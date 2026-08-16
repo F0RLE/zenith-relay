@@ -5,7 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, SourceStats, SourceSummary } from "../../api/types";
 import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
-import { AccountPlanBadge, Button, EmptyState, IconButton, ProviderQuotaStrip, QuotaEconomicsStrip, QuotaStack, StatusIcon, accountErrorLabel, formatDetailedRemainingTime, useConfirm } from "../../components/Ui";
+import { AccountPlanBadge, Button, EmptyState, IconButton, QuotaEconomicsStrip, QuotaStack, StatusIcon, accountErrorLabel, formatDetailedRemainingTime, useConfirm } from "../../components/Ui";
 import { activeModelCounts, activeRequestCount, apiSourceRole, routingOrderPositions } from "../../routingOrder";
 import { comparePoolMembers, memberName, type PoolMember } from "../../poolHelpers";
 import { formatApiEquivalent, formatProviderMicroUsd } from "../../poolFormatting";
@@ -18,7 +18,7 @@ type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: b
 
 export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy, codexPoolOauthSelection, accountEconomicsVisible, setAccountEconomicsVisible, accountQuotaCalculationMode } = useRelayState();
+  const { mode, runtime, perform, busy, codexPoolOauthSelection, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
@@ -238,7 +238,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
           </header>
           <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>{member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}</div>
           <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}</> : <span>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</span>}</div>
-          {member.kind === "account" && accountEconomicsVisible ? accountQuotaCalculationMode === "provider" ? <ProviderQuotaStrip account={member} nowMs={nowMs} /> : <QuotaEconomicsStrip account={member} /> : null}
+          {member.kind === "account" && accountEconomicsVisible ? <QuotaEconomicsStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">
               <IconButton className="danger" data-relay-context-action label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} onContextMenu={(event) => {

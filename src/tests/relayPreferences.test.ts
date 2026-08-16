@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   RELAY_STORAGE_KEYS,
-  readAccountQuotaCalculationMode,
   readCodexPoolOauthSelection,
   readRelayPreference,
   removeRelayPreference,
@@ -52,16 +51,6 @@ describe("relay preferences", () => {
     expect(readRelayPreference("relay.mode", "local", unavailable)).toBe("local");
     expect(() => writeRelayPreference("relay.mode", "remote", unavailable)).not.toThrow();
     expect(() => removeRelayPreference("relay.mode", unavailable)).not.toThrow();
-  });
-
-  test("uses standard calculation unless the Relay estimate is explicitly selected", () => {
-    expect(readAccountQuotaCalculationMode(fakeStorage())).toBe("provider");
-    expect(readAccountQuotaCalculationMode(fakeStorage({
-      [RELAY_STORAGE_KEYS.accountQuotaCalculationMode]: "zenith_experimental",
-    }))).toBe("zenith_experimental");
-    expect(readAccountQuotaCalculationMode(fakeStorage({
-      [RELAY_STORAGE_KEYS.accountQuotaCalculationMode]: "unexpected",
-    }))).toBe("provider");
   });
 
   test("migrates the legacy Codex account selection once", () => {

@@ -88,9 +88,11 @@ times. Relay displays the reported window rather than inventing a fixed
 five-hour, weekly, or subscription duration. A successful refresh can restore
 health and clear a model-level transient restriction.
 
-The account view defaults to that provider-reported quota. A separately chosen
-Relay experimental estimate may show a learned API-value projection, but it
-does not change the reported quota, routing eligibility, or stored usage.
+The account view always keeps the provider-reported quota window visible. When
+the user enables the account calculation, Relay projects remaining
+API-equivalent value from observed usage scaled by that window's reported
+available percentage. This is an estimate, not a provider debit, and it does
+not change routing eligibility or stored usage.
 
 ### Scheduler and execution
 

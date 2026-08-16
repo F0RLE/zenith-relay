@@ -8,12 +8,10 @@ import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIden
 import { sanitizeFeedbackError } from "./feedback";
 import {
   RELAY_STORAGE_KEYS,
-  readAccountQuotaCalculationMode,
   readCodexPoolOauthSelection,
   readRelayPreference,
   removeRelayPreference,
   writeRelayPreference,
-  type AccountQuotaCalculationMode,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
 import { RelayContext, type Feedback, type RelayContextValue } from "./relayStateContext";
@@ -56,7 +54,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
   const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, "true") !== "false");
-  const [accountQuotaCalculationMode, setAccountQuotaCalculationModeState] = useState(readAccountQuotaCalculationMode);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
@@ -449,11 +446,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setAccountEconomicsVisibleState(visible);
   }, []);
 
-  const setAccountQuotaCalculationMode = useCallback((next: AccountQuotaCalculationMode) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.accountQuotaCalculationMode, next);
-    setAccountQuotaCalculationModeState(next);
-  }, []);
-
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
     return displayAccountIdentity({
       index: accountIndex,
@@ -486,8 +478,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setAccountIdentitiesVisible,
     accountEconomicsVisible,
     setAccountEconomicsVisible,
-    accountQuotaCalculationMode,
-    setAccountQuotaCalculationMode,
     accountDisplayName,
     localUsage,
     localUsagePage,
@@ -515,7 +505,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSnapshotBackupBeforeRestore,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountQuotaCalculationMode, setAccountQuotaCalculationMode, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

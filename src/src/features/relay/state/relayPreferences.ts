@@ -1,5 +1,4 @@
 export type RelayStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
-export type AccountQuotaCalculationMode = "provider" | "zenith_experimental";
 
 export const RELAY_STORAGE_KEYS = {
   mode: "relay.mode",
@@ -11,7 +10,6 @@ export const RELAY_STORAGE_KEYS = {
   legacyCodexPoolOauthSelection: "relay.codexPoolOauthAccountId",
   accountIdentitiesVisible: "relay.accountIdentitiesVisible",
   poolEconomicsVisible: "relay.poolEconomicsVisible",
-  accountQuotaCalculationMode: "relay.accountQuotaCalculationMode",
 } as const;
 
 export function readRelayPreference(
@@ -56,12 +54,6 @@ export function readCodexPoolOauthSelection(storage: RelayStorage | undefined = 
   writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection, storage);
   removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection, storage);
   return selection;
-}
-
-export function readAccountQuotaCalculationMode(storage: RelayStorage | undefined = browserStorage()): AccountQuotaCalculationMode {
-  return readRelayPreference(RELAY_STORAGE_KEYS.accountQuotaCalculationMode, "provider", storage) === "zenith_experimental"
-    ? "zenith_experimental"
-    : "provider";
 }
 
 function browserStorage(): RelayStorage | undefined {

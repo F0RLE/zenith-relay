@@ -408,7 +408,7 @@ for (const theme of ["light", "dark"] as const) {
         const bottomGap = availableBottom - (groupsBox!.y + groupsBox!.height);
         expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(2);
       }
-      await expect(groups).toHaveCount(4);
+      await expect(groups).toHaveCount(3);
       const boxes = await groups.evaluateAll((items) => items.map((item) => {
         const rect = item.getBoundingClientRect();
         return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };

@@ -39,7 +39,6 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  ProviderQuotaStrip,
   QuotaEconomicsStrip,
   QuotaStack,
   StatusIcon,
@@ -57,7 +56,7 @@ import { NoResults, matchesQuery } from "./connectionHelpers";
 type ParticipationFilter = "all" | "included" | "excluded";
 export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountQuotaCalculationMode } = useRelayState();
+  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
   const confirm = useConfirm();
   const [selected, setSelected] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
@@ -367,7 +366,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           </div>
           <div className="account-card-quota compact-quota-layout">{accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}</div>
           <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
-          {accountEconomicsVisible ? accountQuotaCalculationMode === "provider" ? <ProviderQuotaStrip account={account} nowMs={nowMs} /> : <QuotaEconomicsStrip account={account} /> : null}
+          {accountEconomicsVisible ? <QuotaEconomicsStrip account={account} /> : null}
           <footer className="account-card-footer"><div className="account-card-actions">
             {onServer
               ? <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />

@@ -159,18 +159,18 @@ API usage.
    API-equivalent estimate; and actual billable upstream/API spend when it
    exists. Each record needs a redacted source, unit, time interval, freshness,
    and confidence level.
-2. Use a provider's live, documented or observed standard accounting mode only
-   after an acceptance run proves its units and reset behavior. An experimental
-   Zenith estimate may compare against that evidence, but must be explicit and
-   must never silently replace the standard entitlement or be presented as a
+2. Use a provider's live, documented or observed quota only after an acceptance
+   run proves its units and reset behavior. Relay may project the remaining
+   API-equivalent value from observed usage and the reported available
+   percentage, but must label it as an estimate and never present it as a
    provider debit.
 3. Preserve the distinction across local SQLite, Relay Server, runtime
    snapshots, UI, and exports. Personal-pool account accounting must not become
    Zenith customer billing, customer debit, or a source of public API prices.
 4. Add fixtures and permitted live-account acceptance for ordinary requests,
    cached and reasoning-token usage where reported, failures, refreshes, quota
-   resets, restart recovery, and both standard and experimental display modes.
-   Never infer a missing provider counter from a different provider's formula.
+   resets, restart recovery, and the single quota-calculation display. Never
+   infer a missing provider counter from a different provider's formula.
 
 ## P5 - Server scale only when a personal deployment outgrows one instance
 

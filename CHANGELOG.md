@@ -6,14 +6,8 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
-Current review set: [PR #49](https://github.com/F0RLE/zenith-relay/pull/49).
-
 ### Added
 
-- Provider-reported quota calculation is the default in Connections and Pool;
-  the Relay estimate remains an explicit experimental setting.
-- Persisted account-calculation visibility controls and regression coverage for
-  both calculation modes.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
   reuse across a follow-up request.
 
@@ -22,6 +16,10 @@ Current review set: [PR #49](https://github.com/F0RLE/zenith-relay/pull/49).
 - Model lists and source price editors order familiar model families
   semantically by company, tier, version, and variant; unknown model IDs keep
   their upstream order.
+- Connections and Pool now use one quota calculation: observed token/API value
+  scaled by the provider-reported available quota percentage. The dollar control
+  only shows or hides that calculation; `Potential` and `Payback` remain, while
+  the redundant secondary potential line is removed.
 - API candidates remain eligible when a provider has not supplied reasoning
   metadata. An explicitly selected reasoning effort is a source/API policy,
   not proof that an account route supports that effort.
@@ -29,8 +27,6 @@ Current review set: [PR #49](https://github.com/F0RLE/zenith-relay/pull/49).
   `model_reasoning_effort`. Provider, base URL, authentication, and model
   catalog changes still block managed restore; an explicitly selected full
   snapshot restore may restore the snapshot as a whole.
-- Provider quota presentation ignores expired reset timestamps and selects the
-  next future reset.
 
 ### Maintenance
 

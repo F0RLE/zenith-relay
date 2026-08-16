@@ -13,7 +13,6 @@ import type {
 } from "../api/types";
 import type { UiState } from "../api/commands";
 import type { FeedbackError } from "./feedback";
-import type { AccountQuotaCalculationMode } from "./relayPreferences";
 
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
@@ -31,8 +30,6 @@ export type RelayContextValue = {
   setAccountIdentitiesVisible: (visible: boolean) => void;
   accountEconomicsVisible: boolean;
   setAccountEconomicsVisible: (visible: boolean) => void;
-  accountQuotaCalculationMode: AccountQuotaCalculationMode;
-  setAccountQuotaCalculationMode: (mode: AccountQuotaCalculationMode) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
   localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;

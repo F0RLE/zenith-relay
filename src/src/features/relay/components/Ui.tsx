@@ -51,13 +51,6 @@ export function QuotaEconomicsStrip({ account }: { account: AccountSummary }) {
       t("accounts.economics.samples", { count: economics.sampleCount }),
     ].filter(Boolean).join(" · ")
     : t(`accounts.economics.${economics?.estimateState === "stale" ? "staleHint" : "collectingHint"}`);
-  const potentialMeta = economics?.estimateState === "estimated"
-    ? [
-      potentialRange,
-      economics.confidence ? t(`accounts.economics.confidenceLevels.${economics.confidence}`) : null,
-      `${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(economics.observedBasisPoints / 100)}%`,
-    ].filter(Boolean).join(" · ")
-    : null;
   const paybackTitle = purchaseCost == null
     ? t("accounts.economics.purchaseMissing")
     : t("accounts.economics.paybackHint", {
@@ -66,29 +59,8 @@ export function QuotaEconomicsStrip({ account }: { account: AccountSummary }) {
     });
   return <dl className="account-economics-strip">
     <div title={t("accounts.economics.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.economics.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale, incompleteEquivalent)}</dd></div>
-    <div title={potentialTitle} data-state={economics?.estimateState ?? "collecting"}><dt>{t("accounts.economics.potential")}</dt><dd><span>{potential}</span>{potentialMeta ? <small>{potentialMeta}</small> : null}</dd></div>
+    <div title={potentialTitle} data-state={economics?.estimateState ?? "collecting"}><dt>{t("accounts.economics.potential")}</dt><dd>{potential}</dd></div>
     <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.economics.payback")}</dt><dd>{payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
-  </dl>;
-}
-
-export function ProviderQuotaStrip({ account, nowMs }: { account: AccountSummary; nowMs: number }) {
-  const { t, i18n } = useTranslation();
-  const locale = i18n.resolvedLanguage ?? i18n.language;
-  const windows = [account.quota.primary, account.quota.secondary, ...(account.quota.supplemental ?? []).map(({ window }) => window)].filter((window): window is QuotaWindow => window != null);
-  const reportedRemaining = windows.map((window) => window.availableBasisPoints).filter((value): value is number => value != null);
-  const lowestRemaining = account.quota.limitReached ? 0 : reportedRemaining.length ? Math.min(...reportedRemaining) : null;
-  const resetTimes = windows.map((window) => window.resetAtMs).filter((value): value is number => value != null && value > nowMs);
-  const nextResetAtMs = resetTimes.length ? Math.min(...resetTimes) : null;
-  const reportStatus = account.quotaRefreshStatus;
-  const reportedAtMs = account.quota.updatedAtMs;
-  const reportedAt = reportedAtMs == null ? t(`accounts.quotaRefreshStatus.${reportStatus}`) : new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(reportedAtMs);
-  const reportTitle = reportedAtMs == null ? reportedAt : t("accounts.providerQuota.reportHint", { value: reportedAt });
-  const resetValue = nextResetAtMs == null ? t("quota.notReported") : formatDetailedRemainingTime(nextResetAtMs, nowMs, t);
-  const resetTitle = nextResetAtMs == null ? resetValue : new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(nextResetAtMs);
-  return <dl className="account-calculation-strip account-provider-quota-strip">
-    <div title={t("accounts.providerQuota.remainingHint")}><dt>{t("accounts.providerQuota.remaining")}</dt><dd>{lowestRemaining == null ? t("quota.notReported") : `${Math.round(lowestRemaining / 100)}%`}</dd></div>
-    <div title={resetTitle}><dt>{t("accounts.providerQuota.reset")}</dt><dd>{resetValue}</dd></div>
-    <div title={reportTitle} data-state={reportStatus}><dt>{t("accounts.providerQuota.report")}</dt><dd>{reportedAt}</dd></div>
   </dl>;
 }
 

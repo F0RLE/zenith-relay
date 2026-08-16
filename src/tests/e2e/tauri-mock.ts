@@ -38,7 +38,6 @@ export type MockOptions = {
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
-  mixedQuotaResets?: boolean;
   quotaAvailable?: boolean;
   quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
@@ -111,7 +110,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     type MockAuthState = { state: string; reason?: string };
     const exhaustedQuotaWindow = input.quotaAvailable ? null : input.exhaustedQuotaWindow ?? "primary";
     const quotaNowMs = Date.now();
-    const primaryResetAtMs = input.mixedQuotaResets ? quotaNowMs - 60_000 : quotaNowMs + 90 * 60_000;
+    const primaryResetAtMs = quotaNowMs + 90 * 60_000;
     const secondaryResetAtMs = quotaNowMs + 3 * 24 * 60 * 60_000;
     const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
       primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: primaryResetAtMs, windowMinutes: 300, observedAtMs: quotaNowMs },
