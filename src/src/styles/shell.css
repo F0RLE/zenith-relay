@@ -281,6 +281,7 @@
 }
 
 .relay-shell {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -980,16 +981,18 @@ textarea:focus-visible {
 }
 
 .global-feedback {
-  position: sticky;
+  position: absolute;
   z-index: 300;
-  top: 8px;
-  width: min(340px, calc(100% - 48px));
+  left: 12px;
+  bottom: 76px;
+  width: min(208px, calc(100vw - 24px));
+  max-width: calc(100% - 24px);
   min-height: 36px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
-  margin: 8px 24px 0 auto;
+  margin: 0;
   padding: 4px 6px 4px 12px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
@@ -1000,17 +1003,40 @@ textarea:focus-visible {
 
 .global-feedback-copy {
   min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.global-feedback-status-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  margin-top: 1px;
+  pointer-events: auto;
+}
+
+.global-feedback-status-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.global-feedback-message {
+  min-width: 0;
   display: grid;
   gap: 2px;
   overflow-wrap: anywhere;
 }
 
-.global-feedback-copy > span {
+.global-feedback-message > span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.global-feedback-copy > code {
+.global-feedback-message > code {
   width: fit-content;
   max-width: 100%;
   overflow: hidden;
@@ -1025,6 +1051,7 @@ textarea:focus-visible {
 .global-feedback-actions {
   min-width: 0;
   display: inline-flex;
+  align-self: start;
   align-items: center;
   gap: 2px;
 }
@@ -1067,16 +1094,80 @@ textarea:focus-visible {
 }
 
 .global-feedback .relay-action-menu > div {
-  top: 34px;
-  right: 0;
-  bottom: auto;
+  top: auto;
+  right: auto;
+  left: 0;
+  bottom: 40px;
 }
 
-@media (max-width: 760px) {
-  .global-feedback {
-    width: min(340px, calc(100% - 32px));
-    margin-right: 16px;
-  }
+.relay-shell.sidebar-collapsed .global-feedback {
+  left: 8px;
+  bottom: 86px;
+  width: max-content;
+  min-width: 52px;
+  max-width: min(88px, calc(100vw - 16px));
+  min-height: 42px;
+  grid-template-columns: auto auto;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 10px;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-copy {
+  align-items: center;
+  gap: 0;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-status-icon {
+  width: 24px;
+  height: 28px;
+  flex-basis: 24px;
+  margin-top: 0;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-status-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-message {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-copy-state {
+  display: none;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .relay-icon-button {
+  width: 24px;
+  min-height: 28px;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .relay-action-menu summary {
+  width: 24px;
+  height: 28px;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-actions {
+  gap: 0;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback.details-open {
+  width: min(340px, calc(100vw - 16px));
+  max-width: calc(100% - 16px);
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 4px 6px 4px 12px;
+  border-radius: 7px;
 }
 
 .global-feedback-copy-state {
@@ -1092,6 +1183,7 @@ textarea:focus-visible {
 
 .global-feedback-details {
   grid-column: 1 / -1;
+  pointer-events: auto;
   min-width: 0;
   max-height: min(220px, calc(100vh - 96px));
   overflow: auto;

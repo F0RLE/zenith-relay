@@ -19,6 +19,10 @@ Current review set: [PR #49](https://github.com/F0RLE/zenith-relay/pull/49).
 
 ### Changed
 
+- Global operation notifications now stay in a bottom-left overlay above the
+  Help controls instead of shifting the page from the upper-right corner;
+  compact sidebar mode uses a small status toast and expands only when error
+  details are opened.
 - API candidates remain eligible when a provider has not supplied reasoning
   metadata. An explicitly selected reasoning effort is a source/API policy,
   not proof that an account route supports that effort.

@@ -1185,12 +1185,44 @@ for (const theme of themes) {
     const recovery = page.locator(".profile-recovery");
     const form = page.locator(".profile-snapshot-create");
     const table = page.locator(".profile-snapshot-table");
+    const headerBefore = await page.locator(".relay-page-header").boundingBox();
+    expect(headerBefore).not.toBeNull();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expect(page.getByText("Исправление истории", { exact: true })).toHaveCount(0);
     const snapshotName = viewport.width === 840 ? "Перед большим обновлением проекта с очень длинным названием рабочей среды" : "Перед обновлением проекта";
     await page.getByLabel("Название снимка").fill(snapshotName);
     await page.getByLabel("Название снимка").press("Enter");
     await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
+    const shell = page.locator(".relay-shell");
+    const [feedbackBox, shellBox, helpBox, headerAfter] = await Promise.all([
+      page.locator(".global-feedback").boundingBox(),
+      page.locator(".relay-shell").boundingBox(),
+      page.getByRole("button", { name: "Помощь" }).boundingBox(),
+      page.locator(".relay-page-header").boundingBox(),
+    ]);
+    expect(feedbackBox).not.toBeNull();
+    expect(shellBox).not.toBeNull();
+    expect(helpBox).not.toBeNull();
+    expect(headerAfter).not.toBeNull();
+    expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
+    expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
+    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
+    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
+    expect(feedbackBox!.y).toBeGreaterThanOrEqual(shellBox!.y - 1);
+    expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
+    if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
+      expect(feedbackBox!.width).toBeLessThanOrEqual(89);
+      expect(await page.locator(".global-feedback-message").evaluate((element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return rect.width <= 1 && rect.height <= 1 && style.clipPath === "inset(50%)";
+      })).toBe(true);
+      await expect(page.locator(".global-feedback-status-icon")).toHaveAttribute("title", "Снимок профиля создан.");
+      await expect(page.locator(".global-feedback")).toHaveAttribute("aria-label", "Снимок профиля создан.");
+    } else {
+      await expect(page.locator(".global-feedback-message")).toBeVisible();
+    }
+    await page.screenshot({ path: `output/playwright/feedback-bottom-left-${theme}-${viewport.width}x${viewport.height}.png` });
     await page.locator(".global-feedback .relay-icon-button").click();
     await page.getByLabel("Название снимка").fill("Новый снимок");
     const createButton = page.getByRole("button", { name: "Создать снимок" });
@@ -1245,6 +1277,78 @@ for (const theme of themes) {
     await page.screenshot({ path: `output/playwright/profile-recovery-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
+}
+
+for (const scenario of [
+  { name: "expanded", viewport: { width: 1160, height: 760 }, collapsed: false },
+  { name: "compact", viewport: { width: 840, height: 560 }, collapsed: true },
+] as const) {
+  test(`feedback error menu ${scenario.name}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "dark", populated: true, gatewayRunning: true, profileSwitchError: true });
+    await page.setViewportSize(scenario.viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+
+    const shell = page.locator(".relay-shell");
+    const feedback = page.locator(".global-feedback.error");
+    await expect(feedback).toContainText("The profile changed during the operation.");
+    if (scenario.collapsed) await expect(shell).toHaveClass(/sidebar-collapsed/);
+    else await expect(shell).not.toHaveClass(/sidebar-collapsed/);
+
+    const initialGeometry = await feedback.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const message = element.querySelector<HTMLElement>(".global-feedback-message")!;
+      const messageBox = message.getBoundingClientRect();
+      const style = getComputedStyle(message);
+      return { width: box.width, messageHidden: messageBox.width <= 1 && messageBox.height <= 1 && style.clipPath === "inset(50%)" };
+    });
+    if (scenario.collapsed) {
+      expect(initialGeometry.width).toBeLessThanOrEqual(89);
+      expect(initialGeometry.messageHidden).toBe(true);
+    } else {
+      expect(initialGeometry.width).toBeGreaterThan(89);
+      expect(initialGeometry.messageHidden).toBe(false);
+    }
+
+    const trigger = feedback.locator(".global-feedback-menu summary");
+    await trigger.click();
+    const menu = feedback.locator(".global-feedback-menu > div[role=menu]");
+    await expect(menu).toBeVisible();
+    const menuGeometry = await menu.evaluate((element) => {
+      const menuBox = element.getBoundingClientRect();
+      const triggerBox = element.parentElement!.querySelector("summary")!.getBoundingClientRect();
+      const feedbackBox = element.closest<HTMLElement>(".global-feedback")!.getBoundingClientRect();
+      const helpBox = document.querySelector<HTMLElement>(".sidebar-help")!.getBoundingClientRect();
+      const overlaps = (left: DOMRect, right: DOMRect) => left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
+      return {
+        withinViewport: menuBox.left >= 0 && menuBox.right <= innerWidth && menuBox.top >= 36 && menuBox.bottom <= innerHeight,
+        opensUp: menuBox.bottom <= triggerBox.top + 1,
+        detachedFromToast: !overlaps(menuBox, feedbackBox),
+        clearOfHelp: !overlaps(menuBox, helpBox),
+        width: menuBox.width,
+      };
+    });
+    expect(menuGeometry).toEqual({ withinViewport: true, opensUp: true, detachedFromToast: true, clearOfHelp: true, width: expect.any(Number) });
+    expect(menuGeometry.width).toBeLessThanOrEqual(242);
+
+    await menu.getByRole("menuitem", { name: "Show details" }).click();
+    const details = feedback.getByRole("region", { name: "Error details" });
+    await expect(details).toBeVisible();
+    const detailsGeometry = await details.evaluate((element) => {
+      const detailsBox = element.getBoundingClientRect();
+      const feedbackBox = element.closest<HTMLElement>(".global-feedback")!.getBoundingClientRect();
+      const helpBox = document.querySelector<HTMLElement>(".sidebar-help")!.getBoundingClientRect();
+      return {
+        insideToast: detailsBox.left >= feedbackBox.left && detailsBox.right <= feedbackBox.right && detailsBox.top >= feedbackBox.top && detailsBox.bottom <= feedbackBox.bottom,
+        withinViewport: detailsBox.left >= 0 && detailsBox.right <= innerWidth && detailsBox.top >= 36 && detailsBox.bottom <= innerHeight,
+        aboveHelp: detailsBox.bottom <= helpBox.top + 1,
+      };
+    });
+    expect(detailsGeometry).toEqual({ insideToast: true, withinViewport: true, aboveHelp: true });
+    if (scenario.collapsed) expect((await feedback.boundingBox())!.width).toBeGreaterThan(89);
+    await feedback.locator(".relay-icon-button").click();
+  });
 }
 
 for (const viewport of viewports) {

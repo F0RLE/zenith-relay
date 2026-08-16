@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, ChevronDown, ChevronUp, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, ChevronUp, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -236,9 +236,9 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
-        {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} /></Suspense>}
       </div>
+      {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
       {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /></Suspense> : null}
       {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={() => { if (!installingUpdate) setUpdateDialogOpen(false); }} /> : null}
@@ -256,6 +256,8 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<number | null>(null);
   const details = feedback.error ? JSON.stringify(feedback.error, null, 2) : null;
+  const message = t(feedback.key);
+  const accessibleLabel = feedback.error ? `${message} (${feedback.error.code})` : message;
 
   useEffect(() => {
     setDetailsOpen(false);
@@ -282,8 +284,11 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
     }
   };
 
-  return <div className={`global-feedback ${feedback.kind}`} role="status">
-    <div className="global-feedback-copy"><span>{t(feedback.key)}</span>{feedback.error ? <code>{feedback.error.code}</code> : null}</div>
+  return <div className={`global-feedback ${feedback.kind}${detailsOpen ? " details-open" : ""}`} role="status" aria-label={accessibleLabel}>
+    <div className="global-feedback-copy">
+      <span className="global-feedback-status-icon" aria-hidden="true" title={message}>{feedback.kind === "success" ? <CheckCircle2 /> : <CircleAlert />}</span>
+      <span className="global-feedback-message"><span>{message}</span>{feedback.error ? <code>{feedback.error.code}</code> : null}</span>
+    </div>
     <div className="global-feedback-actions">
       {feedback.error ? <>
         <span className="global-feedback-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>

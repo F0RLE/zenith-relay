@@ -3175,17 +3175,18 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
-  const [feedbackBox, headerBox, poolControlsBox] = await Promise.all([
+  const [feedbackBox, shellBox, helpBox] = await Promise.all([
     feedback.boundingBox(),
-    page.locator(".relay-page-header").boundingBox(),
-    page.locator(".pool-controls").boundingBox(),
+    page.locator(".relay-shell").boundingBox(),
+    page.getByRole("button", { name: "Help" }).boundingBox(),
   ]);
   expect(feedbackBox).not.toBeNull();
-  expect(headerBox).not.toBeNull();
-  expect(poolControlsBox).not.toBeNull();
-  expect(feedbackBox!.x).toBeGreaterThan(page.viewportSize()!.width / 2);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(headerBox!.y);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(poolControlsBox!.y);
+  expect(shellBox).not.toBeNull();
+  expect(helpBox).not.toBeNull();
+  expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
+  expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
+  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
+  expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
