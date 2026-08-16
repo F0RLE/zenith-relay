@@ -243,7 +243,15 @@ PRAGMA user_version = 22;
 COMMIT;
 "#;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 22;
+pub(super) const MIGRATION_023: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN requested_reasoning_effort TEXT;
+ALTER TABLE request_logs ADD COLUMN effective_reasoning_effort TEXT;
+PRAGMA user_version = 23;
+COMMIT;
+"#;
+
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 23;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"

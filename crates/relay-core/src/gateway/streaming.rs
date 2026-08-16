@@ -13,6 +13,7 @@ use super::response::{
 };
 use crate::protocol::sse_event_end;
 use crate::runtime::{CandidateLease, DefaultServiceTier, ExecutorRoute};
+use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
     GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge, NativeResponsesReplayState,
     PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
@@ -163,6 +164,7 @@ pub(in crate::gateway) struct StreamExecution {
     pub(in crate::gateway) source_model: String,
     pub(in crate::gateway) prompt_affinity_key: Option<String>,
     pub(in crate::gateway) wire_api: WireApi,
+    pub(in crate::gateway) reasoning_effort: ReasoningEffortDiagnostics,
     pub(in crate::gateway) tool_use: ToolUseDiagnostics,
     pub(in crate::gateway) attempt: u16,
     pub(in crate::gateway) started: Instant,
@@ -188,6 +190,7 @@ impl StreamExecution {
             source_model,
             prompt_affinity_key,
             wire_api,
+            reasoning_effort,
             tool_use,
             attempt,
             started,
@@ -315,6 +318,7 @@ impl StreamExecution {
                 attempt,
                 &local_key_id,
                 &route,
+                Some(&reasoning_effort),
                 &requested_model,
                 true,
                 status.as_u16(),
@@ -827,6 +831,8 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
                 routing: None,
                 requested_model: Some("model".into()),
                 resolved_model: Some("model".into()),
+                requested_reasoning_effort: None,
+                effective_reasoning_effort: None,
                 wire_api: crate::WireApi::Responses,
                 service_tier: DefaultServiceTier::Standard,
                 applied_service_tier: None,

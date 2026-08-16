@@ -33,6 +33,10 @@ pub struct UsageExportRow {
     time: String,
     success: bool,
     model: Option<String>,
+    #[serde(default)]
+    requested_reasoning_effort: Option<String>,
+    #[serde(default)]
+    effective_reasoning_effort: Option<String>,
     connection: String,
     latency_ms: u64,
     ttft_ms: Option<u64>,
@@ -309,6 +313,13 @@ fn invalid_export_row(row: &UsageExportRow) -> bool {
         .into_iter()
         .flatten()
         .any(invalid_text)
+        || [
+            row.requested_reasoning_effort.as_deref(),
+            row.effective_reasoning_effort.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| zenith_relay_core::normalize_reasoning_effort(value).is_none())
 }
 
 fn invalid_text(value: &str) -> bool {
@@ -336,6 +347,8 @@ mod tests {
             time: "2026-07-11T00:00:00Z".into(),
             success: true,
             model: Some("gpt-test".into()),
+            requested_reasoning_effort: Some("max".into()),
+            effective_reasoning_effort: Some("low".into()),
             connection: "account".into(),
             latency_ms: 1,
             ttft_ms: Some(1),
@@ -356,6 +369,9 @@ mod tests {
         row.connection = "bad\nvalue".into();
         assert!(invalid_export_row(&row));
         row.connection = "x".repeat(MAX_EXPORT_TEXT + 1);
+        assert!(invalid_export_row(&row));
+        row.connection = "account".into();
+        row.effective_reasoning_effort = Some("untrusted".into());
         assert!(invalid_export_row(&row));
     }
 

@@ -91,6 +91,31 @@
   text-overflow: ellipsis;
 }
 
+.usage-model-value {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+
+.usage-model-value code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-model-value small {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .usage-request-table[data-resized="true"] {
   table-layout: fixed;
 }

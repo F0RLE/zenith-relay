@@ -8,6 +8,8 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Added
 
+- Usage history now shows the requested reasoning effort and the normalized
+  effort actually sent to the selected provider.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
   reuse across a follow-up request.
 

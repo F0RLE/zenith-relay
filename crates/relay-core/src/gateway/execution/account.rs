@@ -18,6 +18,7 @@ use super::super::response::{
 };
 use crate::protocol::{remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids};
 use crate::runtime::AuthenticatedKey;
+use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -114,6 +115,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 Value::String(route.source_model.clone()),
             );
         }
+        let reasoning_effort =
+            ReasoningEffortDiagnostics::from_bodies(&request, &upstream_body, WireApi::Responses);
         let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -162,6 +165,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     attempt,
                     &key.id,
                     &route,
+                    Some(&reasoning_effort),
                     &requested_model,
                     false,
                     failure.status.as_u16(),
@@ -196,6 +200,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 attempt,
                 &key.id,
                 &route,
+                Some(&reasoning_effort),
                 &requested_model,
                 false,
                 failure.status.as_u16(),
@@ -235,6 +240,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 attempt,
                 &key.id,
                 &route,
+                Some(&reasoning_effort),
                 &requested_model,
                 false,
                 status.as_u16(),
@@ -299,6 +305,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             attempt,
             &key.id,
             &route,
+            Some(&reasoning_effort),
             &requested_model,
             true,
             status.as_u16(),

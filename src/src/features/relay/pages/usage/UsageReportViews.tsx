@@ -2,7 +2,7 @@ import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useSt
 import { Activity, CreditCard, Database, Gauge, SlidersHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, DefaultServiceTier, ErrorOrigin, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
+import type { AccountSummary, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { Button, CopyButton, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
@@ -30,6 +30,8 @@ export type UsageRow = {
   time: string;
   success: boolean;
   model: string | null;
+  requestedReasoningEffort: ReasoningEffort | null;
+  effectiveReasoningEffort: ReasoningEffort | null;
   connection: string;
   wireApi: string | null;
   serviceTier: DefaultServiceTier | null;
@@ -88,7 +90,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
   const columns: Record<RequestColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
     time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
     status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} /> },
-    model: { label: t("common.model"), cell: (row) => <code>{row.model ?? "-"}</code> },
+    model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration) },
@@ -206,7 +208,7 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<ErrorColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
     time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
-    model: { label: t("common.model"), cell: (row) => <code>{row.model ?? "-"}</code> },
+    model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     origin: { label: t("usage.errorOrigin"), cell: (row) => formatErrorOrigin(row.errorOrigin, t) },
     error: { label: t("usage.errorCategory"), cell: (row) => <span title={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</span> },
@@ -236,6 +238,8 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       <div><dt>{t("usage.requestId")}</dt><dd className="detail-copy-value"><code>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</dd></div>
       <div><dt>{t("common.status")}</dt><dd>{row.success ? t("common.success") : t("common.failed")}</dd></div>
       <div><dt>{t("common.model")}</dt><dd><code>{row.model ?? "-"}</code></dd></div>
+      <div><dt>{t("usage.requestedReasoningEffort")}</dt><dd>{formatReasoningEffort(row.requestedReasoningEffort, t)}</dd></div>
+      <div><dt>{t("usage.effectiveReasoningEffort")}</dt><dd>{formatReasoningEffort(row.effectiveReasoningEffort, t)}</dd></div>
       <div><dt>{t("usage.protocol")}</dt><dd><code>{row.wireApi ?? "-"}</code></dd></div>
       <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
       <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
@@ -274,6 +278,22 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     {toolUse ? <p className="form-note">{t("usage.toolDiagnosticsHint")}</p> : null}
     <p className="form-note">{t("usage.redactionHint")}</p>
   </Dialog>;
+}
+
+function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort"> }) {
+  const { t } = useTranslation();
+  const requested = row.requestedReasoningEffort;
+  const effective = row.effectiveReasoningEffort;
+  const effort = effective ?? requested;
+  const changed = Boolean(requested && effective && requested !== effective);
+  return <span className="usage-model-value">
+    <code>{row.model ?? "-"}</code>
+    {effort ? <small title={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
+  </span>;
+}
+
+function formatReasoningEffort(effort: ReasoningEffort | null, t: TFunction): string {
+  return effort ? t(`usage.reasoningEfforts.${effort}`) : "-";
 }
 
 function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction, fallback = "—") {

@@ -2,7 +2,8 @@ use super::{
     now_ms, AuthenticatedKey, ExecutorRoute, GatewayFailure, RESPONSES_LITE_METADATA_KEY,
     WEBSOCKET_PROTOCOLS,
 };
-use crate::{GatewayRuntime, ToolUseDiagnostics};
+use crate::usage::ReasoningEffortDiagnostics;
+use crate::{GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
 use serde_json::Value;
 
@@ -76,6 +77,19 @@ impl ClientRequest {
     }
 
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
+        serde_json::to_string(&self.value_for(route))
+            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn reasoning_effort_for(&self, route: &ExecutorRoute) -> ReasoningEffortDiagnostics {
+        ReasoningEffortDiagnostics::from_bodies(
+            &self.value,
+            &self.value_for(route),
+            WireApi::Responses,
+        )
+    }
+
+    fn value_for(&self, route: &ExecutorRoute) -> Value {
         let mut value = self.value.clone();
         let object = value
             .as_object_mut()
@@ -91,8 +105,7 @@ impl ClientRequest {
         if route.account_id.is_some() {
             crate::gateway::request::normalize_account_request(object, self.responses_lite);
         }
-        serde_json::to_string(&value)
-            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+        value
     }
 
     pub(super) fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {

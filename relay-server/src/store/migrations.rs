@@ -169,6 +169,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "032_error_origin",
         sql: include_str!("../../migrations/032_error_origin.sql"),
     },
+    Migration {
+        version: 33,
+        name: "033_reasoning_effort",
+        sql: include_str!("../../migrations/033_reasoning_effort.sql"),
+    },
 ];
 
 struct Migration {
@@ -502,6 +507,23 @@ mod tests {
             store.metadata("schema_version").unwrap(),
             Some(SERVER_SCHEMA_VERSION.to_string())
         );
+        let columns = {
+            let connection = store.lock().unwrap();
+            let mut statement = connection
+                .prepare("SELECT name FROM pragma_table_info('usage_events')")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(columns
+            .iter()
+            .any(|column| column == "requested_reasoning_effort"));
+        assert!(columns
+            .iter()
+            .any(|column| column == "effective_reasoning_effort"));
         let ledger = {
             let connection = store.lock().unwrap();
             let mut statement = connection
@@ -549,7 +571,8 @@ mod tests {
                 (29, "029_candidate_usage_rollups".to_string()),
                 (30, "030_source_priced_key_rollups".to_string()),
                 (31, "031_tool_use_diagnostics".to_string()),
-                (32, "032_error_origin".to_string())
+                (32, "032_error_origin".to_string()),
+                (33, "033_reasoning_effort".to_string())
             ]
         );
         drop(store);

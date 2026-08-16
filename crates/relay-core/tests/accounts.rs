@@ -643,7 +643,7 @@ async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in
     let authority = ready_authority("relay-account", "account-access").await;
     let mut official_account = account("relay-account", "provider-account", &upstream, 10);
     official_account.models = vec![OFFICIAL_CODEX_MODEL.to_string()];
-    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
+    let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![official_account],
         vec![mixed_key(None, None)],
@@ -763,6 +763,13 @@ async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in
         assert_eq!(request.body["reasoning"]["summary"], "detailed");
         assert_eq!(request.body["reasoning"]["context"], "all_turns");
     }
+    drop(requests);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), client_tiers.len());
+    assert!(events.iter().all(|event| {
+        event.requested_reasoning_effort.as_deref() == Some("xhigh")
+            && event.effective_reasoning_effort.as_deref() == Some("xhigh")
+    }));
 }
 
 #[tokio::test]

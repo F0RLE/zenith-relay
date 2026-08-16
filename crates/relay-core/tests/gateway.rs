@@ -1644,7 +1644,7 @@ async fn responses_to_messages_bridge_translates_plain_response() {
 #[tokio::test]
 async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperature() {
     let (upstream, state) = spawn_messages_upstream().await;
-    let (gateway, _) =
+    let (gateway, events) =
         spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Adaptive).await;
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -1652,7 +1652,7 @@ async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperatur
         .json(&json!({
             "model": "claude-test",
             "input": "answer",
-            "reasoning": {"effort": "xhigh"},
+            "reasoning": {"effort": "minimal"},
             "temperature": 0.2,
             "top_p": 0.9
         }))
@@ -1663,9 +1663,17 @@ async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperatur
     let bodies = state.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
-    assert_eq!(bodies[0]["output_config"]["effort"], "xhigh");
+    assert_eq!(bodies[0]["output_config"]["effort"], "low");
     assert!(bodies[0].get("temperature").is_none());
     assert!(bodies[0].get("top_p").is_none());
+    drop(bodies);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].requested_reasoning_effort.as_deref(),
+        Some("minimal")
+    );
+    assert_eq!(events[0].effective_reasoning_effort.as_deref(), Some("low"));
 }
 
 #[tokio::test]

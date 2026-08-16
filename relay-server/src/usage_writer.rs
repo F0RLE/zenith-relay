@@ -316,6 +316,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".to_string()),
             resolved_model: Some("gpt-test".to_string()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,

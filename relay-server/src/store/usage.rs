@@ -80,16 +80,17 @@ impl Store {
                         error_category, latency_ms, ttft_ms, generation_ms, input_tokens,
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json,
-                        service_tier, applied_service_tier, tool_use_json, error_origin
+                        service_tier, applied_service_tier, tool_use_json, error_origin,
+                        requested_reasoning_effort, effective_reasoning_effort
                     ) SELECT
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                        ?23, ?24, ?25, ?26
+                        ?23, ?24, ?25, ?26, ?27, ?28
                     WHERE NOT EXISTS (
                         SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
                     AND (?4 != 'account' OR EXISTS (
-                        SELECT 1 FROM accounts WHERE id = ?27
+                        SELECT 1 FROM accounts WHERE id = ?29
                     ))
                     ON CONFLICT(request_id) DO UPDATE SET
                         attempt=excluded.attempt,
@@ -116,7 +117,9 @@ impl Store {
                         service_tier=excluded.service_tier,
                         applied_service_tier=excluded.applied_service_tier,
                         tool_use_json=excluded.tool_use_json,
-                        error_origin=excluded.error_origin
+                        error_origin=excluded.error_origin,
+                        requested_reasoning_effort=excluded.requested_reasoning_effort,
+                        effective_reasoning_effort=excluded.effective_reasoning_effort
                     WHERE excluded.attempt >= usage_events.attempt"#,
                 )
                 .map_err(db_error)?;
@@ -167,6 +170,14 @@ impl Store {
                         event.applied_service_tier.map(DefaultServiceTier::as_str),
                         tool_use_json,
                         event.error_origin().map(|origin| origin.as_str()),
+                        event
+                            .requested_reasoning_effort
+                            .as_deref()
+                            .and_then(zenith_relay_core::normalize_reasoning_effort),
+                        event
+                            .effective_reasoning_effort
+                            .as_deref()
+                            .and_then(zenith_relay_core::normalize_reasoning_effort),
                         candidate_id,
                     ])
                     .map_err(db_error)?;
@@ -221,7 +232,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -243,6 +254,14 @@ impl Store {
                         .and_then(|value| serde_json::from_str(value).ok()),
                     requested_model: row.get(5)?,
                     resolved_model: row.get(6)?,
+                    requested_reasoning_effort: row
+                        .get::<_, Option<String>>(26)?
+                        .as_deref()
+                        .and_then(zenith_relay_core::normalize_reasoning_effort),
+                    effective_reasoning_effort: row
+                        .get::<_, Option<String>>(27)?
+                        .as_deref()
+                        .and_then(zenith_relay_core::normalize_reasoning_effort),
                     wire_api: parse_wire_api(&wire_api),
                     service_tier: DefaultServiceTier::from_storage_value(
                         &row.get::<_, String>(22)?,
@@ -552,7 +571,8 @@ mod tests {
     #[test]
     fn usage_keeps_one_terminal_row_per_request() {
         let root = test_root("usage-terminal-row");
-        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
         let mut event = UsageEvent {
             request_id: "req_fallback".into(),
             attempt: 1,
@@ -563,6 +583,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: Some("max".into()),
+            effective_reasoning_effort: Some("max".into()),
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
             applied_service_tier: None,
@@ -598,6 +620,7 @@ mod tests {
         event.success = true;
         event.http_status = 200;
         event.error_category = None;
+        event.effective_reasoning_effort = Some("low".into());
         event.cooldown_scope = None;
         event.retry_at_ms = None;
         event.consecutive_failures = Some(0);
@@ -610,6 +633,8 @@ mod tests {
         event.success = false;
         event.http_status = 503;
         event.error_category = Some("upstream_unavailable".into());
+        event.requested_reasoning_effort = Some("not-a-reasoning-effort".into());
+        event.effective_reasoning_effort = None;
         event.total_tokens = None;
         store.record_usage(&event, 3_000).unwrap();
         event.attempt = 2;
@@ -617,6 +642,8 @@ mod tests {
         event.error_category = Some("upstream_rate_limited".into());
         store.record_usage(&event, 4_000).unwrap();
 
+        drop(store);
+        let store = Store::open(path).unwrap();
         let page = store.usage_page(&UsageQuery::default()).unwrap();
         assert_eq!(page.total, 2);
         let fallback = page
@@ -631,6 +658,8 @@ mod tests {
             fallback.applied_service_tier,
             Some(DefaultServiceTier::Standard)
         );
+        assert_eq!(fallback.requested_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(fallback.effective_reasoning_effort.as_deref(), Some("low"));
         assert_eq!(
             fallback
                 .tool_use
@@ -646,6 +675,8 @@ mod tests {
         assert!(!failed.success);
         assert_eq!(failed.http_status, 429);
         assert_eq!(failed.error_origin, Some(ErrorOrigin::Provider));
+        assert_eq!(failed.requested_reasoning_effort, None);
+        assert_eq!(failed.effective_reasoning_effort, None);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -694,6 +725,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
             applied_service_tier: Some(DefaultServiceTier::Standard),
@@ -771,6 +804,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
             applied_service_tier: Some(DefaultServiceTier::Fast),
@@ -901,6 +936,8 @@ mod tests {
             routing: None,
             requested_model: Some("private-model".into()),
             resolved_model: Some("private-model".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -992,6 +1029,8 @@ mod tests {
                         }),
                         requested_model: Some(model.to_string()),
                         resolved_model: Some(model.to_string()),
+                        requested_reasoning_effort: None,
+                        effective_reasoning_effort: None,
                         wire_api: WireApi::Responses,
                         service_tier: DefaultServiceTier::Standard,
                         applied_service_tier: None,

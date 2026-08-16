@@ -3,6 +3,7 @@ use super::now_ms;
 use super::streaming::{parse_sse_event, TerminalOutcome};
 use crate::protocol::sse_event_end;
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
+use crate::usage::ReasoningEffortDiagnostics;
 use crate::{Error, ErrorOrigin, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
@@ -193,6 +194,7 @@ pub(super) fn usage_event(
     attempt: u16,
     local_key_id: &str,
     route: &ExecutorRoute,
+    reasoning_effort: Option<&ReasoningEffortDiagnostics>,
     requested_model: &str,
     success: bool,
     http_status: u16,
@@ -200,7 +202,7 @@ pub(super) fn usage_event(
     latency_ms: u64,
     tool_use: ToolUseDiagnostics,
 ) -> UsageEvent {
-    UsageEvent {
+    let mut event = UsageEvent {
         request_id: request_id.to_string(),
         attempt,
         local_key_id: local_key_id.to_string(),
@@ -210,6 +212,8 @@ pub(super) fn usage_event(
         routing: route.routing.clone(),
         requested_model: Some(requested_model.to_string()),
         resolved_model: Some(route.source_model.clone()),
+        requested_reasoning_effort: None,
+        effective_reasoning_effort: None,
         wire_api: route.wire_api,
         service_tier: route.service_tier,
         applied_service_tier: None,
@@ -230,7 +234,11 @@ pub(super) fn usage_event(
         output_tokens: None,
         total_tokens: None,
         quota_snapshot: None,
+    };
+    if let Some(reasoning_effort) = reasoning_effort {
+        reasoning_effort.apply_to(&mut event);
     }
+    event
 }
 
 pub(super) fn populate_tokens(event: &mut UsageEvent, body: &[u8]) {

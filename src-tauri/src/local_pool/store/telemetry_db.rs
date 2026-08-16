@@ -58,6 +58,8 @@ pub struct UsageLog {
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
+    pub requested_reasoning_effort: Option<String>,
+    pub effective_reasoning_effort: Option<String>,
     pub wire_api: String,
     pub service_tier: DefaultServiceTier,
     pub applied_service_tier: Option<DefaultServiceTier>,
@@ -182,6 +184,9 @@ impl TelemetryDb {
         if version <= 21 {
             connection.execute_batch(MIGRATION_022).map_err(db_error)?;
         }
+        if version <= 22 {
+            connection.execute_batch(MIGRATION_023).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -287,6 +292,8 @@ mod tests {
             }),
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: Some("max".into()),
+            effective_reasoning_effort: Some("low".into()),
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
             applied_service_tier: Some(DefaultServiceTier::Standard),
@@ -325,6 +332,8 @@ mod tests {
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].cache_write_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
+        assert_eq!(logs[0].requested_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(logs[0].effective_reasoning_effort.as_deref(), Some("low"));
         assert_eq!(
             logs[0]
                 .tool_use
@@ -579,6 +588,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -685,6 +696,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: Some("max".into()),
+            effective_reasoning_effort: Some("max".into()),
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -713,6 +726,7 @@ mod tests {
         event.success = true;
         event.http_status = 200;
         event.error_category = None;
+        event.effective_reasoning_effort = Some("low".into());
         event.cooldown_scope = None;
         event.retry_at_ms = None;
         event.consecutive_failures = Some(0);
@@ -730,6 +744,8 @@ mod tests {
         assert_eq!(logs[0].attempt, 2);
         assert!(logs[0].success);
         assert_eq!(logs[0].source_id, "source_2");
+        assert_eq!(logs[0].requested_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(logs[0].effective_reasoning_effort.as_deref(), Some("low"));
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -751,6 +767,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -808,6 +826,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -862,6 +882,8 @@ mod tests {
                 routing: None,
                 requested_model: Some("private-model".into()),
                 resolved_model: Some("private-model".into()),
+                requested_reasoning_effort: None,
+                effective_reasoning_effort: None,
                 wire_api: WireApi::Responses,
                 service_tier: DefaultServiceTier::Standard,
                 applied_service_tier: None,
@@ -941,6 +963,8 @@ mod tests {
             routing: None,
             requested_model: Some("private-model".into()),
             resolved_model: Some("private-model".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -1043,6 +1067,8 @@ mod tests {
         let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].attempt, 1);
+        assert_eq!(logs[0].requested_reasoning_effort, None);
+        assert_eq!(logs[0].effective_reasoning_effort, None);
         let version: u32 = database
             .connection
             .lock()
@@ -1225,6 +1251,8 @@ mod tests {
                 routing: None,
                 requested_model: None,
                 resolved_model: None,
+                requested_reasoning_effort: None,
+                effective_reasoning_effort: None,
                 wire_api: WireApi::Responses,
                 service_tier: DefaultServiceTier::Standard,
                 applied_service_tier: None,

@@ -51,6 +51,90 @@ impl UsageValue {
 /// code should use `UsageValue` so it does not imply an OpenAI-only source.
 pub type ApiEquivalentSummary = UsageValue;
 
+/// Whitelisted reasoning effort metadata for one Usage event.
+///
+/// This is diagnostics only. It records the client-facing request value and
+/// the value present in the exact prepared upstream payload; it never infers
+/// capability from a model or changes request routing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReasoningEffortDiagnostics {
+    pub(crate) requested: Option<String>,
+    pub(crate) effective: Option<String>,
+}
+
+impl ReasoningEffortDiagnostics {
+    pub(crate) fn from_bodies(
+        client_body: &Value,
+        upstream_body: &Value,
+        client_wire_api: WireApi,
+    ) -> Self {
+        Self {
+            requested: requested_reasoning_effort(client_body, client_wire_api),
+            effective: effective_reasoning_effort(upstream_body),
+        }
+    }
+
+    pub(crate) fn apply_to(&self, event: &mut UsageEvent) {
+        event.requested_reasoning_effort.clone_from(&self.requested);
+        event.effective_reasoning_effort.clone_from(&self.effective);
+    }
+}
+
+fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
+    let effort = match wire_api {
+        WireApi::Responses => request.pointer("/reasoning/effort"),
+        WireApi::ChatCompletions => request.get("reasoning_effort"),
+        WireApi::Messages => None,
+    };
+    effort
+        .and_then(Value::as_str)
+        .and_then(normalize_reasoning_effort)
+}
+
+fn effective_reasoning_effort(upstream_body: &Value) -> Option<String> {
+    upstream_body
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+        .and_then(normalize_reasoning_effort)
+        .or_else(|| {
+            upstream_body
+                .pointer("/reasoning/effort")
+                .and_then(Value::as_str)
+                .and_then(normalize_reasoning_effort)
+        })
+        .or_else(|| {
+            upstream_body
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .and_then(normalize_reasoning_effort)
+        })
+        .or_else(|| {
+            let budget = upstream_body
+                .pointer("/thinking/budget_tokens")
+                .and_then(Value::as_u64)?;
+            match budget {
+                1_024 => Some("minimal"),
+                4_096 => Some("low"),
+                8_192 => Some("medium"),
+                16_384 => Some("high"),
+                24_576 => Some("xhigh"),
+                32_000 => Some("max"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        })
+}
+
+/// Returns a canonical diagnostic effort value, rejecting arbitrary text.
+pub fn normalize_reasoning_effort(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    matches!(
+        value.as_str(),
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    )
+    .then_some(value)
+}
+
 /// Privacy-safe evidence about tool handling for one request. This deliberately
 /// excludes tool names, arguments, prompt text, and response text.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -293,6 +377,10 @@ pub struct UsageEvent {
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_reasoning_effort: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub service_tier: DefaultServiceTier,
@@ -402,6 +490,8 @@ mod tests {
             routing: None,
             requested_model: Some("model".into()),
             resolved_model: Some("model".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -455,6 +545,35 @@ mod tests {
             assert_eq!(origin.as_str().parse(), Ok(origin));
         }
         assert!("unknown".parse::<ErrorOrigin>().is_err());
+    }
+
+    #[test]
+    fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values() {
+        let bridge = ReasoningEffortDiagnostics::from_bodies(
+            &json!({"reasoning": {"effort": " Max "}}),
+            &json!({
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": " Low "}
+            }),
+            WireApi::Responses,
+        );
+        assert_eq!(bridge.requested.as_deref(), Some("max"));
+        assert_eq!(bridge.effective.as_deref(), Some("low"));
+
+        let budget = ReasoningEffortDiagnostics::from_bodies(
+            &json!({"reasoning_effort": "high"}),
+            &json!({"thinking": {"type": "enabled", "budget_tokens": 32_000}}),
+            WireApi::ChatCompletions,
+        );
+        assert_eq!(budget.requested.as_deref(), Some("high"));
+        assert_eq!(budget.effective.as_deref(), Some("max"));
+
+        let absent = ReasoningEffortDiagnostics::from_bodies(
+            &json!({"reasoning": {"effort": "untrusted value"}}),
+            &json!({"thinking": {"budget_tokens": 123}}),
+            WireApi::Responses,
+        );
+        assert_eq!(absent, ReasoningEffortDiagnostics::default());
     }
 
     #[test]

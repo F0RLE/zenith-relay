@@ -893,6 +893,10 @@ pub struct UsageSummary {
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_reasoning_effort: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub service_tier: crate::DefaultServiceTier,

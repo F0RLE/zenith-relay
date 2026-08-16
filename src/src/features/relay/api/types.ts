@@ -464,6 +464,7 @@ export type ToolUseDiagnostics = {
 };
 
 export type ErrorOrigin = "provider" | "account" | "relay";
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export type LocalUsage = {
   id: number;
@@ -475,6 +476,8 @@ export type LocalUsage = {
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
+  requestedReasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages";
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;
@@ -544,6 +547,8 @@ export type UsageExportRow = {
   time: string;
   success: boolean;
   model: string | null;
+  requestedReasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   connection: string;
   latencyMs: number;
   ttftMs: number | null;
@@ -581,6 +586,8 @@ export type RemoteUsage = {
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
+  requestedReasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages";
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;
