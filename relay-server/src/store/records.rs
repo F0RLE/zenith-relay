@@ -169,17 +169,6 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
-    pub fn reset_quota_economics_learning(&self) -> Result<(), String> {
-        let mut accounts = self.accounts()?;
-        for account in &mut accounts {
-            account.economics.reset_learning();
-            account
-                .economics
-                .set_value_revision(zenith_relay_core::quota::quota_valuation_revision());
-        }
-        self.save_accounts(&accounts)
-    }
-
     pub fn delete_account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
         let candidate_hint = hex::encode(Sha256::digest(id.as_bytes()))[..12].to_string();
         let mut connection = self.lock()?;
@@ -341,7 +330,7 @@ mod tests {
             weight: 1,
             subscription: Default::default(),
             quota: Default::default(),
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             cooldowns: Default::default(),
             consecutive_failures: 0,
             created_at_ms: 1,

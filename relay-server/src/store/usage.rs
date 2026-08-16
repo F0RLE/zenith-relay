@@ -705,7 +705,7 @@ mod tests {
                 weight: 1,
                 subscription: Subscription::default(),
                 quota: QuotaSnapshot::default(),
-                economics: Default::default(),
+                purchase_cost_micro_usd: None,
                 cooldowns: BTreeMap::new(),
                 consecutive_failures: 0,
                 created_at_ms: 1,

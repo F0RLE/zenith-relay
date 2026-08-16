@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   RELAY_STORAGE_KEYS,
+  readAccountValueVisibility,
   readCodexPoolOauthSelection,
   readRelayPreference,
   removeRelayPreference,
+  writeAccountValueVisibility,
   writeRelayPreference,
   type RelayStorage,
 } from "../src/features/relay/state/relayPreferences";
@@ -71,5 +73,18 @@ describe("relay preferences", () => {
 
     expect(readCodexPoolOauthSelection(storage)).toBe("none");
     expect(storage.values[RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection]).toBeUndefined();
+  });
+
+  test("migrates account-value visibility from the percentage-calculation preference", () => {
+    const storage = fakeStorage({
+      [RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible]: "false",
+    });
+
+    expect(readAccountValueVisibility(storage)).toBe(false);
+    expect(storage.values[RELAY_STORAGE_KEYS.accountValueVisible]).toBe("false");
+    expect(storage.values[RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible]).toBeUndefined();
+
+    writeAccountValueVisibility(true, storage);
+    expect(storage.values[RELAY_STORAGE_KEYS.accountValueVisible]).toBe("true");
   });
 });

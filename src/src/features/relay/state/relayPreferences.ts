@@ -9,7 +9,8 @@ export const RELAY_STORAGE_KEYS = {
   codexPoolOauthSelection: "relay.codexPoolOauthSelection",
   legacyCodexPoolOauthSelection: "relay.codexPoolOauthAccountId",
   accountIdentitiesVisible: "relay.accountIdentitiesVisible",
-  poolEconomicsVisible: "relay.poolEconomicsVisible",
+  accountValueVisible: "relay.accountValueVisible",
+  legacyPoolEconomicsVisible: "relay.poolEconomicsVisible",
 } as const;
 
 export function readRelayPreference(
@@ -54,6 +55,23 @@ export function readCodexPoolOauthSelection(storage: RelayStorage | undefined = 
   writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection, storage);
   removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection, storage);
   return selection;
+}
+
+export function readAccountValueVisibility(storage: RelayStorage | undefined = browserStorage()) {
+  const value = readRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, "", storage)
+    || readRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, "", storage)
+    || "true";
+  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, value, storage);
+  removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
+  return value !== "false";
+}
+
+export function writeAccountValueVisibility(
+  visible: boolean,
+  storage: RelayStorage | undefined = browserStorage(),
+) {
+  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, String(visible), storage);
+  removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
 }
 
 function browserStorage(): RelayStorage | undefined {

@@ -160,10 +160,10 @@ API usage.
    exists. Each record needs a redacted source, unit, time interval, freshness,
    and confidence level.
 2. Use a provider's live, documented or observed quota only after an acceptance
-   run proves its units and reset behavior. Relay may project the remaining
-   API-equivalent value from observed usage and the reported available
-   percentage, but must label it as an estimate and never present it as a
-   provider debit.
+   run proves its units and reset behavior. Keep that entitlement in its native
+   units; do not project a remaining monetary value from an available
+   percentage. Relay's API-equivalent remains a direct estimate from recorded
+   token usage and must never be presented as a provider debit.
 3. Preserve the distinction across local SQLite, Relay Server, runtime
    snapshots, UI, and exports. Personal-pool account accounting must not become
    Zenith customer billing, customer debit, or a source of public API prices.

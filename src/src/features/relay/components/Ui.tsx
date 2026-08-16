@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
 import { accountErrorTranslationKey } from "../accountStatus";
+import { estimateAccountPotential } from "../accountEconomics";
 import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
 
 export { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan };
@@ -27,40 +28,23 @@ export function AccountPlanBadge({ planType, unknown }: { planType: string | nul
   return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
 }
 
-export function QuotaEconomicsStrip({ account }: { account: AccountSummary }) {
+export function AccountValueStrip({ account }: { account: AccountSummary }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const economics = account.economics;
-  const purchaseCost = economics?.purchaseCostMicroUsd ?? null;
+  const purchaseCost = account.purchaseCostMicroUsd ?? null;
   const incompleteEquivalent = account.apiEquivalent.unpricedTokens > 0;
+  const potential = estimateAccountPotential(account.apiEquivalent, account.quota);
   const payback = purchaseCost && purchaseCost > 0 ? account.apiEquivalent.microUsd / purchaseCost : null;
-  const potential = economics?.estimateState === "estimated" && economics.potentialMicroUsd != null
-    ? formatMicroUsd(economics.potentialMicroUsd, locale, true)
-    : economics?.estimateState === "collecting" && economics.observedBasisPoints > 0
-      ? t("accounts.economics.collectingProgress", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(economics.observedBasisPoints / 100) })
-      : t(`accounts.economics.${economics?.estimateState ?? "collecting"}`);
-  const potentialRange = economics?.potentialLowMicroUsd != null && economics.potentialHighMicroUsd != null
-    ? `${formatMicroUsd(economics.potentialLowMicroUsd, locale)}–${formatMicroUsd(economics.potentialHighMicroUsd, locale)}`
-    : null;
-  const potentialTitle = economics?.estimateState === "estimated"
-    ? [
-      t("accounts.economics.potentialHint"),
-      potentialRange ? t("accounts.economics.range", { range: potentialRange }) : null,
-      economics.confidence ? t("accounts.economics.confidence", { value: t(`accounts.economics.confidenceLevels.${economics.confidence}`) }) : null,
-      t("accounts.economics.observed", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(economics.observedBasisPoints / 100) }),
-      t("accounts.economics.samples", { count: economics.sampleCount }),
-    ].filter(Boolean).join(" · ")
-    : t(`accounts.economics.${economics?.estimateState === "stale" ? "staleHint" : "collectingHint"}`);
   const paybackTitle = purchaseCost == null
-    ? t("accounts.economics.purchaseMissing")
-    : t("accounts.economics.paybackHint", {
+    ? t("accounts.accountValue.purchaseMissing")
+    : t("accounts.accountValue.paybackHint", {
       used: formatMicroUsd(account.apiEquivalent.microUsd, locale),
       purchase: formatMicroUsd(purchaseCost, locale),
     });
-  return <dl className="account-economics-strip">
-    <div title={t("accounts.economics.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.economics.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale, incompleteEquivalent)}</dd></div>
-    <div title={potentialTitle} data-state={economics?.estimateState ?? "collecting"}><dt>{t("accounts.economics.potential")}</dt><dd>{potential}</dd></div>
-    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.economics.payback")}</dt><dd>{payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
+  return <dl className="account-value-strip">
+    <div title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.accountValue.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale, incompleteEquivalent)}</dd></div>
+    <div title={t("accounts.accountValue.potentialHint")}><dt>{t("accounts.accountValue.potential")}</dt><dd>{potential == null ? "—" : formatMicroUsd(potential.microUsd, locale, potential.approximate)}</dd></div>
+    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.accountValue.payback")}</dt><dd>{payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
   </dl>;
 }
 

@@ -248,7 +248,7 @@ mod tests {
             weight: 1,
             subscription: Subscription::default(),
             quota: QuotaSnapshot::default(),
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
             created_at_ms: 1,
@@ -484,7 +484,7 @@ mod tests {
                 ..Subscription::default()
             },
             quota: QuotaSnapshot::default(),
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
             created_at_ms: 1,
@@ -547,7 +547,6 @@ mod tests {
             ProxyMode::Direct,
             true,
             ApiEquivalentSummary::default(),
-            DefaultServiceTier::Standard,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         );
         assert_eq!(summary.operational_status, OperationalStatus::Rotation);

@@ -11,9 +11,8 @@ use zenith_relay_core::{
         account_candidate_enabled, account_operational_state, operational_status,
         AccountOperationalInput, AccountSummary, ProxyMode, SourceSummary,
     },
-    quota::{quota_economics_summary_for_revision, quota_valuation_revision},
-    ApiEquivalentSummary, DefaultServiceTier, LocalGatewayKey, ProviderSource, ProxyConfig,
-    RuntimeChatGptAccount, RuntimeMixedLocalKey, RuntimeSource,
+    ApiEquivalentSummary, LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount,
+    RuntimeMixedLocalKey, RuntimeSource,
 };
 
 pub(crate) fn account_proxy_config(
@@ -305,7 +304,6 @@ pub(super) fn account_summary(
     proxy_mode: ProxyMode,
     proxy_available: bool,
     api_equivalent: ApiEquivalentSummary,
-    default_service_tier: DefaultServiceTier,
     quota_stale_after_ms: u64,
 ) -> AccountSummary {
     let operational = account_operational_state(AccountOperationalInput {
@@ -338,14 +336,7 @@ pub(super) fn account_summary(
         priority: record.priority,
         weight: record.weight,
         api_equivalent,
-        economics: quota_economics_summary_for_revision(
-            &record.economics,
-            &record.quota,
-            default_service_tier,
-            now_ms(),
-            quota_stale_after_ms,
-            quota_valuation_revision(),
-        ),
+        purchase_cost_micro_usd: record.purchase_cost_micro_usd,
         subscription: record.subscription.clone(),
         quota: record.quota.clone(),
         quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(

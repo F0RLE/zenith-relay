@@ -2299,23 +2299,20 @@ test("usage filters are named and stay scoped to the request report", async ({ p
   })).not.toMatchObject({ success: false, wireApi: "responses" });
 });
 
-test("account usage shows measured quota economics and the model cost table", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountCount: 4, planBenchmark: true });
+test("account usage shows direct API equivalent, payback, and provider quota windows", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountCount: 4 });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await chooseOption(page, page, "Account", "account_synthetic");
 
-  const economics = page.locator(".usage-account-economics");
-  await expect(economics).toContainText("Personal Plus");
-  await expect(economics).toContainText("Estimated potential≈$24");
-  await expect(economics).toContainText("Calibration3.4%");
-  await expect(economics).toContainText("Plan benchmark");
-  await expect(economics).toContainText("Plus · Follow ChatGPT · 3 accounts");
-  await expect(economics.locator(".usage-window-table thead th")).toHaveText([
-    "Window", "Remaining", "Estimated potential", "Plan benchmark", "Tokens", "Similar requests", "Mode", "Reset",
-  ]);
-  await expect(economics.locator("tbody tr").nth(1).locator("td").nth(2)).toContainText("≈$28.8");
-  await expect(economics.getByRole("row")).toHaveCount(3);
+  const accountUsage = page.locator(".usage-account-value");
+  await expect(accountUsage).toContainText("Personal Plus");
+  await expect(accountUsage).toContainText("API equiv.");
+  await expect(accountUsage).toContainText("Potential");
+  await expect(accountUsage).toContainText("Purchase cost, USD");
+  await expect(accountUsage).toContainText("Payback");
+  await expect(accountUsage.locator(".usage-window-table thead th")).toHaveText(["Window", "Remaining", "Reset"]);
+  await expect(accountUsage.getByRole("row")).toHaveCount(3);
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceOrAccountQuery?: string } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_local_usage_page")?.args.input?.sourceOrAccountQuery;
@@ -2326,7 +2323,7 @@ test("account usage shows measured quota economics and the model cost table", as
     "Model", "Requests", "Input tokens", "Output tokens", "Cache reads", "Value",
   ]);
   await page.setViewportSize({ width: 840, height: 560 });
-  await expect(economics).toBeVisible();
+  await expect(accountUsage).toBeVisible();
 });
 
 test("usage request columns reorder, resize, and open details only from the request id", async ({ page }) => {
@@ -2417,7 +2414,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.locator(".account-card .account-token-speed")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).toHaveCount(0);
+  await expect(page.locator('[data-member-label="Personal Plus"] .account-value-strip')).toHaveCount(0);
   await expect(page.locator('[data-member-label="Personal Plus"] .quota-meter').first()).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
@@ -3037,29 +3034,29 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
 });
 
-test("quota calculation uses the observed quota percentage and remains controlled by the dollar toggle", async ({ page }) => {
+test("direct account value remains controlled by the dollar toggle", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  const connectionEconomics = page.locator(".account-card .account-economics-strip");
+  const connectionValue = page.locator(".account-card .account-value-strip");
 
-  await expect(connectionEconomics.first()).toBeVisible();
-  await expect(connectionEconomics.first().locator("dt")).toHaveText(["API equiv.", "Potential", "Payback"]);
-  await expect(connectionEconomics.first().locator("dd small")).toHaveCount(0);
+  await expect(connectionValue.first()).toBeVisible();
+  await expect(connectionValue.first().locator("dt")).toHaveText(["API equiv.", "Potential", "Payback"]);
+  await expect(connectionValue.first().locator("dd small")).toHaveCount(0);
   await expect(page.locator(".account-provider-quota-strip")).toHaveCount(0);
   await expect(page.locator(".account-card .quota-meter").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Hide account calculation" }).locator("svg.lucide-dollar-sign")).toBeVisible();
   await page.getByRole("button", { name: "Hide account calculation" }).click();
-  await expect(connectionEconomics).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+  await expect(connectionValue).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountValueVisible"))).toBe("false");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const poolEconomics = page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip');
+  const poolValue = page.locator('.pool-member-card[data-member-kind="account"] .account-value-strip');
   await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
-  await expect(poolEconomics).toHaveCount(0);
+  await expect(poolValue).toHaveCount(0);
   await page.getByRole("button", { name: "Show account calculation" }).click();
-  await expect(poolEconomics.first()).toBeVisible();
+  await expect(poolValue.first()).toBeVisible();
   await expect(page.locator(".account-provider-quota-strip")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -3067,23 +3064,17 @@ test("quota calculation uses the observed quota percentage and remains controlle
   await expect(page.getByRole("button", { name: "Relay estimate (experimental)", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(connectionEconomics.first()).toBeVisible();
+  await expect(connectionValue.first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Hide account calculation" }).click();
-  await expect(connectionEconomics).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+  await expect(connectionValue).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountValueVisible"))).toBe("false");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
-  await expect(poolEconomics).toHaveCount(0);
+  await expect(poolValue).toHaveCount(0);
   await page.getByRole("button", { name: "Show account calculation" }).click();
-  await expect(poolEconomics.first()).toBeVisible();
-  await page.evaluate(() => localStorage.setItem("relay.accountQuotaCalculationMode", "provider"));
-  await page.reload();
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(connectionEconomics.first()).toBeVisible();
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(poolEconomics.first()).toBeVisible();
+  await expect(poolValue.first()).toBeVisible();
 });
 
 test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
@@ -3593,13 +3584,13 @@ test("remote server-side usage filters and clear logs use managed commands", asy
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args).toMatchObject({ input: { action: { type: "clear_usage" } } });
 });
 
-test("remote account economics uses the server usage identity without exposing its hash", async ({ page }) => {
+test("remote account usage uses the server usage identity without exposing its hash", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await chooseOption(page, page, "Account", "account_synthetic");
 
-  await expect(page.locator(".usage-account-economics")).toContainText("Personal Plus");
+  await expect(page.locator(".usage-account-value")).toContainText("Personal Plus");
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceOrAccountQuery?: string } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_remote_server_usage")?.args.input?.sourceOrAccountQuery;

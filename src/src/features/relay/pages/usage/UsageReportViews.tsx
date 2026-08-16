@@ -1,9 +1,10 @@
 import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useState } from "react";
-import { Activity, CreditCard, Database, Gauge, SlidersHorizontal, X } from "lucide-react";
+import { Activity, CreditCard, SlidersHorizontal, TrendingUp, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
-import { Button, CopyButton, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
+import { estimateAccountPotential } from "../../accountEconomics";
+import { Button, CopyButton, Dialog, EmptyState, formatDetailedRemainingTime, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
@@ -55,8 +56,6 @@ export type UsageRow = {
   generationDurationMs: number | null;
   apiEquivalent: UsageTotals["apiEquivalent"] | null;
 };
-type AccountWindowEconomics = NonNullable<NonNullable<AccountSummary["economics"]>["windows"]>[number];
-
 
 export function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setModelQuery, connectionQuery, poolMemberOptions, setConnectionQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; modelOptions: Array<{ value: string; label: string }>; setModelQuery: (value: string) => void; connectionQuery: string; poolMemberOptions: Array<{ value: string; label: string }>; setConnectionQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t } = useTranslation();
@@ -410,67 +409,39 @@ export function formatApiEquivalent(value: UsageTotals["apiEquivalent"], locale:
   return `≈${amount}`;
 }
 
-export function AccountUsageEconomics({ account, totals }: { account: AccountSummary; totals: UsageTotals }) {
+export function AccountUsageSummary({ account, totals }: { account: AccountSummary; totals: UsageTotals }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const economics = account.economics;
   const nowMs = Date.now();
-  const windows = (["primary", "secondary"] as const).map((kind) => ({
-    kind,
-    quota: account.quota[kind],
-    economics: economics?.windows?.find((window) => window.kind === kind),
-    benchmark: economics?.windows?.find((window) => window.kind === kind)?.planBenchmark ?? null,
-  })).filter(({ quota }) => Boolean(quota));
-  const benchmarkPotential = windows
-    .filter(({ benchmark }) => benchmark?.potentialMicroUsd != null)
-    .sort((left, right) => (right.quota?.windowMinutes ?? 0) - (left.quota?.windowMinutes ?? 0))[0]
-    ?.benchmark?.potentialMicroUsd ?? null;
-  const benchmarkAvailableNow = windows
-    .map(({ benchmark }) => benchmark?.potentialMicroUsd ?? null)
-    .filter((value): value is number => value != null)
-    .sort((left, right) => left - right)[0] ?? null;
-  const potential = economics?.potentialMicroUsd ?? benchmarkPotential;
-  const availableNow = economics?.availableNowMicroUsd ?? benchmarkAvailableNow;
-  const estimateSource = economics?.potentialMicroUsd != null ? t("usage.estimateSourceAccount") : benchmarkPotential != null ? t("usage.estimateSourcePlan") : undefined;
-  const potentialRequests = economics?.potentialRequests ?? null;
-  const observedPercent = (economics?.observedBasisPoints ?? 0) / 100;
-  const potentialDetail = economics?.potentialLowMicroUsd != null && economics.potentialHighMicroUsd != null
-    ? t("usage.estimateRange", { low: formatMicroUsd(economics.potentialLowMicroUsd, locale), high: formatMicroUsd(economics.potentialHighMicroUsd, locale) })
-    : undefined;
-  return <section className="usage-account-economics" aria-label={t("usage.accountEconomics", { account: account.label })}>
+  const purchaseCost = account.purchaseCostMicroUsd ?? null;
+  const incompleteEquivalent = totals.apiEquivalent.unpricedTokens > 0;
+  const potential = estimateAccountPotential(totals.apiEquivalent, account.quota);
+  const payback = purchaseCost && purchaseCost > 0 ? totals.apiEquivalent.microUsd / purchaseCost : null;
+  const paybackTitle = purchaseCost == null
+    ? t("accounts.accountValue.purchaseMissing")
+    : t("accounts.accountValue.paybackHint", {
+      used: formatMicroUsd(totals.apiEquivalent.microUsd, locale),
+      purchase: formatMicroUsd(purchaseCost, locale),
+    });
+  const windows = (["primary", "secondary"] as const)
+    .map((kind) => ({ kind, quota: account.quota[kind] }))
+    .filter(({ quota }) => Boolean(quota));
+  return <section className="usage-account-value" aria-label={t("usage.accountUsage", { account: account.label })}>
     <header><div><span>{t("usage.selectedAccount")}</span><strong>{account.label}</strong></div><details><summary>{t("usage.howCalculated")}</summary><p>{t("usage.calculationHint")}</p></details></header>
     <div className="usage-account-metrics">
-      <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalentUsed")} value={formatApiEquivalent(totals.apiEquivalent, locale)} />
-      <UsageMetric icon={<Gauge aria-hidden />} label={t("usage.potential")} value={potential == null ? t("usage.collectingEstimate") : formatMicroUsd(potential, locale, true)} detail={potentialDetail ?? estimateSource} />
-      <UsageMetric icon={<Activity aria-hidden />} label={t("usage.availableNow")} value={availableNow == null ? "—" : formatMicroUsd(availableNow, locale, true)} />
-      <UsageMetric icon={<Activity aria-hidden />} label={t("usage.similarRequests")} value={potentialRequests == null ? "—" : `≈${formatCompactNumber(potentialRequests, locale)}`} />
-      <UsageMetric icon={<Database aria-hidden />} label={t("usage.calibration")} value={`${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(observedPercent)}%`} detail={economics ? t("usage.sampleCount", { count: economics.sampleCount }) : undefined} />
+      <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.used")} value={formatApiEquivalent(totals.apiEquivalent, locale)} title={t("accounts.accountValue.usedHint", { count: totals.apiEquivalent.unpricedTokens })} />
+      <UsageMetric icon={<TrendingUp aria-hidden />} label={t("accounts.accountValue.potential")} value={potential == null ? "—" : formatMicroUsd(potential.microUsd, locale, potential.approximate)} title={t("accounts.accountValue.potentialHint")} />
+      <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.purchaseCost")} value={purchaseCost == null ? "—" : formatMicroUsd(purchaseCost, locale)} detail={purchaseCost == null ? t("accounts.accountValue.purchaseMissing") : undefined} />
+      <UsageMetric icon={<Activity aria-hidden />} label={t("accounts.accountValue.payback")} value={payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`} title={paybackTitle} />
     </div>
-    <div className="relay-table-wrap"><table className="relay-table usage-window-table"><thead><tr><th>{t("usage.window")}</th><th>{t("usage.remaining")}</th><th>{t("usage.potential")}</th><th>{t("usage.planBenchmark")}</th><th>{t("usage.tokens")}</th><th>{t("usage.similarRequests")}</th><th>{t("usage.serviceTier")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{windows.map(({ kind, quota, economics: windowEconomics, benchmark }) => <tr key={kind}><th scope="row">{formatWindowDuration(quota?.windowMinutes ?? null, locale, t("usage.window"))}</th><td>{formatQuotaRemaining(quota?.availableBasisPoints ?? null, locale)}</td><td>{formatPotentialEstimate(windowEconomics, locale, t)}</td><td>{benchmark ? <div className="usage-estimate-value"><strong>{benchmark.potentialMicroUsd == null ? "—" : formatMicroUsd(benchmark.potentialMicroUsd, locale, true)}</strong><small>{t("usage.planBenchmarkDetail", { plan: formatAccountPlan(benchmark.plan, t("common.unknown")), tier: t(`pool.serviceTiers.${benchmark.serviceTier}`), count: benchmark.accountCount, cycles: benchmark.cycleCount })}</small><small>{t("usage.planBenchmarkRange", { low: formatMicroUsd(benchmark.lowFullWindowMicroUsd, locale), high: formatMicroUsd(benchmark.highFullWindowMicroUsd, locale), mean: formatMicroUsd(benchmark.meanFullWindowMicroUsd, locale) })}</small>{benchmark.weeklyEquivalentMicroUsd != null ? <small>{t("usage.weeklyEquivalent", { value: formatMicroUsd(benchmark.weeklyEquivalentMicroUsd, locale, true) })}</small> : null}{benchmark.stale ? <small>{t("usage.estimateStale")}</small> : null}</div> : "—"}</td><td>{windowEconomics?.potentialTotalTokens == null ? "—" : `≈${formatCompactNumber(windowEconomics.potentialTotalTokens, locale)}`}</td><td>{windowEconomics?.potentialRequests == null ? "—" : `≈${formatCompactNumber(windowEconomics.potentialRequests, locale)}`}</td><td>{formatTierEstimates(windowEconomics?.serviceTiers, locale, t)}</td><td>{quota?.resetAtMs == null ? "—" : formatDetailedRemainingTime(quota.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div>
-    {economics?.cycles?.length ? <div className="relay-table-wrap"><table className="relay-table usage-cycle-table"><thead><tr><th>{t("usage.cycle")}</th><th>{t("common.status")}</th><th>{t("usage.serviceTier")}</th><th>{t("usage.apiEquivalent")}</th><th>{t("usage.completed")}</th></tr></thead><tbody>{economics.cycles.map((cycle) => <tr key={`${cycle.fingerprint}-${cycle.windowKind}`}><td>{formatWindowDuration(cycle.windowMinutes, locale, t("usage.window"))}</td><td>{t(`usage.cycleStatuses.${cycle.status}`)}</td><td>{cycle.serviceTier ? t(`pool.serviceTiers.${cycle.serviceTier}`) : t("usage.mixedTier")}</td><td>{cycle.apiEquivalentMicroUsd == null ? "—" : formatMicroUsd(cycle.apiEquivalentMicroUsd, locale, true)}</td><td>{new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(cycle.completedAtMs)}</td></tr>)}</tbody></table></div> : null}
-    {economics?.observations?.length ? <div className="relay-table-wrap"><table className="relay-table usage-quota-observation-table"><thead><tr><th>{t("usage.observed")}</th><th>{t("usage.window")}</th><th>{t("usage.observationSource")}</th><th>{t("usage.used")}</th><th>{t("usage.remaining")}</th><th>{t("usage.quotaChange")}</th><th>{t("usage.resolution")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{economics.observations.map((observation) => <tr key={`${observation.windowKind}-${observation.observedAtMs}-${observation.source}`}><td>{new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(observation.observedAtMs)}</td><td>{formatWindowDuration(observation.windowMinutes, locale, t("usage.window"))}</td><td>{t(`usage.observationSources.${observation.source}`)}</td><td>{formatQuotaRemaining(observation.usedBasisPoints, locale)}</td><td>{formatQuotaRemaining(observation.availableBasisPoints, locale)}</td><td>{formatQuotaDelta(observation.deltaBasisPoints, locale)}</td><td>{formatQuotaRemaining(observation.resolutionBasisPoints, locale)}</td><td>{observation.resetAtMs == null ? "—" : formatDetailedRemainingTime(observation.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div> : null}
+    {windows.length ? <div className="relay-table-wrap"><table className="relay-table usage-window-table"><thead><tr><th>{t("usage.window")}</th><th>{t("usage.remaining")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{windows.map(({ kind, quota }) => <tr key={kind}><th scope="row">{formatWindowDuration(quota?.windowMinutes ?? null, locale, t("usage.window"))}</th><td>{formatQuotaRemaining(quota?.availableBasisPoints ?? null, locale)}</td><td>{quota?.resetAtMs == null ? "—" : formatDetailedRemainingTime(quota.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div> : null}
   </section>;
 }
-
-function formatPotentialEstimate(economics: AccountWindowEconomics | undefined, locale: string, t: TFunction) {
-  if (economics?.potentialMicroUsd == null) return "—";
-  const range = economics.potentialLowMicroUsd != null && economics.potentialHighMicroUsd != null
-    ? t("usage.estimateRange", { low: formatMicroUsd(economics.potentialLowMicroUsd, locale), high: formatMicroUsd(economics.potentialHighMicroUsd, locale) })
-    : null;
-  const perPercent = economics.fullWindowMicroUsd == null ? null : formatMicroUsd(economics.fullWindowMicroUsd / 100, locale);
-  return <div className="usage-estimate-value"><strong>{formatMicroUsd(economics.potentialMicroUsd, locale, true)}</strong>{perPercent ? <small>{t("usage.perQuotaPercent", { value: perPercent })}</small> : null}{range ? <small>{range}</small> : null}{economics.confidence ? <small>{t("usage.estimateConfidence", { value: t(`accounts.economics.confidenceLevels.${economics.confidence}`) })}</small> : null}</div>;
-}
-
 function formatWindowDuration(minutes: number | null, locale: string, fallback: string) {
   if (!minutes) return fallback;
   const units: Array<[number, Intl.NumberFormatOptions["unit"]]> = [[10_080, "week"], [1_440, "day"], [60, "hour"], [1, "minute"]];
   const [size, unit] = units.find(([size]) => minutes % size === 0) ?? units[units.length - 1];
   return new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 1 }).format(minutes / size);
-}
-
-function formatTierEstimates(tiers: Array<{ serviceTier: DefaultServiceTier; potentialMicroUsd: number | null }> | undefined, locale: string, t: TFunction) {
-  if (!tiers?.length) return "—";
-  return <div className="usage-tier-breakdown">{tiers.map((tier) => <span key={tier.serviceTier}>{t(`pool.serviceTiers.${tier.serviceTier}`)} {tier.potentialMicroUsd == null ? "—" : formatMicroUsd(tier.potentialMicroUsd, locale, true)}</span>)}</div>;
 }
 
 function formatMicroUsd(value: number, locale: string, approximate = false) {
@@ -480,10 +451,4 @@ function formatMicroUsd(value: number, locale: string, approximate = false) {
 
 function formatQuotaRemaining(basisPoints: number | null, locale: string) {
   return basisPoints == null ? "—" : new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }).format(basisPoints / 10_000);
-}
-
-function formatQuotaDelta(basisPoints: number, locale: string) {
-  if (!basisPoints) return "—";
-  const value = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1, signDisplay: "always" }).format(basisPoints / 10_000);
-  return value;
 }

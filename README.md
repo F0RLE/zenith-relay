@@ -36,6 +36,9 @@ the Help Center and GitHub navigation do not depend on one long page.
   price overrides.
 - Usage diagnostics that distinguish Relay, account, and provider failures
   without recording prompts, response bodies, or secrets.
+- Account views keep provider-reported quota windows separate from direct
+  token-based API-equivalent and optional purchase-cost payback; Relay does
+  not turn a quota percentage into a monetary entitlement.
 - Optional user-managed Relay Server with encrypted vault, SQLite state,
   management API, managed ChatGPT/Codex profile attachment, backup/restore, and
   append-only migrations.

@@ -18,10 +18,10 @@ release entries are kept concise and link to the corresponding tag.
 - Model lists and source price editors order familiar model families
   semantically by company, tier, version, and variant; unknown model IDs keep
   their upstream order.
-- Connections and Pool now use one quota calculation: observed token/API value
-  scaled by the provider-reported available quota percentage. The dollar control
-  only shows or hides that calculation; `Potential` and `Payback` remain, while
-  the redundant secondary potential line is removed.
+- Connections, Pool, and Usage now show direct token-based API-equivalent and
+  optional purchase-cost payback beside the provider-reported quota window.
+  Relay no longer turns a quota percentage into a monetary potential; legacy
+  calculation state migrates to the direct purchase-cost field.
 - API candidates remain eligible when a provider has not supplied reasoning
   metadata. An explicitly selected reasoning effort is a source/API policy,
   not proof that an account route supports that effort.

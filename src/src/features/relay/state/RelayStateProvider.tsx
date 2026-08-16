@@ -8,9 +8,11 @@ import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIden
 import { sanitizeFeedbackError } from "./feedback";
 import {
   RELAY_STORAGE_KEYS,
+  readAccountValueVisibility,
   readCodexPoolOauthSelection,
   readRelayPreference,
   removeRelayPreference,
+  writeAccountValueVisibility,
   writeRelayPreference,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
@@ -53,7 +55,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestoreState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, "1") !== "0");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
-  const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, "true") !== "false");
+  const [accountValueVisible, setAccountValueVisibleState] = useState(readAccountValueVisibility);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
@@ -441,9 +443,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (!visible) setRevealedAccountIdentities({});
   }, []);
 
-  const setAccountEconomicsVisible = useCallback((visible: boolean) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, String(visible));
-    setAccountEconomicsVisibleState(visible);
+  const setAccountValueVisible = useCallback((visible: boolean) => {
+    writeAccountValueVisibility(visible);
+    setAccountValueVisibleState(visible);
   }, []);
 
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
@@ -476,8 +478,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountIdentitiesBusy,
     canRevealAccountIdentities,
     setAccountIdentitiesVisible,
-    accountEconomicsVisible,
-    setAccountEconomicsVisible,
+    accountValueVisible,
+    setAccountValueVisible,
     accountDisplayName,
     localUsage,
     localUsagePage,
@@ -505,7 +507,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSnapshotBackupBeforeRestore,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

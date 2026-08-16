@@ -42,12 +42,14 @@ use zenith_relay_core::accounts::{
     ImportPreview, ImportPreviewStatus, ImportQuotaStatus, ParsedImport, ParsedImportItem,
     MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS,
 };
-use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
+use zenith_relay_core::accounts::{
+    AccountAuthState, AccountHealthState, MAX_PURCHASE_COST_MICRO_USD,
+};
 use zenith_relay_core::providers::chatgpt::{
     AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
     ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
-use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
+use zenith_relay_core::quota::QuotaRefreshFailure;
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, normalize_error_code, ApiModelPriceOverride,
     ProviderSource, ProxyConfig, SourceProtocolBinding, WireApi,
@@ -2005,9 +2007,7 @@ pub(super) fn apply_account_patch(
                 "account purchase cost is too large",
             ));
         }
-        account
-            .economics
-            .set_purchase_cost_micro_usd((purchase_cost > 0).then_some(purchase_cost));
+        account.purchase_cost_micro_usd = (purchase_cost > 0).then_some(purchase_cost);
     }
     account.normalize();
     Ok(())

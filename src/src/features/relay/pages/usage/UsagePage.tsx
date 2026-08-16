@@ -7,7 +7,7 @@ import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader,
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { formatTokenSpeed } from "../../usageSpeed";
-import { AccountUsageEconomics, AggregateView, CompactNumber, ErrorsView, formatApiEquivalent, RequestDetails, RequestsView, totalsFromRows, type UsageRow, UsageMetric } from "./UsageReportViews";
+import { AccountUsageSummary, AggregateView, CompactNumber, ErrorsView, formatApiEquivalent, RequestDetails, RequestsView, totalsFromRows, type UsageRow, UsageMetric } from "./UsageReportViews";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
 type View = "requests" | "models" | "connections" | "errors";
@@ -139,7 +139,7 @@ export function UsagePage() {
         <OptionMenu className="usage-range-menu" label={t("usage.range")} value={range} onChange={(value) => resetPage(() => setRange(value as Range))} icon={<CalendarDays aria-hidden />} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
       </div>
     </div>
-    {selectedAccount ? <AccountUsageEconomics account={selectedAccount} totals={totals} /> : null}
+    {selectedAccount ? <AccountUsageSummary account={selectedAccount} totals={totals} /> : null}
     <section className="usage-overview" aria-label={t("usage.summary")}>
       <div className="usage-metrics">
         <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} />

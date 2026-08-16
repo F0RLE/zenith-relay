@@ -89,10 +89,11 @@ five-hour, weekly, or subscription duration. A successful refresh can restore
 health and clear a model-level transient restriction.
 
 The account view always keeps the provider-reported quota window visible. When
-the user enables the account calculation, Relay projects remaining
-API-equivalent value from observed usage scaled by that window's reported
-available percentage. This is an estimate, not a provider debit, and it does
-not change routing eligibility or stored usage.
+the user enables the account calculation, Relay shows the direct
+API-equivalent of recorded token usage and, when the user enters a purchase
+cost, the resulting payback ratio. It never turns a reported available
+percentage into a monetary entitlement. None of this changes routing
+eligibility, provider quota, or stored request usage.
 
 ### Scheduler and execution
 
@@ -229,7 +230,7 @@ a selector for that route. Claude's separate compatibility fallback remains
 limited to the previously documented sparse Claude metadata case. Native
 ChatGPT catalog rows remain authoritative and are not rewritten by this policy.
 
-## Usage and economics
+## Usage and account value
 
 Usage records safe operational metadata: request id, selected candidate, model,
 request mode, success or classified error, status, token split, time to first
@@ -246,11 +247,11 @@ API-equivalent is an informational estimate, never a routing input:
 - Fast and Standard request modes are recorded as observed service tiers, not
   multiplied by a universal hard-coded factor.
 
-Account quota potential is learned from observed quota movement and measured
-usage. Completed, uncontaminated window cycles can contribute to a
-provider/plan/window benchmark; externally consumed or incomplete cycles do
-not pretend to be precise. This makes estimates adapt as provider limits
-change. The estimate never decides whether a request may use an account.
+Provider quota remains a provider-reported operational signal. Relay does not
+learn, calibrate, or extrapolate a monetary subscription quota from available
+percentages. The optional account purchase cost is user-entered presentation
+metadata used only to calculate payback against direct API-equivalent usage;
+it never decides whether a request may use an account.
 
 ## Profiles and recovery
 

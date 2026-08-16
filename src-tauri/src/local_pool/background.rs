@@ -706,7 +706,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),

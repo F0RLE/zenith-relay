@@ -616,11 +616,11 @@
     border-right: 0;
   }
 
-  .usage-account-metrics > div:nth-child(3) {
+  .usage-account-metrics > div:nth-child(odd) {
     border-right: 1px solid var(--relay-border);
   }
 
-  .usage-account-metrics > div:nth-child(-n + 4) {
+  .usage-account-metrics > div:nth-child(-n + 2) {
     border-bottom: 1px solid var(--relay-border);
   }
 

@@ -989,7 +989,7 @@
   border-left: 1px solid var(--relay-border);
 }
 
-.account-economics-strip {
+.account-value-strip {
   min-width: 0;
   min-height: 46px;
   display: grid;
@@ -999,7 +999,7 @@
   background: color-mix(in srgb, var(--relay-subtle) 55%, transparent);
 }
 
-.account-economics-strip > div {
+.account-value-strip > div {
   min-width: 0;
   display: grid;
   align-content: center;
@@ -1009,25 +1009,25 @@
   text-align: center;
 }
 
-.account-economics-strip > div + div {
+.account-value-strip > div + div {
   border-left: 1px solid var(--relay-border);
 }
 
-.account-economics-strip dt,
-.account-economics-strip dd {
+.account-value-strip dt,
+.account-value-strip dd {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.account-economics-strip dt {
+.account-value-strip dt {
   color: var(--relay-muted);
   font-size: 9px;
   line-height: 13px;
 }
 
-.account-economics-strip dd {
+.account-value-strip dd {
   margin: 0;
   color: var(--relay-text);
   font-size: 12px;
@@ -1036,13 +1036,7 @@
   line-height: 17px;
 }
 
-.account-economics-strip [data-state="collecting"] dd,
-.account-economics-strip [data-state="stale"] dd {
-  color: var(--relay-muted);
-  font-size: 10px;
-}
-
-.account-economics-strip [data-state="paid"] dd {
+.account-value-strip [data-state="paid"] dd {
   color: var(--relay-success);
 }
 

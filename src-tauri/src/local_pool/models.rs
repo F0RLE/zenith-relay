@@ -8,7 +8,6 @@ use zenith_relay_core::{
     normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
-    quota::QuotaEconomicsState,
     source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
     SourceProtocolBinding, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
     DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
@@ -260,7 +259,7 @@ pub struct LocalGatewayKeyRecord {
 pub struct LocalAccountRecord {
     pub account: AccountRecord,
     #[serde(default)]
-    pub economics: QuotaEconomicsState,
+    pub purchase_cost_micro_usd: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_location: Option<RemoteAccountLocation>,
     pub wire_api: WireApi,

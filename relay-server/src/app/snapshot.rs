@@ -5,7 +5,7 @@ use super::{
     AccountCredential, AppState, ServerAccountRecord, SourceRecord,
 };
 use crate::{
-    state::{identity_hint, now_ms, SERVER_SCHEMA_VERSION},
+    state::{identity_hint, SERVER_SCHEMA_VERSION},
     store::configuration_revision,
 };
 use std::{
@@ -18,9 +18,8 @@ use zenith_relay_core::{
         AccountSummary, GatewaySummary, ModelSummary, OperationalStatus, ProxyMode,
         RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
     },
-    quota::{attach_quota_plan_benchmarks, quota_plan_benchmarks, quota_valuation_revision},
-    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, DefaultServiceTier,
-    GatewayRuntime, WireApi, QUOTA_STALE_AFTER_MS,
+    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
+    QUOTA_STALE_AFTER_MS,
 };
 
 #[derive(Clone, Copy)]
@@ -64,19 +63,13 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &equivalents,
         &mut warnings,
     )?;
-    let mut account_summaries = account_summaries(
+    let account_summaries = account_summaries(
         state,
         &accounts,
         proxy_settings,
-        routing_policy.default_service_tier,
         &equivalents,
         &mut warnings,
     )?;
-    attach_account_plan_benchmarks(
-        &accounts,
-        &mut account_summaries,
-        routing_policy.default_service_tier,
-    );
     let models = model_summaries(
         &source_summaries,
         &account_summaries,
@@ -181,7 +174,6 @@ fn account_summaries(
     state: &AppState,
     records: &[ServerAccountRecord],
     proxy_settings: AccountProxySettings,
-    default_service_tier: DefaultServiceTier,
     equivalents: &HashMap<String, ApiEquivalentSummary>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<AccountSummary>, String> {
@@ -216,37 +208,10 @@ fn account_summaries(
                     .get(&identity_hint(&record.id))
                     .copied()
                     .unwrap_or_default(),
-                default_service_tier,
                 QUOTA_STALE_AFTER_MS,
             ))
         })
         .collect()
-}
-
-fn attach_account_plan_benchmarks(
-    records: &[ServerAccountRecord],
-    summaries: &mut [AccountSummary],
-    default_service_tier: DefaultServiceTier,
-) {
-    let economics_revision = quota_valuation_revision();
-    let plan_benchmarks = quota_plan_benchmarks(
-        records
-            .iter()
-            .map(|account| (account.id.as_str(), &account.economics)),
-        now_ms(),
-        economics_revision,
-    );
-    for (record, summary) in records.iter().zip(summaries) {
-        attach_quota_plan_benchmarks(
-            &mut summary.economics,
-            "chatgpt",
-            record.subscription.plan_type.as_deref(),
-            &record.quota,
-            default_service_tier,
-            economics_revision,
-            &plan_benchmarks,
-        );
-    }
 }
 
 fn model_summaries(

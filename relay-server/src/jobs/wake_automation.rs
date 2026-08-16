@@ -335,7 +335,7 @@ mod tests {
             weight: 1,
             subscription: Subscription::default(),
             quota: Default::default(),
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             cooldowns: Default::default(),
             consecutive_failures: 0,
             created_at_ms: 1,

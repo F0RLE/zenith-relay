@@ -16,14 +16,14 @@ use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
-    quota::{QuotaEconomicsState, QuotaSnapshot, Subscription},
+    quota::{QuotaSnapshot, Subscription},
     source_models_for_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime,
     SourceProtocolBinding, WireApi,
 };
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 33;
+pub const SERVER_SCHEMA_VERSION: u32 = 34;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -104,7 +104,7 @@ pub struct ServerAccountRecord {
     pub subscription: Subscription,
     pub quota: QuotaSnapshot,
     #[serde(default)]
-    pub economics: QuotaEconomicsState,
+    pub purchase_cost_micro_usd: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
     #[serde(default)]

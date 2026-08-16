@@ -28,8 +28,8 @@ export type RelayContextValue = {
   accountIdentitiesBusy: boolean;
   canRevealAccountIdentities: boolean;
   setAccountIdentitiesVisible: (visible: boolean) => void;
-  accountEconomicsVisible: boolean;
-  setAccountEconomicsVisible: (visible: boolean) => void;
+  accountValueVisible: boolean;
+  setAccountValueVisible: (visible: boolean) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
   localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;

@@ -29,8 +29,8 @@ pub type UsageCallback = Arc<dyn Fn(UsageEvent) + Send + Sync>;
 
 /// A provider-neutral monetary value attached to measured token usage.
 ///
-/// The OpenAI catalog is one way to produce this value; quota calibration only
-/// consumes the value and does not know how the provider price was obtained.
+/// The OpenAI catalog is one way to produce this value; the estimate does not
+/// imply that the provider charged or debited the same amount.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageValue {

@@ -85,7 +85,6 @@ pub async fn refresh_one(
     mut account: ServerAccountRecord,
     force_subscription_refresh: bool,
 ) -> Result<(ServerAccountRecord, Vec<QuotaTransition>), String> {
-    let previous_plan = account.subscription.plan_type.clone();
     let result = refresh_data(state, &account, force_subscription_refresh).await;
     let access_only_rejected = result.as_ref().err().is_some_and(|failure| {
         failure.http_status() == Some(401) || failure.code == "quota_token_prepare"
@@ -107,23 +106,6 @@ pub async fn refresh_one(
     account.subscription = update.subscription;
     account.health = update.health;
     account.last_error_code = update.last_error_code;
-    if zenith_relay_core::quota::subscription_plan_changed(
-        previous_plan.as_deref(),
-        account.subscription.plan_type.as_deref(),
-    ) {
-        account
-            .economics
-            .reset_learning_for_revision(zenith_relay_core::quota::quota_valuation_revision());
-    }
-    if matches!(&update.outcome, AccountQuotaOutcome::Updated { .. }) {
-        account
-            .economics
-            .set_account_context("chatgpt", account.subscription.plan_type.as_deref());
-        account
-            .economics
-            .set_value_revision(zenith_relay_core::quota::quota_valuation_revision());
-        account.economics.observe_quota(&account.quota);
-    }
     if let Some(auth_state) = state.token_authority.auth_state(&account.id).await {
         account.auth_state = auth_state;
     }
@@ -389,7 +371,7 @@ mod tests {
             weight: 1,
             subscription: Default::default(),
             quota: QuotaSnapshot::default(),
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
             created_at_ms: 1,

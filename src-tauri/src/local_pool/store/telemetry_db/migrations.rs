@@ -251,7 +251,47 @@ PRAGMA user_version = 23;
 COMMIT;
 "#;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 23;
+// Account records live as one JSON array in `app_state`. Move the only
+// user-authored value that used to live inside quota economics before removing
+// the legacy object. A direct value always wins so a previously saved edit is
+// never overwritten by an older nested value.
+pub(super) const MIGRATION_024: &str = r#"
+BEGIN IMMEDIATE;
+UPDATE app_state
+SET value_json = COALESCE((
+    SELECT json_group_array(json(
+        CASE
+            WHEN (
+                json_type(value, '$.purchaseCostMicroUsd') IS NULL
+                OR json_type(value, '$.purchaseCostMicroUsd') = 'null'
+            )
+                AND json_type(value, '$.economics.purchaseCostMicroUsd') IS NOT NULL
+            THEN json_remove(
+                json_set(
+                    value,
+                    '$.purchaseCostMicroUsd',
+                    json_extract(value, '$.economics.purchaseCostMicroUsd')
+                ),
+                '$.economics'
+            )
+            ELSE json_remove(value, '$.economics')
+        END
+    ))
+    FROM json_each(app_state.value_json)
+), '[]')
+WHERE key = 'accounts'
+    AND json_valid(value_json)
+    AND json_type(value_json) = 'array'
+    AND EXISTS (
+        SELECT 1
+        FROM json_each(app_state.value_json)
+        WHERE json_type(value, '$.economics') IS NOT NULL
+    );
+PRAGMA user_version = 24;
+COMMIT;
+"#;
+
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 24;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"

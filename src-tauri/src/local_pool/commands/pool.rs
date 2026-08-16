@@ -453,7 +453,6 @@ pub async fn set_local_model_price(
     if gateway != old_gateway {
         let mut store = state.store()?;
         store.replace_gateway(gateway)?;
-        store.reset_quota_economics_learning()?;
     }
     state.snapshot().await.map_err(Into::into)
 }
