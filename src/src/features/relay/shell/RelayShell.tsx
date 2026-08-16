@@ -49,6 +49,9 @@ export function RelayShell() {
   const modePickerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const visiblePages = pages.filter((item) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(item.id));
+  const focusModePicker = useCallback(() => {
+    modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+  }, []);
   const openImport = useCallback((paths?: string[]) => {
     if (mode === "zenith") setMode("local");
     setPage("connections");
@@ -221,7 +224,7 @@ export function RelayShell() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /></div> : null}
+          {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
           <div className="sidebar-footer">
             {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
             <div className="sidebar-footer-row">
@@ -252,7 +255,7 @@ function ModeIcon({ mode }: { mode: RelayMode }) {
   return mode === "local" ? <Laptop aria-hidden /> : mode === "remote" ? <Server aria-hidden /> : <Gauge aria-hidden />;
 }
 
-function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedback, null>; clearFeedback: () => void }) {
+function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback: Exclude<Feedback, null>; clearFeedback: () => void; focusAfterClose: () => void }) {
   const { t } = useTranslation();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -287,6 +290,13 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
       setCopied(false);
     }
   };
+  const closeDetails = () => {
+    setDetailsOpen(false);
+    window.requestAnimationFrame(() => {
+      focusAfterClose();
+      clearFeedback();
+    });
+  };
 
   return <>
     {!detailsOpen ? <div className={`global-feedback ${feedback.kind}`} role="status" aria-label={accessibleLabel}>
@@ -294,7 +304,7 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
         className="global-feedback-copy global-feedback-error-trigger"
         type="button"
         aria-label={t("feedback.showDetails")}
-        aria-expanded={detailsOpen}
+        aria-haspopup="dialog"
         title={t("feedback.showDetails")}
         onClick={() => setDetailsOpen(true)}
       >
@@ -310,11 +320,11 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
     </div> : null}
     {detailsOpen && details ? <Dialog
       title={t("feedback.errorDetails")}
-      onClose={clearFeedback}
+      onClose={closeDetails}
       footer={<div className="global-feedback-dialog-actions">
         <span className="global-feedback-dialog-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
         <Button variant="secondary" icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</Button>
-        <Button variant="primary" onClick={clearFeedback}>{t("common.close")}</Button>
+        <Button variant="primary" onClick={closeDetails}>{t("common.close")}</Button>
       </div>}
     >
       <div className="global-feedback-dialog-summary">

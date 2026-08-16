@@ -5,6 +5,7 @@ const modes = ["local", "remote", "zenith"] as const;
 const themes = ["light", "dark"] as const;
 const locales = ["en", "ru"] as const;
 const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as const;
+const TITLE_BAR_HEIGHT = 36;
 
 async function expectTopLevelEmptyCentered(page: Page) {
   const [pageBox, headerBox, emptyBox, paddingBottom] = await Promise.all([
@@ -1351,7 +1352,7 @@ for (const scenario of [
     }
 
     await feedback.hover();
-    await expect.poll(async () => (await feedback.boundingBox())?.width ?? 0, { timeout: 1_000 }).toBe(initialGeometry.width);
+    await expect.poll(async () => Math.abs(((await feedback.boundingBox())?.width ?? 0) - initialGeometry.width) <= 1, { timeout: 1_000 }).toBe(true);
     const hoveredGeometry = await readGeometry();
     expect(Math.abs(hoveredGeometry.x - initialGeometry.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(hoveredGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
@@ -1362,20 +1363,21 @@ for (const scenario of [
     await feedback.locator(".global-feedback-error-trigger").click();
     const details = page.getByRole("dialog", { name: "Error details" });
     await expect(details).toBeVisible();
-    const detailsGeometry = await details.evaluate((element) => {
+    const detailsGeometry = await details.evaluate((element, titleBarHeight) => {
       const detailsBox = element.getBoundingClientRect();
       const centerOffset = Math.abs((detailsBox.left + detailsBox.width / 2) - innerWidth / 2);
-      const verticalCenterOffset = Math.abs((detailsBox.top + detailsBox.height / 2) - (innerHeight + 36) / 2);
+      const verticalCenterOffset = Math.abs((detailsBox.top + detailsBox.height / 2) - (innerHeight + titleBarHeight) / 2);
       return {
-        withinViewport: detailsBox.left >= 0 && detailsBox.right <= innerWidth && detailsBox.top >= 36 && detailsBox.bottom <= innerHeight,
+        withinViewport: detailsBox.left >= 0 && detailsBox.right <= innerWidth && detailsBox.top >= titleBarHeight && detailsBox.bottom <= innerHeight,
         centered: centerOffset <= 2 && verticalCenterOffset <= 2,
       };
-    });
+    }, TITLE_BAR_HEIGHT);
     expect(detailsGeometry).toEqual({ withinViewport: true, centered: true });
     await expect(page.locator(".global-feedback")).toHaveCount(0);
     await expect(page.locator(".global-feedback-error-trigger")).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/feedback-error-details-${scenario.name}.png` });
     await details.locator("header .relay-icon-button").click();
+    await expect(page.locator(".mode-picker > button")).toBeFocused();
     await expect(feedback).toHaveCount(0);
   });
 }

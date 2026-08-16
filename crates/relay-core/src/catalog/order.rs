@@ -191,12 +191,8 @@ fn model_version_rank(family: KnownModelFamily, model: &str) -> Vec<i64> {
             }
         }
     }
-    if version.is_empty() {
-        vec![0]
-    } else {
-        version.resize(4, 0);
-        version.into_iter().map(|part| -part).collect()
-    }
+    version.resize(4, 0);
+    version.into_iter().map(|part| -part).collect()
 }
 
 fn model_version_components(family: KnownModelFamily, model: &str) -> Vec<i64> {

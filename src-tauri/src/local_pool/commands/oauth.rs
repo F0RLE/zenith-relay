@@ -805,6 +805,7 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.account.created_at_ms = current.account.created_at_ms;
     next.account.last_used_at_ms = current.account.last_used_at_ms;
     next.account.quota = current.account.quota.clone();
+    next.purchase_cost_micro_usd = current.purchase_cost_micro_usd;
     next.remote_location = current.remote_location.clone();
     if next.account.subscription.plan_type.is_none() {
         next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
@@ -1093,6 +1094,7 @@ mod tests {
         current.excluded_models = vec!["excluded".into()];
         current.priority = -10;
         current.weight = 4;
+        current.purchase_cost_micro_usd = Some(42_000_000);
         current.cooldowns.insert("gpt-test".into(), 900);
         current.consecutive_failures = 3;
 
@@ -1127,6 +1129,7 @@ mod tests {
         assert_eq!(next.excluded_models, vec!["excluded"]);
         assert_eq!(next.priority, -10);
         assert_eq!(next.weight, 4);
+        assert_eq!(next.purchase_cost_micro_usd, Some(42_000_000));
         assert!(next.cooldowns.is_empty());
         assert_eq!(next.consecutive_failures, 0);
         assert_eq!(next.models, vec!["new-model"]);

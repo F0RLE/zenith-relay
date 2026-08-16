@@ -126,9 +126,9 @@ describe("Relay translations", () => {
     expect(formatDetailedRemainingTime(now + 5 * 3_600_000 + 24 * 60_000, now, t)).toBe("5 ч 24 мин");
   });
 
-  test("quota windows use ceiling-based units", () => {
+  test("quota windows preserve their reported duration", () => {
     const t = ((key: string, options?: { count?: number }) => `${key}:${options?.count ?? ""}`) as never;
-    expect(quotaWindowLabel({ windowMinutes: 43_800 } as never, "secondary", t)).toBe("quota.weeks:5");
+    expect(quotaWindowLabel({ windowMinutes: 43_800 } as never, "secondary", t)).toBe("quota.hours:730");
     expect(quotaWindowLabel({ windowMinutes: 10_080 } as never, "secondary", t)).toBe("quota.week:");
   });
 

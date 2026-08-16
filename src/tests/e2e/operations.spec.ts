@@ -2135,7 +2135,7 @@ test("connections route Free accounts like other pool members", async ({ page })
   const freeAccount = page.locator(".account-card").filter({ hasText: "Backup account" });
   await expect(freeAccount.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
   await expect(freeAccount).toContainText("95%");
-  await expect(freeAccount).toContainText("5 weeks");
+  await expect(freeAccount).toContainText("30 days");
 });
 
 test("page navigation resets the shared content scroll position", async ({ page }) => {
@@ -3094,9 +3094,9 @@ test("quota cards name provider windows and make remaining percentages explicit"
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   const free = page.locator(".account-card").filter({ hasText: "Backup account" });
-  await expect(free.locator(".quota-meter-heading > span")).toHaveText("5 weeks");
+  await expect(free.locator(".quota-meter-heading > span")).toHaveText("30 days");
   await expect(free.locator(".quota-meter-heading > strong")).toHaveText("95%");
-  await expect(free.locator(".quota-track")).toHaveAttribute("aria-label", "5 weeks: 95%");
+  await expect(free.locator(".quota-track")).toHaveAttribute("aria-label", "30 days: 95%");
 });
 
 test("pool toggle changes state without switching ChatGPT", async ({ page }) => {
@@ -3294,14 +3294,21 @@ test("Overview keeps rendered analytics while a background refresh is pending or
   await expect(activity).toHaveCount(1);
 
   await page.evaluate(() => {
-    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const testWindow = window as unknown as {
+      __OVERVIEW_USAGE_REFRESH_PENDING__?: boolean;
+      __RESOLVE_OVERVIEW_USAGE_REFRESH__?: () => void;
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    };
+    const internals = testWindow.__TAURI_INTERNALS__;
     const invoke = internals.invoke.bind(internals);
     let delayNextUsageRead = true;
     internals.invoke = (command, args, options) => {
       if (command !== "get_local_usage_page" || !delayNextUsageRead) return invoke(command, args, options);
       delayNextUsageRead = false;
-      (window as unknown as { __OVERVIEW_USAGE_REFRESH_PENDING__?: boolean }).__OVERVIEW_USAGE_REFRESH_PENDING__ = true;
-      return new Promise((resolve, reject) => window.setTimeout(() => invoke(command, args, options).then(resolve, reject), 400));
+      testWindow.__OVERVIEW_USAGE_REFRESH_PENDING__ = true;
+      return new Promise((resolve, reject) => {
+        testWindow.__RESOLVE_OVERVIEW_USAGE_REFRESH__ = () => void invoke(command, args, options).then(resolve, reject);
+      });
     };
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
@@ -3309,6 +3316,11 @@ test("Overview keeps rendered analytics while a background refresh is pending or
   await expect(analytics).toHaveAttribute("aria-busy", "true");
   await expect(tokenSummary).toHaveText("28");
   await expect(activity).toHaveCount(1);
+  await page.evaluate(() => {
+    const release = (window as unknown as { __RESOLVE_OVERVIEW_USAGE_REFRESH__?: () => void }).__RESOLVE_OVERVIEW_USAGE_REFRESH__;
+    if (!release) throw new Error("overview usage refresh was not pending");
+    release();
+  });
   await expect(analytics).toHaveAttribute("aria-busy", "false");
 
   await page.evaluate(() => {

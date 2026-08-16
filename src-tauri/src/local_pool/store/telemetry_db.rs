@@ -1185,6 +1185,18 @@ mod tests {
             serde_json::from_str(database.state_json("accounts").unwrap().as_deref().unwrap())
                 .unwrap();
         let accounts = accounts.as_array().unwrap();
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|account| account["account"]["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "account_direct",
+                "account_legacy",
+                "account_null_direct",
+                "account_without_cost",
+            ]
+        );
         assert_eq!(accounts[0]["purchaseCostMicroUsd"], 42_000_000);
         assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
         assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);

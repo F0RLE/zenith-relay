@@ -276,7 +276,7 @@ SET value_json = COALESCE((
             )
             ELSE json_remove(value, '$.economics')
         END
-    ))
+    ) ORDER BY CAST(key AS INTEGER))
     FROM json_each(app_state.value_json)
 ), '[]')
 WHERE key = 'accounts'

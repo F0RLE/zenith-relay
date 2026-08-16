@@ -29,11 +29,11 @@ export function formatQuotaRemaining(basisPoints: number | null, locale: string)
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
   const minutes = window?.windowMinutes;
   if (!minutes) return t(`quota.${kind}`);
-  if (minutes >= 10_080 - 1) {
-    const weeks = Math.ceil(minutes / 10_080);
+  if (minutes % 10_080 === 0) {
+    const weeks = minutes / 10_080;
     return weeks === 1 ? t("quota.week") : t("quota.weeks", { count: weeks });
   }
-  if (minutes >= 1_440 - 1) return t("quota.days", { count: Math.ceil(minutes / 1_440) });
-  if (minutes >= 60 - 1) return t("quota.hours", { count: Math.ceil(minutes / 60) });
-  return t("quota.minutes", { count: Math.ceil(minutes) });
+  if (minutes % 1_440 === 0) return t("quota.days", { count: minutes / 1_440 });
+  if (minutes % 60 === 0) return t("quota.hours", { count: minutes / 60 });
+  return t("quota.minutes", { count: minutes });
 }

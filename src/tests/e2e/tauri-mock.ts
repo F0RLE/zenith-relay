@@ -181,7 +181,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       priority: 20,
       weight: 100,
       apiEquivalent: { microUsd: 14_100_000, pricedTokens: 2_800_000, unpricedTokens: 0 },
-      purchaseCostMicroUsd: 18_000_000,
+      purchaseCostMicroUsd: 18_000_000 as number | null,
       subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
       quota,
       quotaRefreshStatus: input.quotaRefreshStatus ?? "updated" as "pending" | "refreshing" | "updated" | "failed" | "requires_reauth",

@@ -1040,7 +1040,7 @@ textarea:focus-visible {
 }
 
 .global-feedback-error-trigger:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid currentcolor;
   outline-offset: 2px;
 }
 
@@ -1159,7 +1159,6 @@ textarea:focus-visible {
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
@@ -1236,7 +1235,7 @@ textarea:focus-visible {
 }
 
 .global-feedback-dialog-summary code {
-  color: currentColor;
+  color: currentcolor;
   font-size: 11px;
   font-weight: 650;
 }
