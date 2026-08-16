@@ -1,7 +1,7 @@
 use crate::local_pool::{
     accounts::{
         credentials::CredentialStore,
-        proxy::{common_proxy_available, proxy_status},
+        proxy::{common_proxy_available, effective_proxy_config, proxy_status},
         NativeSecretBackend,
     },
     error::CommandError,
@@ -19,7 +19,8 @@ use zenith_relay_core::protocol::{
     RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
-    unix_time_ms, ApiEquivalentSummary, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
+    unix_time_ms, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, WireApi,
+    QUOTA_STALE_AFTER_MS,
 };
 
 #[tauri::command]
@@ -78,6 +79,14 @@ pub async fn get_local_runtime_state(
         .accounts
         .iter()
         .map(|record| {
+            let runtime_available = if running {
+                Some(
+                    oauth_account_runtime_available(&routing_order, &record.account.id)
+                        .unwrap_or(false),
+                )
+            } else {
+                None
+            };
             local_account_summary(
                 record,
                 &snapshot.gateway,
@@ -89,9 +98,26 @@ pub async fn get_local_runtime_state(
                     .unwrap_or_default(),
                 snapshot_at_ms,
                 state.quota_refresh_in_flight(&record.account.id)?,
+                runtime_available,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut warnings = snapshot.warnings;
+    if running {
+        for record in &snapshot.accounts {
+            if record.account.enabled
+                && record.account.in_pool
+                && !record.account.draining
+                && oauth_account_runtime_available(&routing_order, &record.account.id).is_none()
+            {
+                warnings.push(account_runtime_warning(
+                    record,
+                    &snapshot.gateway,
+                    &record.account.id,
+                ));
+            }
+        }
+    }
     let mut models = pool_model_summaries(
         &source_summaries,
         &account_summaries,
@@ -196,7 +222,7 @@ pub async fn get_local_runtime_state(
         accounts: account_summaries,
         automations: snapshot.automations,
         wake_history: snapshot.wake_history,
-        warnings: snapshot.warnings,
+        warnings,
     };
     let _ = state.record_performance(
         "full_snapshot_native",
@@ -272,6 +298,7 @@ fn local_account_summary(
     api_equivalent: ApiEquivalentSummary,
     now_ms: u64,
     refreshing: bool,
+    runtime_available: Option<bool>,
 ) -> crate::local_pool::error::Result<AccountSummary> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .load(&record.account.id)
@@ -301,6 +328,11 @@ fn local_account_summary(
         now_ms,
         quota_stale_after_ms,
     });
+    let operational_status = if record.account.in_pool && runtime_available == Some(false) {
+        OperationalStatus::Unavailable
+    } else {
+        operational.status
+    };
     Ok(AccountSummary {
         id: record.account.id.clone(),
         label: record.account.label.clone(),
@@ -314,7 +346,7 @@ fn local_account_summary(
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
-        operational_status: operational.status,
+        operational_status,
         auth_state: record.account.auth_state,
         health: format!("{:?}", record.account.health).to_ascii_lowercase(),
         models: record.models.clone(),
@@ -339,6 +371,45 @@ fn local_account_summary(
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
     })
+}
+
+fn oauth_account_runtime_available(
+    routing_order: &[CandidateRuntimeSnapshot],
+    account_id: &str,
+) -> Option<bool> {
+    routing_order
+        .iter()
+        .find(|candidate| {
+            candidate.kind == CandidateKind::OAuthAccount && candidate.candidate_id == account_id
+        })
+        .map(|candidate| candidate.available)
+}
+
+fn account_runtime_warning(
+    record: &LocalAccountRecord,
+    settings: &crate::local_pool::models::GatewaySettings,
+    account_id: &str,
+) -> String {
+    let code = match CredentialStore::from_backend(NativeSecretBackend).load(account_id) {
+        Err(_) => "account_runtime_credential_unreadable",
+        Ok(None) => "account_runtime_credential_missing",
+        Ok(Some(credentials)) if credentials.provider_account_id().is_none() => {
+            "account_runtime_provider_account_id_missing"
+        }
+        Ok(Some(credentials)) if effective_proxy_config(settings, &credentials).is_err() => {
+            "account_runtime_proxy_invalid"
+        }
+        Ok(Some(_)) => "account_runtime_not_registered",
+    };
+    let redacted = if record.account.id.chars().count() <= 12 {
+        record.account.id.clone()
+    } else {
+        format!(
+            "{}...",
+            record.account.id.chars().take(8).collect::<String>()
+        )
+    };
+    format!("{code}:{redacted}")
 }
 
 #[cfg(test)]
@@ -392,6 +463,46 @@ mod parity_tests {
         assert_eq!(
             local.as_object().unwrap().keys().collect::<Vec<_>>(),
             remote.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn runtime_account_presence_is_bound_to_the_oauth_candidate() {
+        let candidate = CandidateRuntimeSnapshot {
+            candidate_id: "account_plus".into(),
+            kind: CandidateKind::OAuthAccount,
+            available: true,
+            in_flight: 0,
+            active_request_count: 0,
+            active_models: Vec::new(),
+            last_used_at_ms: None,
+            next_retry_at_ms: None,
+            half_open: false,
+            dispatches: 0,
+        };
+        assert_eq!(
+            oauth_account_runtime_available(std::slice::from_ref(&candidate), "account_plus"),
+            Some(true)
+        );
+        let unavailable = CandidateRuntimeSnapshot {
+            candidate_id: "account_unavailable".into(),
+            kind: CandidateKind::OAuthAccount,
+            available: false,
+            in_flight: 0,
+            active_request_count: 0,
+            active_models: Vec::new(),
+            last_used_at_ms: None,
+            next_retry_at_ms: None,
+            half_open: false,
+            dispatches: 0,
+        };
+        assert_eq!(
+            oauth_account_runtime_available(std::slice::from_ref(&unavailable), "account_unavailable"),
+            Some(false)
+        );
+        assert_eq!(
+            oauth_account_runtime_available(&[candidate], "missing"),
+            None
         );
     }
 }
