@@ -11,10 +11,10 @@ use crate::scheduler::CooldownRequest;
 use crate::sources::{discover_models_with_client, is_loopback_url};
 use crate::ProxyConfig;
 use crate::{
-    decode_codex_model_alias, CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode,
-    ModelRegistry, ModelRules, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
-    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, SourceAdapter, SourceConnector,
-    SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback, WireApi,
+    decode_codex_model_alias, CacheWriteTtl, CandidateScope, Error, LocalGatewayKey,
+    MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore, PoolScheduler,
+    ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, SourceAdapter,
+    SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback, WireApi,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 #[cfg(test)]
@@ -548,6 +548,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
+    pub(crate) cache_write_ttl: CacheWriteTtl,
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
     pub(crate) upstream_headers: HeaderMap,
@@ -563,6 +564,7 @@ struct SourceCandidateBinding {
     wire_api: WireApi,
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
+    cache_write_ttl: CacheWriteTtl,
 }
 
 pub(crate) struct PreparedAuthorization {
@@ -1039,6 +1041,7 @@ impl GatewayRuntime {
                 wire_api: binding.wire_api,
                 adapter: binding.adapter,
                 reasoning_mode: binding.reasoning_mode,
+                cache_write_ttl: binding.cache_write_ttl,
                 service_tier: DefaultServiceTier::Standard,
                 upstream_url: source.endpoint(binding.binding_key)?.clone(),
                 upstream_headers: source.protocol_headers_for_binding(source_binding),
@@ -1058,6 +1061,7 @@ impl GatewayRuntime {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
             upstream_headers: HeaderMap::new(),
@@ -1089,6 +1093,7 @@ impl GatewayRuntime {
                 wire_api: binding.wire_api,
                 adapter: binding.adapter,
                 reasoning_mode: binding.reasoning_mode,
+                cache_write_ttl: binding.cache_write_ttl,
                 service_tier: DefaultServiceTier::Standard,
                 upstream_url: source.endpoint(binding.binding_key)?.clone(),
                 upstream_headers: source.protocol_headers_for_binding(source_binding),
@@ -1107,6 +1112,7 @@ impl GatewayRuntime {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
             upstream_headers: HeaderMap::new(),

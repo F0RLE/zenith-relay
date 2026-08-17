@@ -87,13 +87,13 @@ impl DesktopUsageWriter {
             } else {
                 None
             };
+            let recorded = telemetry.record(&event).is_ok();
             let update = store.lock().map_err(|_| ()).and_then(|mut store| {
                 let Some(account_id) = account_id.as_deref() else {
-                    let recorded = telemetry.record(&event).is_ok();
                     store
                         .touch_usage(&event.local_key_id, &event.source_id, None, observed_at)
                         .map_err(|_| ())?;
-                    return Ok((0, None, false, recorded));
+                    return Ok((0, None, false));
                 };
 
                 let mut accounts = store.accounts().to_vec();
@@ -101,8 +101,6 @@ impl DesktopUsageWriter {
                     .iter_mut()
                     .find(|account| account.account.id == account_id)
                     .ok_or(())?;
-                let recorded = telemetry.record(&event).is_ok();
-
                 let visible_state = (
                     account.account.quota.clone(),
                     account.account.auth_state,
@@ -145,25 +143,27 @@ impl DesktopUsageWriter {
                     natural_use,
                     refresh_now.then(|| account_id.to_string()),
                     visible_state_changed,
-                    recorded,
                 ))
             });
             if update
                 .as_ref()
-                .is_ok_and(|(completed, _, _, _)| *completed > 0)
+                .is_ok_and(|(completed, _, _)| *completed > 0)
             {
                 wake_notify.notify_one();
             }
+            if recorded {
+                state_events.emit_usage_recorded();
+            }
             if update
                 .as_ref()
-                .is_ok_and(|(_, _, visible_state_changed, _)| *visible_state_changed)
+                .is_ok_and(|(_, _, visible_state_changed)| *visible_state_changed)
             {
                 state_events.emit_state_changed();
             }
             let queued = update
                 .as_ref()
                 .ok()
-                .and_then(|(_, account_id, _, _)| account_id.as_deref())
+                .and_then(|(_, account_id, _)| account_id.as_deref())
                 .map_or(Ok(false), |account_id| {
                     quota_refresh
                         .lock()
@@ -175,7 +175,6 @@ impl DesktopUsageWriter {
                 quota_refresh_notify.notify_one();
             }
             let touched = update.is_ok() && queued.is_ok();
-            let recorded = update.as_ref().is_ok_and(|(_, _, _, recorded)| *recorded);
             if !recorded || !touched {
                 failed.fetch_add(1, Ordering::Relaxed);
             }

@@ -1,6 +1,6 @@
 import { type KeyboardEvent, type PointerEvent, useEffect, useRef, useState } from "react";
 
-export const REQUEST_COLUMN_IDS = ["time", "status", "model", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"] as const;
+export const REQUEST_COLUMN_IDS = ["time", "status", "model", "protocol", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"] as const;
 export type RequestColumnId = typeof REQUEST_COLUMN_IDS[number];
 export type RequestTableLayout = { order: RequestColumnId[]; widths: Partial<Record<RequestColumnId, number>> };
 export const MODEL_COLUMN_IDS = ["name", "requests", "input", "output", "cache", "equivalent"] as const;
@@ -11,7 +11,7 @@ export type ErrorColumnId = typeof ERROR_COLUMN_IDS[number];
 type ColumnDrag<ColumnId extends string> = { column: ColumnId; pointerId: number; target: ColumnId; after: boolean };
 export const REQUEST_TABLE_LAYOUT_KEY = "relay.usageRequestTableLayout";
 export const REQUEST_COLUMN_MAX_WIDTH = 480;
-export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 58, model: 82, tier: 110, connection: 100, timing: 96, speed: 82, tokens: 72, equivalent: 92, request: 120 };
+export const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 58, model: 82, protocol: 112, tier: 110, connection: 100, timing: 96, speed: 82, tokens: 72, equivalent: 92, request: 120 };
 
 export function loadRequestTableLayout(): RequestTableLayout {
   const fallback = { order: [...REQUEST_COLUMN_IDS], widths: {} } satisfies RequestTableLayout;

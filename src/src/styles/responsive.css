@@ -99,6 +99,15 @@
     display: none;
   }
 
+  .source-cache-settings {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
+
+  .source-cache-ttl-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .source-route-model-row {
     grid-template-columns: minmax(0, 1fr);
   }

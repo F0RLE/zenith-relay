@@ -51,8 +51,9 @@ pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,
     discover_source_models_for_protocol_bindings, fetch_source_provider_stats, is_loopback_url,
     normalize_source_protocol_bindings, source_models_for_wire_api, source_points_to_gateway,
-    LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery, SourceProtocolBinding,
-    SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
+    CacheWriteTtl, LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery,
+    SourceProtocolBinding, SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider,
+    WireApi,
 };
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{

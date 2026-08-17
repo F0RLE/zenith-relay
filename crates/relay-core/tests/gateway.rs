@@ -142,6 +142,7 @@ async fn native_messages_model_discovery_uses_anthropic_headers() {
             wire_api: WireApi::Messages,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["claude-test".into()],
         }],
     )
@@ -173,6 +174,7 @@ async fn responses_to_messages_discovery_keeps_responses_client_binding() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
             reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: Default::default(),
             model_ids: Vec::new(),
         }],
     )
@@ -185,6 +187,7 @@ async fn responses_to_messages_discovery_keeps_responses_client_binding() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
             reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: Default::default(),
             model_ids: Vec::new(),
         }]
     );
@@ -213,6 +216,7 @@ async fn source_wide_catalog_binding_refreshes_new_models() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["gpt-test".into()],
         }],
     )
@@ -226,6 +230,7 @@ async fn source_wide_catalog_binding_refreshes_new_models() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: Vec::new(),
         }]
     );
@@ -248,12 +253,14 @@ async fn native_model_discovery_keeps_each_protocol_catalog_separate() {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             },
         ],
@@ -272,12 +279,14 @@ async fn native_model_discovery_keeps_each_protocol_catalog_separate() {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["gpt-test".into(), "hidden-model".into()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".into(), "claude-hidden".into()],
             },
         ]
@@ -318,12 +327,14 @@ async fn native_and_bridged_responses_discovery_keep_route_catalogs_separate() {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             },
         ],
@@ -342,12 +353,14 @@ async fn native_and_bridged_responses_discovery_keep_route_catalogs_separate() {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["gpt-test".into(), "hidden-model".into()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".into(), "claude-hidden".into()],
             },
         ]
@@ -384,12 +397,14 @@ async fn failed_native_binding_is_not_advertised_after_discovery() {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             },
         ],
@@ -404,6 +419,7 @@ async fn failed_native_binding_is_not_advertised_after_discovery() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["gpt-test".into()],
         }]
     );
@@ -1394,6 +1410,7 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
             reasoning_mode,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["claude-test".to_string()],
         }],
         enabled: true,
@@ -1921,6 +1938,7 @@ async fn spawn_messages_bridge_gateway(
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".to_string()],
             }],
             enabled: true,
@@ -1964,12 +1982,14 @@ async fn spawn_mixed_responses_gateway(
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["gpt-test".to_string()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::ResponsesToMessages,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["claude-test".to_string()],
                 },
             ],

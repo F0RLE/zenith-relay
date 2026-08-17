@@ -43,6 +43,8 @@ pub struct UsageExportRow {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
     cache_write_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_ttl: Option<zenith_relay_core::CacheWriteTtl>,
     reasoning_tokens: Option<u64>,
     output_tokens: Option<u64>,
     tokens: Option<u64>,
@@ -355,6 +357,7 @@ mod tests {
             input_tokens: Some(1),
             cached_input_tokens: Some(1),
             cache_write_input_tokens: Some(1),
+            cache_write_ttl: Some(zenith_relay_core::CacheWriteTtl::FiveMinutes),
             reasoning_tokens: Some(1),
             output_tokens: Some(1),
             tokens: Some(2),

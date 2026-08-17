@@ -188,6 +188,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             model: &source_model,
             stream,
             reasoning_mode: route.reasoning_mode,
+            cache_write_ttl: route.cache_write_ttl,
             previous,
             response_scope: &route.candidate_id,
         }) {

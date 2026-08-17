@@ -242,16 +242,20 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     let runtimeRefreshTimer: number | undefined;
     let usageRefreshTimer: number | undefined;
     let unlisten: (() => void) | undefined;
+    let unlistenUsage: (() => void) | undefined;
+    const scheduleUsageRefresh = () => {
+      if (!active || document.visibilityState !== "visible" || pageRef.current !== "usage" || usageRefreshTimer !== undefined) return;
+      usageRefreshTimer = window.setTimeout(() => {
+        usageRefreshTimer = undefined;
+        if (!active || pageRef.current !== "usage" || document.visibilityState !== "visible") return;
+        setUsageRevision((current) => current + 1);
+      }, USAGE_EVENT_REFRESH_DEBOUNCE_MS);
+    };
     void relayCommands.onStateChanged(() => {
       stateRevision.current += 1;
       if (!active || document.visibilityState !== "visible") return;
       if (pageRef.current === "usage") {
-        if (usageRefreshTimer !== undefined) return;
-        usageRefreshTimer = window.setTimeout(() => {
-          usageRefreshTimer = undefined;
-          if (!active || pageRef.current !== "usage" || document.visibilityState !== "visible") return;
-          setUsageRevision((current) => current + 1);
-        }, USAGE_EVENT_REFRESH_DEBOUNCE_MS);
+        scheduleUsageRefresh();
         return;
       }
       if (runtimeRefreshQueued || !isRuntimeRefreshPage(pageRef.current)) return;
@@ -267,11 +271,20 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     }).catch(() => {
       // Initial load and periodic refresh still keep the UI current if Tauri event wiring is unavailable.
     });
+    void relayCommands.onUsageRecorded(() => {
+      if (modeRef.current === "local") scheduleUsageRefresh();
+    }).then((stop) => {
+      if (active) unlistenUsage = stop;
+      else stop();
+    }).catch(() => {
+      // The manual refresh remains available if event wiring is unavailable.
+    });
     return () => {
       active = false;
       if (runtimeRefreshTimer !== undefined) window.clearTimeout(runtimeRefreshTimer);
       if (usageRefreshTimer !== undefined) window.clearTimeout(usageRefreshTimer);
       unlisten?.();
+      unlistenUsage?.();
     };
   }, [runBackgroundRefresh]);
 

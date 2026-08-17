@@ -892,6 +892,7 @@ mod tests {
             wire_api: WireApi::Messages,
             adapter: zenith_relay_core::SourceAdapter::ResponsesToMessages,
             reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["old-model".into()],
         }];
         state

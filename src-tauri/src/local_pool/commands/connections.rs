@@ -644,6 +644,7 @@ mod tests {
             wire_api: WireApi::Messages,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: source.models.clone(),
         }];
 
@@ -659,6 +660,7 @@ mod tests {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: Vec::new(),
         }];
 
@@ -734,12 +736,14 @@ mod tests {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-native".into()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["gpt-native".into()],
             },
         ];
