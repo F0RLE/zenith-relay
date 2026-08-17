@@ -47,6 +47,7 @@ export function accountErrorTranslationKey(code: string) {
   if (/forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
   if (/transport|timeout|network|connect/.test(normalized)) return "accounts.errors.connection";
+  if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";
   if (/quota/.test(normalized)) return "accounts.errors.quota";
   if (/auth_error|unauthorized|authentication/.test(normalized)) return "accounts.errors.authorization";
   if (/response|parse|decode|malformed/.test(normalized)) return "accounts.errors.invalidResponse";
