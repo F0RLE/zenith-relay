@@ -204,8 +204,9 @@
 
 .pool-member-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), min(360px, 100%)));
   align-items: stretch;
+  justify-content: start;
   gap: 10px;
 }
 

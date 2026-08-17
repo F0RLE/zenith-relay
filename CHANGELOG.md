@@ -24,6 +24,8 @@ release entries are kept concise and link to the corresponding tag.
   is color-coded without presenting successful requests as errors.
 - Pool speed controls now use the clearer Standard/Fast terminology while
   preserving the existing service-tier behavior.
+- Pool member cards keep a readable maximum width instead of stretching across
+  the entire page, leaving unused space available on wide screens.
 - Local snapshots preserve the canonical account state and show a sanitized
   warning when the active gateway has no matching OAuth candidate.
 - Global operation notifications now stay in a bottom-left overlay above the
