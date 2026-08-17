@@ -204,8 +204,9 @@
 
 .pool-member-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), min(360px, 100%)));
   align-items: stretch;
+  justify-content: start;
   gap: 10px;
 }
 
@@ -226,6 +227,22 @@
   background: var(--relay-surface);
   box-shadow: var(--relay-shadow-soft);
   transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+@media (max-width: 900px) {
+  .pool-member-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pool-member-card {
+    max-width: 360px;
+  }
+}
+
+@media (max-width: 700px) {
+  .pool-member-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .pool-member-card:hover {

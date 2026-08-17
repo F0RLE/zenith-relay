@@ -82,6 +82,7 @@ test("pool account actions match connection cards", async ({ page }) => {
   const [cardBox, dateBox] = await Promise.all([card.boundingBox(), card.locator(".pool-member-context").boundingBox()]);
   expect(cardBox).not.toBeNull();
   expect(dateBox).not.toBeNull();
+  expect(cardBox!.width).toBeLessThanOrEqual(360);
   expect(Math.abs(dateBox!.x + dateBox!.width / 2 - (cardBox!.x + cardBox!.width / 2))).toBeLessThanOrEqual(1);
   await actions.first().hover();
   const dangerHover = await actions.first().evaluate((button) => ({
