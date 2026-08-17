@@ -1,8 +1,9 @@
-import { Braces, MessageSquareText, Route, Sparkles } from "lucide-react";
+import { Braces, MessageSquareText, Plus, Route, Sparkles } from "lucide-react";
 import { type CSSProperties, useId } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   SourceAdapter,
+  CacheWriteTtl,
   SourceProtocolBinding,
   SourceWireApi,
 } from "../api/types";
@@ -12,6 +13,7 @@ import {
   normalizedModelIds,
   sourceWireApis,
 } from "../sourceProtocolBindings";
+import { OptionMenu } from "./Ui";
 
 const protocolPresentation = {
   responses: { icon: Sparkles, endpoint: "/responses" },
@@ -43,6 +45,9 @@ export function SourceProtocolBindingsEditor({
   const nativeResponsesBinding = routeBinding("responses", "native");
   const bridgeBinding = routeBinding("responses", "responses_to_messages");
   const messagesBinding = routeBinding("messages", "native");
+  const cacheBindings = bindings.filter((binding) => (
+    binding.wireApi === "messages" || normalizedAdapter(binding) === "responses_to_messages"
+  ));
   const hasMultipleRoutes = bindings.length > 1;
   const selectedModels = (binding: SourceProtocolBinding) =>
     binding.modelIds.length || hasMultipleRoutes ? binding.modelIds : models;
@@ -51,9 +56,11 @@ export function SourceProtocolBindingsEditor({
       (candidate) => candidate.toLowerCase() === model.toLowerCase(),
     ));
   const bridgeModels = bridgeBinding ? selectedModels(bridgeBinding) : [];
-  const showsBridgeColumn = wireApis.includes("messages") || Boolean(bridgeBinding);
+  const activeWireApis = wireApis.filter(hasNativeProtocol);
+  const inactiveWireApis = wireApis.filter((wireApi) => !hasNativeProtocol(wireApi));
+  const showsBridgeColumn = Boolean(messagesBinding || bridgeBinding);
   const matrixStyle = {
-    "--source-route-column-count": String(wireApis.length + (showsBridgeColumn ? 1 : 0)),
+    "--source-route-column-count": String(activeWireApis.length + (showsBridgeColumn ? 1 : 0)),
   } as CSSProperties;
 
   const setNativeProtocol = (wireApi: SourceWireApi, selected: boolean) => {
@@ -158,6 +165,16 @@ export function SourceProtocolBindingsEditor({
       },
     ]);
   };
+  const cacheBindingLabel = (binding: SourceProtocolBinding) => (
+    binding.wireApi === "messages"
+      ? t("sources.cacheWriteTtlNative")
+      : t("sources.cacheWriteTtlBridge")
+  );
+  const setCacheWriteTtl = (target: SourceProtocolBinding, cacheWriteTtl: CacheWriteTtl) => {
+    onChange(bindings.map((binding) => (
+      binding === target ? { ...binding, cacheWriteTtl } : binding
+    )));
+  };
 
   return (
     <section className="source-protocol-bindings" aria-labelledby={titleId}>
@@ -165,17 +182,43 @@ export function SourceProtocolBindingsEditor({
         <strong id={titleId}>{t("sources.protocolsTitle")}</strong>
         <p>{t("sources.protocolsHint")}</p>
       </header>
-      <div className="source-route-matrix" style={matrixStyle}>
+      {inactiveWireApis.length ? <div className="source-route-add-formats" role="group" aria-label={t("sources.addFormats")}>
+        {inactiveWireApis.map((wireApi) => {
+          const { icon: Icon } = protocolPresentation[wireApi];
+          const label = t(`sources.protocolCards.${wireApi}.title`);
+          return <button key={wireApi} type="button" onClick={() => setNativeProtocol(wireApi, true)}>
+            <Plus aria-hidden />
+            <Icon aria-hidden />
+            {label}
+          </button>;
+        })}
+      </div> : null}
+      {cacheBindings.length ? <section className="source-cache-settings" aria-label={t("sources.cacheWriteTtl")}>
+        <strong>{t("sources.cacheWriteTtl")}</strong>
+        <div className="source-cache-ttl-grid">
+          {cacheBindings.map((binding) => {
+            const label = `${t("sources.cacheWriteTtl")}: ${cacheBindingLabel(binding)}`;
+            return <div key={`${binding.wireApi}:${normalizedAdapter(binding)}`} className="source-cache-ttl">
+              <span>{cacheBindingLabel(binding)}</span>
+              <OptionMenu className="field-option-menu" label={label} value={binding.cacheWriteTtl ?? "provider"} onChange={(value) => setCacheWriteTtl(binding, value as CacheWriteTtl)} options={[
+                { value: "provider", label: t("sources.cacheWriteTtls.provider") },
+                { value: "5m", label: t("sources.cacheWriteTtls.5m") },
+                { value: "1h", label: t("sources.cacheWriteTtls.1h") },
+              ]} />
+            </div>;
+          })}
+        </div>
+      </section> : null}
+      {activeWireApis.length || showsBridgeColumn ? <div className="source-route-matrix" style={matrixStyle}>
         <div className="source-route-matrix-heading">
           <span>{t("sources.modelColumn")}</span>
           <div className="source-route-format-headings">
-            {wireApis.map((wireApi) => {
-              const selected = hasNativeProtocol(wireApi);
+            {activeWireApis.map((wireApi) => {
               const { icon: Icon, endpoint } = protocolPresentation[wireApi];
               return (
                 <label
                   key={wireApi}
-                  className={`source-route-format-heading ${selected ? "selected" : ""}`}
+                  className="source-route-format-heading selected"
                   data-wire-api={wireApi}
                   title={`POST ${endpoint}`}
                 >
@@ -186,7 +229,7 @@ export function SourceProtocolBindingsEditor({
                   </span>
                   <input
                     type="checkbox"
-                    checked={selected}
+                    checked
                     aria-label={t("sources.protocolAvailableControl", {
                       protocol: t(`sources.protocolCards.${wireApi}.title`),
                     })}
@@ -227,7 +270,7 @@ export function SourceProtocolBindingsEditor({
                 <div key={model} className="source-route-model-row">
                   <code className="source-route-model-name">{model}</code>
                   <div className="source-route-model-controls">
-                    {wireApis.map((wireApi) => {
+                    {activeWireApis.map((wireApi) => {
                       const binding = routeBinding(wireApi, "native");
                       const checked = modelIsSelected(binding, model);
                       const assignedToOtherRoute = Boolean(binding) && bindings.some(
@@ -305,7 +348,7 @@ export function SourceProtocolBindingsEditor({
             })}
           </div>
           : null}
-      </div>
+      </div> : null}
       {showsBridgeColumn
         ? <p className="source-route-bridge-note">{t("sources.bridgeHint")}</p>
         : null}

@@ -6,9 +6,9 @@ use crate::{
     automations::{WakeHistory, WakeTask},
     codex_model_display_name, codex_model_is_picker_eligible,
     quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
-    ApiEquivalentSummary, ApiModelPriceOverride, CandidateHealth, CandidateKind, CandidateQuota,
-    CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
-    SourceProtocolBinding, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, CandidateHealth, CandidateKind,
+    CandidateQuota, CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics,
+    RoutingStrategy, SourceProtocolBinding, WireApi,
 };
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -919,6 +919,8 @@ pub struct UsageSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_ttl: Option<CacheWriteTtl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -1268,12 +1270,14 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["gpt-routed".into()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["claude-native".into()],
                 },
             ],
@@ -1337,18 +1341,21 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["gpt-native".into()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::ResponsesToMessages,
                     reasoning_mode: MessagesReasoningMode::Adaptive,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["claude-bridged".into()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["claude-native".into()],
                 },
             ],
@@ -1376,12 +1383,14 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["gpt-native".into()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: Vec::new(),
                 },
             ],

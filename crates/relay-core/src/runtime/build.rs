@@ -159,6 +159,7 @@ pub(super) fn build_sources(
                     wire_api: binding.wire_api,
                     adapter: binding.adapter,
                     reasoning_mode: binding.reasoning_mode,
+                    cache_write_ttl: binding.cache_write_ttl,
                 },
             );
         }

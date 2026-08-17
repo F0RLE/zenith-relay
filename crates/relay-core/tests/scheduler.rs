@@ -1054,6 +1054,7 @@ async fn bridged_messages_stream_preserves_safe_gateway_error() {
         wire_api: WireApi::Responses,
         adapter: SourceAdapter::ResponsesToMessages,
         reasoning_mode: MessagesReasoningMode::Adaptive,
+        cache_write_ttl: Default::default(),
         model_ids: vec![MODEL.to_string()],
     }];
     let (gateway, events) =
@@ -1587,12 +1588,14 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["gpt-5.4".into(), "shared-model".into()],
         },
         SourceProtocolBinding {
             wire_api: WireApi::Messages,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["gpt-5.4-mini".into(), "shared-model".into()],
         },
     ];

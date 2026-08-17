@@ -1,5 +1,5 @@
 use super::{messages, stream::MessagesStreamBridge};
-use crate::sources::WireApi;
+use crate::{CacheWriteTtl, WireApi};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +27,7 @@ pub struct AdapterRequestContext<'a> {
     pub model: &'a str,
     pub stream: bool,
     pub reasoning_mode: MessagesReasoningMode,
+    pub cache_write_ttl: CacheWriteTtl,
     pub previous: Option<MessagesBridgeState>,
     pub response_scope: &'a str,
 }
@@ -89,6 +90,7 @@ impl SourceAdapter {
             model,
             stream,
             reasoning_mode,
+            cache_write_ttl,
             previous,
             response_scope,
         } = context;
@@ -100,19 +102,25 @@ impl SourceAdapter {
                     .as_object_mut()
                     .ok_or_else(AdapterError::invalid_request)?;
                 object.insert("model".to_string(), Value::String(model.to_string()));
+                if client_wire_api == WireApi::Messages {
+                    messages::apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
+                }
                 Ok(PreparedAdapterRequest::Native { upstream_body })
             }
-            Self::ResponsesToMessages => messages::prepare_responses_to_messages_scoped(
-                request,
-                model,
-                stream,
-                reasoning_mode,
-                previous,
-                response_scope,
-            )
-            .map(|request| PreparedAdapterRequest::ResponsesToMessages {
-                request: Box::new(request),
-            }),
+            Self::ResponsesToMessages => {
+                messages::prepare_responses_to_messages_scoped_with_cache_ttl(
+                    request,
+                    model,
+                    stream,
+                    reasoning_mode,
+                    cache_write_ttl,
+                    previous,
+                    response_scope,
+                )
+                .map(|request| PreparedAdapterRequest::ResponsesToMessages {
+                    request: Box::new(request),
+                })
+            }
         }
     }
 }

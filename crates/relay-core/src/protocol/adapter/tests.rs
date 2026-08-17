@@ -1,5 +1,6 @@
 use super::*;
 use crate::sources::WireApi;
+use crate::CacheWriteTtl;
 use serde_json::{json, Value};
 
 fn request(input: Value) -> Value {
@@ -38,6 +39,7 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
             model: "resolved-model",
             stream: false,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             previous: None,
             response_scope: "native-route",
         })
@@ -72,6 +74,7 @@ fn native_responses_request_keeps_image_input_opaque() {
             model: "resolved-model",
             stream: false,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             previous: None,
             response_scope: "native-route",
         })
@@ -79,6 +82,21 @@ fn native_responses_request_keeps_image_input_opaque() {
 
     assert_eq!(prepared.upstream_body()["model"], "resolved-model");
     assert_eq!(prepared.upstream_body()["input"], request["input"]);
+}
+
+#[test]
+fn messages_cache_write_lifetime_overrides_existing_markers() {
+    let mut request = json!({
+        "system": [{"type": "text", "text": "system"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral", "ttl": "5m"}}]}]
+    });
+
+    messages::apply_cache_write_ttl(&mut request, CacheWriteTtl::OneHour).unwrap();
+
+    assert_eq!(
+        request["messages"][0]["content"][0]["cache_control"]["ttl"],
+        "1h"
+    );
 }
 
 #[test]

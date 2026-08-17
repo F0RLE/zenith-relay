@@ -20,7 +20,7 @@ pub fn sql_like_contains_pattern(value: &str) -> String {
     escaped
 }
 
-use crate::{quota::QuotaSnapshot, DefaultServiceTier, RoutingDiagnostics, WireApi};
+use crate::{quota::QuotaSnapshot, CacheWriteTtl, DefaultServiceTier, RoutingDiagnostics, WireApi};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -403,6 +403,8 @@ pub struct UsageEvent {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_ttl: Option<CacheWriteTtl>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -508,6 +510,7 @@ mod tests {
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,

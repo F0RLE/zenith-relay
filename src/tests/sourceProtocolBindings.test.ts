@@ -37,12 +37,14 @@ describe("source protocol bindings", () => {
         wireApi: "responses",
         adapter: "native",
         reasoningMode: "disabled",
+        cacheWriteTtl: "provider",
         modelIds: ["gpt-native"],
       },
       {
         wireApi: "responses",
         adapter: "responses_to_messages",
         reasoningMode: "adaptive",
+        cacheWriteTtl: "provider",
         modelIds: ["claude-bridge"],
       },
     ]);
@@ -170,5 +172,33 @@ describe("source protocol bindings", () => {
         modelIds: [],
       },
     ]);
+  });
+
+  test("keeps cache-write TTL separate for each Messages upstream binding", () => {
+    const value = {
+      kind: "custom",
+      name: "Compatible API",
+      baseUrl: "https://api.example.test/v1",
+      wireApi: "responses",
+      apiKey: "sk-synthetic",
+      protocolBindings: [
+        {
+          wireApi: "messages",
+          adapter: "native",
+          reasoningMode: "disabled",
+          cacheWriteTtl: "5m",
+          modelIds: ["claude-native"],
+        },
+        {
+          wireApi: "responses",
+          adapter: "responses_to_messages",
+          reasoningMode: "adaptive",
+          cacheWriteTtl: "1h",
+          modelIds: ["claude-bridge"],
+        },
+      ],
+    } satisfies ApiProviderValue;
+
+    expect(apiProviderSourceInput(value).protocolBindings).toEqual(value.protocolBindings);
   });
 });

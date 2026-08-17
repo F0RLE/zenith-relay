@@ -81,16 +81,16 @@ impl Store {
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json,
                         service_tier, applied_service_tier, tool_use_json, error_origin,
-                        requested_reasoning_effort, effective_reasoning_effort
+                        requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl
                     ) SELECT
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                        ?23, ?24, ?25, ?26, ?27, ?28
+                        ?23, ?24, ?25, ?26, ?27, ?28, ?29
                     WHERE NOT EXISTS (
                         SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
                     AND (?4 != 'account' OR EXISTS (
-                        SELECT 1 FROM accounts WHERE id = ?29
+                        SELECT 1 FROM accounts WHERE id = ?30
                     ))
                     ON CONFLICT(request_id) DO UPDATE SET
                         attempt=excluded.attempt,
@@ -119,7 +119,8 @@ impl Store {
                         tool_use_json=excluded.tool_use_json,
                         error_origin=excluded.error_origin,
                         requested_reasoning_effort=excluded.requested_reasoning_effort,
-                        effective_reasoning_effort=excluded.effective_reasoning_effort
+                        effective_reasoning_effort=excluded.effective_reasoning_effort,
+                        cache_write_ttl=excluded.cache_write_ttl
                     WHERE excluded.attempt >= usage_events.attempt"#,
                 )
                 .map_err(db_error)?;
@@ -178,6 +179,9 @@ impl Store {
                             .effective_reasoning_effort
                             .as_deref()
                             .and_then(zenith_relay_core::normalize_reasoning_effort),
+                        event
+                            .cache_write_ttl
+                            .and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
                         candidate_id,
                     ])
                     .map_err(db_error)?;
@@ -232,7 +236,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -287,6 +291,10 @@ impl Store {
                     input_tokens: optional_u64(row.get(14)?),
                     cached_input_tokens: optional_u64(row.get(15)?),
                     cache_write_input_tokens: optional_u64(row.get(16)?),
+                    cache_write_ttl: row
+                        .get::<_, Option<String>>(28)?
+                        .as_deref()
+                        .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
                     reasoning_tokens: optional_u64(row.get(17)?),
                     output_tokens: optional_u64(row.get(18)?),
                     total_tokens: optional_u64(row.get(19)?),
@@ -608,6 +616,7 @@ mod tests {
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -743,6 +752,7 @@ mod tests {
             input_tokens: Some(2),
             cached_input_tokens: Some(1),
             cache_write_input_tokens: Some(1),
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: Some(3),
             total_tokens: Some(5),
@@ -822,6 +832,7 @@ mod tests {
             input_tokens: Some(1_000_000),
             cached_input_tokens: Some(400_000),
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: Some(0),
             output_tokens: Some(100_000),
             total_tokens: Some(1_100_000),
@@ -954,6 +965,7 @@ mod tests {
             input_tokens: Some(1_000_000),
             cached_input_tokens: Some(0),
             cache_write_input_tokens: Some(0),
+            cache_write_ttl: None,
             reasoning_tokens: Some(0),
             output_tokens: Some(100_000),
             total_tokens: Some(1_100_000),
@@ -1047,6 +1059,7 @@ mod tests {
                         input_tokens: Some(1),
                         cached_input_tokens: Some(u64::from(index != 2)),
                         cache_write_input_tokens: (index == 2).then_some(1),
+                        cache_write_ttl: None,
                         reasoning_tokens: Some(1),
                         output_tokens: Some(1),
                         total_tokens: Some(2),

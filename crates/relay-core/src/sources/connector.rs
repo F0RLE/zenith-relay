@@ -174,12 +174,14 @@ mod tests {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["responses-model".to_string()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["messages-model".to_string()],
             },
         ];

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, RefreshCw, Trash2 } from "lucide-react";
+import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, RefreshCw, SlidersHorizontal, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RemoteUsageQuery } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { formatTokenSpeed } from "../../usageSpeed";
@@ -12,6 +12,19 @@ import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
 type View = "requests" | "models" | "connections" | "errors";
 type Range = "all" | "daily" | "weekly" | "monthly";
+const USAGE_SUMMARY_METRICS = ["requests", "success", "tokens", "equivalent", "firstResponse", "totalTime", "generationSpeed", "effectiveSpeed"] as const;
+type UsageSummaryMetric = typeof USAGE_SUMMARY_METRICS[number];
+const USAGE_SUMMARY_LAYOUT_KEY = "relay.usageSummaryMetrics";
+
+function loadUsageSummaryMetrics(): Record<UsageSummaryMetric, boolean> {
+  const defaults = Object.fromEntries(USAGE_SUMMARY_METRICS.map((metric) => [metric, true])) as Record<UsageSummaryMetric, boolean>;
+  try {
+    const stored = JSON.parse(localStorage.getItem(USAGE_SUMMARY_LAYOUT_KEY) ?? "null") as Record<string, unknown> | null;
+    for (const metric of USAGE_SUMMARY_METRICS) if (typeof stored?.[metric] === "boolean") defaults[metric] = stored[metric];
+  } catch { }
+  return defaults;
+}
+
 export function UsagePage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, runtimeRevision, usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
@@ -29,6 +42,8 @@ export function UsagePage() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState(false);
   const [selected, setSelected] = useState<UsageRow | null>(null);
+  const [summaryMetrics, setSummaryMetrics] = useState(loadUsageSummaryMetrics);
+  const [summarySettingsOpen, setSummarySettingsOpen] = useState(false);
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const requestFiltersActive = view === "requests";
   const selectedAccount = runtime?.accounts.find((account) => account.id === selectedAccountId) ?? null;
@@ -72,8 +87,8 @@ export function UsagePage() {
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
     if (mode === "zenith") return [];
-    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, requestedReasoningEffort: item.requestedReasoningEffort ?? null, effectiveReasoningEffort: item.effectiveReasoningEffort ?? null, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, errorOrigin: item.errorOrigin ?? null, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: null, candidateKind: item.candidateKind, generationDurationMs: item.generationMs ?? null, apiEquivalent: item.apiEquivalent ?? null }));
-    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, requestedReasoningEffort: item.requestedReasoningEffort ?? null, effectiveReasoningEffort: item.effectiveReasoningEffort ?? null, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, errorOrigin: item.errorOrigin ?? null, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: item.accountId ?? null, candidateKind: item.accountId ? ("account" as const) : ("source" as const), generationDurationMs: item.generationMs, apiEquivalent: item.apiEquivalent ?? null }));
+    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, requestedReasoningEffort: item.requestedReasoningEffort ?? null, effectiveReasoningEffort: item.effectiveReasoningEffort ?? null, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, cacheWriteTtl: item.cacheWriteTtl ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, errorOrigin: item.errorOrigin ?? null, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: null, candidateKind: item.candidateKind, generationDurationMs: item.generationMs ?? null, apiEquivalent: item.apiEquivalent ?? null }));
+    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, requestedReasoningEffort: item.requestedReasoningEffort ?? null, effectiveReasoningEffort: item.effectiveReasoningEffort ?? null, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, cacheWriteTtl: item.cacheWriteTtl ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, errorOrigin: item.errorOrigin ?? null, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: item.accountId ?? null, candidateKind: item.accountId ? ("account" as const) : ("source" as const), generationDurationMs: item.generationMs, apiEquivalent: item.apiEquivalent ?? null }));
   }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   useEffect(() => {
     if (!selected) return;
@@ -101,9 +116,12 @@ export function UsagePage() {
   const averageEffectiveSpeed = totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
   const successRate = totals.requests ? Math.round(totals.successfulRequests / totals.requests * 100) : null;
   const speedUnit = t("usage.tokensPerSecondUnit");
+  useEffect(() => {
+    try { localStorage.setItem(USAGE_SUMMARY_LAYOUT_KEY, JSON.stringify(summaryMetrics)); } catch { }
+  }, [summaryMetrics]);
   const formatTime = (value: string) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
   const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
-  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, requestedReasoningEffort: row.requestedReasoningEffort, effectiveReasoningEffort: row.effectiveReasoningEffort, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory, errorOrigin: row.errorOrigin, serviceTier: row.serviceTier ?? undefined, appliedServiceTier: row.appliedServiceTier }))), "feedback.exported");
+  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, requestedReasoningEffort: row.requestedReasoningEffort, effectiveReasoningEffort: row.effectiveReasoningEffort, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, cacheWriteTtl: row.cacheWriteTtl, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory, errorOrigin: row.errorOrigin, serviceTier: row.serviceTier ?? undefined, appliedServiceTier: row.appliedServiceTier }))), "feedback.exported");
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
     setPage(1);
@@ -131,7 +149,7 @@ export function UsagePage() {
   }
 
   return <section className="relay-page">
-    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
+    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem icon={<SlidersHorizontal aria-hidden />} onClick={() => setSummarySettingsOpen(true)}>{t("usage.configureSummary")}</ActionMenuItem><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
     <div className="usage-view-toolbar">
       <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
       <div className="usage-scope-controls">
@@ -140,20 +158,20 @@ export function UsagePage() {
       </div>
     </div>
     {selectedAccount ? <AccountUsageSummary account={selectedAccount} totals={totals} /> : null}
-    <section className="usage-overview" aria-label={t("usage.summary")}>
-      <div className="usage-metrics">
-        <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} />
-        <UsageMetric icon={<CheckCircle2 aria-hidden />} label={t("common.success")} value={successRate == null ? "-" : `${successRate}%`} detail={`${formatFullNumber(totals.successfulRequests, i18n.language)} / ${formatFullNumber(totals.requests, i18n.language)}`} />
-        <UsageMetric icon={<Database aria-hidden />} label={t("usage.totalTokens")} value={<CompactNumber value={totals.totalTokens} locale={i18n.language} />} detail={`${t("usage.inputShort")} ${formatCompactNumber(totals.inputTokens, i18n.language)} · ${t("usage.cachedShort")} ${totals.cachedInputSamples ? formatCompactNumber(totals.cachedInputTokens, i18n.language) : "—"} · ${t("usage.outputShort")} ${formatCompactNumber(totals.outputTokens, i18n.language)}`} title={t("usage.tokenCompositionHint")} />
-        <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalent")} value={formatApiEquivalent(totals.apiEquivalent, i18n.language)} detail={t("usage.apiEquivalentCoverage", { priced: formatCompactNumber(totals.apiEquivalent.pricedTokens, i18n.language), unpriced: formatCompactNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} />
-      </div>
-      <div className="usage-performance">
-        <UsageMetric label={t("usage.firstResponse")} value={averageFirstResponse == null ? "-" : `${averageFirstResponse} ms`} />
-        <UsageMetric label={t("usage.totalTime")} value={averageDuration == null ? "-" : `${averageDuration} ms`} />
-        <UsageMetric label={t("usage.generationSpeed")} value={formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} title={t("usage.visibleSpeedHint")} />
-        <UsageMetric label={t("usage.effectiveSpeed")} value={formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} />
-      </div>
-    </section>
+    {USAGE_SUMMARY_METRICS.some((metric) => summaryMetrics[metric]) ? <section className="usage-overview" aria-label={t("usage.summary")}>
+      {summaryMetrics.requests || summaryMetrics.success || summaryMetrics.tokens || summaryMetrics.equivalent ? <div className="usage-metrics">
+        {summaryMetrics.requests ? <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} /> : null}
+        {summaryMetrics.success ? <UsageMetric icon={<CheckCircle2 aria-hidden />} label={t("common.success")} value={successRate == null ? "-" : `${successRate}%`} detail={`${formatFullNumber(totals.successfulRequests, i18n.language)} / ${formatFullNumber(totals.requests, i18n.language)}`} /> : null}
+        {summaryMetrics.tokens ? <UsageMetric icon={<Database aria-hidden />} label={t("usage.totalTokens")} value={<CompactNumber value={totals.totalTokens} locale={i18n.language} />} detail={`${t("usage.inputShort")} ${formatCompactNumber(totals.inputTokens, i18n.language)} · ${t("usage.outputShort")} ${formatCompactNumber(totals.outputTokens, i18n.language)} · ${t("usage.cachedShort")} ${totals.cachedInputSamples ? formatCompactNumber(totals.cachedInputTokens, i18n.language) : "—"}${totals.cacheWriteInputSamples ? ` · ${t("usage.cacheWriteShort")} ${formatCompactNumber(totals.cacheWriteInputTokens ?? 0, i18n.language)}` : ""}`} title={t("usage.tokenCompositionHint")} /> : null}
+        {summaryMetrics.equivalent ? <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalent")} value={formatApiEquivalent(totals.apiEquivalent, i18n.language)} detail={t("usage.apiEquivalentCoverage", { priced: formatCompactNumber(totals.apiEquivalent.pricedTokens, i18n.language), unpriced: formatCompactNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} /> : null}
+      </div> : null}
+      {summaryMetrics.firstResponse || summaryMetrics.totalTime || summaryMetrics.generationSpeed || summaryMetrics.effectiveSpeed ? <div className="usage-performance" data-separated={summaryMetrics.requests || summaryMetrics.success || summaryMetrics.tokens || summaryMetrics.equivalent ? "true" : undefined}>
+        {summaryMetrics.firstResponse ? <UsageMetric label={t("usage.firstResponse")} value={averageFirstResponse == null ? "-" : `${averageFirstResponse} ms`} /> : null}
+        {summaryMetrics.totalTime ? <UsageMetric label={t("usage.totalTime")} value={averageDuration == null ? "-" : `${averageDuration} ms`} /> : null}
+        {summaryMetrics.generationSpeed ? <UsageMetric label={t("usage.generationSpeed")} value={formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} title={t("usage.visibleSpeedHint")} /> : null}
+        {summaryMetrics.effectiveSpeed ? <UsageMetric label={t("usage.effectiveSpeed")} value={formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} /> : null}
+      </div> : null}
+    </section> : null}
     {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} modelOptions={modelOptions} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} poolMemberOptions={poolMemberOptions} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
     {view === "models" ? <AggregateView rows={filtered} groups={modelGroups} field="model" empty={t("usage.empty")} /> : null}
     {view === "connections" ? <AggregateView rows={filtered} groups={poolMemberGroups} field="connection" empty={t("usage.empty")} /> : null}
@@ -161,5 +179,10 @@ export function UsagePage() {
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.totalPages > 1 ? <nav className="usage-pagination" aria-label={t("usage.pagination")}><Button variant="secondary" icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || usageLoading} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t("common.back")}</Button><span>{t("usage.page", { page: usagePage.page, total: usagePage.totalPages })}</span><Button variant="secondary" icon={<ChevronRight aria-hidden />} disabled={page >= usagePage.totalPages || usageLoading} onClick={() => setPage((value) => value + 1)}>{t("common.continue")}</Button></nav> : null}
     {selected ? <RequestDetails row={selected} onClose={() => setSelected(null)} /> : null}
+    {summarySettingsOpen ? <Dialog title={t("usage.configureSummary")} onClose={() => setSummarySettingsOpen(false)} closeOnBackdrop>
+      <div className="usage-summary-settings">
+        {USAGE_SUMMARY_METRICS.map((metric) => <label key={metric}><input type="checkbox" checked={summaryMetrics[metric]} onChange={(event) => setSummaryMetrics((current) => ({ ...current, [metric]: event.target.checked }))} /><span>{t(`usage.summaryMetrics.${metric}`)}</span></label>)}
+      </div>
+    </Dialog> : null}
   </section>;
 }

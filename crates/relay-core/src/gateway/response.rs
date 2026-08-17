@@ -4,7 +4,7 @@ use super::streaming::{parse_sse_event, TerminalOutcome};
 use crate::protocol::sse_event_end;
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
-use crate::{Error, ErrorOrigin, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
+use crate::{CacheWriteTtl, Error, ErrorOrigin, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -230,6 +230,9 @@ pub(super) fn usage_event(
         input_tokens: None,
         cached_input_tokens: None,
         cache_write_input_tokens: None,
+        // Usage records describe what the upstream actually reported, not the
+        // configured preference. `apply_usage` sets this only for a cache write.
+        cache_write_ttl: None,
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
@@ -386,6 +389,10 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                     .saturating_sub(event.cached_input_tokens.unwrap_or_default()),
             )
         });
+    event.cache_write_ttl = event
+        .cache_write_input_tokens
+        .filter(|written| *written > 0)
+        .and_then(|_| cache_write_ttl_from_usage(usage).or(event.cache_write_ttl));
     event.reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
@@ -409,6 +416,30 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         }
         _ => reported_total,
     };
+}
+
+fn cache_write_ttl_from_usage(usage: &Value) -> Option<CacheWriteTtl> {
+    usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cache_write_ttl"))
+        .or_else(|| usage.get("cache_write_ttl"))
+        .and_then(Value::as_str)
+        .and_then(CacheWriteTtl::from_anthropic_ttl)
+        .or_else(|| {
+            let creation = usage.get("cache_creation")?;
+            creation
+                .get("ephemeral_1h_input_tokens")
+                .and_then(Value::as_u64)
+                .filter(|tokens| *tokens > 0)
+                .map(|_| CacheWriteTtl::OneHour)
+                .or_else(|| {
+                    creation
+                        .get("ephemeral_5m_input_tokens")
+                        .and_then(Value::as_u64)
+                        .filter(|tokens| *tokens > 0)
+                        .map(|_| CacheWriteTtl::FiveMinutes)
+                })
+        })
 }
 
 pub(super) fn find_usage(value: &Value) -> Option<&Value> {
@@ -472,6 +503,22 @@ mod tests {
         assert_eq!(event.cache_write_input_tokens, Some(20));
         assert_eq!(event.output_tokens, Some(10));
         assert_eq!(event.total_tokens, Some(170));
+    }
+
+    #[test]
+    fn anthropic_cache_creation_reports_actual_write_lifetime() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":20},"output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_ttl, Some(CacheWriteTtl::OneHour));
+
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":20},"output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_ttl, Some(CacheWriteTtl::FiveMinutes));
     }
 
     #[test]

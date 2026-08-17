@@ -35,8 +35,10 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Edit" }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
   await sourceDialog.locator(".source-routing-details > summary").click();
+  await sourceDialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Chat Completions", exact: true }).click();
   await sourceDialog.getByRole("checkbox", { name: "Chat Completions is available from this source", exact: true }).check();
-  await sourceDialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true }).uncheck();
+  await sourceDialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true }).click();
+  await expect(sourceDialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true })).toHaveCount(0);
   await expect(sourceDialog.getByRole("radiogroup", { name: "API source role" })).toHaveCount(0);
   await expect(sourceDialog.locator("[data-member-model-id]")).toHaveCount(0);
   await sourceDialog.locator(".source-price-section > summary").click();
@@ -739,19 +741,22 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   await expect(dialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true })).toBeHidden();
   await routingDetails.locator("summary").click();
   await expect(dialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true })).toBeChecked();
-  await expect(dialog.getByRole("checkbox", { name: "Chat Completions is available from this source", exact: true })).toHaveCount(1);
-  await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(1);
-  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(3);
+  await expect(dialog.getByRole("checkbox", { name: "Chat Completions is available from this source", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(0);
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(1);
+  await expect(dialog.getByRole("group", { name: "Add API format" }).getByRole("button")).toHaveCount(2);
 
   await dialog.getByRole("button", { name: "Edit", exact: true }).click();
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
   await dialog.locator(".source-routing-details > summary").click();
   const responses = dialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true });
-  const messages = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
   await expect(responses).toBeChecked();
-  await messages.check();
+  await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(0);
+  await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Messages", exact: true }).click();
+  const messages = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
   await expect(messages).toBeChecked();
-  await messages.uncheck();
+  await messages.click();
+  await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(0);
   await expect(responses).toBeChecked();
   await dialog.getByRole("button", { name: "Get API key", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as {
@@ -812,8 +817,12 @@ test("provider presets leave source protocol verification to the connector", asy
   await routingDetails.locator("summary").click();
   const responses = dialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true });
   await expect(responses).toBeChecked();
-  await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).not.toBeChecked();
-  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(3);
+  await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(0);
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(1);
+  await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Messages", exact: true }).click();
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(2);
+  await dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true }).click();
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(1);
 
   await dialog.getByLabel("Upstream API key").fill("sk-synthetic-ready-key");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
@@ -846,8 +855,9 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
   const dialog = page.getByRole("dialog", { name: "Edit source" });
 
   await dialog.locator(".source-routing-details > summary").click();
+  await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Messages", exact: true }).click();
   const messages = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
-  await messages.check();
+  await expect(messages).toBeChecked();
   const nativeMini = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4-mini", exact: true });
   const messageMini = dialog.getByRole("checkbox", { name: "Messages for gpt-5.4-mini", exact: true });
   const bridge = dialog.getByRole("checkbox", { name: "Through Relay for gpt-5.4-mini", exact: true });
@@ -861,6 +871,29 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
   await expect(bridge).toBeChecked();
   await expect(messageMini).toBeChecked();
   await expect(messageMini).toBeDisabled();
+  expect(await dialog.locator(".source-route-matrix").evaluate((matrix) => {
+    const header = [...matrix.querySelectorAll<HTMLElement>(".source-route-format-heading, .source-route-bridge-heading")];
+    const cells = [...matrix.querySelectorAll<HTMLElement>(".source-route-model-row:first-child .source-route-cell")];
+    return header.length === cells.length && header.every((element, index) => {
+      const headerRect = element.getBoundingClientRect();
+      const cellRect = cells[index].getBoundingClientRect();
+      return Math.abs(headerRect.left - cellRect.left) < 1 && Math.abs(headerRect.right - cellRect.right) < 1;
+    });
+  })).toBe(true);
+  expect(await dialog.locator(".source-route-matrix").evaluate((matrix) => {
+    const headers = [...matrix.querySelectorAll<HTMLElement>(".source-route-format-heading")];
+    const cells = [...matrix.querySelectorAll<HTMLElement>(".source-route-model-row:first-child .source-route-cell")];
+    return headers.every((header, index) => {
+      const headerInput = header.querySelector<HTMLInputElement>("input");
+      const cellInput = cells[index]?.querySelector<HTMLInputElement>("input");
+      if (!headerInput || !cellInput) return false;
+      const headerRect = headerInput.getBoundingClientRect();
+      const cellRect = cellInput.getBoundingClientRect();
+      return Math.abs(headerRect.left + headerRect.width / 2 - (cellRect.left + cellRect.width / 2)) < 1;
+    });
+  })).toBe(true);
+  await chooseOption(page, dialog, "Prompt cache: Native Messages", "5m");
+  await chooseOption(page, dialog, "Prompt cache: Responses to Messages", "1h");
   await page.screenshot({ path: "output/playwright/source-bridge-routes-1160x760.png" });
 
   await page.setViewportSize({ width: 840, height: 560 });
@@ -885,6 +918,7 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
               wireApi: string;
               adapter: string;
               reasoningMode: string;
+              cacheWriteTtl?: string;
               modelIds: string[];
             }>;
           };
@@ -898,18 +932,21 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
       wireApi: "responses",
       adapter: "native",
       reasoningMode: "disabled",
+      cacheWriteTtl: "provider",
       modelIds: ["gpt-5.4"],
     },
     {
       wireApi: "messages",
       adapter: "native",
       reasoningMode: "disabled",
+      cacheWriteTtl: "5m",
       modelIds: ["gpt-5.4-mini"],
     },
     {
       wireApi: "responses",
       adapter: "responses_to_messages",
       reasoningMode: "disabled",
+      cacheWriteTtl: "1h",
       modelIds: ["gpt-5.4-mini"],
     },
   ]);
@@ -2349,7 +2386,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   await expect(details).toBeVisible();
   await expect(details.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(details.getByText("Error origin", { exact: true })).toHaveCount(0);
-  await expect(details.getByText("10 tok/s", { exact: true })).toHaveAttribute("data-tone", "slow");
+  await expect(details.getByText("10 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
   await expect(details).toHaveCount(0);
 
@@ -2363,7 +2400,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   await page.mouse.down();
   await page.mouse.move(timeBounds!.x + 3, timeBounds!.y + timeBounds!.height / 2, { steps: 5 });
   await page.mouse.up();
-  await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column")))).toEqual(["status", "time", "model", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+  await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column")))).toEqual(["status", "time", "model", "protocol", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
 
   const modelResize = table.getByRole("separator", { name: /^Resize the Model column/ });
   const bounds = await modelResize.boundingBox();
@@ -2373,7 +2410,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   await page.mouse.move(bounds!.x + bounds!.width / 2 + 36, bounds!.y + bounds!.height / 2, { steps: 4 });
   await page.mouse.up();
   await expect(table).toHaveAttribute("data-resized", "true");
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageRequestTableLayout") ?? "null"))).toMatchObject({ order: ["status", "time", "model", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"], widths: { model: expect.any(Number) } });
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageRequestTableLayout") ?? "null"))).toMatchObject({ order: ["status", "time", "model", "protocol", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"], widths: { model: expect.any(Number) } });
 
   await page.reload();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -2381,6 +2418,28 @@ test("usage request columns reorder, resize, and open details only from the requ
   await expect(page.locator(".usage-request-table")).toHaveAttribute("data-resized", "true");
   await page.setViewportSize({ width: 840, height: 560 });
   expect(await page.locator(".usage-request-table").evaluate((element) => element.parentElement!.scrollWidth <= element.parentElement!.clientWidth)).toBe(true);
+});
+
+test("usage shows the request protocol and persists hidden summary metrics", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+
+  await expect(page.locator('.usage-request-table th[data-column="protocol"]')).toHaveText("Protocol");
+  await expect(page.locator('.usage-request-table td[data-column="protocol"]')).toHaveText("Responses");
+
+  await page.locator(".usage-overflow summary").click();
+  await page.getByRole("menuitem", { name: "Customize summary" }).click();
+  const dialog = page.getByRole("dialog", { name: "Customize summary" });
+  await dialog.getByRole("checkbox", { name: "Total tokens" }).uncheck();
+  await page.keyboard.press("Escape");
+
+  await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageSummaryMetrics") ?? "null"))).toMatchObject({ tokens: false });
+
+  await page.reload();
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
 });
 
 test("usage details warn when forwarded tools yield a text-only response", async ({ page }) => {
@@ -2430,8 +2489,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "≈$0.0001", "10 tok/s", "128 ms / 428 ms"]);
-  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Reason5", "Out8"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "10 tok/s", "128 ms / 428 ms"]);
+  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache ↓12", "Cache ↑4", "Reason5"]);
   await expect(page.locator(".usage-performance")).toContainText("Generation speed10 tok/s");
   await expect(page.locator(".usage-performance")).toContainText("Effective end-to-end speed7 tok/s");
 
@@ -2443,9 +2502,10 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Visible output3");
   await details.getByRole("tab", { name: "Tokens", exact: true }).click();
   await expect(details).toContainText("Input tokens20");
-  await expect(details).toContainText("Cache reads12");
-  await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Output tokens8");
+  await expect(details).toContainText("Cache reads12");
+  await expect(details).toContainText("Cache writes4");
+  await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("API equivalent≈$0.0001");
   await details.getByRole("tab", { name: "Route", exact: true }).click();
@@ -3292,6 +3352,28 @@ test("runtime snapshots stay off Usage while active Usage reloads its own data",
   await emitTauriEvent(page, "zenith-state-changed", null);
   await expect.poll(usageReads).toBeGreaterThan(usagePageReads);
   expect(await stateReads()).toBe(usagePageStateReads);
+});
+
+test("usage records refresh only the visible Usage page", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  const stateReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_runtime_state").length);
+  const usageReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_usage_page").length);
+  const overviewStateReads = await stateReads();
+  const overviewUsageReads = await usageReads();
+
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
+  await page.waitForTimeout(700);
+  expect(await stateReads()).toBe(overviewStateReads);
+  expect(await usageReads()).toBe(overviewUsageReads);
+
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect.poll(usageReads).toBeGreaterThan(overviewUsageReads);
+  const activeUsageReads = await usageReads();
+  const activeStateReads = await stateReads();
+  await emitTauriEvent(page, "zenith-usage-recorded", null);
+  await expect.poll(usageReads).toBeGreaterThan(activeUsageReads);
+  expect(await stateReads()).toBe(activeStateReads);
 });
 
 test("Overview keeps rendered analytics while a background refresh is pending or fails", async ({ page }) => {

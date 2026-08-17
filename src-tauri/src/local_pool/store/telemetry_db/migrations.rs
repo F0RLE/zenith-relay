@@ -291,7 +291,14 @@ PRAGMA user_version = 24;
 COMMIT;
 "#;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 24;
+pub(super) const MIGRATION_025: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN cache_write_ttl TEXT;
+PRAGMA user_version = 25;
+COMMIT;
+"#;
+
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 25;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"

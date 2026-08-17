@@ -179,6 +179,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "034_account_purchase_cost",
         sql: include_str!("../../migrations/034_account_purchase_cost.sql"),
     },
+    Migration {
+        version: 35,
+        name: "035_cache_write_ttl",
+        sql: include_str!("../../migrations/035_cache_write_ttl.sql"),
+    },
 ];
 
 struct Migration {
@@ -723,7 +728,8 @@ mod tests {
                 (31, "031_tool_use_diagnostics".to_string()),
                 (32, "032_error_origin".to_string()),
                 (33, "033_reasoning_effort".to_string()),
-                (34, "034_account_purchase_cost".to_string())
+                (34, "034_account_purchase_cost".to_string()),
+                (35, "035_cache_write_ttl".to_string())
             ]
         );
         drop(store);

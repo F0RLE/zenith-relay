@@ -883,6 +883,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         wire_api: WireApi::ChatCompletions,
         adapter: SourceAdapter::Native,
         reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: Default::default(),
         model_ids: vec!["new-model".into()],
     }];
     let updated = imported_source_record(

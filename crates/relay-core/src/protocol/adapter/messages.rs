@@ -2,6 +2,7 @@ use super::contracts::{
     AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest, MessagesBridgeResponse,
     MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
 };
+use crate::CacheWriteTtl;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,26 @@ pub fn prepare_responses_to_messages_scoped(
     model: &str,
     stream: bool,
     reasoning_mode: MessagesReasoningMode,
+    previous: Option<MessagesBridgeState>,
+    response_scope: &str,
+) -> AdapterResult<MessagesBridgeRequest> {
+    prepare_responses_to_messages_scoped_with_cache_ttl(
+        request,
+        model,
+        stream,
+        reasoning_mode,
+        CacheWriteTtl::Provider,
+        previous,
+        response_scope,
+    )
+}
+
+pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
+    request: &Value,
+    model: &str,
+    stream: bool,
+    reasoning_mode: MessagesReasoningMode,
+    cache_write_ttl: CacheWriteTtl,
     previous: Option<MessagesBridgeState>,
     response_scope: &str,
 ) -> AdapterResult<MessagesBridgeRequest> {
@@ -130,11 +151,97 @@ pub fn prepare_responses_to_messages_scoped(
         body.insert("stop_sequences".to_string(), stop_sequences.clone());
     }
     apply_reasoning(&mut body, object.get("reasoning"), reasoning_mode)?;
+    let mut upstream_body = Value::Object(body);
+    apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
     Ok(MessagesBridgeRequest {
-        upstream_body: Value::Object(body),
+        upstream_body,
         state,
         response_scope: response_scope.trim().to_string(),
     })
+}
+
+pub(crate) fn apply_cache_write_ttl(
+    body: &mut Value,
+    cache_write_ttl: CacheWriteTtl,
+) -> AdapterResult<()> {
+    let Some(ttl) = cache_write_ttl.anthropic_ttl() else {
+        return Ok(());
+    };
+    let object = body
+        .as_object_mut()
+        .ok_or_else(AdapterError::invalid_request)?;
+    let mut updated = false;
+    for key in ["system", "tools"] {
+        if let Some(blocks) = object.get_mut(key).and_then(Value::as_array_mut) {
+            updated |= blocks.iter_mut().any(|block| {
+                block
+                    .as_object()
+                    .is_some_and(|block| block.contains_key("cache_control"))
+                    && set_cache_control(block, ttl)
+            });
+        }
+    }
+    if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                updated |= blocks.iter_mut().any(|block| {
+                    block
+                        .as_object()
+                        .is_some_and(|block| block.contains_key("cache_control"))
+                        && set_cache_control(block, ttl)
+                });
+            }
+        }
+    }
+    if updated {
+        return Ok(());
+    }
+    if let Some(system) = object.get_mut("system") {
+        if set_last_cache_control(system, ttl) {
+            return Ok(());
+        }
+    }
+    if let Some(tools) = object.get_mut("tools") {
+        if set_last_cache_control(tools, ttl) {
+            return Ok(());
+        }
+    }
+    if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+        if let Some(content) = messages
+            .iter_mut()
+            .rev()
+            .find_map(|message| message.get_mut("content"))
+        {
+            set_last_cache_control(content, ttl);
+        }
+    }
+    Ok(())
+}
+
+fn set_last_cache_control(value: &mut Value, ttl: &str) -> bool {
+    if let Some(block) = value.as_array_mut().and_then(|blocks| blocks.last_mut()) {
+        return set_cache_control(block, ttl);
+    }
+    let Some(text) = value.as_str().map(str::to_string) else {
+        return false;
+    };
+    *value = Value::Array(vec![json!({
+        "type": "text",
+        "text": text,
+        "cache_control": {"type": "ephemeral", "ttl": ttl},
+    })]);
+    true
+}
+
+fn set_cache_control(block: &mut Value, ttl: &str) -> bool {
+    let Some(block) = block.as_object_mut() else {
+        return false;
+    };
+    block.insert(
+        "cache_control".to_string(),
+        json!({"type": "ephemeral", "ttl": ttl}),
+    );
+    true
 }
 
 /// Converts a complete Anthropic Messages response to a complete Responses
@@ -1331,5 +1438,32 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
             .expect("usage details is an object")
             .insert("cache_write_tokens".to_string(), Value::from(cache_write));
     }
+    if let Some(cache_write_ttl) = usage.and_then(cache_write_ttl_from_usage) {
+        result
+            .entry("input_tokens_details".to_string())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("usage details is an object")
+            .insert(
+                "cache_write_ttl".to_string(),
+                Value::String(cache_write_ttl.to_string()),
+            );
+    }
     Value::Object(result)
+}
+
+fn cache_write_ttl_from_usage(usage: &Value) -> Option<&'static str> {
+    let creation = usage.get("cache_creation")?;
+    if creation
+        .get("ephemeral_1h_input_tokens")
+        .and_then(Value::as_u64)
+        .is_some_and(|tokens| tokens > 0)
+    {
+        return Some("1h");
+    }
+    creation
+        .get("ephemeral_5m_input_tokens")
+        .and_then(Value::as_u64)
+        .is_some_and(|tokens| tokens > 0)
+        .then_some("5m")
 }

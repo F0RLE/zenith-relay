@@ -2,7 +2,7 @@ import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useSt
 import { Activity, CreditCard, SlidersHorizontal, TrendingUp, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
+import type { AccountSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { buildAccountValueProjection } from "../../accountEconomics";
 import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
@@ -44,6 +44,7 @@ export type UsageRow = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens: number | null;
+  cacheWriteTtl: Exclude<CacheWriteTtl, "provider"> | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;
@@ -92,6 +93,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
     status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} /> },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
+    protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
@@ -163,6 +165,8 @@ type AggregateRow = {
   inputTokens: number;
   cachedInputTokens: number;
   cachedInputSamples: number;
+  cacheWriteInputTokens: number;
+  cacheWriteInputSamples: number;
   reasoningTokens: number;
   outputTokens: number;
   tokens: number;
@@ -186,7 +190,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
     name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <code>{group.name}</code> },
     requests: { label: t("usage.requests"), cell: (group) => <CompactNumber value={group.requests} locale={i18n.language} /> },
     success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
-    breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span><span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span></div> },
+    breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span>{group.cacheWriteInputSamples ? <span title={`${t("usage.cacheWriteInputTokens")}: ${formatFullNumber(group.cacheWriteInputTokens, i18n.language)}`}><small>{t("usage.cacheWriteShort")}</small>{formatCompactNumber(group.cacheWriteInputTokens, i18n.language)}</span> : null}<span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span></div> },
     total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
     speed: { label: t("usage.generationSpeed"), cell: (group) => <SpeedValue value={group.generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests), i18n.resolvedLanguage ?? i18n.language, t) },
@@ -263,7 +267,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     {section === "overview" ? <>
       <dl className="request-details-list">
         <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
-        <div><dt>{t("usage.protocol")}</dt><dd><code>{row.wireApi ?? "-"}</code></dd></div>
+        <div><dt>{t("usage.protocol")}</dt><dd><code>{formatWireApi(row.wireApi, t)}</code></dd></div>
         <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
         <div><dt>{t("usage.reasoning")}</dt><dd>{formatReasoningSummary(row, t)}</dd></div>
       </dl>
@@ -278,9 +282,10 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     </> : null}
     {section === "tokens" ? <dl className="request-details-list request-details-token-list">
       <div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div>
+      <div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div>
+      {row.cacheWriteInputTokens != null ? <div><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{row.cacheWriteInputTokens}{row.cacheWriteTtl ? ` (${t(`usage.cacheWriteTtls.${row.cacheWriteTtl}`)})` : ""}</dd></div> : null}
+      <div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div>
       <div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>
     </dl> : null}
@@ -310,20 +315,13 @@ function RequestDetailMetric({ label, value }: { label: string; value: ReactNode
 
 function SpeedValue({ value, locale, unit }: { value: number | null; locale: string; unit: string }) {
   const { t } = useTranslation();
-  return <span className="usage-speed-value" data-tone={speedTone(value)} title={t("usage.generationSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
+  return <span className="usage-speed-value" title={t("usage.visibleSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
 }
 
 function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
   if (value == null || !Number.isFinite(value)) return "—";
   if (value >= 1000) return t("usage.durationSeconds", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1000) });
   return t("usage.durationMilliseconds", { value: Math.round(value) });
-}
-
-function speedTone(value: number | null): "good" | "warning" | "slow" | "neutral" {
-  if (value == null || !Number.isFinite(value)) return "neutral";
-  if (value >= 80) return "good";
-  if (value >= 30) return "warning";
-  return "slow";
 }
 
 function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort"> }) {
@@ -354,6 +352,13 @@ function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTi
   const requested = t(`pool.serviceTiers.${row.serviceTier}`);
   if (!row.appliedServiceTier || row.appliedServiceTier === row.serviceTier) return requested;
   return `${requested} → ${t(`pool.serviceTiers.${row.appliedServiceTier}`)}`;
+}
+
+function formatWireApi(value: string | null, t: TFunction): string {
+  if (value === "responses") return t("usage.protocols.responses");
+  if (value === "messages") return t("usage.protocols.messages");
+  if (value === "chat_completions") return t("usage.protocols.chatCompletions");
+  return value ?? "—";
 }
 
 function formatErrorCategory(category: string | null, t: TFunction): string {
@@ -436,6 +441,8 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
     inputTokens: totals.inputTokens,
     cachedInputTokens: totals.cachedInputTokens,
     cachedInputSamples: totals.cachedInputSamples,
+    cacheWriteInputTokens: totals.cacheWriteInputTokens ?? 0,
+    cacheWriteInputSamples: totals.cacheWriteInputSamples ?? 0,
     reasoningTokens: totals.reasoningTokens,
     outputTokens: totals.outputTokens,
     tokens: totals.totalTokens,

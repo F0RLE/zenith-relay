@@ -71,6 +71,7 @@ mod test_support {
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,

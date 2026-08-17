@@ -75,16 +75,17 @@
   table-layout: fixed;
 }
 
-.usage-request-table col[data-column="time"] { width: 12%; }
+.usage-request-table col[data-column="time"] { width: 10%; }
 .usage-request-table col[data-column="status"] { width: 5%; }
-.usage-request-table col[data-column="model"] { width: 9%; }
-.usage-request-table col[data-column="tier"] { width: 10%; }
-.usage-request-table col[data-column="connection"] { width: 13%; }
-.usage-request-table col[data-column="timing"] { width: 10%; }
-.usage-request-table col[data-column="speed"] { width: 9%; }
-.usage-request-table col[data-column="tokens"] { width: 7%; }
-.usage-request-table col[data-column="equivalent"] { width: 10%; }
-.usage-request-table col[data-column="request"] { width: 15%; }
+.usage-request-table col[data-column="model"] { width: 8%; }
+.usage-request-table col[data-column="protocol"] { width: 12%; }
+.usage-request-table col[data-column="tier"] { width: 9%; }
+.usage-request-table col[data-column="connection"] { width: 11%; }
+.usage-request-table col[data-column="timing"] { width: 9%; }
+.usage-request-table col[data-column="speed"] { width: 8%; }
+.usage-request-table col[data-column="tokens"] { width: 6%; }
+.usage-request-table col[data-column="equivalent"] { width: 9%; }
+.usage-request-table col[data-column="request"] { width: 13%; }
 
 .usage-request-table td {
   overflow: hidden;

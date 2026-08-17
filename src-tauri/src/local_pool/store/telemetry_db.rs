@@ -12,7 +12,7 @@ use zenith_relay_core::ResponseAffinityBinding;
 use zenith_relay_core::{
     api_pricing_revision, estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, ErrorOrigin,
+    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, DefaultServiceTier, ErrorOrigin,
     RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
 };
 
@@ -74,6 +74,7 @@ pub struct UsageLog {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
+    pub cache_write_ttl: Option<CacheWriteTtl>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -107,6 +108,17 @@ impl TelemetryDb {
             std::fs::create_dir_all(parent).map_err(io_error)?;
         }
         let connection = Connection::open(path).map_err(db_error)?;
+        // This file is read by the usage UI while terminal requests append logs.
+        // WAL avoids creating and deleting a rollback journal for every request;
+        // FULL keeps the same crash durability for the shared local state.
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;\
+                 PRAGMA synchronous = FULL;\
+                 PRAGMA wal_autocheckpoint = 1000;\
+                 PRAGMA busy_timeout = 5000;",
+            )
+            .map_err(db_error)?;
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db_error)?;
@@ -189,6 +201,9 @@ impl TelemetryDb {
         }
         if version <= 23 {
             connection.execute_batch(MIGRATION_024).map_err(db_error)?;
+        }
+        if version <= 24 {
+            connection.execute_batch(MIGRATION_025).map_err(db_error)?;
         }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
@@ -320,6 +335,7 @@ mod tests {
             input_tokens: Some(2),
             cached_input_tokens: Some(1),
             cache_write_input_tokens: Some(1),
+            cache_write_ttl: None,
             reasoning_tokens: Some(2),
             output_tokens: Some(3),
             total_tokens: Some(5),
@@ -400,6 +416,31 @@ mod tests {
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn telemetry_uses_wal_without_relaxing_durability() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-telemetry-pragmas-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: u8 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let auto_checkpoint: u32 = connection
+            .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(synchronous, 2);
+        assert_eq!(auto_checkpoint, 1_000);
+        drop(connection);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -609,6 +650,7 @@ mod tests {
             input_tokens: Some(20),
             cached_input_tokens: Some(12),
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: Some(5),
             output_tokens: Some(8),
             total_tokens: Some(28),
@@ -717,6 +759,7 @@ mod tests {
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -788,6 +831,7 @@ mod tests {
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -847,6 +891,7 @@ mod tests {
             input_tokens: Some(20),
             cached_input_tokens: Some(10),
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: Some(3),
             output_tokens: Some(8),
             total_tokens: Some(28),
@@ -903,6 +948,7 @@ mod tests {
                 input_tokens: Some(1_000_000),
                 cached_input_tokens: Some(0),
                 cache_write_input_tokens: Some(0),
+                cache_write_ttl: None,
                 reasoning_tokens: Some(0),
                 output_tokens: Some(100_000),
                 total_tokens: Some(1_100_000),
@@ -984,6 +1030,7 @@ mod tests {
             input_tokens: Some(1_000_000),
             cached_input_tokens: Some(0),
             cache_write_input_tokens: Some(0),
+            cache_write_ttl: None,
             reasoning_tokens: Some(0),
             output_tokens: Some(100_000),
             total_tokens: Some(1_100_000),
@@ -1176,6 +1223,12 @@ mod tests {
             .connection
             .lock()
             .unwrap()
+            .execute_batch("ALTER TABLE request_logs DROP COLUMN cache_write_ttl;")
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
             .pragma_update(None, "user_version", 23)
             .unwrap();
         drop(database);
@@ -1363,6 +1416,7 @@ mod tests {
                 input_tokens: None,
                 cached_input_tokens: None,
                 cache_write_input_tokens: None,
+                cache_write_ttl: None,
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,

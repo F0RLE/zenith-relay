@@ -1137,6 +1137,7 @@ mod tests {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["bridge-only".to_string()],
         }];
         source.models = vec!["bridge-only".to_string()];
@@ -1313,6 +1314,7 @@ mod tests {
             wire_api: WireApi::Messages,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["claude-native".to_string()],
         }];
         assert!(validate_direct_source(&messages_only).is_err());
@@ -1322,6 +1324,7 @@ mod tests {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
             model_ids: vec!["claude-bridge".to_string()],
         }];
         bridged_only.models = vec!["claude-bridge".to_string()];
@@ -1342,12 +1345,14 @@ mod tests {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-native".to_string()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-responses".to_string(), "gpt-responses".to_string()],
             },
         ];

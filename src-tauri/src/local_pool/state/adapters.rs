@@ -75,6 +75,12 @@ impl DesktopOAuthEvents {
             let _ = app.emit("zenith-state-changed", ());
         }
     }
+
+    pub(in crate::local_pool) fn emit_usage_recorded(&self) {
+        if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
+            let _ = app.emit("zenith-usage-recorded", ());
+        }
+    }
 }
 
 impl OAuthFlowEventSink for DesktopOAuthEvents {

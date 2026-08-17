@@ -8,6 +8,10 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Added
 
+- Compatible Messages sources can select a 5-minute or one-hour prompt-cache
+  write lifetime. Usage records retain the lifetime the provider actually used.
+- Usage history now shows protocol and cache-write tokens, refreshes from
+  recorded requests, and lets users choose the visible summary metrics.
 - Provider-reported quota windows are shown in Connections and Pool, with
   separate visibility controls for the optional account value summary.
 - Regression coverage keeps provider quota, API-equivalent usage, and purchase
@@ -19,6 +23,10 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- The source-route editor is more compact: formats are added on demand, model
+  assignment columns stay aligned, and upstream API keys appear before routes.
+- The OAuth success page is centered and schedules its browser tab to close ten
+  seconds after the account callback succeeds.
 - Usage request details now open as a compact overview with token, tool, and
   route sections; durations use seconds when appropriate, and generation speed
   is color-coded without presenting successful requests as errors.

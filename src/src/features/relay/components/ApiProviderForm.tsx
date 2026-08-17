@@ -76,6 +76,7 @@ function providerProtocolBindings(value: ApiProviderValue) {
       modelIds: [...binding.modelIds],
       adapter: binding.adapter ?? "native",
       reasoningMode: binding.reasoningMode ?? "disabled",
+      ...(binding.cacheWriteTtl ? { cacheWriteTtl: binding.cacheWriteTtl } : {}),
     }));
 }
 
@@ -176,11 +177,6 @@ export function ApiProviderForm({
         <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} required /></label>
         <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
       </div> : null}
-      {!onboarding ? <SourceProtocolRoutingDisclosure
-        models={[]}
-        value={value.protocolBindings}
-        onChange={setProtocolBindings}
-      /> : null}
       <div className="api-provider-key-field">
         <SecretField
           label={t(onboarding ? "apiKey.label" : "sources.apiKey")}
@@ -194,6 +190,11 @@ export function ApiProviderForm({
             : undefined}
         />
       </div>
+      {!onboarding ? <SourceProtocolRoutingDisclosure
+        models={[]}
+        value={value.protocolBindings}
+        onChange={setProtocolBindings}
+      /> : null}
     </div> : null}
   </div>;
 }

@@ -37,6 +37,42 @@ impl WireApi {
     }
 }
 
+/// Explicit Anthropic prompt-cache write lifetime for a Messages upstream.
+/// `Provider` preserves the request as supplied; Relay never chooses a TTL
+/// unless the source owner selected one.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CacheWriteTtl {
+    #[default]
+    #[serde(rename = "provider")]
+    Provider,
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl CacheWriteTtl {
+    pub const fn is_provider(&self) -> bool {
+        matches!(self, Self::Provider)
+    }
+
+    pub const fn anthropic_ttl(self) -> Option<&'static str> {
+        match self {
+            Self::Provider => None,
+            Self::FiveMinutes => Some("5m"),
+            Self::OneHour => Some("1h"),
+        }
+    }
+
+    pub fn from_anthropic_ttl(value: &str) -> Option<Self> {
+        match value.trim() {
+            "5m" => Some(Self::FiveMinutes),
+            "1h" => Some(Self::OneHour),
+            _ => None,
+        }
+    }
+}
+
 /// Associates a client-facing wire contract, an explicit adapter, and the
 /// models that are known to work through that route.
 ///
@@ -50,6 +86,9 @@ pub struct SourceProtocolBinding {
     pub adapter: SourceAdapter,
     #[serde(default)]
     pub reasoning_mode: MessagesReasoningMode,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "CacheWriteTtl::is_provider")]
+    pub cache_write_ttl: CacheWriteTtl,
     #[serde(default)]
     pub model_ids: Vec<String>,
 }
@@ -72,6 +111,7 @@ impl SourceProtocolBinding {
             wire_api,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
             model_ids: models.to_vec(),
         }
     }
@@ -122,6 +162,13 @@ pub fn normalize_source_protocol_bindings(
                     error.message()
                 ))
             })?;
+        if binding.cache_write_ttl != CacheWriteTtl::Provider
+            && binding.adapter.upstream_wire_api(binding.wire_api) != WireApi::Messages
+        {
+            return Err(Error::Validation(
+                "cache write TTL requires a Messages upstream route".to_string(),
+            ));
+        }
         if !seen_routes.insert(binding.key()) {
             return Err(Error::Validation(
                 "each client protocol and adapter route may be configured only once".to_string(),
@@ -154,6 +201,7 @@ pub fn normalize_source_protocol_bindings(
             wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
+            cache_write_ttl: binding.cache_write_ttl,
             model_ids,
         });
     }
@@ -338,12 +386,14 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: Vec::new(),
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: Vec::new(),
                 },
             ],
@@ -358,12 +408,14 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: Vec::new(),
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: Vec::new(),
                 },
             ]
@@ -377,6 +429,7 @@ mod tests {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: Vec::new(),
             }],
             WireApi::Responses,
@@ -393,6 +446,7 @@ mod tests {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".to_string()],
             }],
             WireApi::Responses,
@@ -407,6 +461,7 @@ mod tests {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".to_string()],
             }],
             WireApi::Messages,
@@ -422,6 +477,7 @@ mod tests {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Budget,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["gpt-test".to_string()],
             }],
             WireApi::Responses,
@@ -441,12 +497,14 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["gpt-test".to_string()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::ResponsesToMessages,
                     reasoning_mode: MessagesReasoningMode::Adaptive,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["claude-test".to_string()],
                 },
             ],
@@ -469,12 +527,14 @@ mod tests {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::Native,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["shared-model".to_string()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
                     adapter: SourceAdapter::ResponsesToMessages,
                     reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
                     model_ids: vec!["shared-model".to_string()],
                 },
             ],
@@ -519,12 +579,14 @@ mod tests {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["gpt-test".to_string()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".to_string()],
             },
         ];

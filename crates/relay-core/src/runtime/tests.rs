@@ -613,6 +613,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
+            cache_write_ttl: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -688,12 +689,14 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
                 wire_api: WireApi::Messages,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-opus-5".into(), "claude-sonnet-5".into()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
                 reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
                 model_ids: vec!["gpt-5.6-sol".into(), "gpt-5.4-mini".into()],
             },
         ],
@@ -1362,6 +1365,7 @@ async fn codex_source_metadata_marks_bridge_images_but_requires_native_declarati
         wire_api: WireApi::Responses,
         adapter: SourceAdapter::ResponsesToMessages,
         reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: Default::default(),
         model_ids: vec!["vendor/claude-fable-5".into()],
     }];
     let mut native = RuntimeSource::unrestricted(source(
@@ -1373,6 +1377,7 @@ async fn codex_source_metadata_marks_bridge_images_but_requires_native_declarati
         wire_api: WireApi::Responses,
         adapter: SourceAdapter::Native,
         reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: Default::default(),
         model_ids: vec!["provider/text-only".into()],
     }];
     let runtime = GatewayRuntime::from_pool(

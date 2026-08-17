@@ -3,6 +3,7 @@
 ## Rules
 
 - Default branch is `main`; open PRs into `main` when review is needed.
+- Do not commit, push, open or update PRs, deploy, publish, send external messages, or use subagents unless the user gives explicit authorization in the current request. Local edits and verification are allowed.
 - Use stable dependencies only. No beta, alpha, nightly, or prerelease packages unless explicitly approved.
 - Keep UI text in `src/src/i18n`.
 - Keep React in `src/src` display-only: local state, components, and Tauri command wrappers.

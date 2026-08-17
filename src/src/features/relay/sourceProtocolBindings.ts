@@ -1,5 +1,6 @@
 import type {
   MessagesReasoningMode,
+  CacheWriteTtl,
   SourceAdapter,
   SourceProtocolBinding,
   SourceSummary,
@@ -20,6 +21,12 @@ const supportedMessagesReasoningModes: readonly MessagesReasoningMode[] = [
 
 function isSourceWireApi(value: string): value is SourceWireApi {
   return sourceWireApis.includes(value as SourceWireApi);
+}
+
+function normalizedCacheWriteTtl(value: SourceProtocolBinding): CacheWriteTtl {
+  return value.cacheWriteTtl === "5m" || value.cacheWriteTtl === "1h"
+    ? value.cacheWriteTtl
+    : "provider";
 }
 
 export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter {
@@ -70,6 +77,7 @@ export function normalizedBindings(
       modelIds,
       adapter,
       reasoningMode: normalizedReasoningMode(binding, adapter),
+      cacheWriteTtl: normalizedCacheWriteTtl(binding),
     }];
   });
 }

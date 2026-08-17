@@ -47,6 +47,7 @@ export type UiState = {
 export const relayCommands = {
   readyState: () => invoke<UiState>("get_state"),
   onStateChanged: (callback: () => void) => listen("zenith-state-changed", callback),
+  onUsageRecorded: (callback: () => void) => listen("zenith-usage-recorded", callback),
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
   localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),

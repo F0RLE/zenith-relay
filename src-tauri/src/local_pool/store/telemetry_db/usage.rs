@@ -348,6 +348,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
     let error_origin: Option<String> = row.get(27)?;
     let requested_reasoning_effort: Option<String> = row.get(28)?;
     let effective_reasoning_effort: Option<String> = row.get(29)?;
+    let cache_write_ttl: Option<String> = row.get(30)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -385,6 +386,9 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         input_tokens: input_tokens.map(rust_u64),
         cached_input_tokens: cached_input_tokens.map(rust_u64),
         cache_write_input_tokens: cache_write_input_tokens.map(rust_u64),
+        cache_write_ttl: cache_write_ttl
+            .as_deref()
+            .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
         reasoning_tokens: reasoning_tokens.map(rust_u64),
         output_tokens: output_tokens.map(rust_u64),
         total_tokens: total_tokens.map(rust_u64),

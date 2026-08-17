@@ -47,6 +47,7 @@ export type SourceWireApi = "responses" | "chat_completions" | "messages";
 export type SourceAdapter = "native" | "responses_to_messages";
 
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
+export type CacheWriteTtl = "provider" | "5m" | "1h";
 
 export type SourceProtocolBinding = {
   wireApi: SourceWireApi;
@@ -57,6 +58,7 @@ export type SourceProtocolBinding = {
    */
   adapter?: SourceAdapter;
   reasoningMode?: MessagesReasoningMode;
+  cacheWriteTtl?: CacheWriteTtl;
 };
 
 export type SourceSummary = {
@@ -394,6 +396,7 @@ export type LocalUsage = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
+  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
@@ -457,6 +460,7 @@ export type UsageExportRow = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
+  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;
@@ -504,6 +508,7 @@ export type RemoteUsage = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
+  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;

@@ -241,6 +241,7 @@ async fn discover_protocol_bindings_with_client(
             wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
+            cache_write_ttl: binding.cache_write_ttl,
             model_ids: models.into_iter().map(|(model, _)| model).collect(),
         });
     }
