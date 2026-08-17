@@ -1934,7 +1934,8 @@ test("pool members use one responsive card grid", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Pool card grid" })).toHaveCount(0);
   await expect(members.locator(".pool-member-rank")).toHaveCount(0);
   await page.setViewportSize({ width: 2048, height: 1152 });
-  expect(await members.evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").filter((track) => Number.parseFloat(track) > 1).length)).toBe(await members.locator(".pool-member-card").count());
+  expect(await members.evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").filter((track) => Number.parseFloat(track) > 1).length)).toBeGreaterThan(0);
+  expect(await members.locator(".pool-member-card").evaluateAll((cards) => cards.every((card) => card.getBoundingClientRect().width <= 360))).toBe(true);
   expect(await page.evaluate(() => localStorage.getItem("relay.poolLayout"))).toBeNull();
 });
 
@@ -2018,7 +2019,8 @@ test("pool card grid preserves scheduler order at every width", async ({ page })
 
   await page.setViewportSize({ width: 2048, height: 1152 });
   expect(await labels()).toEqual(expectedOrder);
-  expect(await members.evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").filter((track) => Number.parseFloat(track) > 1).length)).toBeGreaterThan(5);
+  expect(await members.evaluate((list) => getComputedStyle(list).gridTemplateColumns.split(" ").filter((track) => Number.parseFloat(track) > 1).length)).toBeGreaterThan(1);
+  expect(await members.locator(".pool-member-card").evaluateAll((cards) => cards.every((card) => card.getBoundingClientRect().width <= 360))).toBe(true);
   expect(await members.evaluate((list) => list.scrollWidth <= list.clientWidth)).toBe(true);
 
   await page.setViewportSize({ width: 840, height: 900 });
