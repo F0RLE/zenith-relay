@@ -47,6 +47,7 @@ describe("account status policy", () => {
   test("keeps account eligibility and error precedence explicit", () => {
     expect(isCodexOauthAccountEligible(account({ operationalStatus: "quotaWait" }))).toBeTrue();
     expect(isCodexOauthAccountEligible(account({ inPool: false }))).toBeFalse();
+    expect(currentAccountErrorCode(account({ operationalStatus: "quotaWait", routingBlockReason: "quota_exhausted" }))).toBeNull();
     expect(currentAccountErrorCode(account({ quotaRefreshStatus: "failed", quota: { error: { code: "quota_timeout" } } }))).toBe("quota_timeout");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("provider_timeout");
@@ -55,6 +56,7 @@ describe("account status policy", () => {
   test("maps safe error codes to stable translation keys", () => {
     expect(accountErrorTranslationKey("HTTP 429 rate-limit")).toBe("accounts.errors.rateLimited");
     expect(accountErrorTranslationKey("INVALID_GRANT")).toBe("accounts.errors.invalidGrant");
+    expect(accountErrorTranslationKey("quota_exhausted")).toBe("accounts.errors.quotaExhausted");
     expect(accountErrorTranslationKey("unknown_provider_problem")).toBe("accounts.errors.unknown");
   });
 });

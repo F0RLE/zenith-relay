@@ -660,6 +660,7 @@ const relayEn = {
       blocked: "Account blocked",
       rateLimited: "Rate limited",
       connection: "Connection error",
+      quotaExhausted: "Account quota exhausted",
       quota: "Quota check error",
       invalidResponse: "Invalid provider response",
       unknown: "Account error",

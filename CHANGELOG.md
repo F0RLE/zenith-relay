@@ -24,8 +24,8 @@ release entries are kept concise and link to the corresponding tag.
   is color-coded without presenting successful requests as errors.
 - Pool speed controls now use the clearer Standard/Fast terminology while
   preserving the existing service-tier behavior.
-- Local snapshots mark an enabled pool account unavailable when the active
-  gateway has no matching OAuth candidate, with a sanitized diagnostic warning.
+- Local snapshots preserve the canonical account state and show a sanitized
+  warning when the active gateway has no matching OAuth candidate.
 - Global operation notifications now stay in a bottom-left overlay above the
   Help controls instead of shifting the page from the upper-right corner;
   compact sidebar mode uses a small status toast and opens error details in a

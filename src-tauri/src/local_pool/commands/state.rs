@@ -79,14 +79,6 @@ pub async fn get_local_runtime_state(
         .accounts
         .iter()
         .map(|record| {
-            let runtime_available = if running {
-                Some(
-                    oauth_account_runtime_available(&routing_order, &record.account.id)
-                        .unwrap_or(false),
-                )
-            } else {
-                None
-            };
             local_account_summary(
                 record,
                 &snapshot.gateway,
@@ -98,7 +90,6 @@ pub async fn get_local_runtime_state(
                     .unwrap_or_default(),
                 snapshot_at_ms,
                 state.quota_refresh_in_flight(&record.account.id)?,
-                runtime_available,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -298,7 +289,6 @@ fn local_account_summary(
     api_equivalent: ApiEquivalentSummary,
     now_ms: u64,
     refreshing: bool,
-    runtime_available: Option<bool>,
 ) -> crate::local_pool::error::Result<AccountSummary> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .load(&record.account.id)
@@ -328,11 +318,6 @@ fn local_account_summary(
         now_ms,
         quota_stale_after_ms,
     });
-    let operational_status = if record.account.in_pool && runtime_available == Some(false) {
-        OperationalStatus::Unavailable
-    } else {
-        operational.status
-    };
     Ok(AccountSummary {
         id: record.account.id.clone(),
         label: record.account.label.clone(),
@@ -346,7 +331,7 @@ fn local_account_summary(
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
-        operational_status,
+        operational_status: operational.status,
         auth_state: record.account.auth_state,
         health: format!("{:?}", record.account.health).to_ascii_lowercase(),
         models: record.models.clone(),
