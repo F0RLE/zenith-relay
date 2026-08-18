@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, CreditCard, Gauge, Timer } from "lucide-react";
+import { Activity, CreditCard, Gauge } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UsageBucket, UsageTotals } from "../../api/types";
 import { Tabs } from "../../components/Ui";
@@ -17,11 +17,9 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
   const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals);
   const tokenValues = buckets.map((totals) => totals.totalTokens || null);
   const apiValues = buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null);
-  const responseValues = buckets.map((totals) => totals.ttftSamples ? totals.ttftMs / totals.ttftSamples : null);
-  const speedValues = buckets.map((totals) => totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null);
+  const speedValues = buckets.map((totals) => totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null);
   const totals = analytics?.totals ?? emptyUsageTotals();
-  const averageResponse = totals.ttftSamples ? totals.ttftMs / totals.ttftSamples : null;
-  const averageSpeed = totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
+  const averageSpeed = totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
   const apiTotal = totals.apiEquivalent;
   const rangeTabs = [{ id: "today", label: t("overview.ranges.today") }, { id: "week", label: t("overview.ranges.week") }, { id: "month", label: t("overview.ranges.month") }];
 
@@ -31,8 +29,7 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
     <div className="overview-chart-stack">
       <OverviewChart icon={<Activity aria-hidden />} title={t("overview.tokenUsage")} hint={t("overview.tokenUsageHint")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
       <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint", { count: new Intl.NumberFormat(locale).format(apiTotal.unpricedTokens) })} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<Timer aria-hidden />} title={t("overview.responseSpeed")} hint={t("overview.responseSpeedHint")} summary={formatDuration(averageResponse, locale)} values={responseValues} windows={windows} variant="line" tone="latency" formatValue={(value) => formatDuration(value, locale)} formatAxis={(value) => formatDuration(value, locale)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.generationSpeed")} hint={t("overview.generationSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.streamSpeed")} hint={t("overview.streamSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
     </div>
   </section>;
 }
@@ -85,11 +82,6 @@ function lineSegments(values: Array<number | null>, max: number) {
   });
   if (current) segments.push(current);
   return segments;
-}
-
-function formatDuration(value: number | null, locale: string) {
-  if (value == null) return "—";
-  return new Intl.NumberFormat(locale, { style: "unit", unit: value >= 1_000 ? "second" : "millisecond", unitDisplay: "short", maximumFractionDigits: 1 }).format(value >= 1_000 ? value / 1_000 : value);
 }
 
 function formatApiEquivalent(value: number | null, locale: string) {

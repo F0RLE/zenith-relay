@@ -333,7 +333,7 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await page.getByRole("tab", { name: "Месяц" }).click();
 
   const charts = page.locator(".overview-chart");
-  await expect(charts).toHaveCount(4);
+  await expect(charts).toHaveCount(3);
   expect(await charts.evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   const tokenPoint = charts.first().locator(".overview-chart-bar");
   await tokenPoint.hover();
@@ -341,7 +341,7 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await page.screenshot({ path: "output/playwright/overview-analytics-tooltip-ru-dark-840x560.png" });
 
   await charts.last().scrollIntoViewIfNeeded();
-  await expect(charts.last().getByText("Скорость генерации", { exact: true })).toBeVisible();
+  await expect(charts.last().getByText("Поток E2E", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Последние события" })).toBeVisible();
   await page.screenshot({ path: "output/playwright/overview-analytics-lower-ru-dark-840x560.png" });
 });
