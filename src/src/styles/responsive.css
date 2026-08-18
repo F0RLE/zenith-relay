@@ -611,13 +611,11 @@
   }
 
   .usage-metrics,
-  .usage-performance,
   .usage-account-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .usage-metrics > div:nth-child(2n),
-  .usage-performance > div:nth-child(2n) {
+  .usage-metrics > div:nth-child(2n) {
     border-right: 0;
   }
 
@@ -633,8 +631,7 @@
     border-bottom: 1px solid var(--relay-border);
   }
 
-  .usage-metrics > div:nth-child(-n + 2),
-  .usage-performance > div:nth-child(-n + 2) {
+  .usage-metrics > div:nth-child(-n + 2) {
     border-bottom: 1px solid var(--relay-border);
   }
 

@@ -722,6 +722,8 @@ mod tests {
     fn full_window(reset_at_ms: Option<u64>, observed_at_ms: u64) -> QuotaWindow {
         QuotaWindow {
             kind: QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: None,
             available_basis_points: Some(10_000),
             explicitly_full: Some(true),
             reset_at_ms,

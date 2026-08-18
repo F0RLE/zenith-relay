@@ -1189,6 +1189,8 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
     let mut account = account_record("account_local");
     account.account.quota.primary = Some(QuotaWindow {
         kind: QuotaWindowKind::Primary,
+        provider_cycle_id: None,
+        window_start_ms: None,
         available_basis_points: Some(10_000),
         explicitly_full: Some(true),
         reset_at_ms: Some(now_ms + 300_000),

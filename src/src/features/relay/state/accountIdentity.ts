@@ -53,6 +53,7 @@ export function displayAccountIdentity({
     ? index.uniqueById.get(accountId) ?? null
     : fallbackLabel ? index.uniqueByLabel.get(fallbackLabel) ?? null : null;
   if (!account) return fallbackLabel ?? null;
-  if (!identitiesVisible || !canReveal || !account.secretAvailable) return account.label;
-  return revealedIdentities[`${mode}:${account.id}`] ?? account.label;
+  const maskedIdentity = account.identityHint.trim() || account.label;
+  if (!identitiesVisible || !canReveal || !account.secretAvailable) return maskedIdentity;
+  return revealedIdentities[`${mode}:${account.id}`] ?? maskedIdentity;
 }

@@ -116,6 +116,7 @@ mod tests {
                     observed_at_ms,
                 }),
                 reset_credits_available: Some(1),
+                direct_balance_micro_usd: None,
                 observed_at_ms,
             },
             allowed: Some(true),

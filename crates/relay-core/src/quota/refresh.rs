@@ -50,6 +50,8 @@ pub struct QuotaRefreshData {
     pub limit_reached: bool,
     pub subscription: Option<SubscriptionInput>,
     pub reset_credits_available: Option<u32>,
+    #[serde(default)]
+    pub direct_balance_micro_usd: Option<u64>,
     pub observed_at_ms: u64,
 }
 
@@ -107,6 +109,7 @@ impl QuotaRefreshData {
                 supplemental,
                 limit_reached: self.limit_reached,
                 reset_credits_available: self.reset_credits_available,
+                direct_balance_micro_usd: self.direct_balance_micro_usd,
                 updated_at_ms: Some(self.observed_at_ms),
                 error: None,
             },

@@ -1157,6 +1157,14 @@ impl PoolScheduler {
         {
             return false;
         }
+        // An explicit API source order is a hard route policy. Prompt affinity
+        // may preserve a cache only when it does not demote that policy.
+        if preferred.kind == CandidateKind::ApiSource
+            && baseline.kind == CandidateKind::ApiSource
+            && preferred.priority < baseline.priority
+        {
+            return false;
+        }
         match (self.routing_quota(preferred), self.routing_quota(baseline)) {
             (CandidateQuota::Available(preferred), CandidateQuota::Available(baseline)) => {
                 preferred.saturating_add(PROMPT_AFFINITY_QUOTA_SLACK_BPS) >= baseline

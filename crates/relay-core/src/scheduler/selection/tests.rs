@@ -491,6 +491,33 @@ fn prompt_cache_affinity_applies_to_accounts_with_quota_and_load_guards() {
 }
 
 #[test]
+fn prompt_cache_affinity_does_not_override_api_source_order() {
+    let mut scheduler = PoolScheduler::new();
+    let mut first = candidate("first");
+    first.priority = 2;
+    scheduler.upsert(first);
+    let mut cached = candidate("cached");
+    cached.priority = 1;
+    scheduler.upsert(cached);
+    assert!(scheduler.bind_prompt_affinity("thread", "cached", 0));
+
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("thread"),
+            now_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(selected.candidate_id, "first");
+    assert_eq!(selected.diagnostics.reason, SelectionReason::ManualPriority);
+}
+
+#[test]
 fn oauth_equal_quota_uses_stable_order_without_last_use() {
     let mut scheduler = PoolScheduler::new();
     let mut high_priority = oauth_candidate("high-priority");

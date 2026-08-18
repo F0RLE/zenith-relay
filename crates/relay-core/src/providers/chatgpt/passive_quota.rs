@@ -223,6 +223,8 @@ mod tests {
     fn empty_secondary_placeholder_is_ignored_and_removed_from_saved_quota() {
         let placeholder = QuotaWindow {
             kind: QuotaWindowKind::Secondary,
+            provider_cycle_id: None,
+            window_start_ms: None,
             available_basis_points: Some(10_000),
             explicitly_full: None,
             reset_at_ms: Some(1_000),
