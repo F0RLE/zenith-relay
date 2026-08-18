@@ -48,6 +48,10 @@ pub struct QuotaWindowInput {
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
     pub kind: QuotaWindowKind,
+    #[serde(default)]
+    pub provider_cycle_id: Option<String>,
+    #[serde(default)]
+    pub window_start_ms: Option<u64>,
     pub available_basis_points: Option<u16>,
     pub explicitly_full: Option<bool>,
     pub reset_at_ms: Option<u64>,
@@ -97,6 +101,10 @@ impl QuotaWindow {
         };
         Ok(Self {
             kind: input.kind,
+            provider_cycle_id: input.provider_cycle_id,
+            window_start_ms: input.window_minutes.and_then(|minutes| {
+                reset_at_ms.map(|reset| reset.saturating_sub(u64::from(minutes) * 60_000))
+            }),
             available_basis_points,
             explicitly_full: input.explicitly_full,
             reset_at_ms,
@@ -263,6 +271,8 @@ pub struct QuotaSnapshot {
     #[serde(default)]
     pub limit_reached: bool,
     pub reset_credits_available: Option<u32>,
+    #[serde(default)]
+    pub direct_balance_micro_usd: Option<u64>,
     pub updated_at_ms: Option<u64>,
     pub error: Option<QuotaErrorState>,
 }

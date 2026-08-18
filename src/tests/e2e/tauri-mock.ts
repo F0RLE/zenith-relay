@@ -62,6 +62,7 @@ export type MockOptions = {
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
   profileSnapshotBackupBeforeRestore?: boolean;
+  distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
   sourceDetectedModelPrices?: Record<string, {
@@ -74,7 +75,7 @@ export type MockOptions = {
   modelReasoning?: Record<string, string[]>;
   sourceProtocolBindings?: Array<{
     wireApi: "responses" | "messages" | "chat_completions";
-    adapter: "native" | "responses_to_messages";
+    adapter: "native" | "responses_to_messages" | "responses_to_gemini";
     reasoningMode: "disabled" | "budget" | "adaptive";
     modelIds: string[];
   }>;
@@ -91,6 +92,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const locale = input.locale ?? "en";
     const populated = input.populated ?? true;
     const usagePresent = populated && input.usagePresent !== false;
+    const distinctAccountIdentityHints = input.distinctAccountIdentityHints ?? false;
     const dayMs = 24 * 60 * 60_000;
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
     localStorage.setItem("relay.mode", input.mode ?? "local");
@@ -168,7 +170,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const account = {
       id: "account_synthetic",
       label: "Personal Plus",
-      identityHint: "p***@example.test",
+      identityHint: distinctAccountIdentityHints ? "p***@example.test" : "Personal Plus",
       enabled: true,
       inPool: input.poolMembers ?? true,
       draining: false,
@@ -206,7 +208,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const item = structuredClone(account);
       item.id = `account_synthetic_${index + 1}`;
       item.label = variant.label;
-      item.identityHint = ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6];
+      item.identityHint = distinctAccountIdentityHints ? ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6] : variant.label;
       item.authState = { state: "active" };
       item.subscription.planType = variant.plan;
       item.subscription.activeUntilMs = variant.activeUntilMs;

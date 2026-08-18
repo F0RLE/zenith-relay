@@ -35,6 +35,25 @@ Relay lets routed models receive image attachments without guessing support
 from their names. The selected model makes the final decision; native ChatGPT
 model capabilities remain unchanged.
 
+## Application tabs
+
+- **Overview** shows runtime state and the **Stream (E2E)** chart. It divides
+  all output tokens by the full request time, so first-token wait and network
+  time are included.
+- **Connections** stores accounts, API sources, and proxies.
+- **Pool** controls who may receive requests, plus model rules, order, and
+  routing weight.
+- **API & ChatGPT** starts the local OpenAI-compatible endpoint and reversibly
+  attaches it to the ChatGPT/Codex profile. The desktop app must stay open in
+  this mode.
+- **Usage** never stores prompt or response text and has four views: **Requests**,
+  **Models**, **Pool members**, and **Errors**. Its **Generation speed** divides
+  output tokens by the time after the first token; first-token wait and network
+  time are excluded. **First / total** shows time to first output and the full
+  request duration.
+- **Recovery** restores saved profiles; **Help** explains the selected mode and
+  starts Quick Setup again.
+
 ## Before you start
 
 - Zenith Relay and ChatGPT are installed on the same computer.

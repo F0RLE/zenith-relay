@@ -1,4 +1,8 @@
-use super::{messages, stream::MessagesStreamBridge};
+use super::{
+    gemini::{self, GeminiBridgeRequest, GeminiBridgeResponse},
+    messages,
+    stream::{AdapterStreamBridge, MessagesStreamBridge},
+};
 use crate::{CacheWriteTtl, WireApi};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -15,6 +19,20 @@ pub enum SourceAdapter {
     #[default]
     Native,
     ResponsesToMessages,
+    ResponsesToGemini,
+}
+
+/// The actual upstream HTTP contract selected by a source binding.
+///
+/// This stays separate from [`WireApi`], which describes the API Relay
+/// presents to its client. An adapter is the only place allowed to change one
+/// into another.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum UpstreamProtocol {
+    Responses,
+    ChatCompletions,
+    Messages,
+    GeminiGenerateContent,
 }
 
 /// Inputs needed to turn one client request into an upstream request.
@@ -30,13 +48,19 @@ pub struct AdapterRequestContext<'a> {
     pub cache_write_ttl: CacheWriteTtl,
     pub previous: Option<MessagesBridgeState>,
     pub response_scope: &'a str,
+    pub response_id_seed: &'a str,
 }
 
 impl SourceAdapter {
-    pub const fn upstream_wire_api(self, client_wire_api: WireApi) -> WireApi {
+    pub const fn upstream_protocol(self, client_wire_api: WireApi) -> UpstreamProtocol {
         match self {
-            Self::Native => client_wire_api,
-            Self::ResponsesToMessages => WireApi::Messages,
+            Self::Native => match client_wire_api {
+                WireApi::Responses => UpstreamProtocol::Responses,
+                WireApi::ChatCompletions => UpstreamProtocol::ChatCompletions,
+                WireApi::Messages => UpstreamProtocol::Messages,
+            },
+            Self::ResponsesToMessages => UpstreamProtocol::Messages,
+            Self::ResponsesToGemini => UpstreamProtocol::GeminiGenerateContent,
         }
     }
 
@@ -51,13 +75,14 @@ impl SourceAdapter {
     pub const fn route_suffix(self, client_wire_api: WireApi) -> &'static str {
         match (client_wire_api, self) {
             (WireApi::Responses, Self::ResponsesToMessages) => "responses_to_messages",
+            (WireApi::Responses, Self::ResponsesToGemini) => "responses_to_gemini",
             (WireApi::Responses, Self::Native) => "responses",
             (WireApi::ChatCompletions, Self::Native) => "chat_completions",
             (WireApi::Messages, Self::Native) => "messages",
             // Validation rejects this combination today. Keeping a stable
             // fallback makes candidate identity forward-compatible with a
             // future adapter that targets another upstream contract.
-            (_, Self::ResponsesToMessages) => "bridge",
+            (_, Self::ResponsesToMessages | Self::ResponsesToGemini) => "bridge",
         }
     }
 
@@ -70,7 +95,17 @@ impl SourceAdapter {
             Self::Native if reasoning_mode == MessagesReasoningMode::Disabled => Ok(()),
             Self::Native => Err(AdapterError::reasoning_unsupported()),
             Self::ResponsesToMessages if client_wire_api == WireApi::Responses => Ok(()),
+            Self::ResponsesToGemini
+                if client_wire_api == WireApi::Responses
+                    && reasoning_mode == MessagesReasoningMode::Disabled =>
+            {
+                Ok(())
+            }
             Self::ResponsesToMessages => Err(AdapterError::unsupported_binding()),
+            Self::ResponsesToGemini if reasoning_mode != MessagesReasoningMode::Disabled => {
+                Err(AdapterError::reasoning_unsupported())
+            }
+            Self::ResponsesToGemini => Err(AdapterError::unsupported_binding()),
         }
     }
 
@@ -93,6 +128,7 @@ impl SourceAdapter {
             cache_write_ttl,
             previous,
             response_scope,
+            response_id_seed,
         } = context;
         self.validate(client_wire_api, reasoning_mode)?;
         match self {
@@ -121,6 +157,16 @@ impl SourceAdapter {
                     request: Box::new(request),
                 })
             }
+            Self::ResponsesToGemini => gemini::prepare_responses_to_gemini(
+                request,
+                model,
+                stream,
+                response_scope,
+                response_id_seed,
+            )
+            .map(|request| PreparedAdapterRequest::ResponsesToGemini {
+                request: Box::new(request),
+            }),
         }
     }
 }
@@ -624,6 +670,36 @@ pub struct MessagesBridgeResponse {
     pub continuation: MessagesBridgeState,
 }
 
+/// A translated response from any non-native source binding.
+#[derive(Clone, Debug)]
+pub enum AdapterResponse {
+    Messages(MessagesBridgeResponse),
+    Gemini(GeminiBridgeResponse),
+}
+
+impl AdapterResponse {
+    pub fn response_body(&self) -> &Value {
+        match self {
+            Self::Messages(response) => &response.response_body,
+            Self::Gemini(response) => &response.response_body,
+        }
+    }
+
+    pub fn response_id(&self) -> &str {
+        match self {
+            Self::Messages(response) => &response.response_id,
+            Self::Gemini(response) => &response.response_id,
+        }
+    }
+
+    pub fn messages_continuation(&self) -> Option<&MessagesBridgeResponse> {
+        match self {
+            Self::Messages(response) => Some(response),
+            Self::Gemini(_) => None,
+        }
+    }
+}
+
 /// A source-agnostic prepared protocol route.
 ///
 /// It pairs the exact upstream payload with the inverse translation required
@@ -633,6 +709,7 @@ pub struct MessagesBridgeResponse {
 pub enum PreparedAdapterRequest {
     Native { upstream_body: Value },
     ResponsesToMessages { request: Box<MessagesBridgeRequest> },
+    ResponsesToGemini { request: Box<GeminiBridgeRequest> },
 }
 
 impl PreparedAdapterRequest {
@@ -640,6 +717,7 @@ impl PreparedAdapterRequest {
         match self {
             Self::Native { upstream_body } => upstream_body,
             Self::ResponsesToMessages { request } => request.upstream_body(),
+            Self::ResponsesToGemini { request } => request.upstream_body(),
         }
     }
 
@@ -648,7 +726,7 @@ impl PreparedAdapterRequest {
     pub fn native_upstream_body_mut(&mut self) -> Option<&mut Value> {
         match self {
             Self::Native { upstream_body } => Some(upstream_body),
-            Self::ResponsesToMessages { .. } => None,
+            Self::ResponsesToMessages { .. } | Self::ResponsesToGemini { .. } => None,
         }
     }
 
@@ -657,21 +735,34 @@ impl PreparedAdapterRequest {
     }
 
     pub const fn requires_bridge_headers(&self) -> bool {
+        matches!(
+            self,
+            Self::ResponsesToMessages { .. } | Self::ResponsesToGemini { .. }
+        )
+    }
+
+    pub const fn uses_messages_continuation(&self) -> bool {
         matches!(self, Self::ResponsesToMessages { .. })
     }
 
     /// Translates a completed upstream response only when the selected route
     /// is a bridge. Native bytes remain untouched and can be proxied directly.
-    pub fn translate_response_bytes(
-        self,
-        bytes: &[u8],
-    ) -> AdapterResult<Option<MessagesBridgeResponse>> {
+    pub fn translate_response_bytes(self, bytes: &[u8]) -> AdapterResult<Option<AdapterResponse>> {
         match self {
             Self::Native { .. } => Ok(None),
             Self::ResponsesToMessages { request } => {
                 let upstream = serde_json::from_slice::<Value>(bytes)
                     .map_err(|_| AdapterError::upstream_response_invalid())?;
-                messages::translate_messages_response(*request, &upstream).map(Some)
+                messages::translate_messages_response(*request, &upstream)
+                    .map(AdapterResponse::Messages)
+                    .map(Some)
+            }
+            Self::ResponsesToGemini { request } => {
+                let upstream = serde_json::from_slice::<Value>(bytes)
+                    .map_err(|_| AdapterError::upstream_response_invalid())?;
+                gemini::translate_gemini_response(*request, &upstream)
+                    .map(AdapterResponse::Gemini)
+                    .map(Some)
             }
         }
     }
@@ -679,10 +770,15 @@ impl PreparedAdapterRequest {
     /// Returns the stream transformer for a bridged route. A native route
     /// intentionally returns `None` so its stream stays byte-for-byte
     /// passthrough.
-    pub fn into_stream_bridge(self) -> Option<MessagesStreamBridge> {
+    pub fn into_stream_bridge(self) -> Option<AdapterStreamBridge> {
         match self {
             Self::Native { .. } => None,
-            Self::ResponsesToMessages { request } => Some(MessagesStreamBridge::new(*request)),
+            Self::ResponsesToMessages { request } => Some(AdapterStreamBridge::Messages(Box::new(
+                MessagesStreamBridge::new(*request),
+            ))),
+            Self::ResponsesToGemini { request } => Some(AdapterStreamBridge::Gemini(Box::new(
+                super::stream::GeminiStreamBridge::new(*request),
+            ))),
         }
     }
 }

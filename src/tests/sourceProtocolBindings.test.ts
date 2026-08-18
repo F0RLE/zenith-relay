@@ -72,6 +72,39 @@ describe("source protocol bindings", () => {
     expect(sourceSupportsNativeResponses(source)).toBe(false);
   });
 
+  test("keeps an explicit Gemini bridge available only through Responses", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["gemini-3-pro"],
+      protocolBindings: [{
+        wireApi: "responses",
+        adapter: "responses_to_gemini",
+        reasoningMode: "disabled",
+        modelIds: ["gemini-3-pro"],
+      }],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(effectiveSourceProtocolBindings(source)[0].adapter).toBe("responses_to_gemini");
+    expect(sourceModelsForWireApi(source, "responses")).toEqual(["gemini-3-pro"]);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+  });
+
+  test("does not expand an empty Gemini bridge to the source catalog", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["gemini-3-pro"],
+      protocolBindings: [{
+        wireApi: "responses",
+        adapter: "responses_to_gemini",
+        reasoningMode: "disabled",
+        modelIds: [],
+      }],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(sourceModelsForWireApi(source, "responses")).toEqual([]);
+    expect(sourceSupportsWireApi(source, "responses")).toBe(false);
+  });
+
   test("keeps Messages-only models out of the Responses route", () => {
     const source = {
       wireApi: "responses",

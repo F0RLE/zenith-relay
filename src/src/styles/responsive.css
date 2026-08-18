@@ -89,6 +89,24 @@
     grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
   }
 
+  .source-routing-details > summary {
+    grid-template-columns: minmax(0, 1fr) 14px;
+    grid-template-rows: auto auto;
+    align-items: start;
+    row-gap: 2px;
+  }
+
+  .source-routing-details > summary small {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .source-routing-details > summary::after {
+    grid-column: 2;
+    grid-row: 1 / -1;
+    align-self: center;
+  }
+
   .source-identity-grid,
   .source-access-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -611,13 +629,11 @@
   }
 
   .usage-metrics,
-  .usage-performance,
   .usage-account-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .usage-metrics > div:nth-child(2n),
-  .usage-performance > div:nth-child(2n) {
+  .usage-metrics > div:nth-child(2n) {
     border-right: 0;
   }
 
@@ -633,8 +649,7 @@
     border-bottom: 1px solid var(--relay-border);
   }
 
-  .usage-metrics > div:nth-child(-n + 2),
-  .usage-performance > div:nth-child(-n + 2) {
+  .usage-metrics > div:nth-child(-n + 2) {
     border-bottom: 1px solid var(--relay-border);
   }
 

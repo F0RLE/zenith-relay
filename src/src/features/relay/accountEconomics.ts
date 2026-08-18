@@ -21,14 +21,41 @@ export type AccountValueProjection = {
  */
 export function estimateAccountPotential(
   usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
-  quota: Pick<QuotaSnapshot, "primary" | "secondary">,
+  quota: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
 ): PotentialEstimate | null {
   if (usage.microUsd <= 0 || !Number.isFinite(usage.microUsd)) return null;
 
-  const estimates = [quota.primary, quota.secondary]
+  if (quota.directBalanceMicroUsd != null && Number.isFinite(quota.directBalanceMicroUsd) && quota.directBalanceMicroUsd >= 0) {
+    return { microUsd: Math.round(quota.directBalanceMicroUsd), approximate: false };
+  }
+  if (usage.unpricedTokens > 0) return null;
+
+  const windows = [quota.primary, quota.secondary].filter((window): window is NonNullable<typeof window> => {
+    return window != null
+      && window.availableBasisPoints != null
+      && Number.isFinite(window.availableBasisPoints)
+      && window.availableBasisPoints >= 0
+      && window.availableBasisPoints <= 10_000
+      && window.providerCycleId != null
+      && window.providerCycleId.trim().length > 0
+      && window.windowStartMs != null
+      && window.resetAtMs != null
+      && window.windowMinutes != null;
+  });
+
+  const matchingWindows = windows.filter((window, index) => {
+    if (index === 0) return true;
+    const first = windows[0];
+    return window.providerCycleId === first.providerCycleId
+      && window.windowStartMs === first.windowStartMs
+      && window.resetAtMs === first.resetAtMs
+      && window.windowMinutes === first.windowMinutes;
+  });
+
+  const estimates = matchingWindows
     .map((window) => {
       const available = window?.availableBasisPoints;
-      if (available == null || !Number.isFinite(available) || available < 0 || available > 10_000) return null;
+      if (available == null) return null;
       const consumed = 10_000 - available;
       if (consumed <= 0) return null;
       return Math.round((usage.microUsd * available) / consumed);
@@ -50,7 +77,7 @@ export function estimateAccountPotential(
  */
 export function buildAccountValueProjection(
   usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
-  quota: Pick<QuotaSnapshot, "primary" | "secondary">,
+  quota: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
   purchaseCostMicroUsd?: number | null,
 ): AccountValueProjection {
   const purchaseCost = purchaseCostMicroUsd ?? null;

@@ -186,6 +186,15 @@ tools are rejected rather than converted into text. Budget and adaptive
 reasoning are opt-in binding capabilities; `Native` bindings cannot declare a
 bridge reasoning mode.
 
+A `ResponsesToGemini` binding sends the supported text subset to Gemini's
+native `generateContent` endpoint (or `streamGenerateContent` for SSE), with
+the model encoded in the route and the source credential sent only as
+`x-goog-api-key`. It is not a provider-name rule. The binding rejects tools,
+images, reasoning, and `previous_response_id` until each conversion has its
+own confirmed capability and regression coverage; it returns native Gemini
+usage as normalized Responses usage without turning account entitlement into
+API billing.
+
 Relay exposes three client contracts: <code>/v1/responses</code> for
 Codex/OpenAI Responses clients, <code>/v1/messages</code> for native Messages
 clients, and <code>/v1/chat/completions</code> for text-and-image-only

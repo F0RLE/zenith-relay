@@ -33,7 +33,7 @@ export function latestLocalAccountSpeeds(events: LocalUsage[]) {
   const speeds = new Map<string, number>();
   for (const event of [...events].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))) {
     if (!event.accountId || speeds.has(event.accountId)) continue;
-    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, durationMs: event.latencyMs });
+    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, durationMs: event.generationMs });
     if (speed != null) speeds.set(event.accountId, speed);
   }
   return speeds;

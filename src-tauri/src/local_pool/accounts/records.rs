@@ -253,6 +253,8 @@ mod tests {
         let quota = QuotaSnapshot {
             primary: Some(QuotaWindow {
                 kind: QuotaWindowKind::Primary,
+                provider_cycle_id: None,
+                window_start_ms: None,
                 available_basis_points: Some(8_000),
                 explicitly_full: None,
                 reset_at_ms: None,
@@ -262,6 +264,8 @@ mod tests {
             }),
             secondary: Some(QuotaWindow {
                 kind: QuotaWindowKind::Secondary,
+                provider_cycle_id: None,
+                window_start_ms: None,
                 available_basis_points: Some(2_000),
                 explicitly_full: None,
                 reset_at_ms: None,
@@ -272,6 +276,7 @@ mod tests {
             supplemental: Vec::new(),
             limit_reached: false,
             reset_credits_available: None,
+            direct_balance_micro_usd: None,
             updated_at_ms: Some(1),
             error: None,
         };

@@ -150,7 +150,7 @@ for (const locale of locales) {
                     return Math.abs((rect.top + rect.bottom) / 2 - centerY) <= 1;
                 });
               }))).toBe(true);
-              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".usage-metrics > div, .usage-performance > div")].every((cell) => {
+              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".usage-metrics > div")].every((cell) => {
                 const cellRect = cell.getBoundingClientRect();
                 const children = [...cell.children].map((child) => child.getBoundingClientRect());
                 const textChildren = [...cell.querySelectorAll<HTMLElement>(":scope > span, :scope > strong, :scope > small")].map((child) => child.getBoundingClientRect());
@@ -1632,7 +1632,7 @@ for (const scenario of [
     expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 4);
     expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
     expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
-    expect(await page.locator(".usage-metrics > div, .usage-performance > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     expect(await page.locator(".usage-request-table th, .usage-request-table td").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
     await expect(timing).toHaveText(scenario.locale === "ru" ? "128 мс / 428 мс" : "128 ms / 428 ms");

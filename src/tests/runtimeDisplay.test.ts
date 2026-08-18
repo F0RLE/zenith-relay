@@ -5,8 +5,8 @@ import { projectRuntimeAccountLabels } from "../src/features/relay/state/runtime
 function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
   return {
     id: "account",
-    label: "Masked account",
-    identityHint: "Masked account",
+    label: "Imported account name",
+    identityHint: "a1b2c3d4e5f6",
     enabled: true,
     inPool: true,
     draining: false,
@@ -61,7 +61,7 @@ describe("runtime account display projection", () => {
     );
 
     expect(projected).not.toBe(snapshot);
-    expect(snapshot.accounts[0]).toMatchObject({ label: "Masked account", identityHint: "Masked account" });
+    expect(snapshot.accounts[0]).toMatchObject({ label: "Imported account name", identityHint: "a1b2c3d4e5f6" });
     expect(projected?.accounts).toMatchObject([
       { id: "one", label: "Visible account", identityHint: "Visible account" },
       { id: "two", label: "Fallback", identityHint: "Fallback" },

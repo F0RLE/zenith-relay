@@ -892,6 +892,8 @@ mod tests {
                 quota: QuotaSnapshot {
                     primary: Some(QuotaWindow {
                         kind: QuotaWindowKind::Primary,
+                        provider_cycle_id: None,
+                        window_start_ms: None,
                         available_basis_points: Some(10_000),
                         explicitly_full: Some(true),
                         reset_at_ms: Some(10_000),

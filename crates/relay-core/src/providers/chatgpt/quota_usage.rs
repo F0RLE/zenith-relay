@@ -481,6 +481,7 @@ pub fn parse_codex_usage(
                 .rate_limit_reset_credits
                 .and_then(|credits| credits.available_count)
                 .and_then(ResetCreditCount::into_u32),
+            direct_balance_micro_usd: None,
             observed_at_ms,
         },
         allowed,

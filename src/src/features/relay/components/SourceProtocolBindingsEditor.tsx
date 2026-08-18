@@ -43,24 +43,31 @@ export function SourceProtocolBindingsEditor({
   const hasNativeProtocol = (wireApi: SourceWireApi) =>
     Boolean(routeBinding(wireApi, "native"));
   const nativeResponsesBinding = routeBinding("responses", "native");
-  const bridgeBinding = routeBinding("responses", "responses_to_messages");
+  const messagesBridgeBinding = routeBinding("responses", "responses_to_messages");
+  const geminiBridgeBinding = routeBinding("responses", "responses_to_gemini");
   const messagesBinding = routeBinding("messages", "native");
   const cacheBindings = bindings.filter((binding) => (
     binding.wireApi === "messages" || normalizedAdapter(binding) === "responses_to_messages"
   ));
   const hasMultipleRoutes = bindings.length > 1;
   const selectedModels = (binding: SourceProtocolBinding) =>
-    binding.modelIds.length || hasMultipleRoutes ? binding.modelIds : models;
+    binding.modelIds.length || hasMultipleRoutes || normalizedAdapter(binding) !== "native"
+      ? binding.modelIds
+      : models;
   const modelIsSelected = (binding: SourceProtocolBinding | undefined, model: string) =>
     Boolean(binding && selectedModels(binding).some(
       (candidate) => candidate.toLowerCase() === model.toLowerCase(),
     ));
-  const bridgeModels = bridgeBinding ? selectedModels(bridgeBinding) : [];
+  const messagesBridgeModels = messagesBridgeBinding ? selectedModels(messagesBridgeBinding) : [];
+  const geminiBridgeModels = geminiBridgeBinding ? selectedModels(geminiBridgeBinding) : [];
   const activeWireApis = wireApis.filter(hasNativeProtocol);
   const inactiveWireApis = wireApis.filter((wireApi) => !hasNativeProtocol(wireApi));
-  const showsBridgeColumn = Boolean(messagesBinding || bridgeBinding);
+  const showsMessagesBridgeColumn = Boolean(messagesBinding || messagesBridgeBinding);
+  const showsGeminiBridgeColumn = Boolean(geminiBridgeBinding);
   const matrixStyle = {
-    "--source-route-column-count": String(activeWireApis.length + (showsBridgeColumn ? 1 : 0)),
+    "--source-route-column-count": String(
+      activeWireApis.length + Number(showsMessagesBridgeColumn) + Number(showsGeminiBridgeColumn),
+    ),
   } as CSSProperties;
 
   const setNativeProtocol = (wireApi: SourceWireApi, selected: boolean) => {
@@ -114,27 +121,29 @@ export function SourceProtocolBindingsEditor({
     onChange(nextBindings);
   };
 
-  const setBridgeModel = (model: string, selected: boolean) => {
+  const setMessagesBridgeModel = (model: string, selected: boolean) => {
     if (!selected) {
-      if (!bridgeBinding) return;
+      if (!messagesBridgeBinding) return;
       const nextModelIds = normalizedModelIds(
-        bridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
+        messagesBridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
         models,
       );
       onChange(nextModelIds.length
         ? bindings.map((binding) => (
-          binding === bridgeBinding
+          binding === messagesBridgeBinding
             ? { ...binding, modelIds: nextModelIds }
             : binding
         ))
-        : bindings.filter((binding) => binding !== bridgeBinding));
+        : bindings.filter((binding) => binding !== messagesBridgeBinding));
       return;
     }
 
     // A bridged route is still a native Messages capability upstream. Keeping
     // the relationship in one operation prevents the UI from advertising a
     // Responses route whose upstream Messages model was not declared.
-    if (!messagesBinding || modelIsSelected(nativeResponsesBinding, model)) return;
+    if (!messagesBinding
+      || modelIsSelected(nativeResponsesBinding, model)
+      || modelIsSelected(geminiBridgeBinding, model)) return;
     const nextMessageModels = normalizedModelIds(
       [...selectedModels(messagesBinding), model],
       models,
@@ -144,12 +153,12 @@ export function SourceProtocolBindingsEditor({
         ? { ...binding, modelIds: nextMessageModels }
         : binding
     ));
-    if (bridgeBinding) {
+    if (messagesBridgeBinding) {
       onChange(nextBindings.map((binding) => (
-        binding === bridgeBinding
+        binding === messagesBridgeBinding
           ? {
             ...binding,
-            modelIds: normalizedModelIds([...bridgeModels, model], models),
+            modelIds: normalizedModelIds([...messagesBridgeModels, model], models),
           }
           : binding
       )));
@@ -162,6 +171,55 @@ export function SourceProtocolBindingsEditor({
         adapter: "responses_to_messages",
         reasoningMode: "disabled",
         modelIds: [model],
+      },
+    ]);
+  };
+  const setGeminiBridgeModel = (model: string, selected: boolean) => {
+    if (!selected) {
+      if (!geminiBridgeBinding) return;
+      const nextModelIds = normalizedModelIds(
+        geminiBridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
+        models,
+      );
+      onChange(nextModelIds.length
+        ? bindings.map((binding) => (
+          binding === geminiBridgeBinding
+            ? { ...binding, modelIds: nextModelIds }
+            : binding
+        ))
+        : bindings.filter((binding) => binding !== geminiBridgeBinding));
+      return;
+    }
+
+    if (modelIsSelected(nativeResponsesBinding, model)
+      || modelIsSelected(messagesBridgeBinding, model)) return;
+    if (geminiBridgeBinding) {
+      onChange(bindings.map((binding) => (
+        binding === geminiBridgeBinding
+          ? { ...binding, modelIds: normalizedModelIds([...geminiBridgeModels, model], models) }
+          : binding
+      )));
+      return;
+    }
+    onChange([
+      ...bindings,
+      {
+        wireApi: "responses",
+        adapter: "responses_to_gemini",
+        reasoningMode: "disabled",
+        modelIds: [model],
+      },
+    ]);
+  };
+  const addGeminiBridge = () => {
+    if (geminiBridgeBinding) return;
+    onChange([
+      ...bindings,
+      {
+        wireApi: "responses",
+        adapter: "responses_to_gemini",
+        reasoningMode: "disabled",
+        modelIds: [],
       },
     ]);
   };
@@ -182,7 +240,7 @@ export function SourceProtocolBindingsEditor({
         <strong id={titleId}>{t("sources.protocolsTitle")}</strong>
         <p>{t("sources.protocolsHint")}</p>
       </header>
-      {inactiveWireApis.length ? <div className="source-route-add-formats" role="group" aria-label={t("sources.addFormats")}>
+      {inactiveWireApis.length || (!geminiBridgeBinding && wireApis.includes("responses")) ? <div className="source-route-add-formats" role="group" aria-label={t("sources.addFormats")}>
         {inactiveWireApis.map((wireApi) => {
           const { icon: Icon } = protocolPresentation[wireApi];
           const label = t(`sources.protocolCards.${wireApi}.title`);
@@ -192,6 +250,13 @@ export function SourceProtocolBindingsEditor({
             {label}
           </button>;
         })}
+        {!geminiBridgeBinding && wireApis.includes("responses")
+          ? <button type="button" onClick={addGeminiBridge}>
+            <Plus aria-hidden />
+            <Sparkles aria-hidden />
+            {t("sources.addGeminiBridge")}
+          </button>
+          : null}
       </div> : null}
       {cacheBindings.length ? <section className="source-cache-settings" aria-label={t("sources.cacheWriteTtl")}>
         <strong>{t("sources.cacheWriteTtl")}</strong>
@@ -209,7 +274,7 @@ export function SourceProtocolBindingsEditor({
           })}
         </div>
       </section> : null}
-      {activeWireApis.length || showsBridgeColumn ? <div className="source-route-matrix" style={matrixStyle}>
+      {activeWireApis.length || showsMessagesBridgeColumn || showsGeminiBridgeColumn ? <div className="source-route-matrix" style={matrixStyle}>
         <div className="source-route-matrix-heading">
           <span>{t("sources.modelColumn")}</span>
           <div className="source-route-format-headings">
@@ -238,7 +303,7 @@ export function SourceProtocolBindingsEditor({
                 </label>
               );
             })}
-            {showsBridgeColumn
+            {showsMessagesBridgeColumn
               ? <div className="source-route-bridge-heading">
                 <span className="source-route-format-icon" aria-hidden="true"><Route /></span>
                 <span>
@@ -247,25 +312,45 @@ export function SourceProtocolBindingsEditor({
                 </span>
               </div>
               : null}
+            {showsGeminiBridgeColumn
+              ? <div className="source-route-bridge-heading">
+                <span className="source-route-format-icon" aria-hidden="true"><Sparkles /></span>
+                <span>
+                  <strong>{t("sources.geminiBridgeColumnTitle")}</strong>
+                  <small>{t("sources.geminiBridgeColumnHint")}</small>
+                </span>
+              </div>
+              : null}
           </div>
         </div>
         {models.length
           ? <div className="source-route-model-list">
             {models.map((model) => {
-              const bridgeChecked = modelIsSelected(bridgeBinding, model);
+              const messagesBridgeChecked = modelIsSelected(messagesBridgeBinding, model);
+              const geminiBridgeChecked = modelIsSelected(geminiBridgeBinding, model);
               const directResponsesChecked = modelIsSelected(nativeResponsesBinding, model);
-              const bridgeIsLastAvailableRoute = bridgeChecked
-                && bridgeModels.length === 1
+              const messagesBridgeIsLastAvailableRoute = messagesBridgeChecked
+                && messagesBridgeModels.length === 1
                 && bindings.length === 1;
-              const bridgeDisabled = bridgeIsLastAvailableRoute
-                || (!bridgeChecked && (!messagesBinding || directResponsesChecked));
-              const bridgeTitle = bridgeIsLastAvailableRoute
+              const messagesBridgeDisabled = messagesBridgeIsLastAvailableRoute
+                || (!messagesBridgeChecked && (!messagesBinding || directResponsesChecked || geminiBridgeChecked));
+              const messagesBridgeTitle = messagesBridgeIsLastAvailableRoute
                 ? t("sources.modelRouteRequired")
-                : !bridgeChecked && !messagesBinding
+                : !messagesBridgeChecked && !messagesBinding
                   ? t("sources.bridgeRequiresMessages")
-                  : !bridgeChecked && directResponsesChecked
+                  : !messagesBridgeChecked && (directResponsesChecked || geminiBridgeChecked)
                     ? t("sources.bridgeRouteConflict")
                     : undefined;
+              const geminiBridgeIsLastAvailableRoute = geminiBridgeChecked
+                && geminiBridgeModels.length === 1
+                && bindings.length === 1;
+              const geminiBridgeDisabled = geminiBridgeIsLastAvailableRoute
+                || (!geminiBridgeChecked && (directResponsesChecked || messagesBridgeChecked));
+              const geminiBridgeTitle = geminiBridgeIsLastAvailableRoute
+                ? t("sources.modelRouteRequired")
+                : !geminiBridgeChecked && (directResponsesChecked || messagesBridgeChecked)
+                  ? t("sources.geminiBridgeRouteConflict")
+                  : undefined;
               return (
                 <div key={model} className="source-route-model-row">
                   <code className="source-route-model-name">{model}</code>
@@ -280,7 +365,7 @@ export function SourceProtocolBindingsEditor({
                           && modelIsSelected(candidate, model),
                       );
                       const requiredByBridge = wireApi === "messages"
-                        && bridgeChecked;
+                        && messagesBridgeChecked;
                       const lastSelectedModel = binding != null
                         && checked
                         && selectedModels(binding).length === 1
@@ -325,20 +410,37 @@ export function SourceProtocolBindingsEditor({
                         </label>
                       );
                     })}
-                    {showsBridgeColumn
+                    {showsMessagesBridgeColumn
                       ? <label
-                        className={`source-route-cell source-route-bridge-cell ${bridgeChecked ? "selected" : ""}`}
-                        title={bridgeTitle}
+                        className={`source-route-cell source-route-bridge-cell ${messagesBridgeChecked ? "selected" : ""}`}
+                        title={messagesBridgeTitle}
                       >
                         <span className="source-route-cell-label" aria-hidden="true">
                           {t("sources.bridgeColumnTitle")}
                         </span>
                         <input
                           type="checkbox"
-                          checked={bridgeChecked}
-                          disabled={bridgeDisabled}
+                          checked={messagesBridgeChecked}
+                          disabled={messagesBridgeDisabled}
                           aria-label={t("sources.modelBridgeControl", { model })}
-                          onChange={(event) => setBridgeModel(model, event.target.checked)}
+                          onChange={(event) => setMessagesBridgeModel(model, event.target.checked)}
+                        />
+                      </label>
+                      : null}
+                    {showsGeminiBridgeColumn
+                      ? <label
+                        className={`source-route-cell source-route-bridge-cell ${geminiBridgeChecked ? "selected" : ""}`}
+                        title={geminiBridgeTitle}
+                      >
+                        <span className="source-route-cell-label" aria-hidden="true">
+                          {t("sources.geminiBridgeColumnTitle")}
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={geminiBridgeChecked}
+                          disabled={geminiBridgeDisabled}
+                          aria-label={t("sources.modelGeminiBridgeControl", { model })}
+                          onChange={(event) => setGeminiBridgeModel(model, event.target.checked)}
                         />
                       </label>
                       : null}
@@ -349,8 +451,11 @@ export function SourceProtocolBindingsEditor({
           </div>
           : null}
       </div> : null}
-      {showsBridgeColumn
+      {showsMessagesBridgeColumn
         ? <p className="source-route-bridge-note">{t("sources.bridgeHint")}</p>
+        : null}
+      {showsGeminiBridgeColumn
+        ? <p className="source-route-bridge-note">{t("sources.geminiBridgeHint")}</p>
         : null}
     </section>
   );

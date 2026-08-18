@@ -435,6 +435,8 @@ mod tests {
     fn scheduler_uses_the_tightest_fresh_quota_window() {
         let window = |kind, available_basis_points| QuotaWindow {
             kind,
+            provider_cycle_id: None,
+            window_start_ms: None,
             available_basis_points: Some(available_basis_points),
             explicitly_full: None,
             reset_at_ms: None,
@@ -522,6 +524,8 @@ mod tests {
         exhausted.quota = QuotaSnapshot {
             primary: Some(QuotaWindow {
                 kind: QuotaWindowKind::Primary,
+                provider_cycle_id: None,
+                window_start_ms: None,
                 available_basis_points: Some(0),
                 explicitly_full: None,
                 reset_at_ms: Some(60_000),

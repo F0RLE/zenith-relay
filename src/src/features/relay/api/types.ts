@@ -5,6 +5,8 @@ export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disa
 
 export type QuotaWindow = {
   kind: "primary" | "secondary";
+  providerCycleId?: string | null;
+  windowStartMs?: number | null;
   availableBasisPoints: number | null;
   explicitlyFull: boolean | null;
   resetAtMs: number | null;
@@ -24,6 +26,7 @@ export type QuotaSnapshot = {
   supplemental?: SupplementalQuotaWindow[];
   limitReached: boolean;
   resetCreditsAvailable: number | null;
+  directBalanceMicroUsd?: number | null;
   updatedAtMs: number | null;
   error: { code: string; occurredAtMs: number } | null;
 };
@@ -44,7 +47,7 @@ export type ApiModelPriceOverride = {
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages";
 
-export type SourceAdapter = "native" | "responses_to_messages";
+export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini";
 
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";

@@ -778,6 +778,8 @@ mod tests {
     ) -> QuotaWindow {
         QuotaWindow {
             kind,
+            provider_cycle_id: None,
+            window_start_ms: None,
             available_basis_points,
             explicitly_full,
             reset_at_ms,

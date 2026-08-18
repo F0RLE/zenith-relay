@@ -322,9 +322,9 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   await expect(dialog.locator(".source-price-group > summary")).toHaveText([
     "OpenAIModels: 1",
     "AnthropicModels: 1",
-    "GeminiModels: 1",
-    "GrokModels: 1",
-    "GLMModels: 1",
+    "GoogleModels: 1",
+    "xAIModels: 1",
+    "Z.aiModels: 1",
     "PrivateModels: 1",
   ]);
 
@@ -744,7 +744,7 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   await expect(dialog.getByRole("checkbox", { name: "Chat Completions is available from this source", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(0);
   await expect(dialog.locator(".source-route-format-heading")).toHaveCount(1);
-  await expect(dialog.getByRole("group", { name: "Add API format" }).getByRole("button")).toHaveCount(2);
+  await expect(dialog.getByRole("group", { name: "Add API format" }).getByRole("button")).toHaveCount(3);
 
   await dialog.getByRole("button", { name: "Edit", exact: true }).click();
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
@@ -858,9 +858,19 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
   await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Messages", exact: true }).click();
   const messages = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
   await expect(messages).toBeChecked();
+  await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Gemini via Relay", exact: true }).click();
+  const nativeBase = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4", exact: true });
+  const geminiBase = dialog.getByRole("checkbox", { name: "Gemini via Relay for gpt-5.4", exact: true });
+  await expect(geminiBase).toBeDisabled();
+  await nativeBase.uncheck();
+  await expect(geminiBase).toBeEnabled();
+  await geminiBase.check();
+  await expect(geminiBase).toBeChecked();
+  await expect(nativeBase).toBeDisabled();
+
   const nativeMini = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4-mini", exact: true });
   const messageMini = dialog.getByRole("checkbox", { name: "Messages for gpt-5.4-mini", exact: true });
-  const bridge = dialog.getByRole("checkbox", { name: "Through Relay for gpt-5.4-mini", exact: true });
+  const bridge = dialog.getByRole("checkbox", { name: "Messages via Relay for gpt-5.4-mini", exact: true });
   await expect(bridge).not.toBeChecked();
   await expect(dialog.locator(".source-route-model-row").filter({ hasText: "gpt-5.4-mini" })).toHaveCount(1);
   await expect(dialog.getByRole("group", { name: "Messages reasoning" })).toHaveCount(0);
@@ -907,6 +917,17 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/source-bridge-routes-840x560.png" });
 
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+  })).toBe(true);
+  expect(await dialog.locator(".source-route-matrix").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-bridge-routes-390x844.png" });
+
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as {
@@ -933,7 +954,7 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
       adapter: "native",
       reasoningMode: "disabled",
       cacheWriteTtl: "provider",
-      modelIds: ["gpt-5.4"],
+      modelIds: [],
     },
     {
       wireApi: "messages",
@@ -941,6 +962,13 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
       reasoningMode: "disabled",
       cacheWriteTtl: "5m",
       modelIds: ["gpt-5.4-mini"],
+    },
+    {
+      wireApi: "responses",
+      adapter: "responses_to_gemini",
+      reasoningMode: "disabled",
+      cacheWriteTtl: "provider",
+      modelIds: ["gpt-5.4"],
     },
     {
       wireApi: "responses",
@@ -2386,7 +2414,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   await expect(details).toBeVisible();
   await expect(details.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(details.getByText("Error origin", { exact: true })).toHaveCount(0);
-  await expect(details.getByText("18.7 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
+  await expect(details.getByText("26.7 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
   await expect(details).toHaveCount(0);
 
@@ -2431,14 +2459,18 @@ test("usage shows the request protocol and persists hidden summary metrics", asy
   await page.locator(".usage-overflow summary").click();
   await page.getByRole("menuitem", { name: "Customize summary" }).click();
   const dialog = page.getByRole("dialog", { name: "Customize summary" });
+  await expect(dialog.getByRole("checkbox", { name: "Generation speed" })).toBeChecked();
+  await dialog.getByRole("checkbox", { name: "Generation speed" }).uncheck();
   await dialog.getByRole("checkbox", { name: "Total tokens" }).uncheck();
   await page.keyboard.press("Escape");
 
+  await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
   await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageSummaryMetrics") ?? "null"))).toMatchObject({ tokens: false });
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageSummaryMetrics") ?? "null"))).toMatchObject({ generationSpeed: false, tokens: false });
 
   await page.reload();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
   await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
 });
 
@@ -2489,14 +2521,15 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "18.7 tok/s", "128 ms / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "26.7 tok/s", "128 ms / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache ↓12", "Cache ↑4", "Reason5"]);
-  await expect(page.locator(".usage-performance")).toContainText("Stream (E2E)18.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("Generation speed26.7 tok/s");
+  await expect(page.getByText("Stream (E2E)", { exact: true })).toHaveCount(0);
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
-  await expect(details).toContainText("Stream (E2E)18.7 tok/s");
+  await expect(details).toContainText("Generation speed26.7 tok/s");
   await expect(details).toContainText("Total time428 ms");
   await expect(details).toContainText("Visible output3");
   await details.getByRole("tab", { name: "Tokens", exact: true }).click();
@@ -2939,27 +2972,27 @@ test("recovery reports load failures instead of claiming backups are empty", asy
 });
 
 test("account identities are controlled only from the global action", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, distinctAccountIdentityHints: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   const identity = page.locator(".account-card").first().locator(".account-identity > strong");
-  await expect(identity).toHaveText("Personal Plus");
-  await expect(page.getByText("p***@example.test")).toHaveCount(0);
+  await expect(identity).toHaveText("p***@example.test");
+  await expect(page.getByText("Personal Plus", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Show full identity", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Show all account identities" }).click();
   await expect(identity).toHaveText("person@example.test");
   await expect(page.locator(".account-card").first().getByText("Personal Plus", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Hide full identity", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Hide all account identities" }).click();
-  await expect(identity).toHaveText("Personal Plus");
+  await expect(identity).toHaveText("p***@example.test");
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.find((item) => item.command === "reveal_local_account_identity"));
   expect(call?.args).toEqual({ accountId: "account_synthetic" });
 });
 
 test("stale identity reveal cannot replace or finish a newer mode request", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, distinctAccountIdentityHints: true });
   await page.goto("/");
   await page.evaluate(() => {
     type RevealMode = "local" | "remote";
@@ -3024,7 +3057,7 @@ test("stale identity reveal cannot replace or finish a newer mode request", asyn
 });
 
 test("account identity visibility applies across the workspace and survives reloads", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, distinctAccountIdentityHints: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Show all account identities" }).click();
@@ -3044,15 +3077,15 @@ test("account identity visibility applies across the workspace and survives relo
   await expect(page.getByRole("button", { name: "Hide all account identities" })).toBeVisible();
   await expect(page.locator(".account-identity > strong").first()).toHaveText("person@example.test");
   await page.getByRole("button", { name: "Hide all account identities" }).click();
-  await expect(page.getByText("Personal Plus", { exact: true })).toBeVisible();
-  await expect(page.getByText("Business Workspace", { exact: true })).toBeVisible();
-  await expect(page.getByText("Backup account", { exact: true })).toBeVisible();
+  await expect(page.getByText("p***@example.test", { exact: true })).toBeVisible();
+  await expect(page.getByText("b***@example.test", { exact: true })).toBeVisible();
+  await expect(page.getByText("r***@example.test", { exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountIdentitiesVisible"))).toBe("0");
 
   await page.reload();
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("button", { name: "Show all account identities" })).toBeVisible();
-  expect(await page.locator(".account-identity > strong").allTextContents()).toEqual(expect.arrayContaining(["Personal Plus", "Business Workspace", "Backup account"]));
+  expect(await page.locator(".account-identity > strong").allTextContents()).toEqual(expect.arrayContaining(["p***@example.test", "b***@example.test", "r***@example.test"]));
   await expect(page.getByText("person@example.test", { exact: true })).toHaveCount(0);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "reveal_local_account_identity").length);
@@ -3060,7 +3093,7 @@ test("account identity visibility applies across the workspace and survives relo
 });
 
 test("remote account identity reveal uses the negotiated server capability", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, distinctAccountIdentityHints: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Show all account identities" }).click();
@@ -3698,12 +3731,12 @@ test("remote server-side usage filters and clear logs use managed commands", asy
 });
 
 test("remote account usage uses the server usage identity without exposing its hash", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, distinctAccountIdentityHints: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await chooseOption(page, page, "Account", "account_synthetic");
 
-  await expect(page.locator(".usage-account-value")).toContainText("Personal Plus");
+  await expect(page.locator(".usage-account-value")).toContainText("p***@example.test");
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceOrAccountQuery?: string } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_remote_server_usage")?.args.input?.sourceOrAccountQuery;
