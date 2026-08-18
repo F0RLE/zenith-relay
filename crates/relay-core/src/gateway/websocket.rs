@@ -188,6 +188,7 @@ async fn connect_upstream(
             &request.resolved_model,
             &key.scope_snapshot(),
             WEBSOCKET_PROTOCOLS,
+            false,
         ) else {
             continue;
         };
@@ -1082,6 +1083,7 @@ async fn start_next_request(
                 &request.resolved_model,
                 &key.scope_snapshot(),
                 WEBSOCKET_PROTOCOLS,
+                false,
             )
             .ok_or_else(GatewayFailure::unavailable)?;
         route.half_open_probe = selected.half_open_probe;
@@ -1574,6 +1576,7 @@ mod tests {
                 &request.resolved_model,
                 &key.scope_snapshot(),
                 WEBSOCKET_PROTOCOLS,
+                false,
             )
             .unwrap();
         let payload: serde_json::Value = serde_json::from_str(

@@ -42,6 +42,7 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
             cache_write_ttl: Default::default(),
             previous: None,
             response_scope: "native-route",
+            response_id_seed: "request-1",
         })
         .unwrap();
 
@@ -77,6 +78,7 @@ fn native_responses_request_keeps_image_input_opaque() {
             cache_write_ttl: Default::default(),
             previous: None,
             response_scope: "native-route",
+            response_id_seed: "request-2",
         })
         .unwrap();
 

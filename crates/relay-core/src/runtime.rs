@@ -1027,6 +1027,7 @@ impl GatewayRuntime {
         model: &str,
         scope: &CandidateScope,
         allowed_protocols: &[WireApi],
+        upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             let source = self.sources.get(&binding.source_id)?;
@@ -1043,7 +1044,11 @@ impl GatewayRuntime {
                 reasoning_mode: binding.reasoning_mode,
                 cache_write_ttl: binding.cache_write_ttl,
                 service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(binding.binding_key)?.clone(),
+                upstream_url: source.endpoint(
+                    binding.binding_key,
+                    &source_model,
+                    upstream_stream,
+                )?,
                 upstream_headers: source.protocol_headers_for_binding(source_binding),
                 source_model,
                 half_open_probe: false,
@@ -1095,7 +1100,7 @@ impl GatewayRuntime {
                 reasoning_mode: binding.reasoning_mode,
                 cache_write_ttl: binding.cache_write_ttl,
                 service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(binding.binding_key)?.clone(),
+                upstream_url: source.endpoint(binding.binding_key, &source_model, false)?,
                 upstream_headers: source.protocol_headers_for_binding(source_binding),
                 source_model,
                 half_open_probe: false,

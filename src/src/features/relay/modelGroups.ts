@@ -11,6 +11,12 @@ type ModelGroup<T> = {
 const knownGroupOrder: KnownModelProviderGroup[] = ["chatgpt", "openai", "anthropic"];
 const otherGroup = "other" as const;
 const dynamicGroupPrefix = "provider-";
+const knownCompanyByFamily: Record<string, string> = {
+  gemini: "Google",
+  glm: "Z.ai",
+  zai: "Z.ai",
+  grok: "xAI",
+};
 
 type SemanticModelFamily = "openai" | "anthropic" | "gemini" | "grok" | "zai";
 
@@ -184,6 +190,8 @@ function dynamicModelFamily(model: string) {
 }
 
 function dynamicGroupLabel(family: string) {
+  const company = knownCompanyByFamily[family];
+  if (company) return company;
   return family.length <= 3
     ? family.toUpperCase()
     : `${family[0]!.toUpperCase()}${family.slice(1)}`;

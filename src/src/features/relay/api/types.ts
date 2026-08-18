@@ -47,7 +47,7 @@ export type ApiModelPriceOverride = {
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages";
 
-export type SourceAdapter = "native" | "responses_to_messages";
+export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini";
 
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";

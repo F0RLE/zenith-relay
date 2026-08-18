@@ -322,9 +322,9 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   await expect(dialog.locator(".source-price-group > summary")).toHaveText([
     "OpenAIModels: 1",
     "AnthropicModels: 1",
-    "GeminiModels: 1",
-    "GrokModels: 1",
-    "GLMModels: 1",
+    "GoogleModels: 1",
+    "xAIModels: 1",
+    "Z.aiModels: 1",
     "PrivateModels: 1",
   ]);
 
@@ -744,7 +744,7 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   await expect(dialog.getByRole("checkbox", { name: "Chat Completions is available from this source", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true })).toHaveCount(0);
   await expect(dialog.locator(".source-route-format-heading")).toHaveCount(1);
-  await expect(dialog.getByRole("group", { name: "Add API format" }).getByRole("button")).toHaveCount(2);
+  await expect(dialog.getByRole("group", { name: "Add API format" }).getByRole("button")).toHaveCount(3);
 
   await dialog.getByRole("button", { name: "Edit", exact: true }).click();
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
@@ -858,9 +858,19 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
   await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Messages", exact: true }).click();
   const messages = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
   await expect(messages).toBeChecked();
+  await dialog.getByRole("group", { name: "Add API format" }).getByRole("button", { name: "Gemini via Relay", exact: true }).click();
+  const nativeBase = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4", exact: true });
+  const geminiBase = dialog.getByRole("checkbox", { name: "Gemini via Relay for gpt-5.4", exact: true });
+  await expect(geminiBase).toBeDisabled();
+  await nativeBase.uncheck();
+  await expect(geminiBase).toBeEnabled();
+  await geminiBase.check();
+  await expect(geminiBase).toBeChecked();
+  await expect(nativeBase).toBeDisabled();
+
   const nativeMini = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4-mini", exact: true });
   const messageMini = dialog.getByRole("checkbox", { name: "Messages for gpt-5.4-mini", exact: true });
-  const bridge = dialog.getByRole("checkbox", { name: "Through Relay for gpt-5.4-mini", exact: true });
+  const bridge = dialog.getByRole("checkbox", { name: "Messages via Relay for gpt-5.4-mini", exact: true });
   await expect(bridge).not.toBeChecked();
   await expect(dialog.locator(".source-route-model-row").filter({ hasText: "gpt-5.4-mini" })).toHaveCount(1);
   await expect(dialog.getByRole("group", { name: "Messages reasoning" })).toHaveCount(0);
@@ -907,6 +917,17 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/source-bridge-routes-840x560.png" });
 
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+  })).toBe(true);
+  expect(await dialog.locator(".source-route-matrix").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-bridge-routes-390x844.png" });
+
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as {
@@ -933,7 +954,7 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
       adapter: "native",
       reasoningMode: "disabled",
       cacheWriteTtl: "provider",
-      modelIds: ["gpt-5.4"],
+      modelIds: [],
     },
     {
       wireApi: "messages",
@@ -941,6 +962,13 @@ test("source editor keeps bridge model ownership explicit", async ({ page }) => 
       reasoningMode: "disabled",
       cacheWriteTtl: "5m",
       modelIds: ["gpt-5.4-mini"],
+    },
+    {
+      wireApi: "responses",
+      adapter: "responses_to_gemini",
+      reasoningMode: "disabled",
+      cacheWriteTtl: "provider",
+      modelIds: ["gpt-5.4"],
     },
     {
       wireApi: "responses",

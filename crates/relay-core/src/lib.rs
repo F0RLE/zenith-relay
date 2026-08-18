@@ -29,10 +29,11 @@ pub use catalog::{
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use protocol::{
-    bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError, AdapterResult,
-    MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState, MessagesBridgeStore,
-    MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter,
+    bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError,
+    AdapterResponse, AdapterResult, AdapterStreamBridge, GeminiBridgeRequest, GeminiBridgeResponse,
+    GeminiStreamBridge, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
+    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
+    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};

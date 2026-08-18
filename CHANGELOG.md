@@ -22,6 +22,9 @@ release entries are kept concise and link to the corresponding tag.
   stream, keeps E2E in Overview, and lets the summary include generation speed.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
   reuse across a follow-up request.
+- Explicit `Responses -> Gemini` source routing for discovered Gemini models;
+  the new bridge starts unassigned and does not advertise a model until it is
+  selected.
 
 ### Changed
 
@@ -35,7 +38,9 @@ release entries are kept concise and link to the corresponding tag.
 - The OAuth success page is centered and schedules its browser tab to close ten
   seconds after the account callback succeeds.
 - Usage request details now open as a compact overview with token, tool, and
-  route sections; generation speed uses the post-first-token interval while
+  route sections.
+- Generation speed now uses successful post-first-output intervals and the
+  remaining visible output tokens, excluding separately reported reasoning;
   the full-request E2E stream remains in Overview.
 - Pool speed controls now use the clearer Standard/Fast terminology while
   preserving the existing service-tier behavior.

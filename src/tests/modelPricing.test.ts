@@ -9,7 +9,10 @@ describe("model pricing", () => {
     expect(modelProviderGroup("grok-4.5")).toBe("provider-grok");
     expect(modelProviderGroup("gemini-3.6-flash")).toBe("provider-gemini");
     expect(modelProviderGroup("glm-5.2")).toBe("provider-glm");
-    expect(modelProviderGroupLabel("provider-glm")).toBe("GLM");
+    expect(modelProviderGroupLabel("provider-gemini")).toBe("Google");
+    expect(modelProviderGroupLabel("provider-grok")).toBe("xAI");
+    expect(modelProviderGroupLabel("provider-glm")).toBe("Z.ai");
+    expect(modelProviderGroupLabel("provider-deepseek")).toBe("Deepseek");
     expect(supportsCacheWritePricing("claude-sonnet-next")).toBe(true);
     expect(groupModels(["glm-5", "gpt-5", "gemini-3", "grok-4", "new-provider"], (model) => model).map((group) => [group.id, group.items])).toEqual([
       ["openai", ["gpt-5"]],

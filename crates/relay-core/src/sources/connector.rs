@@ -1,7 +1,7 @@
 use super::{
     normalized_base_url, ProviderSource, SourceProtocolBinding, SourceProtocolBindingKey, WireApi,
 };
-use crate::{Error, Result};
+use crate::{Error, Result, UpstreamProtocol};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use std::fmt;
 use url::Url;
@@ -15,6 +15,7 @@ use url::Url;
 #[derive(Clone)]
 pub struct SourceConnector {
     pub(crate) id: String,
+    pub(crate) base_url: Url,
     pub(crate) responses_url: Url,
     pub(crate) chat_completions_url: Url,
     pub(crate) messages_url: Url,
@@ -38,6 +39,7 @@ impl SourceConnector {
         messages_api_key.set_sensitive(true);
         Ok(Self {
             id: source.id.clone(),
+            base_url: base_url.clone(),
             responses_url: base_url
                 .join("responses")
                 .map_err(|_| Error::Validation("source responses URL is invalid".to_string()))?,
@@ -68,14 +70,66 @@ impl SourceConnector {
         }
     }
 
-    pub fn endpoint(&self, binding_key: SourceProtocolBindingKey) -> Option<&Url> {
+    fn authorization_for_protocol(&self, protocol: UpstreamProtocol) -> (HeaderName, HeaderValue) {
+        match protocol {
+            UpstreamProtocol::Messages => (
+                HeaderName::from_static("x-api-key"),
+                self.messages_api_key.clone(),
+            ),
+            UpstreamProtocol::GeminiGenerateContent => (
+                HeaderName::from_static("x-goog-api-key"),
+                self.messages_api_key.clone(),
+            ),
+            UpstreamProtocol::Responses | UpstreamProtocol::ChatCompletions => {
+                (AUTHORIZATION, self.bearer_authorization.clone())
+            }
+        }
+    }
+
+    pub fn endpoint(
+        &self,
+        binding_key: SourceProtocolBindingKey,
+        model: &str,
+        stream: bool,
+    ) -> Option<Url> {
         let binding = self.binding_for(binding_key)?;
-        let upstream_wire_api = binding.adapter.upstream_wire_api(binding.wire_api);
-        Some(match upstream_wire_api {
-            WireApi::Responses => &self.responses_url,
-            WireApi::ChatCompletions => &self.chat_completions_url,
-            WireApi::Messages => &self.messages_url,
-        })
+        let protocol = binding.adapter.upstream_protocol(binding.wire_api);
+        match protocol {
+            UpstreamProtocol::Responses => Some(self.responses_url.clone()),
+            UpstreamProtocol::ChatCompletions => Some(self.chat_completions_url.clone()),
+            UpstreamProtocol::Messages => Some(self.messages_url.clone()),
+            UpstreamProtocol::GeminiGenerateContent => self.gemini_endpoint(model, stream),
+        }
+    }
+
+    fn gemini_endpoint(&self, model: &str, stream: bool) -> Option<Url> {
+        let model = model.strip_prefix("models/").unwrap_or(model);
+        if model.is_empty()
+            || !model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return None;
+        }
+        let mut url = self.base_url.clone();
+        {
+            let mut segments = url.path_segments_mut().ok()?;
+            segments.pop_if_empty().push("models").push(model);
+        }
+        let path = format!(
+            "{}:{}",
+            url.path(),
+            if stream {
+                "streamGenerateContent"
+            } else {
+                "generateContent"
+            }
+        );
+        url.set_path(&path);
+        if stream {
+            url.query_pairs_mut().append_pair("alt", "sse");
+        }
+        Some(url)
     }
 
     pub fn canonical_model_for(
@@ -102,7 +156,7 @@ impl SourceConnector {
         &self,
         binding: &SourceProtocolBinding,
     ) -> (HeaderName, HeaderValue) {
-        self.authorization(binding.adapter.upstream_wire_api(binding.wire_api))
+        self.authorization_for_protocol(binding.adapter.upstream_protocol(binding.wire_api))
     }
 
     /// Returns headers required by the selected upstream wire contract.
@@ -113,7 +167,7 @@ impl SourceConnector {
     /// native Responses, native Messages, or a bridge.
     pub fn protocol_headers_for_binding(&self, binding: &SourceProtocolBinding) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if binding.adapter.upstream_wire_api(binding.wire_api) == WireApi::Messages {
+        if binding.adapter.upstream_protocol(binding.wire_api) == UpstreamProtocol::Messages {
             headers.insert(
                 HeaderName::from_static("anthropic-version"),
                 HeaderValue::from_static("2023-06-01"),
@@ -142,6 +196,7 @@ impl fmt::Debug for SourceConnector {
         formatter
             .debug_struct("SourceConnector")
             .field("id", &self.id)
+            .field("base_url", &self.base_url)
             .field("responses_url", &self.responses_url)
             .field("chat_completions_url", &self.chat_completions_url)
             .field("messages_url", &self.messages_url)
@@ -199,5 +254,37 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("2023-06-01")
         );
+    }
+
+    #[test]
+    fn gemini_bridge_uses_model_url_and_google_key_header() {
+        let bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::ResponsesToGemini,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["gemini-test".to_string()],
+        }];
+        let connector = SourceConnector::new(&source(), &bindings).unwrap();
+        let (name, value) = connector.authorization_for_binding(&bindings[0]);
+        assert_eq!(name, HeaderName::from_static("x-goog-api-key"));
+        assert_eq!(value, "source-secret");
+        assert_eq!(
+            connector
+                .endpoint(bindings[0].key(), "gemini-test", false)
+                .unwrap()
+                .as_str(),
+            "https://api.example.test/v1/models/gemini-test:generateContent"
+        );
+        assert_eq!(
+            connector
+                .endpoint(bindings[0].key(), "gemini-test", true)
+                .unwrap()
+                .as_str(),
+            "https://api.example.test/v1/models/gemini-test:streamGenerateContent?alt=sse"
+        );
+        assert!(connector
+            .endpoint(bindings[0].key(), "../not-a-model", false)
+            .is_none());
     }
 }
