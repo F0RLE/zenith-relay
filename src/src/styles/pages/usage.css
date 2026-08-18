@@ -10,7 +10,7 @@
 
 .usage-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
 .usage-metrics > div {
@@ -27,14 +27,6 @@
 
 .usage-metrics > div:last-child {
   border-right: 0;
-}
-
-.usage-generation-metric {
-  grid-column: 1 / -1;
-  min-height: 62px !important;
-  border-top: 1px solid var(--relay-border);
-  border-right: 0 !important;
-  background: var(--relay-subtle);
 }
 
 .usage-metrics > div > svg {
@@ -95,14 +87,21 @@
 
   .usage-metrics > div {
     border-right: 1px solid var(--relay-border);
+    border-bottom: 1px solid var(--relay-border);
   }
 
   .usage-metrics > div:nth-child(2n) {
     border-right: 0;
   }
 
-  .usage-metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--relay-border);
+  .usage-metrics > div:last-child,
+  .usage-metrics > div:nth-last-child(2):nth-child(odd) {
+    border-bottom: 0;
+  }
+
+  .usage-metrics > div:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+    border-right: 0;
   }
 
   .usage-metrics > div {

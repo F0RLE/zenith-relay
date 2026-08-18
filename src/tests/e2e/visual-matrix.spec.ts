@@ -1629,7 +1629,10 @@ for (const scenario of [
       });
     }
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 4);
+    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 5);
+    if (scenario.width === 1160) {
+      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(1);
+    }
     expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
     expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
     expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
