@@ -58,8 +58,12 @@ pub use sources::{
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,
+    estimate_api_equivalent_with_cache_ttl,
+    estimate_api_equivalent_with_cache_ttl_and_price_override,
+    estimate_api_equivalent_with_cache_ttl_and_price_sources,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
     normalize_reasoning_effort, sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPrice,
-    ApiModelPriceOverride, ErrorOrigin, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
-    UsageCallback, UsageEvent, UsageValue, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin, TerminalOutputKind, ToolChoiceMode,
+    ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };

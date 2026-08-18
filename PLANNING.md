@@ -63,10 +63,12 @@ reasoning options the source explicitly confirms. A proxy is optional and may
 be shared; there is no one-proxy-per-account rule.
 
 Discovery refreshes provider-derived catalog data for that source without
-turning it into a global vendor assumption. A user-entered price remains an
-explicit override; changing an endpoint or protocol causes stale
-provider-derived prices to be rediscovered rather than carried to a different
-source contract.
+turning it into a global vendor assumption. Source pricing keeps provider,
+official-catalog, and manual provenance separate; runtime resolution is
+provider-discovered first, then the verified official catalog, then a manual
+value when no trusted upstream or official price exists. Changing an endpoint
+or protocol causes stale provider-derived prices to be rediscovered rather than
+carried to a different source contract.
 
 Every candidate has a stable record, credential availability, health, model
 availability, and a user-facing operational state. A missing secret, revoked
@@ -239,9 +241,10 @@ response bodies in ordinary telemetry.
 
 API-equivalent is an informational estimate, never a routing input:
 
-- a source-specific model price override wins;
-- otherwise the source's valid discovered catalog price is used;
-- otherwise the verified bundled OpenAI price catalog is used;
+- personal account usage uses the verified bundled OpenAI price catalog only;
+- an API source uses provider-discovered price evidence first;
+- if discovery has no price, the verified bundled OpenAI catalog is tried;
+- a manual source price is used only when neither provider nor official price exists;
 - input, cached input, cache writes, and output retain separate price buckets;
 - unknown or incomplete token splits remain explicitly unpriced;
 - Fast and Standard request modes are recorded as observed service tiers, not

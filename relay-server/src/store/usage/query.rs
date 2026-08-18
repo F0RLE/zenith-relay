@@ -5,9 +5,11 @@ use super::super::{
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
-    estimate_api_equivalent_with_price_override,
+    estimate_api_equivalent_with_cache_ttl,
+    estimate_api_equivalent_with_cache_ttl_and_price_sources,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, WireApi,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, ApiModelPriceSources,
+    WireApi,
 };
 
 pub(super) const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
@@ -118,6 +120,9 @@ pub(super) fn usage_model_equivalents(
     let sql = format!(
         "SELECT candidate_kind, candidate_hint, COALESCE(resolved_model, requested_model, ''),
             SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END),
+            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END),
+            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END),
             SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
             COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
             COUNT(output_tokens), COUNT(total_tokens)
@@ -131,25 +136,29 @@ pub(super) fn usage_model_equivalents(
             let model = row.get::<_, String>(2)?;
             let input_tokens = optional_u64(row.get(3)?);
             let cached_input_tokens = optional_u64(row.get(4)?);
-            let cache_write_input_tokens = optional_u64(row.get(5)?);
-            let output_tokens = optional_u64(row.get(6)?);
-            let total_tokens = optional_u64(row.get(7)?);
-            let input_samples = nonnegative_u64(row.get(8)?);
-            let cached_samples = nonnegative_u64(row.get(9)?);
-            let cache_write_samples = nonnegative_u64(row.get(10)?);
-            let output_samples = nonnegative_u64(row.get(11)?);
-            let total_samples = nonnegative_u64(row.get(12)?);
+            let cache_write_5m_tokens = optional_u64(row.get(6)?);
+            let cache_write_1h_tokens = optional_u64(row.get(7)?);
+            let unknown_cache_write_tokens = optional_u64(row.get(8)?);
+            let output_tokens = optional_u64(row.get(9)?);
+            let total_tokens = optional_u64(row.get(10)?);
+            let input_samples = nonnegative_u64(row.get(11)?);
+            let cached_samples = nonnegative_u64(row.get(12)?);
+            let cache_write_samples = nonnegative_u64(row.get(13)?);
+            let output_samples = nonnegative_u64(row.get(14)?);
+            let total_samples = nonnegative_u64(row.get(15)?);
+            let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 model.clone(),
-                estimate_api_equivalent_with_price_override(
+                estimate_candidate_equivalent(
+                    &kind,
                     (!model.is_empty()).then_some(model.as_str()),
                     (input_samples > 0).then_some(input_tokens).flatten(),
                     (input_samples > 0 && cached_samples == input_samples)
                         .then_some(cached_input_tokens)
                         .flatten(),
-                    (input_samples > 0 && cache_write_samples == input_samples)
-                        .then_some(cache_write_input_tokens)
-                        .flatten(),
+                    cache_writes.map(|_| cache_write_5m_tokens.unwrap_or_default()),
+                    cache_writes.map(|_| cache_write_1h_tokens.unwrap_or_default()),
+                    cache_writes.map(|_| unknown_cache_write_tokens.unwrap_or_default()),
                     (output_samples > 0).then_some(output_tokens).flatten(),
                     (total_samples > 0).then_some(total_tokens).flatten(),
                     configured_model_price(
@@ -169,6 +178,44 @@ pub(super) fn usage_model_equivalents(
         equivalents.entry(model).or_default().merge(estimate);
     }
     Ok(equivalents)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn estimate_candidate_equivalent(
+    candidate_kind: &str,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    cache_write_5m_tokens: Option<u64>,
+    cache_write_1h_tokens: Option<u64>,
+    unknown_cache_write_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    price_sources: Option<ApiModelPriceSources>,
+) -> ApiEquivalentSummary {
+    if candidate_kind == "account" {
+        return estimate_api_equivalent_with_cache_ttl(
+            model,
+            input_tokens,
+            cached_input_tokens,
+            cache_write_5m_tokens,
+            cache_write_1h_tokens,
+            unknown_cache_write_tokens,
+            output_tokens,
+            total_tokens,
+        );
+    }
+    estimate_api_equivalent_with_cache_ttl_and_price_sources(
+        model,
+        input_tokens,
+        cached_input_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        unknown_cache_write_tokens,
+        output_tokens,
+        total_tokens,
+        price_sources,
+    )
 }
 
 pub(super) fn usage_buckets(
@@ -208,6 +255,9 @@ pub(super) fn usage_buckets(
         "SELECT {bucket_sql}, candidate_kind, candidate_hint, \
             COALESCE(resolved_model, requested_model), \
             SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), \
+            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
+            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
+            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), \
             SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
             COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
             COUNT(output_tokens), COUNT(total_tokens) \
@@ -221,14 +271,16 @@ pub(super) fn usage_buckets(
             let model = row.get::<_, Option<String>>(3)?;
             let input_tokens: Option<i64> = row.get(4)?;
             let cached_input_tokens: Option<i64> = row.get(5)?;
-            let cache_write_input_tokens: Option<i64> = row.get(6)?;
-            let output_tokens: Option<i64> = row.get(7)?;
-            let total_tokens: Option<i64> = row.get(8)?;
-            let input_samples: i64 = row.get(9)?;
-            let cached_samples: i64 = row.get(10)?;
-            let cache_write_samples: i64 = row.get(11)?;
-            let output_samples: i64 = row.get(12)?;
-            let total_samples: i64 = row.get(13)?;
+            let cache_write_5m_tokens: Option<i64> = row.get(7)?;
+            let cache_write_1h_tokens: Option<i64> = row.get(8)?;
+            let unknown_cache_write_tokens: Option<i64> = row.get(9)?;
+            let output_tokens: Option<i64> = row.get(10)?;
+            let total_tokens: Option<i64> = row.get(11)?;
+            let input_samples: i64 = row.get(12)?;
+            let cached_samples: i64 = row.get(13)?;
+            let cache_write_samples: i64 = row.get(14)?;
+            let output_samples: i64 = row.get(15)?;
+            let total_samples: i64 = row.get(16)?;
             let start_ms = nonnegative_u64(row.get(0)?);
             let input_tokens = (input_samples > 0)
                 .then(|| optional_u64(input_tokens))
@@ -236,17 +288,18 @@ pub(super) fn usage_buckets(
             let cached_input_tokens = (input_samples > 0 && cached_samples == input_samples)
                 .then(|| optional_u64(cached_input_tokens))
                 .flatten();
-            let cache_write_input_tokens = (input_samples > 0
-                && cache_write_samples == input_samples)
-                .then(|| optional_u64(cache_write_input_tokens))
-                .flatten();
+            let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 start_ms,
-                estimate_api_equivalent_with_price_override(
+                estimate_candidate_equivalent(
+                    &kind,
                     model.as_deref(),
                     input_tokens,
                     cached_input_tokens,
-                    cache_write_input_tokens,
+                    cache_writes.map(|_| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
+                    cache_writes.map(|_| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
+                    cache_writes
+                        .map(|_| optional_u64(unknown_cache_write_tokens).unwrap_or_default()),
                     (output_samples > 0)
                         .then(|| optional_u64(output_tokens))
                         .flatten(),
@@ -317,10 +370,21 @@ pub(super) fn configured_model_price(
     candidate_kind: &str,
     candidate_id: &str,
     model: Option<&str>,
-) -> Option<ApiModelPriceOverride> {
+) -> Option<ApiModelPriceSources> {
     let model = model?.to_ascii_lowercase();
-    (candidate_kind == "source")
-        .then(|| source_overrides.get(candidate_id)?.get(&model).copied())
-        .flatten()
-        .or_else(|| overrides.get(&model).copied())
+    if candidate_kind != "source" {
+        return None;
+    }
+    source_overrides
+        .get(candidate_id)
+        .and_then(|prices| prices.get(&model).copied())
+        .or_else(|| {
+            overrides
+                .get(&model)
+                .copied()
+                .map(|manual| ApiModelPriceSources {
+                    provider: None,
+                    manual: Some(manual),
+                })
+        })
 }

@@ -1113,11 +1113,12 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .json()
         .await
         .unwrap();
-    assert_eq!(repriced_usage["totals"]["apiEquivalent"]["microUsd"], 3);
-    assert_eq!(repriced_usage["totals"]["apiEquivalent"]["pricedTokens"], 2);
+    // Global API-source price rules must not reprice personal-account usage.
+    assert_eq!(repriced_usage["totals"]["apiEquivalent"]["microUsd"], 0);
+    assert_eq!(repriced_usage["totals"]["apiEquivalent"]["pricedTokens"], 0);
     assert_eq!(
         repriced_usage["totals"]["apiEquivalent"]["unpricedTokens"],
-        0
+        2
     );
     let disabled_response = client
         .post(format!("{}/models/rules", first.origin))

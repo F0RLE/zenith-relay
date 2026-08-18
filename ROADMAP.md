@@ -105,7 +105,9 @@ real endpoint and client evidence.
 
 1. Run source discovery against real Responses and Messages endpoints and prove
    that model availability, protocol bindings, confirmed reasoning, discovered
-   prices, and manual price overrides remain separate across refreshes.
+   prices, and manual price overrides remain separate across refreshes. Keep
+   account API-equivalent estimates on the official account catalog path, while
+   API sources resolve provider evidence, official fallback, then manual price.
 2. Keep native passthrough as the default and require an explicit adapter for
    every protocol conversion.
 3. Do not claim hosted tools, dynamic discovery, unsupported reasoning, or

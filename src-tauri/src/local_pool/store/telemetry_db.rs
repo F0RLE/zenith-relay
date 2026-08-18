@@ -10,10 +10,10 @@ use std::{
 #[cfg(test)]
 use zenith_relay_core::ResponseAffinityBinding;
 use zenith_relay_core::{
-    api_pricing_revision, estimate_api_equivalent_with_price_override,
+    api_pricing_revision,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, DefaultServiceTier, ErrorOrigin,
-    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, ApiModelPriceOverride, ApiModelPriceSources, CacheWriteTtl,
+    DefaultServiceTier, ErrorOrigin, RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
 };
 
 mod affinity;
@@ -29,7 +29,7 @@ use usage::{
     usage_log_from_row, usage_model_equivalents, usage_totals,
 };
 
-pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
+pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
 
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
@@ -1057,11 +1057,23 @@ mod tests {
         let source_prices = BTreeMap::from([
             (
                 "source_cheap".into(),
-                BTreeMap::from([("private-model".into(), price(1_000_000, 2_000_000))]),
+                BTreeMap::from([(
+                    "private-model".into(),
+                    zenith_relay_core::ApiModelPriceSources {
+                        provider: None,
+                        manual: Some(price(1_000_000, 2_000_000)),
+                    },
+                )]),
             ),
             (
                 "source_expensive".into(),
-                BTreeMap::from([("private-model".into(), price(2_000_000, 4_000_000))]),
+                BTreeMap::from([(
+                    "private-model".into(),
+                    zenith_relay_core::ApiModelPriceSources {
+                        provider: None,
+                        manual: Some(price(2_000_000, 4_000_000)),
+                    },
+                )]),
             ),
         ]);
         let page = database
