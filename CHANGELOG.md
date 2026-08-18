@@ -23,6 +23,7 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Pool cards now retain the configured routing order for API sources with multiple protocol routes.
 - The source-route editor is more compact: formats are added on demand, model
   assignment columns stay aligned, and upstream API keys appear before routes.
 - The OAuth success page is centered and schedules its browser tab to close ten

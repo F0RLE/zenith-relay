@@ -1181,6 +1181,7 @@ for (const theme of themes) {
   for (const viewport of viewports) {
     test(`profile recovery ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+    await page.clock.install({ time: 0 });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Восстановление", exact: true }).click();

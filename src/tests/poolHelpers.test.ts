@@ -11,6 +11,7 @@ import {
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
+import { routingOrderPositions } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -177,5 +178,20 @@ describe("pool helpers", () => {
     const unavailable = { ...account({ id: "unavailable", label: "A", operationalStatus: "unavailable" }), kind: "account" as const };
     const order = new Map([["unavailable", 0], ["healthy", 1]]);
     expect(comparePoolMembers(healthy, unavailable, order)).toBeLessThan(0);
+  });
+
+  test("sorts a multi-protocol source by its first protocol candidate", () => {
+    const order = routingOrderPositions([
+      { candidateId: "zenith-api::responses", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "zenith-api::messages", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "gpt-pro", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+    ]);
+
+    expect(order.get("zenith-api")).toBe(0);
+    expect(comparePoolMembers(
+      { ...source({ id: "zenith-api", name: "Zenith API" }), kind: "source" },
+      { ...source({ id: "gpt-pro", name: "GPT PRO" }), kind: "source" },
+      order,
+    )).toBeLessThan(0);
   });
 });
