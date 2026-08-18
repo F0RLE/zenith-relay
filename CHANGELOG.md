@@ -18,11 +18,18 @@ release entries are kept concise and link to the corresponding tag.
   cost as separate values.
 - Usage history now shows the requested reasoning effort and the normalized
   effort actually sent to the selected provider.
+- Usage now shows provider generation speed separately from the full-request E2E
+  stream, keeps E2E in Overview, and lets the summary include generation speed.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
   reuse across a follow-up request.
+- Explicit `Responses -> Gemini` source routing for discovered Gemini models;
+  the new bridge starts unassigned and does not advertise a model until it is
+  selected.
 
 ### Changed
 
+- Configured API source order now takes precedence over prompt-cache affinity;
+  response-owner affinity remains intact for protocol continuations.
 - Pool cards now retain the configured routing order for API sources with multiple protocol routes.
 - Source discovery keeps the native Responses catalog fallback fresh when
   other models are assigned to a Messages or Responses-to-Messages route.
@@ -31,8 +38,10 @@ release entries are kept concise and link to the corresponding tag.
 - The OAuth success page is centered and schedules its browser tab to close ten
   seconds after the account callback succeeds.
 - Usage request details now open as a compact overview with token, tool, and
-  route sections; stream speed uses all output tokens over the full request
-  duration without presenting successful requests as errors.
+  route sections.
+- Generation speed now uses successful post-first-output intervals and the
+  remaining visible output tokens, excluding separately reported reasoning;
+  the full-request E2E stream remains in Overview.
 - Pool speed controls now use the clearer Standard/Fast terminology while
   preserving the existing service-tier behavior.
 - Pool member cards fill the available grid width at larger windows while

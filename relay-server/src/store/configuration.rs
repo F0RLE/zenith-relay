@@ -17,15 +17,15 @@ use zenith_relay_core::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, DEFAULT_COOLDOWN_AFTER_FAILURES,
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    ApiModelPriceOverride, ApiModelPriceSources, DefaultServiceTier, RoutingStrategy,
+    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 
-pub(super) type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
+pub(super) type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
 
 #[derive(Debug)]
 pub enum ConfigurationReplaceError {
@@ -234,10 +234,17 @@ impl Store {
         self.sources()?
             .into_iter()
             .map(|source| {
-                let mut prices = normalize_model_price_overrides(source.detected_model_prices)?;
-                prices.extend(normalize_model_price_overrides(
-                    source.model_price_overrides,
-                )?);
+                let manual = normalize_model_price_overrides(source.model_price_overrides)?;
+                let provider = normalize_model_price_overrides(source.detected_model_prices)?;
+                let mut prices = BTreeMap::new();
+                for model in manual.keys().chain(provider.keys()) {
+                    prices
+                        .entry(model.clone())
+                        .or_insert_with(|| ApiModelPriceSources {
+                            provider: provider.get(model).copied(),
+                            manual: manual.get(model).copied(),
+                        });
+                }
                 Ok((identity_hint(&source.id), prices))
             })
             .collect()
@@ -827,11 +834,23 @@ mod tests {
                 .and_then(|prices| prices.get("private-model"))
                 .copied()
         };
-        assert_eq!(price(&store), Some(manual));
+        assert_eq!(
+            price(&store),
+            Some(ApiModelPriceSources {
+                provider: Some(detected),
+                manual: Some(manual),
+            })
+        );
 
         source.model_price_overrides.clear();
         store.save_source(&source).unwrap();
-        assert_eq!(price(&store), Some(detected));
+        assert_eq!(
+            price(&store),
+            Some(ApiModelPriceSources {
+                provider: Some(detected),
+                manual: None,
+            })
+        );
 
         // A later catalog refresh can legitimately omit a still-available
         // model's price; it must clear the old detected value.

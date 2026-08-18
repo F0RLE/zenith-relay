@@ -33,8 +33,19 @@ pub fn get_local_usage_page(
                 .sources()
                 .iter()
                 .map(|source| {
-                    let mut prices = source.detected_model_prices.clone();
-                    prices.extend(source.model_price_overrides.clone());
+                    let mut prices = BTreeMap::new();
+                    for model in source
+                        .model_price_overrides
+                        .keys()
+                        .chain(source.detected_model_prices.keys())
+                    {
+                        prices.entry(model.clone()).or_insert_with(|| {
+                            zenith_relay_core::ApiModelPriceSources {
+                                provider: source.detected_model_prices.get(model).copied(),
+                                manual: source.model_price_overrides.get(model).copied(),
+                            }
+                        });
+                    }
                     (source.id.clone(), prices)
                 })
                 .collect::<BTreeMap<_, _>>(),

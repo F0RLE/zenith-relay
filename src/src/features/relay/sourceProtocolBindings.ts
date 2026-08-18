@@ -30,7 +30,8 @@ function normalizedCacheWriteTtl(value: SourceProtocolBinding): CacheWriteTtl {
 }
 
 export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter {
-  return binding.adapter === "responses_to_messages" && binding.wireApi === "responses"
+  return (binding.adapter === "responses_to_messages" || binding.adapter === "responses_to_gemini")
+    && binding.wireApi === "responses"
     ? binding.adapter
     : "native";
 }
@@ -105,7 +106,7 @@ function sourceBindingModels(
   bindings: readonly SourceProtocolBinding[],
   binding: SourceProtocolBinding,
 ) {
-  return binding.modelIds.length || bindings.length !== 1
+  return binding.modelIds.length || bindings.length !== 1 || normalizedAdapter(binding) !== "native"
     ? binding.modelIds
     : source.models;
 }

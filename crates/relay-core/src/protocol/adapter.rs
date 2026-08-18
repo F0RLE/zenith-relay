@@ -4,6 +4,7 @@
 //! provider-specific behavior.
 
 mod contracts;
+mod gemini;
 mod messages;
 mod store;
 mod stream;
@@ -14,13 +15,14 @@ pub(crate) use contracts::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
 };
 pub use contracts::{
-    AdapterError, AdapterRequestContext, AdapterResult, MessagesBridgeRequest,
+    AdapterError, AdapterRequestContext, AdapterResponse, AdapterResult, MessagesBridgeRequest,
     MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode, NativeResponsesReplayState,
-    PreparedAdapterRequest, SourceAdapter,
+    PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
+pub use gemini::{GeminiBridgeRequest, GeminiBridgeResponse};
 pub use messages::{
     bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,
     prepare_responses_to_messages_scoped, translate_messages_response,
 };
 pub use store::{MessagesBridgeStore, NativeResponsesReplayStore};
-pub use stream::MessagesStreamBridge;
+pub use stream::{AdapterStreamBridge, GeminiStreamBridge, MessagesStreamBridge};

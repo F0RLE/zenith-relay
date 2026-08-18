@@ -1,6 +1,7 @@
 use super::contracts::{
     AdapterError, AdapterResult, MessagesBridgeRequest, MessagesBridgeResponse, ResponsesToolKind,
 };
+use super::gemini::GeminiBridgeRequest;
 use super::messages::{
     bridged_response_id_scoped, custom_tool_input, responses_output_from_messages_content,
     responses_usage, set_message_output_id, validate_messages_tool_calls,
@@ -8,6 +9,11 @@ use super::messages::{
 use crate::protocol::sse_event_end;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+pub enum AdapterStreamBridge {
+    Messages(Box<MessagesStreamBridge>),
+    Gemini(Box<GeminiStreamBridge>),
+}
 
 /// Incremental Messages-to-Responses state machine. It owns no network
 /// client and can therefore be reused by desktop, server, and contract tests.
@@ -1015,6 +1021,279 @@ impl MessagesStreamBridge {
     }
 }
 
+/// Incrementally converts Gemini's native `streamGenerateContent` SSE frames
+/// into the client-facing Responses event contract. This adapter intentionally
+/// accepts only text parts; capability probes must prove tools, images, or
+/// thinking before they receive a different bridge.
+#[derive(Debug)]
+pub struct GeminiStreamBridge {
+    request: GeminiBridgeRequest,
+    pending: Vec<u8>,
+    output: VecDeque<Vec<u8>>,
+    text: String,
+    usage: Option<Value>,
+    started: bool,
+    terminal: bool,
+    upstream_error: Option<Value>,
+}
+
+impl GeminiStreamBridge {
+    pub fn new(request: GeminiBridgeRequest) -> Self {
+        Self {
+            request,
+            pending: Vec::new(),
+            output: VecDeque::new(),
+            text: String::new(),
+            usage: None,
+            started: false,
+            terminal: false,
+            upstream_error: None,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        if self.terminal {
+            return;
+        }
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = sse_event_end(&self.pending) {
+            let event = self.pending.drain(..end).collect::<Vec<_>>();
+            self.handle_event(&event);
+            if self.terminal {
+                self.pending.clear();
+                return;
+            }
+        }
+    }
+
+    pub fn finish(&mut self) {
+        if self.terminal {
+            return;
+        }
+        self.complete();
+    }
+
+    pub fn pop_output(&mut self) -> Option<Vec<u8>> {
+        self.output.pop_front()
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub fn take_upstream_error(&mut self) -> Option<Value> {
+        self.upstream_error.take()
+    }
+
+    fn handle_event(&mut self, event: &[u8]) {
+        if sse_done(event) {
+            self.complete();
+            return;
+        }
+        let Some(value) = parse_sse_data(event) else {
+            if sse_event_has_data(event) {
+                self.fail(AdapterError::upstream_stream_invalid());
+            }
+            return;
+        };
+        if value.get("error").is_some() {
+            self.upstream_error = Some(value);
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
+        if let Some(usage) = value.get("usageMetadata") {
+            self.usage = Some(usage.clone());
+        }
+        let Some(candidate) = value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+        else {
+            return;
+        };
+        let Some(parts) = candidate
+            .pointer("/content/parts")
+            .and_then(Value::as_array)
+        else {
+            if candidate
+                .get("finishReason")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                self.complete();
+            } else {
+                self.fail(AdapterError::upstream_stream_invalid());
+            }
+            return;
+        };
+        let mut next = String::new();
+        for part in parts {
+            let Some(part) = part.as_object() else {
+                self.fail(AdapterError::upstream_stream_invalid());
+                return;
+            };
+            if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            let Some(text) = part.get("text").and_then(Value::as_str) else {
+                self.fail(AdapterError::upstream_stream_invalid());
+                return;
+            };
+            next.push_str(text);
+        }
+        if !next.is_empty() {
+            self.ensure_started();
+            if self.terminal {
+                return;
+            }
+            let delta = next.strip_prefix(&self.text).unwrap_or(&next).to_string();
+            if !delta.is_empty() {
+                self.text.push_str(&delta);
+                self.frame(
+                    "response.output_text.delta",
+                    json!({
+                        "type": "response.output_text.delta",
+                        "response_id": self.request.response_id(),
+                        "item_id": "gemini_bridge_output",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": delta,
+                    }),
+                );
+            }
+        }
+        if candidate
+            .get("finishReason")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            self.complete();
+        }
+    }
+
+    fn ensure_started(&mut self) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        self.frame(
+            "response.created",
+            json!({
+                "type": "response.created",
+                "response": {
+                    "id": self.request.response_id(),
+                    "object": "response",
+                    "status": "in_progress",
+                    "model": self.request.model(),
+                    "output": [],
+                }
+            }),
+        );
+        self.frame(
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "gemini_bridge_output",
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                }
+            }),
+        );
+        self.frame(
+            "response.content_part.added",
+            json!({
+                "type": "response.content_part.added",
+                "item_id": "gemini_bridge_output",
+                "output_index": 0,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            }),
+        );
+    }
+
+    fn complete(&mut self) {
+        if self.terminal {
+            return;
+        }
+        if !self.started || self.text.is_empty() {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
+        let upstream = json!({"usageMetadata": self.usage.clone()});
+        let response = super::gemini::responses_body(
+            self.request.response_id(),
+            self.request.model(),
+            &self.text,
+            &upstream,
+        );
+        self.frame(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": response["output"][0].clone(),
+            }),
+        );
+        self.frame(
+            "response.completed",
+            json!({"type": "response.completed", "response": response}),
+        );
+        self.terminal = true;
+    }
+
+    fn fail(&mut self, error: AdapterError) {
+        if self.terminal {
+            return;
+        }
+        self.frame(
+            "response.failed",
+            json!({
+                "type": "response.failed",
+                "response": {
+                    "id": self.request.response_id(),
+                    "object": "response",
+                    "status": "failed",
+                    "model": self.request.model(),
+                    "output": [],
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": error.code(),
+                        "message": error.message(),
+                    }
+                }
+            }),
+        );
+        self.terminal = true;
+    }
+
+    fn frame(&mut self, event: &str, payload: Value) {
+        let Ok(payload) = serde_json::to_vec(&payload) else {
+            self.terminal = true;
+            return;
+        };
+        let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
+        frame.extend_from_slice(b"event: ");
+        frame.extend_from_slice(event.as_bytes());
+        frame.extend_from_slice(b"\ndata: ");
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(b"\n\n");
+        self.output.push_back(frame);
+    }
+}
+
+fn sse_done(event: &[u8]) -> bool {
+    event.split(|byte| *byte == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line.strip_prefix(b"data:")
+            .map(|value| value.trim_ascii() == b"[DONE]")
+            .unwrap_or(false)
+    })
+}
+
 fn parse_sse_data(event: &[u8]) -> Option<Value> {
     let mut data = Vec::new();
     for line in event.split(|byte| *byte == b'\n') {
@@ -1055,4 +1334,44 @@ fn tool_arguments_value(arguments: &str) -> Option<Value> {
     serde_json::from_str::<Value>(arguments)
         .ok()
         .filter(Value::is_object)
+}
+
+#[cfg(test)]
+mod gemini_stream_tests {
+    use super::*;
+    use crate::protocol::adapter::gemini::prepare_responses_to_gemini;
+
+    #[test]
+    fn gemini_stream_emits_responses_events_and_usage() {
+        let request = prepare_responses_to_gemini(
+            &json!({"input": "Hello"}),
+            "gemini-test",
+            true,
+            "route",
+            "request-42",
+        )
+        .unwrap();
+        let mut bridge = GeminiStreamBridge::new(request);
+        bridge.push(
+            br#"data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Hello world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}
+
+"#,
+        );
+        let output = std::iter::from_fn(|| bridge.pop_output())
+            .flat_map(|frame| {
+                String::from_utf8(frame)
+                    .unwrap()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(bridge.is_terminal());
+        assert!(output.contains("response.output_text.delta"));
+        assert!(output.contains("Hello world"));
+        assert!(output.contains("\"total_tokens\":5"));
+    }
 }

@@ -3,19 +3,24 @@ use crate::local_pool::error::Result;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
-    estimate_api_equivalent_with_price_override,
+    estimate_api_equivalent_with_cache_ttl,
+    estimate_api_equivalent_with_cache_ttl_and_price_sources,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier,
-    WireApi,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, ApiModelPriceSources,
+    DefaultServiceTier, WireApi,
 };
 
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
-    COALESCE(SUM(CASE WHEN success != 0 THEN generation_ms ELSE 0 END), 0), \
-    COUNT(CASE WHEN success != 0 THEN generation_ms END), \
-    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
-        THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        THEN generation_ms ELSE 0 END), 0), \
+    COUNT(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        THEN generation_ms END), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
     COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
     COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
@@ -130,6 +135,9 @@ pub(super) fn usage_model_equivalents(
         "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
             COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
             SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END),
+            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END),
+            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END),
             SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
             COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
             COUNT(output_tokens), COUNT(total_tokens)
@@ -143,25 +151,29 @@ pub(super) fn usage_model_equivalents(
             let model = row.get::<_, String>(2)?;
             let input_tokens = row.get::<_, Option<i64>>(3)?.map(rust_u64);
             let cached_input_tokens = row.get::<_, Option<i64>>(4)?.map(rust_u64);
-            let cache_write_input_tokens = row.get::<_, Option<i64>>(5)?.map(rust_u64);
-            let output_tokens = row.get::<_, Option<i64>>(6)?.map(rust_u64);
-            let total_tokens = row.get::<_, Option<i64>>(7)?.map(rust_u64);
-            let input_samples = rust_u64(row.get(8)?);
-            let cached_samples = rust_u64(row.get(9)?);
-            let cache_write_samples = rust_u64(row.get(10)?);
-            let output_samples = rust_u64(row.get(11)?);
-            let total_samples = rust_u64(row.get(12)?);
+            let cache_write_5m_tokens = row.get::<_, Option<i64>>(6)?.map(rust_u64);
+            let cache_write_1h_tokens = row.get::<_, Option<i64>>(7)?.map(rust_u64);
+            let unknown_cache_write_tokens = row.get::<_, Option<i64>>(8)?.map(rust_u64);
+            let output_tokens = row.get::<_, Option<i64>>(9)?.map(rust_u64);
+            let total_tokens = row.get::<_, Option<i64>>(10)?.map(rust_u64);
+            let input_samples = rust_u64(row.get(11)?);
+            let cached_samples = rust_u64(row.get(12)?);
+            let cache_write_samples = rust_u64(row.get(13)?);
+            let output_samples = rust_u64(row.get(14)?);
+            let total_samples = rust_u64(row.get(15)?);
+            let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 model.clone(),
-                estimate_api_equivalent_with_price_override(
+                estimate_candidate_equivalent(
+                    &kind,
                     (!model.is_empty()).then_some(model.as_str()),
                     (input_samples > 0).then_some(input_tokens).flatten(),
                     (input_samples > 0 && cached_samples == input_samples)
                         .then_some(cached_input_tokens)
                         .flatten(),
-                    (input_samples > 0 && cache_write_samples == input_samples)
-                        .then_some(cache_write_input_tokens)
-                        .flatten(),
+                    cache_writes.map(|_| cache_write_5m_tokens.unwrap_or_default()),
+                    cache_writes.map(|_| cache_write_1h_tokens.unwrap_or_default()),
+                    cache_writes.map(|_| unknown_cache_write_tokens.unwrap_or_default()),
                     (output_samples > 0).then_some(output_tokens).flatten(),
                     (total_samples > 0).then_some(total_tokens).flatten(),
                     configured_model_price(
@@ -181,6 +193,44 @@ pub(super) fn usage_model_equivalents(
         equivalents.entry(model).or_default().merge(estimate);
     }
     Ok(equivalents)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn estimate_candidate_equivalent(
+    candidate_kind: &str,
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    cache_write_5m_tokens: Option<u64>,
+    cache_write_1h_tokens: Option<u64>,
+    unknown_cache_write_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    price_sources: Option<ApiModelPriceSources>,
+) -> ApiEquivalentSummary {
+    if candidate_kind == "account" {
+        return estimate_api_equivalent_with_cache_ttl(
+            model,
+            input_tokens,
+            cached_input_tokens,
+            cache_write_5m_tokens,
+            cache_write_1h_tokens,
+            unknown_cache_write_tokens,
+            output_tokens,
+            total_tokens,
+        );
+    }
+    estimate_api_equivalent_with_cache_ttl_and_price_sources(
+        model,
+        input_tokens,
+        cached_input_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        unknown_cache_write_tokens,
+        output_tokens,
+        total_tokens,
+        price_sources,
+    )
 }
 
 pub(super) fn usage_buckets(
@@ -221,6 +271,9 @@ pub(super) fn usage_buckets(
         "SELECT {bucket_sql}, CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END, \
             COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model), \
             SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), \
+            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
+            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
+            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), \
             SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
             COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
             COUNT(output_tokens), COUNT(total_tokens) \
@@ -234,14 +287,16 @@ pub(super) fn usage_buckets(
             let model = row.get::<_, Option<String>>(3)?;
             let input_tokens: Option<i64> = row.get(4)?;
             let cached_input_tokens: Option<i64> = row.get(5)?;
-            let cache_write_input_tokens: Option<i64> = row.get(6)?;
-            let output_tokens: Option<i64> = row.get(7)?;
-            let total_tokens: Option<i64> = row.get(8)?;
-            let input_samples: i64 = row.get(9)?;
-            let cached_samples: i64 = row.get(10)?;
-            let cache_write_samples: i64 = row.get(11)?;
-            let output_samples: i64 = row.get(12)?;
-            let total_samples: i64 = row.get(13)?;
+            let cache_write_5m_tokens: Option<i64> = row.get(7)?;
+            let cache_write_1h_tokens: Option<i64> = row.get(8)?;
+            let unknown_cache_write_tokens: Option<i64> = row.get(9)?;
+            let output_tokens: Option<i64> = row.get(10)?;
+            let total_tokens: Option<i64> = row.get(11)?;
+            let input_samples: i64 = row.get(12)?;
+            let cached_samples: i64 = row.get(13)?;
+            let cache_write_samples: i64 = row.get(14)?;
+            let output_samples: i64 = row.get(15)?;
+            let total_samples: i64 = row.get(16)?;
             let start_ms = rust_u64(row.get(0)?);
             let input_tokens = (input_samples > 0)
                 .then(|| input_tokens.map(rust_u64))
@@ -249,17 +304,18 @@ pub(super) fn usage_buckets(
             let cached_input_tokens = (input_samples > 0 && cached_samples == input_samples)
                 .then(|| cached_input_tokens.map(rust_u64))
                 .flatten();
-            let cache_write_input_tokens = (input_samples > 0
-                && cache_write_samples == input_samples)
-                .then(|| cache_write_input_tokens.map(rust_u64))
-                .flatten();
+            let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 start_ms,
-                estimate_api_equivalent_with_price_override(
+                estimate_candidate_equivalent(
+                    &kind,
                     model.as_deref(),
                     input_tokens,
                     cached_input_tokens,
-                    cache_write_input_tokens,
+                    cache_writes.map(|_| cache_write_5m_tokens.map(rust_u64).unwrap_or_default()),
+                    cache_writes.map(|_| cache_write_1h_tokens.map(rust_u64).unwrap_or_default()),
+                    cache_writes
+                        .map(|_| unknown_cache_write_tokens.map(rust_u64).unwrap_or_default()),
                     (output_samples > 0)
                         .then(|| output_tokens.map(rust_u64))
                         .flatten(),
@@ -294,17 +350,23 @@ pub(super) fn configured_model_price(
     candidate_kind: &str,
     candidate_id: &str,
     model: Option<&str>,
-) -> Option<ApiModelPriceOverride> {
+) -> Option<ApiModelPriceSources> {
     let model = model?.to_ascii_lowercase();
-    (candidate_kind == "source")
-        .then(|| {
-            source_price_overrides
-                .get(candidate_id)?
+    if candidate_kind != "source" {
+        return None;
+    }
+    source_price_overrides
+        .get(candidate_id)
+        .and_then(|prices| prices.get(&model).copied())
+        .or_else(|| {
+            price_overrides
                 .get(&model)
                 .copied()
+                .map(|manual| ApiModelPriceSources {
+                    provider: None,
+                    manual: Some(manual),
+                })
         })
-        .flatten()
-        .or_else(|| price_overrides.get(&model).copied())
 }
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {

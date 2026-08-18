@@ -10,7 +10,7 @@
 
 .usage-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
 .usage-metrics > div {
@@ -59,8 +59,7 @@
   line-height: 16px;
 }
 
-.usage-metrics strong,
-.usage-performance strong {
+.usage-metrics strong {
   min-width: 0;
   color: var(--relay-text);
   font-size: 18px;
@@ -71,8 +70,7 @@
   white-space: nowrap;
 }
 
-.usage-metrics small,
-.usage-performance small {
+.usage-metrics small {
   min-width: 0;
   overflow: hidden;
   color: var(--relay-muted);
@@ -82,50 +80,28 @@
   white-space: nowrap;
 }
 
-.usage-performance {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  background: var(--relay-subtle);
-}
-
-.usage-performance[data-separated="true"] { border-top: 1px solid var(--relay-border); }
-
-.usage-performance > div {
-  min-width: 0;
-  min-height: 62px;
-  display: flex;
-  align-items: center;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  padding: 9px 14px;
-  border-right: 1px solid var(--relay-border);
-  text-align: center;
-}
-
-.usage-performance > div:last-child {
-  border-right: 0;
-}
-
 @container (max-width: 760px) {
-  .usage-metrics,
-  .usage-performance {
+  .usage-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .usage-metrics > div,
-  .usage-performance > div {
+  .usage-metrics > div {
     border-right: 1px solid var(--relay-border);
+    border-bottom: 1px solid var(--relay-border);
   }
 
-  .usage-metrics > div:nth-child(2n),
-  .usage-performance > div:nth-child(2n) {
+  .usage-metrics > div:nth-child(2n) {
     border-right: 0;
   }
 
-  .usage-metrics > div:nth-child(-n + 2),
-  .usage-performance > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--relay-border);
+  .usage-metrics > div:last-child,
+  .usage-metrics > div:nth-last-child(2):nth-child(odd) {
+    border-bottom: 0;
+  }
+
+  .usage-metrics > div:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+    border-right: 0;
   }
 
   .usage-metrics > div {
@@ -133,10 +109,6 @@
     padding-block: 10px;
   }
 
-  .usage-performance > div {
-    min-height: 54px;
-    padding-block: 8px;
-  }
 }
 
 .usage-view-toolbar {

@@ -3,7 +3,7 @@ use super::{
     SourceProtocolBinding, SourceProtocolBindingKey, WireApi,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
-use crate::{ApiModelPriceOverride, Error, Result};
+use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
@@ -207,21 +207,17 @@ async fn discover_protocol_bindings_with_client(
                 continue;
             }
         };
-        let Some(data) = body.get("data").and_then(Value::as_array) else {
-            last_error = Some(Error::InvalidUpstreamResponse(
-                "upstream model response is invalid",
-            ));
-            continue;
-        };
-        let mut seen = HashSet::new();
-        let upstream_models = data
-            .iter()
-            .filter_map(|model| {
-                let id = model.get("id").and_then(Value::as_str)?;
-                seen.insert(id.to_ascii_lowercase())
-                    .then(|| (id.to_string(), detected_model_price(model)))
-            })
-            .collect::<Vec<_>>();
+        let upstream_models =
+            match parse_upstream_models(binding.adapter.upstream_protocol(binding.wire_api), &body)
+            {
+                Some(models) => models,
+                None => {
+                    last_error = Some(Error::InvalidUpstreamResponse(
+                        "upstream model response is invalid",
+                    ));
+                    continue;
+                }
+            };
 
         // An explicitly supplied model list is scoped to this protocol unless
         // the route is a source-wide catalog fallback. The normalized legacy
@@ -311,4 +307,59 @@ async fn discover_protocol_bindings_with_client(
         protocol_bindings: discovered_bindings,
         detected_model_prices,
     })
+}
+
+fn parse_upstream_models(
+    protocol: UpstreamProtocol,
+    body: &Value,
+) -> Option<Vec<(String, Option<ApiModelPriceOverride>)>> {
+    let models = match protocol {
+        UpstreamProtocol::GeminiGenerateContent => body.get("models")?.as_array()?,
+        UpstreamProtocol::Responses
+        | UpstreamProtocol::ChatCompletions
+        | UpstreamProtocol::Messages => body.get("data")?.as_array()?,
+    };
+    let mut seen = HashSet::new();
+    Some(
+        models
+            .iter()
+            .filter_map(|model| {
+                let id = match protocol {
+                    UpstreamProtocol::GeminiGenerateContent => {
+                        let name = model.get("name")?.as_str()?.strip_prefix("models/")?;
+                        let supported = model
+                            .get("supportedGenerationMethods")
+                            .and_then(Value::as_array)?
+                            .iter()
+                            .any(|method| method.as_str() == Some("generateContent"));
+                        supported.then_some(name)
+                    }
+                    UpstreamProtocol::Responses
+                    | UpstreamProtocol::ChatCompletions
+                    | UpstreamProtocol::Messages => model.get("id")?.as_str(),
+                }?;
+                seen.insert(id.to_ascii_lowercase())
+                    .then(|| (id.to_string(), detected_model_price(model)))
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_gemini_catalog_requires_generate_content_capability() {
+        let models = parse_upstream_models(
+            UpstreamProtocol::GeminiGenerateContent,
+            &serde_json::json!({"models": [
+                {"name": "models/gemini-usable", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-unsupported", "supportedGenerationMethods": ["countTokens"]}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(models[0].0, "gemini-usable");
+        assert_eq!(models.len(), 1);
+    }
 }

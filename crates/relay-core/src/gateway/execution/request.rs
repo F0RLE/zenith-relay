@@ -11,9 +11,10 @@ use super::super::errors::{
 };
 use super::super::now_ms;
 use super::super::request::{
-    candidate_protocols, contains_tool_call_output, forwarded_bridge_messages_headers,
-    normalize_account_request, request_service_tier, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
+    candidate_protocols, contains_tool_call_output, forwarded_bridge_gemini_headers,
+    forwarded_bridge_messages_headers, normalize_account_request, request_service_tier,
+    tool_use_diagnostics, try_recover_encrypted_content, with_forwarded_tool_diagnostics,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_error_response,
@@ -27,7 +28,7 @@ use crate::protocol::{
 };
 use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
 use crate::usage::ReasoningEffortDiagnostics;
-use crate::{Error, GatewayRuntime, WireApi};
+use crate::{Error, GatewayRuntime, SourceAdapter, WireApi};
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -147,6 +148,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             &resolved_model,
             &key.scope_snapshot(),
             allowed_protocols,
+            stream,
         ) else {
             continue;
         };
@@ -191,6 +193,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             cache_write_ttl: route.cache_write_ttl,
             previous,
             response_scope: &route.candidate_id,
+            response_id_seed: &request_id,
         }) {
             Ok(request) => request,
             Err(error) if error.is_route_incompatible() => {
@@ -229,7 +232,15 @@ pub(in crate::gateway::execution) async fn execute_request(
         let started = Instant::now();
         let client = runtime.request_client(&route.candidate_id, upstream_stream);
         let mut upstream_headers = if adapter_request.requires_bridge_headers() {
-            forwarded_bridge_messages_headers(&forwarded_headers)
+            match route.adapter {
+                SourceAdapter::ResponsesToMessages => {
+                    forwarded_bridge_messages_headers(&forwarded_headers)
+                }
+                SourceAdapter::ResponsesToGemini => {
+                    forwarded_bridge_gemini_headers(&forwarded_headers)
+                }
+                SourceAdapter::Native => HeaderMap::new(),
+            }
         } else {
             forwarded_headers.clone()
         };
@@ -638,7 +649,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 }
             };
             let bytes = if let Some(response) = bridge_response.as_ref() {
-                match serde_json::to_vec(&response.response_body) {
+                match serde_json::to_vec(response.response_body()) {
                     Ok(bytes) => bytes,
                     Err(_) => {
                         let error = AdapterError::upstream_response_invalid();
@@ -692,7 +703,10 @@ pub(in crate::gateway::execution) async fn execute_request(
                 now_ms(),
             );
             emit_usage(&runtime, event);
-            if let Some(bridge_response) = bridge_response.as_ref() {
+            if let Some(bridge_response) = bridge_response
+                .as_ref()
+                .and_then(|response| response.messages_continuation())
+            {
                 runtime.save_messages_bridge_response(
                     &key.id,
                     &route.candidate_id,

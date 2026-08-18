@@ -36,6 +36,14 @@ This mode has no **Pool**, **API & ChatGPT**, or **Usage** pages. The provider
 owns routing, availability, and request logs. **Overview** displays only the
 balance and counters exposed by the selected provider.
 
+## Application tabs
+
+Use **Connections** to add and configure the API source, then use **Overview**
+to check its state, available models, and provider statistics. **Pool**, **API &
+ChatGPT**, and **Usage** are hidden in this mode: Relay does not route requests
+or keep its own request history. Any speed shown comes from the provider, so
+there is no Relay-side split between E2E and generation speed here.
+
 ## Before you start
 
 - A base HTTPS URL for a Responses-compatible API when connecting ChatGPT.

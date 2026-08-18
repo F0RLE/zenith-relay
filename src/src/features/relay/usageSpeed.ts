@@ -3,23 +3,31 @@ import type { LocalUsage } from "./api/types";
 export type TokenSpeedSample = {
   success: boolean;
   outputTokens: number | null;
+  reasoningTokens?: number | null;
   durationMs: number | null;
 };
 
-function measurement(sample: TokenSpeedSample) {
-  if (!sample.success || !sample.outputTokens || sample.outputTokens < 0) return null;
+export type TokenSpeedMeasurement = {
+  outputTokens: number;
+  durationMs: number;
+};
+
+export function measureTokenSpeed(sample: TokenSpeedSample): TokenSpeedMeasurement | null {
+  if (!sample.success || sample.outputTokens == null || sample.outputTokens < 0) return null;
   if (!sample.durationMs || sample.durationMs <= 0) return null;
-  return { outputTokens: sample.outputTokens, durationMs: sample.durationMs };
+  const reasoningTokens = Math.min(sample.outputTokens, Math.max(0, sample.reasoningTokens ?? 0));
+  const outputTokens = Math.max(0, sample.outputTokens - reasoningTokens - 1);
+  return outputTokens > 0 ? { outputTokens, durationMs: sample.durationMs } : null;
 }
 
 export function tokenSpeed(sample: TokenSpeedSample) {
-  const measured = measurement(sample);
+  const measured = measureTokenSpeed(sample);
   return measured ? measured.outputTokens * 1_000 / measured.durationMs : null;
 }
 
 export function averageTokenSpeed(samples: TokenSpeedSample[]) {
   const totals = samples.reduce((result, sample) => {
-    const measured = measurement(sample);
+    const measured = measureTokenSpeed(sample);
     if (measured) {
       result.outputTokens += measured.outputTokens;
       result.durationMs += measured.durationMs;
@@ -33,7 +41,7 @@ export function latestLocalAccountSpeeds(events: LocalUsage[]) {
   const speeds = new Map<string, number>();
   for (const event of [...events].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))) {
     if (!event.accountId || speeds.has(event.accountId)) continue;
-    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, durationMs: event.latencyMs });
+    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, reasoningTokens: event.reasoningTokens, durationMs: event.generationMs });
     if (speed != null) speeds.set(event.accountId, speed);
   }
   return speeds;

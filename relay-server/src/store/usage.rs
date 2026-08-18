@@ -3,7 +3,6 @@ use rusqlite::{params, params_from_iter, types::Value as SqlValue, TransactionBe
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use zenith_relay_core::{
-    estimate_api_equivalent_with_price_override,
     protocol::{UsagePage, UsageQuery, UsageSummary},
     ApiEquivalentSummary, DefaultServiceTier, UsageEvent,
 };
@@ -11,8 +10,8 @@ use zenith_relay_core::{
 mod query;
 
 use query::{
-    configured_model_price, parse_wire_api, usage_buckets, usage_filter, usage_groups,
-    usage_model_equivalents, usage_totals, USAGE_TOTAL_COLUMNS,
+    configured_model_price, estimate_candidate_equivalent, parse_wire_api, usage_buckets,
+    usage_filter, usage_groups, usage_model_equivalents, usage_totals, USAGE_TOTAL_COLUMNS,
 };
 
 #[cfg(test)]
@@ -309,11 +308,24 @@ impl Store {
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
-            event.api_equivalent = estimate_api_equivalent_with_price_override(
+            let (cache_write_5m, cache_write_1h, unknown_cache_write) = match event.cache_write_ttl
+            {
+                Some(zenith_relay_core::CacheWriteTtl::FiveMinutes) => {
+                    (event.cache_write_input_tokens, Some(0), Some(0))
+                }
+                Some(zenith_relay_core::CacheWriteTtl::OneHour) => {
+                    (Some(0), event.cache_write_input_tokens, Some(0))
+                }
+                _ => (Some(0), Some(0), event.cache_write_input_tokens),
+            };
+            event.api_equivalent = estimate_candidate_equivalent(
+                &event.candidate_kind,
                 model,
                 event.input_tokens,
                 event.cached_input_tokens,
-                event.cache_write_input_tokens,
+                cache_write_5m,
+                cache_write_1h,
+                unknown_cache_write,
                 event.output_tokens,
                 event.total_tokens,
                 configured_model_price(
@@ -351,11 +363,14 @@ impl Store {
             .prepare(
                 "SELECT candidate_kind, candidate_id, model,
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+                    SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens), SUM(unknown_cache_write_tokens),
                     SUM(output_tokens), SUM(total_tokens), SUM(input_samples),
                     SUM(cached_input_samples), SUM(cache_write_input_samples)
                  FROM (
                     SELECT candidate_kind, candidate_id, model,
                         input_tokens, cached_input_tokens, cache_write_input_tokens,
+                        0 AS cache_write_5m_tokens, 0 AS cache_write_1h_tokens,
+                        cache_write_input_tokens AS unknown_cache_write_tokens,
                         output_tokens, total_tokens, input_samples,
                         cached_input_samples, cache_write_input_samples
                     FROM usage_candidate_rollups
@@ -363,7 +378,11 @@ impl Store {
                     SELECT candidate_kind, candidate_hint,
                         COALESCE(resolved_model, requested_model, ''),
                         COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
-                        COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_write_input_tokens), 0),
+                        COALESCE(SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), 0),
+                        COALESCE(SUM(output_tokens), 0),
                         COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
                         COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
                     FROM usage_events GROUP BY 1, 2, 3
@@ -377,22 +396,28 @@ impl Store {
                 let model = row.get::<_, Option<String>>(2)?;
                 let input_tokens: Option<i64> = row.get(3)?;
                 let cached_input_tokens: Option<i64> = row.get(4)?;
-                let cache_write_input_tokens: Option<i64> = row.get(5)?;
-                let output_tokens: Option<i64> = row.get(6)?;
-                let total_tokens: Option<i64> = row.get(7)?;
-                let input_samples: i64 = row.get(8)?;
-                let cached_samples: i64 = row.get(9)?;
-                let cache_write_samples: i64 = row.get(10)?;
+                let cache_write_5m_tokens: Option<i64> = row.get(6)?;
+                let cache_write_1h_tokens: Option<i64> = row.get(7)?;
+                let unknown_cache_write_tokens: Option<i64> = row.get(8)?;
+                let output_tokens: Option<i64> = row.get(9)?;
+                let total_tokens: Option<i64> = row.get(10)?;
+                let input_samples: i64 = row.get(11)?;
+                let cached_samples: i64 = row.get(12)?;
+                let cache_write_samples: i64 = row.get(13)?;
                 Ok((candidate_id.clone(), {
-                    estimate_api_equivalent_with_price_override(
+                    estimate_candidate_equivalent(
+                        &kind,
                         model.as_deref(),
                         optional_u64(input_tokens),
                         (input_samples > 0 && cached_samples == input_samples)
                             .then(|| optional_u64(cached_input_tokens))
                             .flatten(),
-                        (input_samples > 0 && cache_write_samples == input_samples)
-                            .then(|| optional_u64(cache_write_input_tokens))
-                            .flatten(),
+                        (cache_write_samples > 0)
+                            .then(|| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
+                        (cache_write_samples > 0)
+                            .then(|| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
+                        (cache_write_samples > 0)
+                            .then(|| optional_u64(unknown_cache_write_tokens).unwrap_or_default()),
                         optional_u64(output_tokens),
                         optional_u64(total_tokens),
                         configured_model_price(
@@ -839,6 +864,9 @@ mod tests {
             quota_snapshot: None,
         };
         store.record_usage(&event, DAY_MS).unwrap();
+        let initial_usage = store.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(initial_usage.totals.generation_output_tokens, 99_999);
+        assert_eq!(initial_usage.totals.generation_samples, 1);
         event.request_id = "req_current".into();
         event.input_tokens = Some(10);
         event.cached_input_tokens = Some(0);

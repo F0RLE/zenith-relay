@@ -105,9 +105,15 @@ real endpoint and client evidence.
 
 1. Run source discovery against real Responses and Messages endpoints and prove
    that model availability, protocol bindings, confirmed reasoning, discovered
-   prices, and manual price overrides remain separate across refreshes.
+   prices, and manual price overrides remain separate across refreshes. Keep
+   account API-equivalent estimates on the official account catalog path, while
+   API sources resolve provider evidence, official fallback, then manual price.
 2. Keep native passthrough as the default and require an explicit adapter for
    every protocol conversion.
+   `ResponsesToGemini` now covers discovered `generateContent` models and the
+   text/usage/SSE path. Do not expand that binding to tools, vision, thinking,
+   caching, continuation, or WebSocket traffic without a protocol-specific
+   probe and fixture.
 3. Do not claim hosted tools, dynamic discovery, unsupported reasoning, or
    WebSocket bridging until an exact adapter path and regression coverage exist.
 4. Before release, run a real `codex.exe` acceptance matrix for every claimed

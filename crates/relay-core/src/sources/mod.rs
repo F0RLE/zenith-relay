@@ -12,7 +12,7 @@ pub use stats::{fetch_source_provider_stats, SourceProviderStats, SourceStatsPro
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};
 
-use crate::{Error, MessagesReasoningMode, Result, SourceAdapter};
+use crate::{Error, MessagesReasoningMode, Result, SourceAdapter, UpstreamProtocol};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -151,7 +151,7 @@ pub fn normalize_source_protocol_bindings(
     let mut assigned_models = BTreeMap::<WireApi, HashSet<String>>::new();
     let mut normalized = Vec::with_capacity(bindings.len());
 
-    let expand_empty_models = bindings.len() == 1;
+    let expand_empty_models = bindings.len() == 1 && bindings[0].adapter.is_passthrough();
     for binding in bindings {
         binding
             .adapter
@@ -163,7 +163,7 @@ pub fn normalize_source_protocol_bindings(
                 ))
             })?;
         if binding.cache_write_ttl != CacheWriteTtl::Provider
-            && binding.adapter.upstream_wire_api(binding.wire_api) != WireApi::Messages
+            && binding.adapter.upstream_protocol(binding.wire_api) != UpstreamProtocol::Messages
         {
             return Err(Error::Validation(
                 "cache write TTL requires a Messages upstream route".to_string(),
@@ -437,6 +437,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bindings[0].model_ids, ["gpt-test"]);
+    }
+
+    #[test]
+    fn single_empty_gemini_bridge_stays_unconfirmed() {
+        let bindings = normalize_source_protocol_bindings(
+            vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::ResponsesToGemini,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: Vec::new(),
+            }],
+            WireApi::Responses,
+            &["gemini-3-pro".to_string()],
+        )
+        .unwrap();
+
+        assert!(bindings[0].model_ids.is_empty());
     }
 
     #[test]

@@ -6,11 +6,13 @@ function quota(primary: number | null, secondary: number | null) {
     kind,
     availableBasisPoints,
     explicitlyFull: false,
-    resetAtMs: null,
+    providerCycleId: "cycle-1",
+    resetAtMs: 18_000_001,
     windowMinutes: 300,
+    windowStartMs: 1,
     observedAtMs: 1,
   };
-  return { primary: window("primary", primary), secondary: window("secondary", secondary) };
+  return { primary: window("primary", primary), secondary: window("secondary", secondary), directBalanceMicroUsd: null };
 }
 
 describe("account potential", () => {
@@ -37,15 +39,19 @@ describe("account potential", () => {
     expect(estimateAccountPotential({ microUsd: 10_000_000, unpricedTokens: 0 }, quota(null, null))).toBeNull();
   });
 
-  test("marks the estimate approximate when some usage is unpriced", () => {
-    expect(estimateAccountPotential({ microUsd: 10_000_000, unpricedTokens: 42 }, quota(5_000, null))).toEqual({
-      microUsd: 10_000_000,
-      approximate: true,
-    });
+  test("fails closed when some usage is unpriced", () => {
+    expect(estimateAccountPotential({ microUsd: 10_000_000, unpricedTokens: 42 }, quota(5_000, null))).toBeNull();
   });
 
   test("does not invent potential without priced usage", () => {
     expect(estimateAccountPotential({ microUsd: 0, unpricedTokens: 100 }, quota(5_000, null))).toBeNull();
+  });
+
+  test("prefers a direct provider balance over percentage math", () => {
+    expect(estimateAccountPotential({ microUsd: 10_000_000, unpricedTokens: 42 }, {
+      ...quota(null, null),
+      directBalanceMicroUsd: 2_500_000,
+    })).toEqual({ microUsd: 2_500_000, approximate: false });
   });
 });
 
@@ -67,7 +73,7 @@ describe("account value projection", () => {
   test("marks values approximate when usage contains unpriced tokens", () => {
     expect(buildAccountValueProjection({ microUsd: 10_000_000, unpricedTokens: 3 }, quota(5_000, null), 5_000_000)).toEqual({
       purchaseCostMicroUsd: 5_000_000,
-      potential: { microUsd: 10_000_000, approximate: true },
+      potential: null,
       payback: 2,
       approximate: true,
     });

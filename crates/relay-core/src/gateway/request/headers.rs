@@ -84,6 +84,16 @@ pub(in crate::gateway) fn forwarded_bridge_messages_headers(
     headers
 }
 
+/// A Responses-to-Gemini bridge has no Messages session contract. Keep only a
+/// harmless client identity header and never forward Claude/OpenAI metadata.
+pub(in crate::gateway) fn forwarded_bridge_gemini_headers(client_headers: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(value) = client_headers.get("user-agent") {
+        headers.insert(HeaderName::from_static("user-agent"), value.clone());
+    }
+    headers
+}
+
 /// For native Messages routes, forward only headers that belong to the
 /// Anthropic contract. This avoids leaking Codex/OpenAI request metadata into
 /// a different upstream protocol while retaining the version and session

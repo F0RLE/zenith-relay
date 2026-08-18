@@ -29,10 +29,11 @@ pub use catalog::{
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use protocol::{
-    bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError, AdapterResult,
-    MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState, MessagesBridgeStore,
-    MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter,
+    bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError,
+    AdapterResponse, AdapterResult, AdapterStreamBridge, GeminiBridgeRequest, GeminiBridgeResponse,
+    GeminiStreamBridge, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
+    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
+    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
@@ -58,8 +59,12 @@ pub use sources::{
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,
+    estimate_api_equivalent_with_cache_ttl,
+    estimate_api_equivalent_with_cache_ttl_and_price_override,
+    estimate_api_equivalent_with_cache_ttl_and_price_sources,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
     normalize_reasoning_effort, sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPrice,
-    ApiModelPriceOverride, ErrorOrigin, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
-    UsageCallback, UsageEvent, UsageValue, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin, TerminalOutputKind, ToolChoiceMode,
+    ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };

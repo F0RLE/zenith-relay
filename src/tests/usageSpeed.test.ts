@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { averageTokenSpeed, formatTokenSpeed, tokenSpeed } from "../src/features/relay/usageSpeed";
 
 describe("usage token speed", () => {
-  test("measures all output tokens over the whole request", () => {
-    const speed = tokenSpeed({ success: true, outputTokens: 30, durationMs: 500 });
-    expect(speed).toBe(60);
-    expect(formatTokenSpeed(speed, "en", "tok/s")).toBe("60 tok/s");
+  test("measures tokens after the first output over generation time", () => {
+    const speed = tokenSpeed({ success: true, outputTokens: 30, durationMs: 300 });
+    expect(speed).toBeCloseTo(96.6667, 4);
+    expect(formatTokenSpeed(speed, "en", "tok/s")).toBe("96.7 tok/s");
   });
 
   test("uses a token-weighted average and ignores failed samples", () => {
@@ -13,11 +13,21 @@ describe("usage token speed", () => {
       { success: true, outputTokens: 30, durationMs: 500 },
       { success: true, outputTokens: 20, durationMs: 500 },
       { success: false, outputTokens: 100, durationMs: 100 },
-    ])).toBe(50);
+    ])).toBe(48);
     expect(averageTokenSpeed([{ success: false, outputTokens: 8, durationMs: 300 }])).toBeNull();
   });
 
-  test("uses end-to-end time as the denominator", () => {
-    expect(tokenSpeed({ success: true, outputTokens: 20, durationMs: 800 })).toBe(25);
+  test("subtracts separately reported reasoning tokens", () => {
+    expect(tokenSpeed({ success: true, outputTokens: 30, reasoningTokens: 10, durationMs: 300 })).toBeCloseTo(63.3333, 4);
+  });
+
+  test("uses the supplied generation duration and rejects one-token samples", () => {
+    expect(tokenSpeed({ success: true, outputTokens: 20, durationMs: 800 })).toBeCloseTo(23.75, 4);
+    expect(tokenSpeed({ success: true, outputTokens: 1, durationMs: 800 })).toBeNull();
+    expect(tokenSpeed({ success: true, outputTokens: 20, durationMs: 0 })).toBeNull();
+  });
+
+  test("clamps malformed reasoning usage to reported output", () => {
+    expect(tokenSpeed({ success: true, outputTokens: 4, reasoningTokens: 10, durationMs: 300 })).toBeNull();
   });
 });

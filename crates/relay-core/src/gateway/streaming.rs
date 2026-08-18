@@ -15,8 +15,8 @@ use crate::protocol::sse_event_end;
 use crate::runtime::{CandidateLease, DefaultServiceTier, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
-    GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge, NativeResponsesReplayState,
-    PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
+    AdapterStreamBridge, GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge,
+    NativeResponsesReplayState, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
 };
 use axum::body::{Body, Bytes};
 use axum::http::{Response, StatusCode};
@@ -203,8 +203,9 @@ impl StreamExecution {
         let completion_half_open_probe = route.half_open_probe;
         let completion_headers = headers.clone();
         let completion_uses_response_affinity = wire_api == WireApi::Responses;
-        let completion_bridge_state =
-            (!adapter_is_passthrough).then(|| Arc::new(Mutex::new(None::<MessagesBridgeResponse>)));
+        let completion_bridge_state = adapter_request
+            .uses_messages_continuation()
+            .then(|| Arc::new(Mutex::new(None::<MessagesBridgeResponse>)));
         let completion_bridge_state_for_callback = completion_bridge_state.clone();
         let completion_native_response = (wire_api == WireApi::Responses && adapter_is_passthrough)
             .then(|| Arc::new(Mutex::new(None::<Value>)));
@@ -301,14 +302,18 @@ impl StreamExecution {
             }
         });
         let combined: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
-            if let Some(bridge) = adapter_request.into_stream_bridge() {
-                let completed =
-                    completion_bridge_state.expect("bridge state is configured for bridge routes");
-                Box::pin(bridge_messages_stream(first, remaining, bridge, completed))
-            } else {
-                Box::pin(
+            match adapter_request.into_stream_bridge() {
+                Some(AdapterStreamBridge::Messages(bridge)) => {
+                    let completed = completion_bridge_state
+                        .expect("message bridge state is configured for message routes");
+                    Box::pin(bridge_messages_stream(first, remaining, *bridge, completed))
+                }
+                Some(AdapterStreamBridge::Gemini(bridge)) => {
+                    Box::pin(bridge_gemini_stream(first, remaining, *bridge))
+                }
+                None => Box::pin(
                     stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining),
-                )
+                ),
             };
         let usage_stream = UsageStream::with_runtime(
             combined,
@@ -399,6 +404,52 @@ pub(super) fn bridge_messages_stream(
                         .completed
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+                }
+                if state.bridge.is_terminal() {
+                    state.finished = true;
+                }
+            }
+        },
+    )
+}
+
+struct GeminiBridgeStreamState {
+    inner: UpstreamStream,
+    bridge: crate::GeminiStreamBridge,
+    pending: VecDeque<Bytes>,
+    finished: bool,
+}
+
+pub(super) fn bridge_gemini_stream(
+    first: Bytes,
+    remaining: UpstreamStream,
+    bridge: crate::GeminiStreamBridge,
+) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
+    let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
+    stream::unfold(
+        GeminiBridgeStreamState {
+            inner: Box::pin(inner),
+            bridge,
+            pending: VecDeque::new(),
+            finished: false,
+        },
+        |mut state| async move {
+            loop {
+                if let Some(bytes) = state.pending.pop_front() {
+                    return Some((Ok(bytes), state));
+                }
+                if state.finished {
+                    return None;
+                }
+                match state.inner.next().await {
+                    Some(Ok(bytes)) => state.bridge.push(&bytes),
+                    Some(Err(_)) | None => {
+                        state.bridge.finish();
+                        state.finished = true;
+                    }
+                }
+                while let Some(bytes) = state.bridge.pop_output() {
+                    state.pending.push_back(Bytes::from(bytes));
                 }
                 if state.bridge.is_terminal() {
                     state.finished = true;

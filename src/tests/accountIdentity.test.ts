@@ -18,7 +18,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
   return {
     id: "account",
     label: "Account",
-    identityHint: "Account",
+    identityHint: "a1b2c3d4e5f6",
     enabled: true,
     inPool: true,
     draining: false,
@@ -60,14 +60,14 @@ describe("account identity display", () => {
   });
 
   test("uses a revealed identity only for a supported account with a secret", () => {
-    const visible = account({ id: "visible", label: "Masked", secretAvailable: true });
-    const hidden = account({ id: "hidden", label: "Still masked", secretAvailable: false });
+    const visible = account({ id: "visible", label: "Imported name", identityHint: "v1e2a3c4b5l6", secretAvailable: true });
+    const hidden = account({ id: "hidden", label: "Another imported name", identityHint: "h1d2e3n4t5y6", secretAvailable: false });
     const index = buildAccountIdentityIndex([visible, hidden]);
     const revealedIdentities = { "remote:visible": "visible@example.test", "remote:hidden": "hidden@example.test" };
 
     expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("visible@example.test");
-    expect(displayAccountIdentity({ index, accountId: hidden.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("Still masked");
-    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: false, canReveal: true, mode: "remote", revealedIdentities })).toBe("Masked");
+    expect(displayAccountIdentity({ index, accountId: hidden.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("h1d2e3n4t5y6");
+    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: false, canReveal: true, mode: "remote", revealedIdentities })).toBe("v1e2a3c4b5l6");
   });
 
   test("keeps revealed identities scoped to the active relay mode", () => {

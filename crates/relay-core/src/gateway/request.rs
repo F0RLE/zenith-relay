@@ -13,7 +13,8 @@ use codex_models::{
     build_codex_models_response_with_source_reasoning,
 };
 pub(super) use headers::{
-    forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
+    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_codex_headers,
+    forwarded_messages_headers,
 };
 pub(super) use normalization::{
     normalize_account_request, request_service_tier, try_recover_encrypted_content,

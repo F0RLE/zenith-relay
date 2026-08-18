@@ -40,6 +40,24 @@ Relay lets routed models receive image attachments without guessing support
 from their names. The selected model makes the final decision; native ChatGPT
 model capabilities remain unchanged.
 
+## Application tabs
+
+- **Overview** shows server state and the **Stream (E2E)** chart: all reported
+  output tokens divided by the Relay-to-provider request time, including
+  first-output wait and network time.
+- **Connections** manages the server connection, accounts, API sources, and
+  proxies.
+- **Pool** controls server participants, model rules, and routing order.
+- **API & ChatGPT** attaches ChatGPT/Codex to the server `/v1`; the desktop app
+  may be closed afterwards.
+- **Usage** contains **Requests**, **Models**, **Pool members**, and **Errors**.
+  **Generation speed** uses the remaining tokens after the first output and
+  excludes separately reported reasoning tokens, while **First / total** keeps
+  time to first output and full request duration separate. E2E is shown only in
+  **Overview**.
+- **Recovery** concerns the ChatGPT profile; **Help** contains the instructions
+  and Quick Setup.
+
 ## Prepare the server
 
 - A compatible Relay Server version runs as a persistent service.

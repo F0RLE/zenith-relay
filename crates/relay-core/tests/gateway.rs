@@ -31,6 +31,7 @@ struct ObservedRequest {
     path: &'static str,
     authorization: Option<String>,
     x_api_key: Option<String>,
+    x_goog_api_key: Option<String>,
     anthropic_version: Option<String>,
     x_oai_attestation: Option<String>,
 }
@@ -1730,6 +1731,85 @@ async fn responses_to_messages_bridge_translates_plain_response() {
 }
 
 #[tokio::test]
+async fn responses_to_gemini_bridge_uses_native_routes_for_plain_and_streaming_requests() {
+    let (upstream, state) = spawn_gemini_upstream().await;
+    let (gateway, events) = spawn_gemini_bridge_gateway(&upstream.base_url).await;
+    let client = reqwest::Client::new();
+
+    let plain = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("x-goog-api-key", "client-google-key")
+        .header("x-oai-attestation", "client-attestation")
+        .json(&json!({
+            "model": "gemini-test",
+            "input": "Give a plain answer",
+            "temperature": 0.2,
+            "max_output_tokens": 32,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    let plain: Value = plain.json().await.unwrap();
+    assert_eq!(
+        plain["output"][0]["content"][0]["text"],
+        "Native Gemini response"
+    );
+    assert_eq!(plain["usage"]["input_tokens"], 2);
+    assert_eq!(plain["usage"]["output_tokens"], 3);
+
+    let stream = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gemini-test",
+            "input": "Stream a response",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream = stream.text().await.unwrap();
+    assert!(stream.contains("\"type\":\"response.output_text.delta\""));
+    assert!(stream.contains("Native Gemini stream"));
+    assert!(stream.contains("\"type\":\"response.completed\""));
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/v1/models/gemini-test:generateContent");
+    assert_eq!(
+        requests[1].path,
+        "/v1/models/gemini-test:streamGenerateContent"
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.authorization.is_none()));
+    assert!(requests
+        .iter()
+        .all(|request| request.x_goog_api_key.as_deref() == Some(SOURCE_KEY)));
+    assert!(requests
+        .iter()
+        .all(|request| request.x_oai_attestation.is_none()));
+    drop(requests);
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(
+        bodies[0]["contents"][0]["parts"][0]["text"],
+        "Give a plain answer"
+    );
+    assert_eq!(bodies[0]["generationConfig"]["temperature"], 0.2);
+    assert_eq!(bodies[0]["generationConfig"]["maxOutputTokens"], 32);
+    assert!(bodies.iter().all(|body| body.get("model").is_none()));
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+}
+
+#[tokio::test]
 async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperature() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
@@ -2105,6 +2185,63 @@ async fn spawn_messages_upstream() -> (TestServer, UpstreamState) {
         .route("/v1/models", get(upstream_models))
         .route("/v1/messages", post(upstream_messages))
         .layer(DefaultBodyLimit::max(MAX_CLIENT_REQUEST_BODY_BYTES))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
+async fn spawn_gemini_bridge_gateway(
+    upstream_base_url: &str,
+) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let usage_events = events.clone();
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource {
+            source: ProviderSource {
+                id: "gemini-source".to_string(),
+                name: "Synthetic Gemini source".to_string(),
+                base_url: format!("{upstream_base_url}/v1"),
+                api_key: SOURCE_KEY.to_string(),
+                wire_api: WireApi::Responses,
+                models: vec!["gemini-test".to_string()],
+            },
+            protocol_bindings: vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::ResponsesToGemini,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["gemini-test".to_string()],
+            }],
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            last_used_at_ms: None,
+        }],
+        vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+            id: "local-key-1".to_string(),
+            secret: LOCAL_KEY.to_string(),
+        })],
+        GatewayRuntimeOptions::default(),
+        Arc::new(move |event| usage_events.lock().unwrap().push(event)),
+    )
+    .unwrap();
+    (spawn(gateway::router(Arc::new(runtime))).await, events)
+}
+
+async fn spawn_gemini_upstream() -> (TestServer, UpstreamState) {
+    let state = UpstreamState::default();
+    let app = Router::new()
+        .route(
+            "/v1/models/gemini-test:generateContent",
+            post(upstream_gemini_generate_content),
+        )
+        .route(
+            "/v1/models/gemini-test:streamGenerateContent",
+            post(upstream_gemini_stream_generate_content),
+        )
         .with_state(state.clone());
     (spawn(app).await, state)
 }
@@ -2767,6 +2904,64 @@ async fn upstream_messages(
     .into_response()
 }
 
+async fn upstream_gemini_generate_content(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    observe(&state, "/v1/models/gemini-test:generateContent", &headers);
+    if !has_gemini_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    state.bodies.lock().unwrap().push(request);
+    Json(json!({
+        "candidates": [{"content": {"parts": [{"text": "Native Gemini response"}]}}],
+        "usageMetadata": {
+            "promptTokenCount": 2,
+            "candidatesTokenCount": 3,
+            "totalTokenCount": 5
+        }
+    }))
+    .into_response()
+}
+
+async fn upstream_gemini_stream_generate_content(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    observe(
+        &state,
+        "/v1/models/gemini-test:streamGenerateContent",
+        &headers,
+    );
+    if !has_gemini_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    state.bodies.lock().unwrap().push(request);
+    let chunks = stream::iter([
+        Ok::<_, Infallible>(Bytes::from_static(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Native Gemini \"}]}}]}\n\n",
+        )),
+        Ok::<_, Infallible>(Bytes::from_static(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Native Gemini stream\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}}\n\n",
+        )),
+    ]);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
 fn observe(state: &UpstreamState, path: &'static str, headers: &HeaderMap) {
     state.requests.lock().unwrap().push(ObservedRequest {
         path,
@@ -2776,6 +2971,10 @@ fn observe(state: &UpstreamState, path: &'static str, headers: &HeaderMap) {
             .map(str::to_string),
         x_api_key: headers
             .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        x_goog_api_key: headers
+            .get("x-goog-api-key")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string),
         anthropic_version: headers
@@ -2805,4 +3004,11 @@ fn has_messages_source_key(headers: &HeaderMap) -> bool {
             .get("anthropic-version")
             .and_then(|value| value.to_str().ok())
             == Some("2023-06-01")
+}
+
+fn has_gemini_source_key(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-goog-api-key")
+        .and_then(|value| value.to_str().ok())
+        == Some(SOURCE_KEY)
 }

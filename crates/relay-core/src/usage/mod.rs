@@ -2,8 +2,11 @@ mod api_equivalent;
 
 pub use api_equivalent::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,
+    estimate_api_equivalent_with_cache_ttl,
+    estimate_api_equivalent_with_cache_ttl_and_price_override,
+    estimate_api_equivalent_with_cache_ttl_and_price_sources,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides, ApiModelPrice,
-    ApiModelPriceOverride, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    ApiModelPriceOverride, ApiModelPriceSources, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.

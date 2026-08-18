@@ -62,6 +62,7 @@ export type MockOptions = {
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
   profileSnapshotBackupBeforeRestore?: boolean;
+  distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
   sourceDetectedModelPrices?: Record<string, {
@@ -74,7 +75,7 @@ export type MockOptions = {
   modelReasoning?: Record<string, string[]>;
   sourceProtocolBindings?: Array<{
     wireApi: "responses" | "messages" | "chat_completions";
-    adapter: "native" | "responses_to_messages";
+    adapter: "native" | "responses_to_messages" | "responses_to_gemini";
     reasoningMode: "disabled" | "budget" | "adaptive";
     modelIds: string[];
   }>;
@@ -91,6 +92,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const locale = input.locale ?? "en";
     const populated = input.populated ?? true;
     const usagePresent = populated && input.usagePresent !== false;
+    const distinctAccountIdentityHints = input.distinctAccountIdentityHints ?? false;
     const dayMs = 24 * 60 * 60_000;
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
     localStorage.setItem("relay.mode", input.mode ?? "local");
@@ -168,7 +170,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const account = {
       id: "account_synthetic",
       label: "Personal Plus",
-      identityHint: "p***@example.test",
+      identityHint: distinctAccountIdentityHints ? "p***@example.test" : "Personal Plus",
       enabled: true,
       inPool: input.poolMembers ?? true,
       draining: false,
@@ -206,7 +208,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const item = structuredClone(account);
       item.id = `account_synthetic_${index + 1}`;
       item.label = variant.label;
-      item.identityHint = ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6];
+      item.identityHint = distinctAccountIdentityHints ? ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6] : variant.label;
       item.authState = { state: "active" };
       item.subscription.planType = variant.plan;
       item.subscription.activeUntilMs = variant.activeUntilMs;
@@ -436,9 +438,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens?: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const outputTokens = item.success ? Math.max(0, item.outputTokens ?? 0) : 0;
+        const reasoningTokens = Math.min(outputTokens, Math.max(0, item.reasoningTokens ?? 0));
+        const measuredOutputTokens = Math.max(0, outputTokens - reasoningTokens - 1);
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
         if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
-        if (item.success && item.generationMs != null && item.generationMs > 0) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += outputTokens; }
+        if (item.success && item.generationMs != null && item.generationMs > 0 && measuredOutputTokens > 0) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += measuredOutputTokens; }
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null); totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0; totals.cacheWriteInputSamples += Number(item.cacheWriteInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
         if (outputTokens && item.latencyMs) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += item.latencyMs; }

@@ -10,10 +10,10 @@ use std::{
 #[cfg(test)]
 use zenith_relay_core::ResponseAffinityBinding;
 use zenith_relay_core::{
-    api_pricing_revision, estimate_api_equivalent_with_price_override,
+    api_pricing_revision,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, DefaultServiceTier, ErrorOrigin,
-    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, ApiModelPriceOverride, ApiModelPriceSources, CacheWriteTtl,
+    DefaultServiceTier, ErrorOrigin, RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
 };
 
 mod affinity;
@@ -29,7 +29,7 @@ use usage::{
     usage_log_from_row, usage_model_equivalents, usage_totals,
 };
 
-pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
+pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
 
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
@@ -693,7 +693,7 @@ mod tests {
         assert_eq!(page.total_pages, 3);
         assert_eq!(page.totals.requests, 3);
         assert_eq!(page.totals.total_tokens, 158);
-        assert_eq!(page.totals.generation_output_tokens, 28);
+        assert_eq!(page.totals.generation_output_tokens, 21);
         assert_eq!(page.totals.generation_ms, 600);
         assert_eq!(page.totals.generation_samples, 2);
         assert_eq!(page.totals.speed_output_tokens, 28);
@@ -710,6 +710,18 @@ mod tests {
         assert_eq!(page.events[0].wire_api, "chat_completions");
         assert_eq!(page.events[0].service_tier, DefaultServiceTier::Standard);
         assert!(page.events[0].tool_use.is_none());
+
+        event.request_id = "req_zero_generation".into();
+        event.wire_api = WireApi::Responses;
+        event.success = true;
+        event.http_status = 200;
+        event.error_category = None;
+        event.generation_ms = Some(0);
+        event.output_tokens = Some(100);
+        database.record(&event).unwrap();
+        let with_zero_generation = database.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(with_zero_generation.totals.generation_output_tokens, 21);
+        assert_eq!(with_zero_generation.totals.generation_samples, 2);
 
         let chat = database
             .usage_page(&UsageQuery {
@@ -1057,11 +1069,23 @@ mod tests {
         let source_prices = BTreeMap::from([
             (
                 "source_cheap".into(),
-                BTreeMap::from([("private-model".into(), price(1_000_000, 2_000_000))]),
+                BTreeMap::from([(
+                    "private-model".into(),
+                    zenith_relay_core::ApiModelPriceSources {
+                        provider: None,
+                        manual: Some(price(1_000_000, 2_000_000)),
+                    },
+                )]),
             ),
             (
                 "source_expensive".into(),
-                BTreeMap::from([("private-model".into(), price(2_000_000, 4_000_000))]),
+                BTreeMap::from([(
+                    "private-model".into(),
+                    zenith_relay_core::ApiModelPriceSources {
+                        provider: None,
+                        manual: Some(price(2_000_000, 4_000_000)),
+                    },
+                )]),
             ),
         ]);
         let page = database

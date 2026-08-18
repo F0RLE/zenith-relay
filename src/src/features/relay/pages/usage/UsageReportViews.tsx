@@ -7,7 +7,7 @@ import { buildAccountValueProjection } from "../../accountEconomics";
 import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
 import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
-import { formatTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
+import { formatTokenSpeed, measureTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
   CONNECTION_COLUMN_IDS,
@@ -40,6 +40,7 @@ export type UsageRow = {
   serviceTier: DefaultServiceTier | null;
   appliedServiceTier: DefaultServiceTier | null;
   ttft: number | null;
+  generationMs: number | null;
   duration: number;
   inputTokens: number | null;
   cachedInputTokens: number | null;
@@ -96,7 +97,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
-    speed: { label: t("usage.streamSpeed"), cell: (row) => <SpeedValue value={tokenSpeed(rowSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
+    speed: { label: t("usage.generationSpeedShort"), cell: (row) => <SpeedValue value={tokenSpeed(rowSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
@@ -149,8 +150,8 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
   </table></div>;
 }
 
-export function UsageMetric({ icon, label, value, detail, title }: { icon?: ReactNode; label: string; value: ReactNode; detail?: ReactNode; title?: string }) {
-  return <div title={title}>{icon}<div className="usage-metric-copy"><span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div></div>;
+export function UsageMetric({ icon, label, value, detail, title, className }: { icon?: ReactNode; label: string; value: ReactNode; detail?: ReactNode; title?: string; className?: string }) {
+  return <div className={className} title={title}>{icon}<div className="usage-metric-copy"><span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div></div>;
 }
 
 function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
@@ -172,7 +173,7 @@ type AggregateRow = {
   ttft: number;
   ttftCount: number;
   duration: number;
-  speed: number | null;
+  generationSpeed: number | null;
   apiEquivalent: UsageTotals["apiEquivalent"];
 };
 
@@ -190,7 +191,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
     success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
     breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span>{group.cacheWriteInputSamples ? <span title={`${t("usage.cacheWriteInputTokens")}: ${formatFullNumber(group.cacheWriteInputTokens, i18n.language)}`}><small>{t("usage.cacheWriteShort")}</small>{formatCompactNumber(group.cacheWriteInputTokens, i18n.language)}</span> : null}<span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span></div> },
     total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
-    speed: { label: t("usage.streamSpeed"), cell: (group) => <SpeedValue value={group.speed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
+    speed: { label: t("usage.generationSpeedShort"), cell: (group) => <SpeedValue value={group.generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests), i18n.resolvedLanguage ?? i18n.language, t) },
     input: { label: t("usage.inputTokens"), cell: (group) => <CompactNumber value={group.inputTokens} locale={i18n.language} /> },
     output: { label: t("usage.outputTokens"), cell: (group) => <CompactNumber value={group.outputTokens} locale={i18n.language} /> },
@@ -233,7 +234,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   const routing = row.routing;
   const toolUse = row.toolUse;
   const speed = rowSpeedSample(row);
-  const streamSpeed = tokenSpeed(speed);
+  const generationSpeed = tokenSpeed(speed);
   const visibleOutputTokens = row.outputTokens == null ? null : Math.max(0, row.outputTokens - (row.reasoningTokens ?? 0));
   const toolWarning = Boolean(
     toolUse
@@ -257,7 +258,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     </div>
     <div className="request-details-metrics">
       <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} />
-      <RequestDetailMetric label={t("usage.streamSpeed")} value={<SpeedValue value={streamSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} />
+      <RequestDetailMetric label={t("usage.generationSpeed")} value={<SpeedValue value={generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} />
       <RequestDetailMetric label={t("usage.totalTime")} value={formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t)} />
       <RequestDetailMetric label={t("usage.visibleOutputTokens")} value={visibleOutputTokens == null ? "—" : formatCompactNumber(visibleOutputTokens, i18n.language)} />
     </div>
@@ -313,7 +314,7 @@ function RequestDetailMetric({ label, value }: { label: string; value: ReactNode
 
 function SpeedValue({ value, locale, unit }: { value: number | null; locale: string; unit: string }) {
   const { t } = useTranslation();
-  return <span className="usage-speed-value" title={t("usage.streamSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
+  return <span className="usage-speed-value" title={t("usage.generationSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
 }
 
 function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
@@ -377,7 +378,7 @@ function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: T
 }
 
 function rowSpeedSample(row: UsageRow): TokenSpeedSample {
-  return { success: row.success, outputTokens: row.outputTokens, durationMs: row.duration };
+  return { success: row.success, outputTokens: row.outputTokens, reasoningTokens: row.reasoningTokens, durationMs: row.generationMs };
 }
 
 export function totalsFromRows(rows: UsageRow[]): UsageTotals {
@@ -389,6 +390,12 @@ export function totalsFromRows(rows: UsageRow[]): UsageTotals {
     if (row.ttft != null) {
       totals.ttftMs += row.ttft;
       totals.ttftSamples += 1;
+    }
+    const generation = measureTokenSpeed(rowSpeedSample(row));
+    if (generation) {
+      totals.generationMs += generation.durationMs;
+      totals.generationSamples += 1;
+      totals.generationOutputTokens += generation.outputTokens;
     }
     totals.inputTokens += row.inputTokens ?? 0;
     if (row.cachedInputTokens != null) {
@@ -442,7 +449,7 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
     ttft: totals.ttftMs,
     ttftCount: totals.ttftSamples,
     duration: totals.latencyMs,
-    speed: totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null,
+    generationSpeed: totals.generationMs ? totals.generationOutputTokens * 1_000 / totals.generationMs : null,
     apiEquivalent: totals.apiEquivalent,
   };
 }

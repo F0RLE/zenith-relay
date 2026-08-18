@@ -90,6 +90,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             &resolved_model,
             &key.scope_snapshot(),
             &[WireApi::Responses],
+            false,
         ) else {
             continue;
         };
