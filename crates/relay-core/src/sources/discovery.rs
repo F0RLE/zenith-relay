@@ -1,10 +1,11 @@
 use super::{
-    normalize_source_protocol_bindings, ProviderSource, SourceConnector, SourceProtocolBinding,
+    normalize_source_protocol_bindings, ProviderSource, SourceAdapter, SourceConnector,
+    SourceProtocolBinding, SourceProtocolBindingKey, WireApi,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{ApiModelPriceOverride, Error, Result};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 mod pricing;
@@ -53,8 +54,9 @@ pub struct SourceDiscovery {
 /// Discovery must therefore never reuse the first successful response for the
 /// remaining bindings. A configured non-empty `model_ids` list is a strict
 /// allow-list for that binding, except that a single legacy list equal to the
-/// prior source catalog is recognized as an automatic source-wide route. An
-/// empty single binding also uses the catalog returned under that binding's
+/// prior source catalog, or the native Responses remainder beside an explicit
+/// Responses bridge, is recognized as an automatic source-wide route. An empty
+/// single binding also uses the catalog returned under that binding's
 /// authentication. The function succeeds when at least one binding has a
 /// non-empty catalog.
 pub async fn discover_source_models_and_protocol_bindings(
@@ -62,29 +64,30 @@ pub async fn discover_source_models_and_protocol_bindings(
     protocol_bindings: &[SourceProtocolBinding],
 ) -> Result<SourceDiscovery> {
     source.validate()?;
-    // A source-wide single route is an automatic catalog binding, not a
-    // snapshot allow-list. Older records persisted its discovered IDs, so
-    // recognize that equivalent form before asking the upstream for updates.
-    let source_wide_catalog_route = is_source_wide_catalog_route(protocol_bindings, &source.models);
     let bindings = normalize_source_protocol_bindings(
         protocol_bindings.to_vec(),
         source.wire_api,
         &source.models,
     )?;
+    // A source-wide route is an automatic catalog binding, not a snapshot
+    // allow-list. The native Responses route can retain that role when the
+    // remaining Responses models are explicitly assigned to a bridge.
+    let automatic_catalog_routes =
+        automatic_catalog_routes(protocol_bindings, &bindings, &source.models);
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let configured_bindings = (!source_wide_catalog_route).then_some(protocol_bindings);
     let mut discovery = discover_protocol_bindings_with_client(
         &client,
         &SourceConnector::new(source, &bindings)?,
         &bindings,
-        configured_bindings.unwrap_or_default(),
+        protocol_bindings,
+        &automatic_catalog_routes,
     )
     .await?;
-    if source_wide_catalog_route {
+    if bindings.len() == 1 && automatic_catalog_routes.contains(&bindings[0].key()) {
         if let Some(binding) = discovery.protocol_bindings.first_mut() {
             binding.model_ids.clear();
         }
@@ -92,16 +95,46 @@ pub async fn discover_source_models_and_protocol_bindings(
     Ok(discovery)
 }
 
-fn is_source_wide_catalog_route(
-    protocol_bindings: &[SourceProtocolBinding],
+fn automatic_catalog_routes(
+    configured_bindings: &[SourceProtocolBinding],
+    bindings: &[SourceProtocolBinding],
     source_models: &[String],
-) -> bool {
-    let [binding] = protocol_bindings else {
-        return protocol_bindings.is_empty();
+) -> BTreeSet<SourceProtocolBindingKey> {
+    let mut automatic = BTreeSet::new();
+    let Some(binding) = bindings.first() else {
+        return automatic;
     };
-    binding.model_ids.is_empty()
-        || (!source_models.is_empty()
-            && normalized_model_ids(&binding.model_ids) == normalized_model_ids(source_models))
+    if configured_bindings.is_empty()
+        || (configured_bindings.len() == 1
+            && (configured_bindings[0].model_ids.is_empty()
+                || (!source_models.is_empty()
+                    && normalized_model_ids(&configured_bindings[0].model_ids)
+                        == normalized_model_ids(source_models))))
+    {
+        automatic.insert(binding.key());
+        return automatic;
+    }
+
+    let source_models = normalized_model_ids(source_models);
+    for binding in bindings.iter().filter(|binding| {
+        binding.wire_api == WireApi::Responses && binding.adapter == SourceAdapter::Native
+    }) {
+        let assigned_elsewhere = bindings
+            .iter()
+            .filter(|candidate| {
+                candidate.wire_api == binding.wire_api && candidate.key() != binding.key()
+            })
+            .flat_map(|candidate| normalized_model_ids(&candidate.model_ids))
+            .collect::<HashSet<_>>();
+        let expected = source_models
+            .difference(&assigned_elsewhere)
+            .cloned()
+            .collect::<HashSet<_>>();
+        if !expected.is_empty() && normalized_model_ids(&binding.model_ids) == expected {
+            automatic.insert(binding.key());
+        }
+    }
+    automatic
 }
 
 fn normalized_model_ids(models: &[String]) -> HashSet<String> {
@@ -120,7 +153,7 @@ pub(crate) async fn discover_models_with_client(
     // legacy expanded model list from an explicit per-protocol allow-list.
     // Keep this compatibility helper broad; management paths use the public
     // discovery API above and retain that distinction.
-    discover_protocol_bindings_with_client(client, source, bindings, &[])
+    discover_protocol_bindings_with_client(client, source, bindings, &[], &BTreeSet::new())
         .await
         .map(|discovery| discovery.models)
 }
@@ -130,6 +163,7 @@ async fn discover_protocol_bindings_with_client(
     source: &SourceConnector,
     bindings: &[SourceProtocolBinding],
     configured_bindings: &[SourceProtocolBinding],
+    automatic_catalog_routes: &BTreeSet<SourceProtocolBindingKey>,
 ) -> Result<SourceDiscovery> {
     let mut last_error = None;
     let mut discovered_models = Vec::new();
@@ -189,25 +223,46 @@ async fn discover_protocol_bindings_with_client(
             })
             .collect::<Vec<_>>();
 
-        // An explicitly supplied model list is scoped to this protocol. The
-        // normalized legacy binding may contain source.models after expansion,
-        // so use the original configured binding to distinguish an allow-list
-        // from the legacy "discover everything" form.
-        let explicit_models = configured_bindings
-            .iter()
-            .find(|configured| configured.key() == binding.key())
-            .and_then(|configured| {
-                let models = configured
-                    .model_ids
+        // An explicitly supplied model list is scoped to this protocol unless
+        // the route is a source-wide catalog fallback. The normalized legacy
+        // binding may contain source.models after expansion, so use the
+        // original configured binding to distinguish an allow-list from the
+        // legacy "discover everything" form.
+        let explicit_models = (!automatic_catalog_routes.contains(&binding.key()))
+            .then(|| {
+                configured_bindings
                     .iter()
-                    .map(|model| model.trim().to_ascii_lowercase())
-                    .filter(|model| !model.is_empty())
-                    .collect::<HashSet<_>>();
-                (!models.is_empty()).then_some(models)
+                    .find(|configured| configured.key() == binding.key())
+                    .and_then(|configured| {
+                        let models = configured
+                            .model_ids
+                            .iter()
+                            .map(|model| model.trim().to_ascii_lowercase())
+                            .filter(|model| !model.is_empty())
+                            .collect::<HashSet<_>>();
+                        (!models.is_empty()).then_some(models)
+                    })
+            })
+            .flatten();
+        let automatic_route_exclusions =
+            automatic_catalog_routes.contains(&binding.key()).then(|| {
+                bindings
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.wire_api == binding.wire_api && candidate.key() != binding.key()
+                    })
+                    .flat_map(|candidate| normalized_model_ids(&candidate.model_ids))
+                    .collect::<HashSet<_>>()
             });
         let models = upstream_models
             .into_iter()
             .filter(|(model, _)| {
+                if automatic_route_exclusions
+                    .as_ref()
+                    .is_some_and(|excluded| excluded.contains(&model.to_ascii_lowercase()))
+                {
+                    return false;
+                }
                 explicit_models
                     .as_ref()
                     .is_none_or(|allowed| allowed.contains(&model.to_ascii_lowercase()))

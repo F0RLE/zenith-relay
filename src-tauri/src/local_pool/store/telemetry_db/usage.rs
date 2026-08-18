@@ -15,15 +15,15 @@ const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN generation_ms ELSE 0 END), 0), \
     COUNT(CASE WHEN success != 0 THEN generation_ms END), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
-        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0), 0) ELSE 0 END), 0), \
+        THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
     COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
     COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
-        THEN output_tokens - COALESCE(reasoning_tokens, 0) ELSE 0 END), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) AND latency_ms > 0 \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
+        THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
         THEN latency_ms ELSE 0 END), 0)";
 
 pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {

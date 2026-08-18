@@ -693,10 +693,10 @@ mod tests {
         assert_eq!(page.total_pages, 3);
         assert_eq!(page.totals.requests, 3);
         assert_eq!(page.totals.total_tokens, 158);
-        assert_eq!(page.totals.generation_output_tokens, 23);
+        assert_eq!(page.totals.generation_output_tokens, 28);
         assert_eq!(page.totals.generation_ms, 600);
         assert_eq!(page.totals.generation_samples, 2);
-        assert_eq!(page.totals.speed_output_tokens, 23);
+        assert_eq!(page.totals.speed_output_tokens, 28);
         assert_eq!(page.totals.speed_duration_ms, 928);
         assert_eq!(page.totals.api_equivalent.priced_tokens, 158);
         assert_eq!(page.models.len(), 1);

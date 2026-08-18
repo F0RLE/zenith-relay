@@ -237,6 +237,77 @@ async fn source_wide_catalog_binding_refreshes_new_models() {
 }
 
 #[tokio::test]
+async fn native_responses_catalog_refreshes_after_models_are_split_to_a_messages_bridge() {
+    let upstream = spawn_mixed_catalog_upstream().await;
+    let discovery = discover_source_models_and_protocol_bindings(
+        &ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic mixed source-wide upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.into(),
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into(), "claude-test".into()],
+        },
+        &[
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["gpt-test".into()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["claude-test".into()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::ResponsesToMessages,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["claude-test".into()],
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        discovery.models,
+        ["gpt-test", "hidden-model", "claude-test"]
+    );
+    assert_eq!(
+        discovery.protocol_bindings,
+        [
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["gpt-test".into(), "hidden-model".into()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["claude-test".into()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::ResponsesToMessages,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["claude-test".into()],
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn native_model_discovery_keeps_each_protocol_catalog_separate() {
     let (upstream, state) = spawn_upstream().await;
     let discovery = discover_source_models_and_protocol_bindings(
@@ -2024,6 +2095,10 @@ async fn spawn_upstream() -> (TestServer, UpstreamState) {
     (spawn(app).await, state)
 }
 
+async fn spawn_mixed_catalog_upstream() -> TestServer {
+    spawn(Router::new().route("/v1/models", get(upstream_models_with_shared_catalog))).await
+}
+
 async fn spawn_messages_upstream() -> (TestServer, UpstreamState) {
     let state = UpstreamState::default();
     let app = Router::new()
@@ -2107,6 +2182,28 @@ async fn upstream_models(State(state): State<UpstreamState>, headers: HeaderMap)
                 {"id": "claude-test", "object": "model"},
                 {"id": "claude-hidden", "object": "model"}
             ]
+        }))
+        .into_response();
+    }
+    StatusCode::UNAUTHORIZED.into_response()
+}
+
+async fn upstream_models_with_shared_catalog(headers: HeaderMap) -> Response<Body> {
+    if has_source_key(&headers) {
+        return Json(json!({
+            "object": "list",
+            "data": [
+                {"id": "gpt-test", "object": "model"},
+                {"id": "hidden-model", "object": "model"},
+                {"id": "claude-test", "object": "model"}
+            ]
+        }))
+        .into_response();
+    }
+    if has_messages_source_key(&headers) {
+        return Json(json!({
+            "object": "list",
+            "data": [{"id": "claude-test", "object": "model"}]
         }))
         .into_response();
     }

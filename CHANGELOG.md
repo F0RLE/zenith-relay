@@ -23,17 +23,20 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Pool cards now retain the configured routing order for API sources with multiple protocol routes.
+- Source discovery keeps the native Responses catalog fallback fresh when
+  other models are assigned to a Messages or Responses-to-Messages route.
 - The source-route editor is more compact: formats are added on demand, model
   assignment columns stay aligned, and upstream API keys appear before routes.
 - The OAuth success page is centered and schedules its browser tab to close ten
   seconds after the account callback succeeds.
 - Usage request details now open as a compact overview with token, tool, and
-  route sections; durations use seconds when appropriate, and generation speed
-  is color-coded without presenting successful requests as errors.
+  route sections; stream speed uses all output tokens over the full request
+  duration without presenting successful requests as errors.
 - Pool speed controls now use the clearer Standard/Fast terminology while
   preserving the existing service-tier behavior.
-- Pool member cards keep a readable maximum width instead of stretching across
-  the entire page, leaving unused space available on wide screens.
+- Pool member cards fill the available grid width at larger windows while
+  preserving a readable minimum width and responsive layout.
 - Local snapshots preserve the canonical account state and show a sanitized
   warning when the active gateway has no matching OAuth candidate.
 - Global operation notifications now stay in a bottom-left overlay above the

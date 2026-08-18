@@ -227,12 +227,11 @@ function bucketsFromSamples(windows: WindowBucket[], samples: UsageSample[]) {
 
 function totalsFromSamples(samples: UsageSample[]) {
   return samples.reduce<UsageTotals>((totals, sample) => {
-    const visibleOutput = sample.success ? Math.max(0, (sample.outputTokens ?? 0) - (sample.reasoningTokens ?? 0)) : 0;
+    const outputTokens = sample.success ? Math.max(0, sample.outputTokens ?? 0) : 0;
     totals.requests += 1;
     totals.successfulRequests += Number(sample.success);
     totals.latencyMs += sample.latencyMs;
     if (sample.ttftMs != null) { totals.ttftMs += sample.ttftMs; totals.ttftSamples += 1; }
-    if (sample.success && sample.generationMs != null && sample.generationMs > 0) { totals.generationMs += sample.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += visibleOutput; }
     totals.inputTokens += sample.inputTokens ?? 0;
     if (sample.cachedInputTokens != null) { totals.cachedInputTokens += sample.cachedInputTokens; totals.cachedInputSamples += 1; }
     if (sample.cacheWriteInputTokens != null) { totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens; totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1; }
@@ -245,7 +244,7 @@ function totalsFromSamples(samples: UsageSample[]) {
     } else {
       totals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
     }
-    if (visibleOutput > 0 && sample.latencyMs > 0) { totals.speedOutputTokens += visibleOutput; totals.speedDurationMs += sample.latencyMs; }
+    if (outputTokens > 0 && sample.latencyMs > 0) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += sample.latencyMs; }
     return totals;
   }, emptyUsageTotals());
 }

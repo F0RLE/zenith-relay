@@ -9,7 +9,17 @@ const API_SOURCE_PRIMARY_PRIORITY = 1_000_000;
 const API_SOURCE_RESERVE_PRIORITY = -1_000_000;
 
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
-  return new Map(order.map((candidate, index) => [candidate.candidateId, index]));
+  const positions = new Map<string, number>();
+  for (const [index, candidate] of order.entries()) {
+    positions.set(candidate.candidateId, index);
+    if (candidate.kind !== "api_source") continue;
+    const separator = candidate.candidateId.indexOf("::");
+    if (separator > 0) {
+      const sourceId = candidate.candidateId.slice(0, separator);
+      if (!positions.has(sourceId)) positions.set(sourceId, index);
+    }
+  }
+  return positions;
 }
 
 export function compareRoutingOrder(leftId: string, rightId: string, order: Map<string, number>, fallback?: Map<string, number>) {
