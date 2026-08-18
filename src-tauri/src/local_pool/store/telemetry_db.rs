@@ -693,7 +693,7 @@ mod tests {
         assert_eq!(page.total_pages, 3);
         assert_eq!(page.totals.requests, 3);
         assert_eq!(page.totals.total_tokens, 158);
-        assert_eq!(page.totals.generation_output_tokens, 28);
+        assert_eq!(page.totals.generation_output_tokens, 21);
         assert_eq!(page.totals.generation_ms, 600);
         assert_eq!(page.totals.generation_samples, 2);
         assert_eq!(page.totals.speed_output_tokens, 28);
@@ -710,6 +710,18 @@ mod tests {
         assert_eq!(page.events[0].wire_api, "chat_completions");
         assert_eq!(page.events[0].service_tier, DefaultServiceTier::Standard);
         assert!(page.events[0].tool_use.is_none());
+
+        event.request_id = "req_zero_generation".into();
+        event.wire_api = WireApi::Responses;
+        event.success = true;
+        event.http_status = 200;
+        event.error_category = None;
+        event.generation_ms = Some(0);
+        event.output_tokens = Some(100);
+        database.record(&event).unwrap();
+        let with_zero_generation = database.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(with_zero_generation.totals.generation_output_tokens, 21);
+        assert_eq!(with_zero_generation.totals.generation_samples, 2);
 
         let chat = database
             .usage_page(&UsageQuery {

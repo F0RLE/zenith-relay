@@ -13,10 +13,14 @@ use zenith_relay_core::{
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
-    COALESCE(SUM(CASE WHEN success != 0 THEN generation_ms ELSE 0 END), 0), \
-    COUNT(CASE WHEN success != 0 THEN generation_ms END), \
-    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
-        THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        THEN generation_ms ELSE 0 END), 0), \
+    COUNT(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        THEN generation_ms END), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
     COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
     COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \

@@ -438,9 +438,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens?: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const outputTokens = item.success ? Math.max(0, item.outputTokens ?? 0) : 0;
+        const reasoningTokens = Math.min(outputTokens, Math.max(0, item.reasoningTokens ?? 0));
+        const measuredOutputTokens = Math.max(0, outputTokens - reasoningTokens - 1);
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
         if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
-        if (item.success && item.generationMs != null && item.generationMs > 0) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += outputTokens; }
+        if (item.success && item.generationMs != null && item.generationMs > 0 && measuredOutputTokens > 0) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += measuredOutputTokens; }
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null); totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0; totals.cacheWriteInputSamples += Number(item.cacheWriteInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
         if (outputTokens && item.latencyMs) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += item.latencyMs; }

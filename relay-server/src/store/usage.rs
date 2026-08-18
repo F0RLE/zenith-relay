@@ -864,6 +864,9 @@ mod tests {
             quota_snapshot: None,
         };
         store.record_usage(&event, DAY_MS).unwrap();
+        let initial_usage = store.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(initial_usage.totals.generation_output_tokens, 99_999);
+        assert_eq!(initial_usage.totals.generation_samples, 1);
         event.request_id = "req_current".into();
         event.input_tokens = Some(10);
         event.cached_input_tokens = Some(0);

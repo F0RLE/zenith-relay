@@ -7,7 +7,7 @@ import { buildAccountValueProjection } from "../../accountEconomics";
 import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
 import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
-import { formatTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
+import { formatTokenSpeed, measureTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
   CONNECTION_COLUMN_IDS,
@@ -378,7 +378,7 @@ function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: T
 }
 
 function rowSpeedSample(row: UsageRow): TokenSpeedSample {
-  return { success: row.success, outputTokens: row.outputTokens, durationMs: row.generationMs };
+  return { success: row.success, outputTokens: row.outputTokens, reasoningTokens: row.reasoningTokens, durationMs: row.generationMs };
 }
 
 export function totalsFromRows(rows: UsageRow[]): UsageTotals {
@@ -391,10 +391,11 @@ export function totalsFromRows(rows: UsageRow[]): UsageTotals {
       totals.ttftMs += row.ttft;
       totals.ttftSamples += 1;
     }
-    if (row.success && row.generationMs != null) {
-      totals.generationMs += Math.max(0, row.generationMs);
+    const generation = measureTokenSpeed(rowSpeedSample(row));
+    if (generation) {
+      totals.generationMs += generation.durationMs;
       totals.generationSamples += 1;
-      totals.generationOutputTokens += outputTokens;
+      totals.generationOutputTokens += generation.outputTokens;
     }
     totals.inputTokens += row.inputTokens ?? 0;
     if (row.cachedInputTokens != null) {
