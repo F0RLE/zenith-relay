@@ -29,14 +29,6 @@
   border-right: 0;
 }
 
-.usage-generation-metric {
-  grid-column: 1 / -1;
-  min-height: 62px !important;
-  border-top: 1px solid var(--relay-border);
-  border-right: 0 !important;
-  background: var(--relay-subtle);
-}
-
 .usage-metrics > div > svg {
   width: 18px;
   height: 18px;
@@ -102,8 +94,14 @@
     border-right: 0;
   }
 
-  .usage-metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--relay-border);
+  .usage-metrics > div:last-child,
+  .usage-metrics > div:nth-last-child(2):nth-child(odd) {
+    border-bottom: 0;
+  }
+
+  .usage-metrics > div:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+    border-right: 0;
   }
 
   .usage-metrics > div {

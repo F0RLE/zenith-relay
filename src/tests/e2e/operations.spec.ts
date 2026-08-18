@@ -2414,7 +2414,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   await expect(details).toBeVisible();
   await expect(details.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(details.getByText("Error origin", { exact: true })).toHaveCount(0);
-  await expect(details.getByText("26.7 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
+  await expect(details.getByText("6.7 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
   await expect(details).toHaveCount(0);
 
@@ -2521,15 +2521,15 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "26.7 tok/s", "128 ms / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "6.7 tok/s", "128 ms / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache ↓12", "Cache ↑4", "Reason5"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Generation speed26.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("Generation speed6.7 tok/s");
   await expect(page.getByText("Stream (E2E)", { exact: true })).toHaveCount(0);
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
-  await expect(details).toContainText("Generation speed26.7 tok/s");
+  await expect(details).toContainText("Generation speed6.7 tok/s");
   await expect(details).toContainText("Total time428 ms");
   await expect(details).toContainText("Visible output3");
   await details.getByRole("tab", { name: "Tokens", exact: true }).click();
