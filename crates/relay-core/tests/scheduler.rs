@@ -160,7 +160,7 @@ async fn public_models_follow_the_canonical_model_family_order() {
 }
 
 #[tokio::test]
-async fn pool_does_not_mutate_client_service_tier() {
+async fn pool_injects_fast_default_without_overriding_client_service_tier() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![source("source", &upstream, "source-key", &[MODEL], 0)],
@@ -203,7 +203,7 @@ async fn pool_does_not_mutate_client_service_tier() {
     assert_eq!(
         tiers,
         [
-            None,
+            Some("priority"),
             Some("fast"),
             Some("standard"),
             Some("flex"),
@@ -1336,28 +1336,8 @@ async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use()
 }
 
 #[tokio::test]
-async fn chat_completions_enforces_manual_reasoning_levels() {
-    let chat = json!({
-        "id": "chat-reasoning",
-        "object": "chat.completion",
-        "created": 123,
-        "model": "chat-model",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": "translated"},
-            "finish_reason": "stop"
-        }]
-    });
-    let (chat_server, state) = spawn_upstream(
-        "chat-key",
-        vec![Reply::Json {
-            status: StatusCode::OK,
-            body: chat,
-            cache_control: "chat",
-            retry_after: None,
-        }],
-    )
-    .await;
+async fn chat_completions_does_not_invent_manual_reasoning_levels() {
+    let (chat_server, state) = spawn_upstream("chat-key", Vec::new()).await;
     let mut chat_source = source("chat", &chat_server, "chat-key", &["chat-model"], 0);
     chat_source.source.wire_api = WireApi::ChatCompletions;
     let mut options = GatewayRuntimeOptions::default();
@@ -1390,7 +1370,7 @@ async fn chat_completions_enforces_manual_reasoning_levels() {
     );
     assert!(state.requests.lock().unwrap().is_empty());
 
-    let accepted = client
+    let also_rejected = client
         .post(format!("{}/v1/chat/completions", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -1401,11 +1381,12 @@ async fn chat_completions_enforces_manual_reasoning_levels() {
         .send()
         .await
         .unwrap();
-    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(also_rejected.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        state.requests.lock().unwrap()[0].body["reasoning_effort"],
-        "high"
+        also_rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "reasoning_effort_not_allowed"
     );
+    assert!(state.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -1,7 +1,10 @@
 use crate::accounts::{
     AccountAuthState, TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter,
 };
-use crate::catalog::{normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities};
+use crate::catalog::{
+    normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities,
+    SourceReasoningProbeProgress,
+};
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     AgentIdentityCredential, CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
@@ -61,6 +64,7 @@ const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 15 * 1_000;
 pub(crate) struct CodexSourceModelMetadata {
     pub context_windows: BTreeMap<String, u64>,
     pub reasoning_catalog_templates: BTreeMap<String, Map<String, Value>>,
+    pub reasoning_probe_progress: BTreeMap<String, SourceReasoningProbeProgress>,
     pub image_models: BTreeSet<String>,
 }
 
@@ -391,6 +395,7 @@ struct CachedModelManifest {
 struct ConfirmedSourceReasoning {
     efforts: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     levels: BTreeMap<String, Vec<String>>,
+    probe_progress: BTreeMap<String, SourceReasoningProbeProgress>,
 }
 
 struct SourceModelMetadataState {
@@ -1182,7 +1187,6 @@ impl GatewayRuntime {
             .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
     }
 
-    #[cfg(test)]
     pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
         if self.default_service_tier_fast.load(Ordering::Relaxed) {
             DefaultServiceTier::Fast

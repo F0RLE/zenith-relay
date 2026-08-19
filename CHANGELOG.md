@@ -19,7 +19,7 @@ release entries are kept concise and link to the corresponding tag.
 - Usage history now shows the requested reasoning effort and the normalized
   effort actually sent to the selected provider.
 - Usage now shows provider generation speed separately from the full-request E2E
-  stream, keeps E2E in Overview, and lets the summary include generation speed.
+  speed, keeps E2E speed in Overview, and lets the summary include generation speed.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
   reuse across a follow-up request.
 - Explicit `Responses -> Gemini` source routing for discovered Gemini models;
@@ -41,7 +41,7 @@ release entries are kept concise and link to the corresponding tag.
   route sections.
 - Generation speed now uses successful post-first-output intervals and the
   remaining visible output tokens, excluding separately reported reasoning;
-  the full-request E2E stream remains in Overview.
+  the full-request E2E speed remains in Overview.
 - Pool speed controls now use the clearer Standard/Fast terminology while
   preserving the existing service-tier behavior.
 - Pool member cards fill the available grid width at larger windows while

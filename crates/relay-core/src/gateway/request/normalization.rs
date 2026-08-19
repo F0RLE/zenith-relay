@@ -15,6 +15,30 @@ pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServic
     }
 }
 
+/// Apply the pool's fast default only when the client did not choose a tier.
+///
+/// `priority` is the upstream OpenAI spelling. Standard deliberately remains
+/// implicit, matching the Codex/Cockpit behavior and preserving arbitrary
+/// client-owned values such as `flex`.
+pub(in crate::gateway) fn apply_default_service_tier_if_missing(
+    request: &mut Value,
+    default: DefaultServiceTier,
+) {
+    if default != DefaultServiceTier::Fast {
+        return;
+    }
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    if object.contains_key("service_tier") {
+        return;
+    }
+    object.insert(
+        "service_tier".to_string(),
+        Value::String("priority".to_string()),
+    );
+}
+
 pub(in crate::gateway) fn normalize_account_request(
     object: &mut Map<String, Value>,
     responses_lite: bool,

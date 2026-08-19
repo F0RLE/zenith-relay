@@ -217,13 +217,29 @@
   gap: 18px;
 }
 
+.model-reasoning-detected {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 8px;
+  color: var(--relay-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.model-reasoning-detected strong {
+  color: var(--relay-secondary);
+  font-weight: 600;
+}
+
 .model-reasoning-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
 }
 
-.model-reasoning-options button {
+.model-reasoning-options button,
+.model-reasoning-mode {
   min-height: 38px;
   padding: 7px 10px;
   border: 1px solid var(--relay-border-strong);
@@ -234,6 +250,11 @@
   font-size: 12px;
   font-weight: 600;
   text-align: center;
+}
+
+.model-reasoning-mode {
+  display: grid;
+  place-items: center;
 }
 
 .model-reasoning-options button:hover {

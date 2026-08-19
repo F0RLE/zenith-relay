@@ -1,7 +1,9 @@
+use super::super::request::requested_reasoning_effort;
 use super::{
     now_ms, AuthenticatedKey, ExecutorRoute, GatewayFailure, RESPONSES_LITE_METADATA_KEY,
     WEBSOCKET_PROTOCOLS,
 };
+use crate::gateway::request::apply_default_service_tier_if_missing;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
@@ -32,6 +34,7 @@ impl ClientRequest {
         }
         let mut value: Value = serde_json::from_slice(payload)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
+        apply_default_service_tier_if_missing(&mut value, runtime.default_service_tier());
         let object = value
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
@@ -54,6 +57,13 @@ impl ClientRequest {
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .ok_or_else(GatewayFailure::model_not_found)?;
+        if let Some(effort) = requested_reasoning_effort(&value, WireApi::Responses) {
+            if !runtime.model_reasoning_effort_is_allowed(&resolved_model, &effort)
+                && !runtime.codex_model_has_chatgpt_account(key, &resolved_model)
+            {
+                return Err(GatewayFailure::reasoning_effort_not_allowed());
+            }
+        }
         let responses_lite = headers
             .contains_key(crate::gateway::request::CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
@@ -87,6 +97,10 @@ impl ClientRequest {
             &self.value_for(route),
             WireApi::Responses,
         )
+    }
+
+    pub(super) fn requested_reasoning_effort(&self) -> Option<String> {
+        requested_reasoning_effort(&self.value, WireApi::Responses)
     }
 
     fn value_for(&self, route: &ExecutorRoute) -> Value {

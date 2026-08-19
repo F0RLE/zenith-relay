@@ -1,5 +1,5 @@
 use super::is_valid_model_id;
-use serde::{de::Error as _, Deserialize, Deserializer};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,15 +7,6 @@ const MAX_ADVERTISED_CONTEXT_WINDOW: u64 = 16_000_000;
 const MAX_REASONING_EFFORT_LENGTH: usize = 64;
 const MAX_REASONING_DESCRIPTION_LENGTH: usize = 256;
 const MAX_MODEL_REASONING_LEVELS: usize = 64;
-const CLAUDE_MANUAL_REASONING_LEVELS: &[(&str, &str)] = &[
-    ("low", "Low"),
-    ("medium", "Medium"),
-    ("high", "High"),
-    ("xhigh", "Extra high"),
-    ("max", "Maximum"),
-    ("ultra", "Ultra"),
-];
-const CLAUDE_MANUAL_DEFAULT_REASONING_EFFORT: &str = "medium";
 
 mod images;
 
@@ -43,6 +34,16 @@ struct SourceReasoningLevel {
 }
 
 impl SourceReasoningCapabilities {
+    fn empty() -> Self {
+        Self {
+            levels: Vec::new(),
+            default_effort: None,
+            supports_summary_parameter: false,
+            supports_summaries: false,
+            default_summary: "none".to_string(),
+        }
+    }
+
     pub(crate) fn effort_ids(&self) -> impl Iterator<Item = &str> {
         self.levels.iter().map(|level| level.effort.as_str())
     }
@@ -160,16 +161,14 @@ pub(crate) fn source_context_windows(
         .collect()
 }
 
-/// Reads optional, provider-declared reasoning capabilities from OpenAI-style
-/// `data` rows or a top-level `models` catalog. The source API remains
-/// provider-neutral: it may expose Relay's canonical
-/// `capabilities.reasoning` object, a nested `reasoning` object,
-/// Codex-compatible fields, `reasoningEffortModes`, or a catalog of
-/// `reasoningEfforts` options.
+/// Reads only the reasoning modes published by a Gateway catalog.
 ///
-/// An ordinary `/models` response with IDs only returns no capabilities. That
-/// is deliberate: Relay must hide the Codex selector rather than infer
-/// reasoning support from a model name.
+/// Provider-declared metadata is a hint, not evidence. The Gateway publishes
+/// `reasoningEffortModes` only from confirmed probe/runtime evidence and emits
+/// the aggregate `reasoningProbe` record beside it. Relay therefore accepts
+/// this narrow envelope and ignores nested/provider-specific reasoning fields.
+/// An ordinary `/models` response, or a response with a running probe but no
+/// confirmed mode, produces no selector.
 pub(crate) fn source_reasoning_capabilities(
     manifest: &Value,
     configured_models: &BTreeSet<String>,
@@ -200,6 +199,30 @@ pub(crate) fn source_reasoning_capabilities(
     capabilities
 }
 
+pub(crate) fn source_reasoning_probe_progress(
+    manifest: &Value,
+    configured_models: &BTreeSet<String>,
+) -> BTreeMap<String, SourceReasoningProbeProgress> {
+    source_catalog_model_rows(manifest)
+        .filter_map(|model| {
+            let object = model.as_object()?;
+            let id = source_catalog_model_id(object)?.trim();
+            if !configured_models
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(id))
+            {
+                return None;
+            }
+            let probe = object
+                .get("reasoningProbe")
+                .or_else(|| object.get("reasoning_probe"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())?;
+            Some((id.to_ascii_lowercase(), probe))
+        })
+        .collect()
+}
+
 fn source_catalog_model_rows(manifest: &Value) -> impl Iterator<Item = &Value> {
     ["data", "models"].into_iter().flat_map(move |key| {
         manifest
@@ -218,59 +241,10 @@ fn source_catalog_model_id(model: &Map<String, Value>) -> Option<&str> {
         .find(|id| !id.is_empty())
 }
 
-/// Applies the explicit Claude compatibility fallback for source catalogs
-/// that omit some of Claude's known Codex effort levels.
+/// Combines modes published as confirmed by one or more Gateway routes.
 ///
-/// Provider-declared capabilities remain authoritative for every other model:
-/// Relay must not infer a model's effort vocabulary from its name or maintain a
-/// blacklist of levels that might become valid later.
-///
-/// Native ChatGPT rows do not use this function and remain untouched.
-pub(crate) fn apply_claude_reasoning_capability_fallback(
-    model_id: &str,
-    capabilities: Option<SourceReasoningCapabilities>,
-) -> Option<SourceReasoningCapabilities> {
-    if !is_claude_model_id(model_id) {
-        return capabilities;
-    }
-
-    let mut capabilities = capabilities.unwrap_or_else(|| SourceReasoningCapabilities {
-        levels: Vec::new(),
-        default_effort: Some(CLAUDE_MANUAL_DEFAULT_REASONING_EFFORT.to_string()),
-        supports_summary_parameter: false,
-        supports_summaries: false,
-        default_summary: "none".to_string(),
-    });
-    let mut provider_levels = std::mem::take(&mut capabilities.levels);
-    let mut levels = Vec::with_capacity(
-        CLAUDE_MANUAL_REASONING_LEVELS
-            .len()
-            .saturating_add(provider_levels.len()),
-    );
-    for (effort, description) in CLAUDE_MANUAL_REASONING_LEVELS {
-        let provider_level = provider_levels
-            .iter()
-            .position(|level| level.effort.eq_ignore_ascii_case(effort))
-            .map(|index| provider_levels.remove(index));
-        levels.push(provider_level.unwrap_or_else(|| SourceReasoningLevel {
-            effort: (*effort).to_string(),
-            description: (*description).to_string(),
-        }));
-    }
-    levels.append(&mut provider_levels);
-    capabilities.levels = levels;
-    if capabilities.default_effort.is_none() {
-        capabilities.default_effort = Some(CLAUDE_MANUAL_DEFAULT_REASONING_EFFORT.to_string());
-    }
-    Some(capabilities)
-}
-
-/// Combines capabilities confirmed by one or more provider routes.
-///
-/// A route that does not publish metadata is intentionally absent from this
-/// input. It remains eligible for requests because a provider may support an
-/// effort without advertising it, so the picker exposes every level confirmed
-/// by at least one route instead of hiding controls for the whole public model.
+/// A route without an explicit publication is intentionally absent. It stays
+/// eligible for ordinary requests, but cannot add a reasoning selector.
 pub(crate) fn union_source_reasoning_capabilities(
     capabilities: impl IntoIterator<Item = SourceReasoningCapabilities>,
 ) -> Option<SourceReasoningCapabilities> {
@@ -383,26 +357,77 @@ pub(crate) fn context_window(value: &Value) -> Option<u64> {
 fn parse_source_reasoning_capabilities(
     model: &Map<String, Value>,
 ) -> Option<SourceReasoningCapabilities> {
-    if first_bool(
-        model,
-        &["supports_reasoning_effort", "supportsReasoningEffort"],
-    ) == Some(false)
-    {
+    let probe = model
+        .get("reasoningProbe")
+        .or_else(|| model.get("reasoning_probe"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<SourceReasoningProbeProgress>(value).ok())?;
+    let raw_modes = model
+        .get("reasoningEffortModes")
+        .or_else(|| model.get("reasoning_effort_modes"))
+        .and_then(Value::as_array)?;
+    let fully_rejected = probe.total > 0
+        && probe.running == 0
+        && probe.pending == 0
+        && probe.confirmed == 0
+        && probe.rejected == probe.total;
+    if probe.confirmed <= 0 && !fully_rejected {
         return None;
     }
-    let nested_capabilities = model
-        .get("capabilities")
-        .and_then(Value::as_object)
-        .and_then(|capabilities| capabilities.get("reasoning"))
-        .and_then(Value::as_object)
-        .and_then(parse_reasoning_object);
-    let nested_reasoning = model
-        .get("reasoning")
-        .and_then(Value::as_object)
-        .and_then(parse_reasoning_object);
-    nested_capabilities
-        .or(nested_reasoning)
-        .or_else(|| parse_reasoning_object(model))
+
+    // Keep the existing strict parser, but feed it only the Gateway-owned
+    // publication field. Nested provider metadata must never become evidence.
+    if raw_modes.is_empty() {
+        return fully_rejected.then(SourceReasoningCapabilities::empty);
+    }
+    let mut published = Map::new();
+    published.insert(
+        "reasoningEffortModes".to_string(),
+        Value::Array(raw_modes.clone()),
+    );
+    for (target, aliases) in [
+        (
+            "default_effort",
+            [
+                "default_effort",
+                "default_reasoning_level",
+                "defaultReasoningLevel",
+            ]
+            .as_slice(),
+        ),
+        (
+            "supports_summary_parameter",
+            [
+                "supports_summary_parameter",
+                "supports_reasoning_summary_parameter",
+                "supportsReasoningSummaryParameter",
+            ]
+            .as_slice(),
+        ),
+        (
+            "supports_summaries",
+            [
+                "supports_summaries",
+                "supports_reasoning_summaries",
+                "supportsReasoningSummaries",
+            ]
+            .as_slice(),
+        ),
+        (
+            "default_summary",
+            [
+                "default_summary",
+                "default_reasoning_summary",
+                "defaultReasoningSummary",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        if let Some(value) = aliases.iter().find_map(|alias| model.get(*alias)).cloned() {
+            published.insert((*target).to_string(), value);
+        }
+    }
+    parse_reasoning_object(&published)
 }
 
 fn parse_reasoning_object(value: &Map<String, Value>) -> Option<SourceReasoningCapabilities> {
@@ -571,9 +596,19 @@ fn valid_reasoning_description(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn is_claude_model_id(model_id: &str) -> bool {
-    let model = model_id.rsplit('/').next().unwrap_or(model_id).trim();
-    model.eq_ignore_ascii_case("claude") || model.to_ascii_lowercase().starts_with("claude-")
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceReasoningProbeProgress {
+    pub status: String,
+    pub total: i64,
+    pub running: i64,
+    pub success: i64,
+    pub failed: i64,
+    pub confirmed: i64,
+    pub rejected: i64,
+    pub inconclusive: i64,
+    pub pending: i64,
+    pub last_probe_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -632,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_generic_provider_reasoning_metadata_without_model_name_rules() {
+    fn ignores_provider_reasoning_metadata_without_gateway_evidence() {
         let configured = ["provider/fable", "provider/no-reasoning"]
             .into_iter()
             .map(str::to_string)
@@ -662,28 +697,11 @@ mod tests {
             ]
         });
 
-        let capabilities = source_reasoning_capabilities(&manifest, &configured);
-
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(
-            capabilities["provider/fable"].codex_catalog_template(),
-            json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Low"},
-                    {"effort": "ultra", "description": "Maximum"}
-                ],
-                "supports_reasoning_summary_parameter": true,
-                "supports_reasoning_summaries": true,
-                "default_reasoning_summary": "detailed"
-            })
-            .as_object()
-            .unwrap()
-            .clone()
-        );
+        assert!(source_reasoning_capabilities(&manifest, &configured).is_empty());
     }
 
     #[test]
-    fn reads_explicit_reasoning_effort_options_without_inference() {
+    fn accepts_only_confirmed_gateway_modes() {
         let configured = ["grok-4.5", "provider/unknown"]
             .into_iter()
             .map(str::to_string)
@@ -692,17 +710,35 @@ mod tests {
             "data": [
                 {
                     "id": "grok-4.5",
-                    "supportsReasoningEffort": true,
-                    "reasoningEffort": "high",
-                    "reasoningEfforts": [
-                        {"value": "low", "label": "Low"},
-                        {"value": "medium", "label": "Medium"},
-                        {"value": "high", "label": "High", "default": true}
-                    ]
+                    "reasoningEffortModes": ["low", "medium", "high"],
+                    "reasoningProbe": {
+                        "status": "confirmed",
+                        "total": 8,
+                        "running": 0,
+                        "success": 3,
+                        "failed": 5,
+                        "confirmed": 3,
+                        "rejected": 5,
+                        "inconclusive": 0,
+                        "pending": 0,
+                        "lastProbeAt": "2026-08-19T00:00:00Z"
+                    }
                 },
                 {
                     "id": "provider/unknown",
-                    "supportsReasoningEffort": true
+                    "reasoningEffortModes": ["high"],
+                    "reasoningProbe": {
+                        "status": "running",
+                        "total": 8,
+                        "running": 1,
+                        "success": 0,
+                        "failed": 0,
+                        "confirmed": 0,
+                        "rejected": 0,
+                        "inconclusive": 0,
+                        "pending": 7,
+                        "lastProbeAt": null
+                    }
                 }
             ]
         });
@@ -714,9 +750,9 @@ mod tests {
             capabilities["grok-4.5"].codex_catalog_template(),
             json!({
                 "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Low"},
-                    {"effort": "medium", "description": "Medium"},
-                    {"effort": "high", "description": "High"}
+                    {"effort": "low", "description": "low"},
+                    {"effort": "medium", "description": "medium"},
+                    {"effort": "high", "description": "high"}
                 ],
                 "default_reasoning_level": "medium"
             })
@@ -724,39 +760,34 @@ mod tests {
             .unwrap()
             .clone()
         );
-        assert!(
-            !capabilities.contains_key("provider/unknown"),
-            "a support flag without exact levels must not invent a selector"
-        );
+        assert!(!capabilities.contains_key("provider/unknown"));
     }
 
     #[test]
-    fn reads_top_level_models_catalog_with_explicit_effort_options() {
+    fn explicit_rejection_publishes_an_empty_capability() {
         let configured = ["glm-5.2"].into_iter().map(str::to_string).collect();
         let manifest = json!({
             "models": [{
                 "slug": "glm-5.2",
-                "reasoningEffortOptions": [
-                    {"value": "low", "label": "Low"},
-                    {"value": "very_high", "label": "Very high", "isDefault": true}
-                ]
+                "reasoningEffortModes": [],
+                "reasoningProbe": {
+                    "status": "rejected",
+                    "total": 8,
+                    "running": 0,
+                    "success": 0,
+                    "failed": 8,
+                    "confirmed": 0,
+                    "rejected": 8,
+                    "inconclusive": 0,
+                    "pending": 0,
+                    "lastProbeAt": "2026-08-19T00:00:00Z"
+                }
             }]
         });
 
         let capabilities = source_reasoning_capabilities(&manifest, &configured);
-
-        assert_eq!(
-            capabilities["glm-5.2"].codex_catalog_template(),
-            json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Low"},
-                    {"effort": "very_high", "description": "Very high"}
-                ],
-            })
-            .as_object()
-            .unwrap()
-            .clone()
-        );
+        assert!(capabilities.contains_key("glm-5.2"));
+        assert!(capabilities["glm-5.2"].effort_ids().next().is_none());
     }
 
     #[test]
@@ -819,48 +850,19 @@ mod tests {
     }
 
     #[test]
-    fn manual_claude_exception_completes_the_codex_effort_set() {
-        let declared = parse_reasoning_object(
-            json!({
-                "reasoningEffortModes": ["low", "medium", "high"],
-                "default_effort": "medium"
-            })
-            .as_object()
-            .unwrap(),
-        );
-
-        let capabilities =
-            apply_claude_reasoning_capability_fallback("vendor/claude-fable-5", declared).unwrap();
-
-        assert_eq!(
-            capabilities.codex_catalog_template(),
-            json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"},
-                    {"effort": "medium", "description": "medium"},
-                    {"effort": "high", "description": "high"},
-                    {"effort": "xhigh", "description": "Extra high"},
-                    {"effort": "max", "description": "Maximum"},
-                    {"effort": "ultra", "description": "Ultra"}
-                ],
-                "default_reasoning_level": "medium"
-            })
-            .as_object()
-            .unwrap()
-            .clone()
-        );
+    fn model_names_never_create_reasoning_capabilities() {
+        let configured = ["provider/gpt-future", "provider/claude-future"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let manifest = json!({
+            "data": [{"id": "provider/gpt-future"}, {"id": "provider/claude-future"}]
+        });
+        assert!(source_reasoning_capabilities(&manifest, &configured).is_empty());
     }
 
     #[test]
-    fn non_claude_models_do_not_receive_manual_efforts_without_metadata() {
-        assert!(
-            apply_claude_reasoning_capability_fallback("gpt-5.6-sol", None).is_none(),
-            "only Claude model IDs receive the manual effort set"
-        );
-    }
-
-    #[test]
-    fn non_claude_models_preserve_every_source_declared_effort_and_use_medium_auto_default() {
+    fn source_declared_efforts_preserve_every_mode_and_use_medium_auto_default() {
         let declared = parse_reasoning_object(
             json!({
                 "reasoningEffortModes": [
@@ -878,30 +880,25 @@ mod tests {
             .unwrap(),
         );
 
-        for model_id in ["grok-4.5", "glm-5.2"] {
-            let capabilities =
-                apply_claude_reasoning_capability_fallback(model_id, declared.clone())
-                    .expect("baseline reasoning levels remain available");
+        let capabilities = declared.expect("source-declared reasoning levels");
 
-            assert_eq!(
-                capabilities.codex_catalog_template(),
-                json!({
-                    "supported_reasoning_levels": [
-                        {"effort": "low", "description": "low"},
-                        {"effort": "medium", "description": "medium"},
-                        {"effort": "high", "description": "high"},
-                        {"effort": "xhigh", "description": "xhigh"},
-                        {"effort": "max", "description": "max"},
-                        {"effort": "ultra", "description": "ultra"},
-                        {"effort": "very_high", "description": "very_high"}
-                    ],
-                    "default_reasoning_level": "medium"
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-                "source-declared effort was rewritten for {model_id}"
-            );
-        }
+        assert_eq!(
+            capabilities.codex_catalog_template(),
+            json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "low"},
+                    {"effort": "medium", "description": "medium"},
+                    {"effort": "high", "description": "high"},
+                    {"effort": "xhigh", "description": "xhigh"},
+                    {"effort": "max", "description": "max"},
+                    {"effort": "ultra", "description": "ultra"},
+                    {"effort": "very_high", "description": "very_high"}
+                ],
+                "default_reasoning_level": "medium"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
     }
 }

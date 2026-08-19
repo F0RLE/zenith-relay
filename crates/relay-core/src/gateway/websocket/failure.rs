@@ -104,6 +104,16 @@ impl GatewayFailure {
         }
     }
 
+    pub(super) fn reasoning_effort_not_allowed() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            category: "reasoning_effort_not_allowed",
+            message: "reasoning effort is not allowed for this model",
+            retry_at_ms: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
     pub(super) fn prepare(error: ExecutorPrepareError, origin: ErrorOrigin) -> Self {
         let failure = super::super::errors::AttemptFailure::prepare(error);
         Self {

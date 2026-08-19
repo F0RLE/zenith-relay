@@ -1789,7 +1789,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
     assert_eq!(requests[0]["parallel_tool_calls"], true);
-    assert!(requests[0].get("service_tier").is_none());
+    assert_eq!(requests[0]["service_tier"], "priority");
     assert_eq!(requests[1]["service_tier"], "flex");
     assert_eq!(requests[1]["reasoning"]["effort"], "high");
     assert_eq!(requests[1]["reasoning"]["summary"], "detailed");

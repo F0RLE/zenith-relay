@@ -1365,7 +1365,8 @@ async fn native_responses_remove_item_prefixed_message_ids_after_strict_rejectio
 async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continuation() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Budget).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Budget)
+            .await;
     let client = reqwest::Client::new();
     let tools = json!([{
         "type": "function",
@@ -1510,6 +1511,9 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
         .unwrap(),
     );
     let gateway = spawn(gateway::router(runtime.clone())).await;
+    prime_source_metadata(&gateway).await;
+    state.requests.lock().unwrap().clear();
+    state.bodies.lock().unwrap().clear();
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -1540,7 +1544,8 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
 async fn responses_to_messages_bridge_translates_custom_tool_turn_and_continuation() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
     let client = reqwest::Client::new();
 
     let first = client
@@ -1682,7 +1687,8 @@ async fn source_can_mix_native_and_bridged_responses_models() {
 async fn responses_to_messages_bridge_translates_plain_response() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -1813,7 +1819,8 @@ async fn responses_to_gemini_bridge_uses_native_routes_for_plain_and_streaming_r
 async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperature() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Adaptive).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Adaptive)
+            .await;
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -1848,7 +1855,8 @@ async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperatur
 async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
     let client = reqwest::Client::new();
 
     let reasoning = client
@@ -1866,7 +1874,7 @@ async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted()
     let reasoning_body: Value = reasoning.json().await.unwrap();
     assert_eq!(
         reasoning_body["error"]["code"],
-        "adapter_reasoning_unsupported"
+        "reasoning_effort_not_allowed"
     );
 
     let opaque_tool = client
@@ -1892,7 +1900,8 @@ async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted()
 async fn missing_bridge_continuation_is_rejected_without_context_free_tool_output() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -1919,7 +1928,8 @@ async fn missing_bridge_continuation_is_rejected_without_context_free_tool_outpu
 async fn responses_to_messages_bridge_translates_sse_text_and_tool_arguments() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -1960,7 +1970,8 @@ async fn responses_to_messages_bridge_translates_sse_text_and_tool_arguments() {
 async fn responses_to_messages_bridge_preserves_plain_stream_context_for_http_continuation() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
     let client = reqwest::Client::new();
 
     let first = client
@@ -2024,7 +2035,8 @@ async fn responses_to_messages_bridge_preserves_plain_stream_context_for_http_co
 async fn malformed_messages_response_is_redacted_as_adapter_error() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
-        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -2068,8 +2080,22 @@ async fn spawn_gateway(
     (spawn(gateway::router(Arc::new(runtime))).await, events)
 }
 
+async fn prime_source_metadata(gateway: &TestServer) {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version=1.0.0",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+}
+
 async fn spawn_messages_bridge_gateway(
     upstream_base_url: &str,
+    state: &UpstreamState,
     reasoning_mode: MessagesReasoningMode,
 ) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -2109,7 +2135,11 @@ async fn spawn_messages_bridge_gateway(
         Arc::new(move |event| usage_events.lock().unwrap().push(event)),
     )
     .unwrap();
-    (spawn(gateway::router(Arc::new(runtime))).await, events)
+    let gateway = spawn(gateway::router(Arc::new(runtime))).await;
+    prime_source_metadata(&gateway).await;
+    state.requests.lock().unwrap().clear();
+    state.bodies.lock().unwrap().clear();
+    (gateway, events)
 }
 
 async fn spawn_mixed_responses_gateway(
@@ -2316,7 +2346,23 @@ async fn upstream_models(State(state): State<UpstreamState>, headers: HeaderMap)
         return Json(json!({
             "object": "list",
             "data": [
-                {"id": "claude-test", "object": "model"},
+                {
+                    "id": "claude-test",
+                    "object": "model",
+                    "reasoningEffortModes": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                    "reasoningProbe": {
+                        "status": "confirmed",
+                        "total": 7,
+                        "running": 0,
+                        "success": 7,
+                        "failed": 0,
+                        "confirmed": 7,
+                        "rejected": 0,
+                        "inconclusive": 0,
+                        "pending": 0,
+                        "lastProbeAt": "2026-08-20T00:00:00Z"
+                    }
+                },
                 {"id": "claude-hidden", "object": "model"}
             ]
         }))

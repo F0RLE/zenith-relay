@@ -251,6 +251,8 @@ fn model_summaries(
                 .map(Vec::as_slice),
             model_has_native_account_route(account_summaries, &model_id),
         );
+        model.reasoning_probe =
+            runtime.and_then(|runtime| runtime.reasoning_probe_progress(&model_id));
     }
     models
 }

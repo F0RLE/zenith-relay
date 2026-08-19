@@ -118,8 +118,10 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
       codexVisible: model.codexVisible ?? false,
       codexDisplayName: model.codexDisplayName || model.id,
       reasoningLevels: model.reasoningLevels ?? [],
+      reasoningSupportedLevels: model.reasoningSupportedLevels ?? [],
       reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
       reasoningConfigurable: model.reasoningConfigurable ?? false,
+      reasoningProbe: model.reasoningProbe,
     }));
   }
 
@@ -139,8 +141,10 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
     outputMicroUsdPerMillion: null,
     customPrice: false,
     reasoningLevels: [],
+    reasoningSupportedLevels: [],
     reasoningAllowedLevels: [],
     reasoningConfigurable: false,
+    reasoningProbe: undefined,
   }));
 }
 

@@ -5,9 +5,10 @@ use super::{
     SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS,
 };
 use crate::catalog::{
-    apply_claude_reasoning_capability_fallback, normalize_model_reasoning_allowed_levels,
-    source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
-    union_source_reasoning_capabilities, SourceReasoningCapabilities,
+    normalize_model_reasoning_allowed_levels, source_context_windows,
+    source_image_input_capabilities, source_reasoning_capabilities,
+    source_reasoning_probe_progress, union_source_reasoning_capabilities,
+    SourceReasoningCapabilities, SourceReasoningProbeProgress,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{
@@ -70,7 +71,16 @@ impl GatewayRuntime {
             let rules = ModelRules::default();
             let scope = runtime.management_source_metadata_scope();
             runtime
-                .source_model_metadata(&rules, &scope, &[WireApi::Responses], runtime_now_ms())
+                .source_model_metadata(
+                    &rules,
+                    &scope,
+                    &[
+                        WireApi::Responses,
+                        WireApi::ChatCompletions,
+                        WireApi::Messages,
+                    ],
+                    runtime_now_ms(),
+                )
                 .await;
             runtime.model_metadata.prefetch_not_before_ms.store(
                 runtime_now_ms().saturating_add(SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS),
@@ -114,6 +124,7 @@ impl GatewayRuntime {
 
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
+        let mut probe_progress_by_model = BTreeMap::new();
         let mut evaluated_reasoning = Vec::<(String, String, BTreeSet<String>)>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
         for SourceMetadataManifest {
@@ -132,6 +143,12 @@ impl GatewayRuntime {
                 .as_ref()
                 .map(|manifest| source_image_input_capabilities(manifest, &configured_models))
                 .unwrap_or_default();
+            if let Some(manifest) = manifest.as_ref() {
+                probe_progress_by_model.extend(source_reasoning_probe_progress(
+                    manifest,
+                    &configured_models,
+                ));
+            }
             if let Some(manifest) = manifest.as_ref() {
                 for (model, context_window) in source_context_windows(manifest, &configured_models)
                 {
@@ -153,14 +170,13 @@ impl GatewayRuntime {
                     .entry(model_key.clone())
                     .or_default()
                     .push(supports_image);
-                let capabilities = apply_claude_reasoning_capability_fallback(
-                    model,
-                    reasoning.get(&model_key).cloned(),
-                )
-                .and_then(|capabilities| {
+                let capabilities = reasoning.get(&model_key).cloned().and_then(|capabilities| {
                     source_reasoning_for_route(capabilities, adapter, reasoning_mode)
                 });
-                if manifest.is_some() {
+                // Only an explicit Gateway publication is evidence. A normal
+                // provider catalog refresh must not withdraw a previously
+                // confirmed route merely because it omitted reasoning fields.
+                if reasoning.contains_key(&model_key) {
                     evaluated_reasoning.push((
                         model_key.clone(),
                         candidate_id.clone(),
@@ -183,6 +199,7 @@ impl GatewayRuntime {
                 }
             }
         }
+        metadata.reasoning_probe_progress = probe_progress_by_model.clone();
         let mut current_reasoning_levels = BTreeMap::new();
         for (model, capabilities) in reasoning_by_model {
             let Some(capabilities) = union_source_reasoning_capabilities(capabilities) else {
@@ -228,6 +245,7 @@ impl GatewayRuntime {
                 &previous_levels,
                 &current_reasoning_levels,
             );
+            confirmed.probe_progress.extend(probe_progress_by_model);
         }
         for (model, route_support) in image_support_by_model {
             if route_support.iter().all(|supports_image| *supports_image) {
@@ -246,9 +264,6 @@ impl GatewayRuntime {
         let scheduler = self.lock_scheduler();
         let mut routes = Vec::new();
         for (candidate_id, binding) in &self.source_candidate_bindings {
-            if binding.wire_api != WireApi::Responses {
-                continue;
-            }
             let Some(candidate) = scheduler.candidate(candidate_id) else {
                 continue;
             };
@@ -534,6 +549,16 @@ impl GatewayRuntime {
             .unwrap_or_default()
     }
 
+    pub fn reasoning_probe_progress(&self, model: &str) -> Option<SourceReasoningProbeProgress> {
+        self.model_metadata
+            .confirmed_reasoning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .probe_progress
+            .get(&model.trim().to_ascii_lowercase())
+            .cloned()
+    }
+
     /// Returns a model's manually allowed reasoning levels. An empty result
     /// means the catalog remains automatic and exposes every confirmed level.
     pub fn model_reasoning_allowed_levels(&self, model: &str) -> Vec<String> {
@@ -548,11 +573,59 @@ impl GatewayRuntime {
     pub fn model_reasoning_effort_is_allowed(&self, model: &str, effort: &str) -> bool {
         let model = model.trim().to_ascii_lowercase();
         let effort = effort.trim().to_ascii_lowercase();
+        let confirmed = self
+            .model_metadata
+            .confirmed_reasoning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .levels
+            .get(&model)
+            .cloned()
+            .unwrap_or_default();
+        if confirmed.is_empty() {
+            return false;
+        }
         self.model_reasoning_allowed_levels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&model)
-            .is_none_or(|allowed| allowed.iter().any(|level| level == &effort))
+            .map_or_else(
+                || confirmed.iter().any(|level| level == &effort),
+                |allowed| {
+                    allowed.iter().any(|level| {
+                        level == &effort && confirmed.iter().any(|confirmed| confirmed == level)
+                    })
+                },
+            )
+    }
+
+    /// Model-level confirmation is not enough when multiple API sources expose
+    /// the same model with different reasoning capabilities.
+    pub(crate) fn candidate_reasoning_effort_is_allowed(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        effort: &str,
+    ) -> bool {
+        if self.chatgpt_accounts.contains_key(candidate_id) {
+            return true;
+        }
+        if !self.model_reasoning_effort_is_allowed(model, effort) {
+            return false;
+        }
+        if !self.source_candidate_bindings.contains_key(candidate_id) {
+            return false;
+        }
+        let model = model.trim().to_ascii_lowercase();
+        let effort = effort.trim().to_ascii_lowercase();
+        self.model_metadata
+            .confirmed_reasoning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .efforts
+            .get(&model)
+            .and_then(|routes| routes.get(candidate_id))
+            .is_some_and(|efforts| efforts.contains(&effort))
     }
 
     pub fn set_model_reasoning_allowed_levels(

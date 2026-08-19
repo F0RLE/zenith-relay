@@ -143,8 +143,23 @@ export type ModelSummary = {
   outputMicroUsdPerMillion: number | null;
   customPrice: boolean;
   reasoningLevels?: string[];
+  reasoningSupportedLevels?: string[];
   reasoningAllowedLevels?: string[];
   reasoningConfigurable?: boolean;
+  reasoningProbe?: ReasoningProbeProgress;
+};
+
+export type ReasoningProbeProgress = {
+  status: "queued" | "running" | "confirmed" | "rejected" | "inconclusive" | string;
+  total: number;
+  running: number;
+  success: number;
+  failed: number;
+  confirmed: number;
+  rejected: number;
+  inconclusive: number;
+  pending: number;
+  lastProbeAt: string | null;
 };
 
 export type CandidateRuntimeSnapshot = {

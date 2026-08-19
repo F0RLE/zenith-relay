@@ -1428,7 +1428,7 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
-async fn model_reasoning_modes_are_hot_applied_without_source_confirmation() {
+async fn model_reasoning_modes_require_gateway_confirmation_and_are_hot_applied() {
     let root = TempDir::new().unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
@@ -1564,7 +1564,7 @@ async fn model_reasoning_modes_are_hot_applied_without_source_confirmation() {
             .iter()
             .find(|model| model["id"] == "gpt-test")
             .unwrap()["reasoningAllowedLevels"],
-        json!(["ultra"])
+        json!([])
     );
 
     let reset: Value = client
@@ -4033,7 +4033,19 @@ async fn models_response(request: Request) -> impl IntoResponse {
     Json(json!({
         "data":[{
             "id":"gpt-test",
-            "reasoningEffortModes":["low", "medium", "high"]
+            "reasoningEffortModes":["low", "medium", "high"],
+            "reasoningProbe": {
+                "status": "confirmed",
+                "total": 3,
+                "running": 0,
+                "success": 3,
+                "failed": 0,
+                "confirmed": 3,
+                "rejected": 0,
+                "inconclusive": 0,
+                "pending": 0,
+                "lastProbeAt": "2026-08-20T00:00:00Z"
+            }
         }]
     }))
 }

@@ -2524,7 +2524,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "6.7 tok/s", "128 ms / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache ↓12", "Cache ↑4", "Reason5"]);
   await expect(page.locator(".usage-metrics")).toContainText("Generation speed6.7 tok/s");
-  await expect(page.getByText("Stream (E2E)", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("E2E speed", { exact: true })).toHaveCount(0);
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -2692,7 +2692,7 @@ test("remote model prices use the server-owned override", async ({ page }) => {
   ]);
 });
 
-test("local model reasoning uses only confirmed source levels", async ({ page }) => {
+test("local model reasoning keeps confirmed modes separate from saved selection", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
@@ -2707,15 +2707,82 @@ test("local model reasoning uses only confirmed source levels", async ({ page })
   const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
   await claude.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
   const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  await expect(dialog.getByText("Confirmed:", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".model-reasoning-detected").filter({ hasText: "Confirmed:" }).getByText("Low, Medium, High, Ultra", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Ultra"]);
-  await dialog.getByRole("checkbox", { name: "High" }).click();
+  await expect(dialog.getByRole("checkbox", { name: "Max" })).toHaveCount(0);
+  await dialog.getByRole("checkbox", { name: "Ultra" }).click();
   await dialog.getByRole("button", { name: "Save" }).click();
 
-  await expect(page.locator('[data-model-reasoning-edit="gpt-5.4"]')).toHaveCount(0);
+  const gpt = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
+  await expect(gpt.getByRole("button", { name: "View reasoning modes for gpt-5.4" })).toHaveCount(0);
+
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.filter((call) => call.command === "set_local_model_reasoning").map((call) => call.args)).toEqual([
-    { input: { modelId: "claude-opus-4-8", allowedLevels: ["high"] } },
+    { input: { modelId: "claude-opus-4-8", allowedLevels: ["ultra"] } },
   ]);
+});
+
+test("reasoning probe lifecycle is visible without inventing modes", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    mixedModels: true,
+    modelReasoning: { "claude-opus-4-8": ["low", "high"] },
+    modelReasoningProbe: {
+      "gpt-5.4": { status: "queued", total: 8, running: 0, success: 0, failed: 0, confirmed: 0, rejected: 0, inconclusive: 0, pending: 8, lastProbeAt: null },
+      "claude-opus-4-8": { status: "confirmed", total: 2, running: 0, success: 2, failed: 0, confirmed: 2, rejected: 0, inconclusive: 0, pending: 0, lastProbeAt: "2026-08-19T00:00:00.000Z" },
+      "gemini-3.1-pro-preview": { status: "running", total: 8, running: 1, success: 0, failed: 0, confirmed: 0, rejected: 0, inconclusive: 0, pending: 7, lastProbeAt: null },
+      "grok-4.5": { status: "inconclusive", total: 4, running: 0, success: 2, failed: 2, confirmed: 2, rejected: 1, inconclusive: 1, pending: 0, lastProbeAt: "2026-08-19T00:00:00.000Z" },
+      "glm-5.2": { status: "rejected", total: 4, running: 0, success: 0, failed: 4, confirmed: 0, rejected: 4, inconclusive: 0, pending: 0, lastProbeAt: "2026-08-19T00:00:00.000Z" },
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const openDialog = async (model: string) => {
+    await page.locator(`.model-rules tbody tr[data-model-id="${model}"]`).getByRole("button", { name: new RegExp(`(?:Set|View) reasoning modes for ${model}`) }).click();
+    return page.getByRole("dialog", { name: "Reasoning modes" });
+  };
+  const queued = await openDialog("gpt-5.4");
+  await expect(queued).toContainText("Queued");
+  await expect(queued).toContainText("0 successful · 0 failed · 0 running · 8 pending / 8");
+  await expect(queued).toContainText("No modes reported");
+  await expect(queued.getByRole("checkbox")).toHaveCount(0);
+  await queued.locator("footer").getByRole("button", { name: "Close" }).click();
+
+  const confirmed = await openDialog("claude-opus-4-8");
+  await expect(confirmed).toContainText("Confirmed");
+  await expect(confirmed).toContainText("2 successful · 0 failed · 0 running · 0 pending / 2");
+  await expect(confirmed).toContainText("last checked");
+  await expect(confirmed).toContainText("Low, High");
+  await confirmed.getByRole("button", { name: "Cancel" }).click();
+
+  const running = await openDialog("gemini-3.1-pro-preview");
+  await expect(running).toContainText("Running");
+  await expect(running).toContainText("0 successful · 0 failed · 1 running · 7 pending / 8");
+  await running.locator("footer").getByRole("button", { name: "Close" }).click();
+
+  const partial = await openDialog("grok-4.5");
+  await expect(partial).toContainText("Partial result");
+  await expect(partial).toContainText("2 successful · 2 failed · 0 running · 0 pending / 4");
+  await expect(partial).toContainText("last checked");
+  await partial.locator("footer").getByRole("button", { name: "Close" }).click();
+
+  const rejected = await openDialog("glm-5.2");
+  await expect(rejected).toContainText("All rejected");
+  await expect(rejected).toContainText("0 successful · 4 failed · 0 running · 0 pending / 4");
+  await expect(rejected).toContainText("last checked");
+  await expect(rejected.getByRole("checkbox")).toHaveCount(0);
+  await rejected.locator("footer").getByRole("button", { name: "Close" }).click();
+
+  await page.reload();
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+  const afterReload = await openDialog("gpt-5.4");
+  await expect(afterReload).toContainText("Queued");
 });
 
 test("remote model reasoning is saved through the server action", async ({ page }) => {
@@ -3796,7 +3863,7 @@ test("overview presents time-based usage analytics for the local relay", async (
   await expect(page.getByText("Token usage", { exact: true })).toBeVisible();
   await expect(page.getByText("API equivalent", { exact: true })).toBeVisible();
   await expect(page.locator(".overview-chart.cost .overview-chart-summary")).toHaveText("≈$0.000148");
-  await expect(page.getByText("Stream (E2E)", { exact: true })).toBeVisible();
+  await expect(page.getByText("E2E speed", { exact: true })).toBeVisible();
   await expect(page.getByText("Runtime", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Connections and capacity", { exact: true })).toHaveCount(0);
   await page.getByRole("tab", { name: "Week" }).click();
