@@ -658,6 +658,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
             return structuredClone(localRuntime);
           }
+          case "sync_codex_default_service_tier": return null;
           case "delete_local_account": {
             for (const entry of proxyEntries) entry.assignedAccountIds = entry.assignedAccountIds.filter((accountId) => accountId !== args.accountId);
             localRuntime.accounts = localRuntime.accounts.filter((item) => item.id !== args.accountId);

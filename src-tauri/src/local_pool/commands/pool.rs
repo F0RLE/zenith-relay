@@ -11,9 +11,11 @@ use crate::{
         models::{
             LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord,
         },
+        profiles::codex,
         state::DesktopState,
         store::secret_store,
     },
+    platform::default_codex_home,
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -714,6 +716,7 @@ pub async fn update_local_routing(
     }
     gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {
+        codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)?;
         return state.snapshot().await.map_err(Into::into);
     }
     let service_tier_only = gateway.max_retry_candidates == old_gateway.max_retry_candidates
@@ -722,13 +725,30 @@ pub async fn update_local_routing(
         && gateway.routing_strategy == old_gateway.routing_strategy
         && gateway.subscription_plan_order == old_gateway.subscription_plan_order;
     let default_service_tier = gateway.default_service_tier;
-    state.store()?.replace_gateway(gateway)?;
+    state.store()?.replace_gateway(gateway.clone())?;
     if service_tier_only {
         if let Some(runtime) = state.gateway.runtime().await {
             runtime.set_default_service_tier(default_service_tier);
         }
     } else {
-        sync_gateway_or_rollback(&state, old_gateway).await?;
+        sync_gateway_or_rollback(&state, old_gateway.clone()).await?;
+    }
+    if let Err(error) =
+        codex::sync_default_service_tier(&default_codex_home(), default_service_tier)
+    {
+        state.store()?.replace_gateway(old_gateway.clone())?;
+        if service_tier_only {
+            if let Some(runtime) = state.gateway.runtime().await {
+                runtime.set_default_service_tier(old_gateway.default_service_tier);
+            }
+        } else if let Err(restore) = sync_gateway_or_rollback(&state, gateway).await {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("{error}; failed to restore previous gateway settings: {restore}"),
+            )
+            .into());
+        }
+        return Err(error.into());
     }
     state.snapshot().await.map_err(Into::into)
 }

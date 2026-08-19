@@ -2159,6 +2159,66 @@ fn oauth_account_bindings_are_isolated_per_profile_path() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn sync_default_service_tier_preserves_codex_profile_state() {
+    let (root, home, _) = profile_dirs("service-tier");
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model_provider = \"custom\"\n\n[desktop]\nappearanceTheme = \"dark\"\n",
+    )
+    .unwrap();
+    fs::write(
+        home.join(GLOBAL_STATE_FILE),
+        r#"{"other":1,"electron-persisted-atom-state":{"theme":"dark"}}"#,
+    )
+    .unwrap();
+
+    sync_default_service_tier(&home, DefaultServiceTier::Fast).unwrap();
+    let config = fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    assert_eq!(
+        config["desktop"][DESKTOP_DEFAULT_SERVICE_TIER_KEY].as_str(),
+        Some("priority")
+    );
+    assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    assert_eq!(state["other"], 1);
+    assert_eq!(state[PERSISTED_ATOM_STATE_KEY]["theme"], "dark");
+    assert_eq!(
+        state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY],
+        "priority"
+    );
+    assert_eq!(
+        state[PERSISTED_ATOM_STATE_KEY][SERVICE_TIER_CHANGED_KEY],
+        true
+    );
+
+    sync_default_service_tier(&home, DefaultServiceTier::Standard).unwrap();
+    let config = fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    assert!(config["desktop"]
+        .as_table()
+        .unwrap()
+        .get(DESKTOP_DEFAULT_SERVICE_TIER_KEY)
+        .is_none());
+    assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    assert_eq!(state["other"], 1);
+    assert!(state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY].is_null());
+    assert_eq!(
+        state[PERSISTED_ATOM_STATE_KEY][SERVICE_TIER_CHANGED_KEY],
+        true
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn profile_dirs(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-profile-{name}-{}",

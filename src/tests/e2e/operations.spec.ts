@@ -2147,7 +2147,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
     action: { type: "set_routing_policy" },
     payload: { maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "subscription_expiry", defaultServiceTier: "fast", subscriptionPlanOrder: [] },
   });
-  expect(calls.some((call) => call.command === "sync_codex_default_service_tier")).toBe(false);
+  expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
 });
 
 test("remote configuration presets require preview before an explicit apply", async ({ page }) => {

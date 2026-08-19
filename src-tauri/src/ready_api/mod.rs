@@ -333,6 +333,7 @@ pub fn run() {
             local_pool::commands::usage::get_local_usage_page,
             local_pool::commands::usage::clear_local_usage,
             local_pool::commands::profiles::update_chatgpt_interface_quota_reserve,
+            local_pool::commands::profiles::sync_codex_default_service_tier,
             local_pool::commands::profiles::attach_codex_to_local_gateway,
             local_pool::commands::profiles::attach_codex_to_remote_gateway,
             local_pool::commands::profiles::restore_codex_profile,

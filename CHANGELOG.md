@@ -42,8 +42,8 @@ release entries are kept concise and link to the corresponding tag.
 - Generation speed now uses successful post-first-output intervals and the
   remaining visible output tokens, excluding separately reported reasoning;
   the full-request E2E speed remains in Overview.
-- Pool speed controls now use the clearer Standard/Fast terminology while
-  preserving the existing service-tier behavior.
+- Pool speed controls now use the clearer Standard/Fast terminology and sync
+  Codex's official priority setting with the selected pool tier.
 - Pool member cards fill the available grid width at larger windows while
   preserving a readable minimum width and responsive layout.
 - Local snapshots preserve the canonical account state and show a sanitized

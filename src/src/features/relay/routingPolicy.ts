@@ -13,5 +13,6 @@ export type RoutingPolicy = {
 export function persistRoutingPolicy(mode: RelayMode, policy: RoutingPolicy) {
   return mode === "local"
     ? relayCommands.updateRouting(policy.routingStrategy, policy.maxRetryCandidates, policy.cooldownAfterFailures, policy.keepLastCandidateAvailable, policy.defaultServiceTier, policy.subscriptionPlanOrder)
-    : relayCommands.remoteAction({ type: "set_routing_policy" }, policy);
+    : relayCommands.remoteAction({ type: "set_routing_policy" }, policy)
+      .then(() => relayCommands.syncCodexDefaultServiceTier(policy.defaultServiceTier));
 }
