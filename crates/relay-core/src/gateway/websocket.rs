@@ -192,6 +192,16 @@ async fn connect_upstream(
         ) else {
             continue;
         };
+        if let Some(effort) = request.requested_reasoning_effort() {
+            if !runtime.candidate_reasoning_effort_is_allowed(
+                &route.candidate_id,
+                &request.resolved_model,
+                &effort,
+            ) {
+                drop(lease);
+                continue 'candidates;
+            }
+        }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         let source_error_origin = route_error_origin(&route);
@@ -1086,6 +1096,16 @@ async fn start_next_request(
                 false,
             )
             .ok_or_else(GatewayFailure::unavailable)?;
+        if let Some(effort) = request.requested_reasoning_effort() {
+            if !runtime.candidate_reasoning_effort_is_allowed(
+                &route.candidate_id,
+                &request.resolved_model,
+                &effort,
+            ) {
+                drop(lease);
+                return Err(GatewayFailure::unavailable());
+            }
+        }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         let started = Instant::now();

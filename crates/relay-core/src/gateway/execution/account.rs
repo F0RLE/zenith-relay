@@ -8,9 +8,9 @@ use super::super::errors::{
 };
 use super::super::now_ms;
 use super::super::request::{
-    account_endpoint_url, forwarded_codex_headers, request_id, request_service_tier,
-    tool_use_diagnostics, try_recover_encrypted_content, with_forwarded_tool_diagnostics,
-    AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
+    account_endpoint_url, apply_default_service_tier_if_missing, forwarded_codex_headers,
+    request_id, request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
@@ -40,6 +40,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     response_affinity_key: Option<String>,
     rewrite_model: bool,
 ) -> Response<Body> {
+    apply_default_service_tier_if_missing(&mut request, runtime.default_service_tier());
     let request_id = request_id();
     let service_tier = request_service_tier(&request);
     let client_tool_use = tool_use_diagnostics(&request);

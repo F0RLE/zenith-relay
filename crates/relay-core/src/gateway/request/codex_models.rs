@@ -314,13 +314,27 @@ fn build_codex_models_response_from_manifests<'a>(
             .get(&upstream_id.to_ascii_lowercase())
             .copied();
         let mut model = if native_account_model {
+            let native_model_id = upstream_by_model
+                .get(&normalized)
+                .and_then(|entry| entry.get("slug"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|slug| is_valid_model_id(slug))
+                .unwrap_or(&display_id);
             upstream_by_model
                 .get(&normalized)
                 .and_then(|entry| {
-                    normalize_native_codex_catalog_entry(entry, &display_id, priority, None)
+                    normalize_native_codex_catalog_entry(entry, native_model_id, priority, None)
                 })
                 .unwrap_or_else(|| {
-                    routed_codex_catalog_entry(template, &display_id, priority, None)
+                    // A missing/invalid account manifest must not borrow
+                    // another account's native capabilities. Keep only the
+                    // exact configured/upstream ID until a fresh manifest is
+                    // available.
+                    let mut fallback =
+                        routed_codex_catalog_entry(None, native_model_id, priority, None);
+                    fallback["slug"] = Value::String(native_model_id.to_string());
+                    fallback
                 })
         } else {
             source_reasoning_templates
@@ -404,21 +418,24 @@ fn apply_source_reasoning_allowed_levels(model: &mut Value, allowed_levels: &[St
     }
     let allowed = allowed_levels
         .iter()
-        .map(|level| level.to_ascii_lowercase())
+        .map(|level| level.trim().to_ascii_lowercase())
+        .filter(|level| !level.is_empty())
         .collect::<BTreeSet<_>>();
-    let (has_levels, default_reasoning_level) = {
-        let Some(levels) = model
-            .get_mut("supported_reasoning_levels")
-            .and_then(Value::as_array_mut)
-        else {
-            return;
-        };
-        levels.retain(|level| {
+    let detected_levels = model
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let levels = detected_levels
+        .into_iter()
+        .filter(|level| {
             level
                 .get("effort")
                 .and_then(Value::as_str)
                 .is_some_and(|effort| allowed.contains(&effort.to_ascii_lowercase()))
-        });
+        })
+        .collect::<Vec<_>>();
+    let (has_levels, default_reasoning_level) = {
         let default_reasoning_level = match levels.as_slice() {
             [] => None,
             [level] => level
@@ -435,6 +452,7 @@ fn apply_source_reasoning_allowed_levels(model: &mut Value, allowed_levels: &[St
         };
         (!levels.is_empty(), default_reasoning_level)
     };
+    model["supported_reasoning_levels"] = Value::Array(levels);
     if !has_levels {
         model["supported_reasoning_levels"] = Value::Array(Vec::new());
         model
@@ -486,7 +504,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn manual_reasoning_modes_prefer_medium_over_provider_ultra_default() {
+    fn confirmed_reasoning_modes_prefer_medium_over_provider_ultra_default() {
         let mut model = json!({
             "default_reasoning_level": "ultra",
             "supported_reasoning_levels": [
@@ -505,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_reasoning_modes_do_not_keep_provider_ultra_default_without_medium() {
+    fn confirmed_reasoning_modes_do_not_keep_provider_ultra_default_without_medium() {
         let mut model = json!({
             "default_reasoning_level": "ultra",
             "supported_reasoning_levels": [
@@ -524,16 +542,24 @@ mod tests {
     }
 
     #[test]
-    fn manual_reasoning_modes_keep_an_empty_supported_levels_array_without_a_match() {
+    fn unconfirmed_reasoning_modes_are_not_synthesized() {
         let mut model = json!({
-            "default_reasoning_level": "high",
-            "supported_reasoning_levels": [{"effort": "low"}]
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Provider low"}
+            ]
         });
 
-        apply_source_reasoning_allowed_levels(&mut model, &["medium".to_string()]);
+        apply_source_reasoning_allowed_levels(
+            &mut model,
+            &["low".to_string(), "xhigh".to_string(), "max".to_string()],
+        );
 
-        assert_eq!(model["supported_reasoning_levels"], json!([]));
-        assert!(model.get("default_reasoning_level").is_none());
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([{"effort": "low", "description": "Provider low"}])
+        );
+        assert_eq!(model["default_reasoning_level"], "low");
     }
 
     #[test]

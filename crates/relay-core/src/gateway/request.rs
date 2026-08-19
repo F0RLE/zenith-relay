@@ -17,7 +17,8 @@ pub(super) use headers::{
     forwarded_messages_headers,
 };
 pub(super) use normalization::{
-    normalize_account_request, request_service_tier, try_recover_encrypted_content,
+    apply_default_service_tier_if_missing, normalize_account_request, request_service_tier,
+    try_recover_encrypted_content,
 };
 
 use super::execution::execute_client_request;
@@ -45,6 +46,19 @@ pub(super) const MAX_CLIENT_REQUEST_BODY_ERROR: &str = "request body exceeds 64 
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+
+pub(super) fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
+    let effort = match wire_api {
+        WireApi::Responses => request.pointer("/reasoning/effort"),
+        WireApi::ChatCompletions => request.get("reasoning_effort"),
+        WireApi::Messages => None,
+    };
+    effort
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty() && !effort.eq_ignore_ascii_case("none"))
+        .map(str::to_ascii_lowercase)
+}
 
 pub(super) async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -288,7 +302,20 @@ mod tests {
     }
 
     #[test]
-    fn service_tier_metrics_classify_legacy_fast_without_rewriting_the_request() {
+    fn service_tier_defaults_inject_only_fast_without_overriding_client_choice() {
+        let mut request = json!({});
+        apply_default_service_tier_if_missing(&mut request, DefaultServiceTier::Fast);
+        assert_eq!(request["service_tier"], "priority");
+        assert_eq!(request_service_tier(&request), DefaultServiceTier::Fast);
+
+        let mut standard = json!({});
+        apply_default_service_tier_if_missing(&mut standard, DefaultServiceTier::Standard);
+        assert!(standard.get("service_tier").is_none());
+
+        let mut client_selected = json!({"service_tier": "flex"});
+        apply_default_service_tier_if_missing(&mut client_selected, DefaultServiceTier::Fast);
+        assert_eq!(client_selected["service_tier"], "flex");
+
         assert_eq!(
             request_service_tier(&json!({"service_tier": "priority"})),
             DefaultServiceTier::Fast

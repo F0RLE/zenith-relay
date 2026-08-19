@@ -1,4 +1,5 @@
 use super::Capabilities;
+use crate::catalog::SourceReasoningProbeProgress;
 use crate::{
     account_candidate_health,
     accounts::{AccountAuthState, AccountHealthState},
@@ -95,15 +96,16 @@ pub struct ModelSummary {
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
     #[serde(default)]
+    pub reasoning_supported_levels: Vec<String>,
+    #[serde(default)]
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_probe: Option<SourceReasoningProbeProgress>,
 }
 
-/// Adds API-source reasoning capabilities to a management model row. Saved
-/// operator policy is a valid API capability even when a provider catalog
-/// omits its reasoning metadata. Native ChatGPT routes retain their
-/// provider-owned catalog and are intentionally never configurable here.
+/// Adds only backend-confirmed reasoning capabilities to a management model.
 pub fn apply_model_reasoning_summary(
     model: &mut ModelSummary,
     confirmed_levels: Vec<String>,
@@ -111,31 +113,32 @@ pub fn apply_model_reasoning_summary(
     has_native_account_route: bool,
 ) {
     model.reasoning_levels.clear();
+    model.reasoning_supported_levels.clear();
     model.reasoning_allowed_levels.clear();
     model.reasoning_configurable = false;
-    if has_native_account_route {
-        return;
-    }
 
     let mut seen = BTreeSet::new();
     for level in confirmed_levels {
         let level = level.trim().to_ascii_lowercase();
         if !level.is_empty() && seen.insert(level.clone()) {
+            model.reasoning_supported_levels.push(level.clone());
             model.reasoning_levels.push(level);
         }
     }
-    if let Some(saved_allowed_levels) = saved_allowed_levels {
-        for level in saved_allowed_levels {
-            let level = level.trim().to_ascii_lowercase();
-            if !level.is_empty() && seen.insert(level.clone()) {
-                model.reasoning_levels.push(level.clone());
-            }
-            if !level.is_empty() && !model.reasoning_allowed_levels.contains(&level) {
-                model.reasoning_allowed_levels.push(level);
+    if !has_native_account_route {
+        if let Some(saved_allowed_levels) = saved_allowed_levels {
+            for level in saved_allowed_levels {
+                let level = level.trim().to_ascii_lowercase();
+                if seen.contains(&level)
+                    && !level.is_empty()
+                    && !model.reasoning_allowed_levels.contains(&level)
+                {
+                    model.reasoning_allowed_levels.push(level);
+                }
             }
         }
     }
-    model.reasoning_configurable = !model.reasoning_levels.is_empty();
+    model.reasoning_configurable = !has_native_account_route && !model.reasoning_levels.is_empty();
 }
 
 pub fn source_runtime_available(
@@ -836,8 +839,10 @@ pub fn pool_model_summaries(
                         .map(|price| price.output_micro_usd_per_million),
                     custom_price: false,
                     reasoning_levels: Vec::new(),
+                    reasoning_supported_levels: Vec::new(),
                     reasoning_allowed_levels: Vec::new(),
                     reasoning_configurable: false,
+                    reasoning_probe: None,
                 },
             )
         })
@@ -1154,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn model_reasoning_summary_keeps_saved_api_levels_without_catalog_metadata() {
+    fn model_reasoning_summary_separates_detected_and_manual_api_levels() {
         let mut model = ModelSummary {
             enabled: true,
             codex_visible: true,
@@ -1169,8 +1174,10 @@ mod tests {
             output_micro_usd_per_million: None,
             custom_price: false,
             reasoning_levels: Vec::new(),
+            reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
+            reasoning_probe: None,
         };
 
         apply_model_reasoning_summary(
@@ -1179,12 +1186,20 @@ mod tests {
             Some(&["ultra".into()]),
             false,
         );
-        assert_eq!(model.reasoning_levels, ["high", "ultra"]);
-        assert_eq!(model.reasoning_allowed_levels, ["ultra"]);
+        assert_eq!(model.reasoning_levels, ["high"]);
+        assert_eq!(model.reasoning_supported_levels, ["high"]);
+        assert!(model.reasoning_allowed_levels.is_empty());
         assert!(model.reasoning_configurable);
+
+        apply_model_reasoning_summary(&mut model, Vec::new(), None, false);
+        assert!(model.reasoning_levels.is_empty());
+        assert!(model.reasoning_supported_levels.is_empty());
+        assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(!model.reasoning_configurable);
 
         apply_model_reasoning_summary(&mut model, Vec::new(), Some(&["max".into()]), true);
         assert!(model.reasoning_levels.is_empty());
+        assert!(model.reasoning_supported_levels.is_empty());
         assert!(model.reasoning_allowed_levels.is_empty());
         assert!(!model.reasoning_configurable);
     }

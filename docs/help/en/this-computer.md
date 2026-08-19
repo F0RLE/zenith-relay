@@ -37,7 +37,7 @@ model capabilities remain unchanged.
 
 ## Application tabs
 
-- **Overview** shows runtime state and the **Stream (E2E)** chart. It divides
+- **Overview** shows runtime state and the **E2E speed** chart. It divides
   all reported output tokens by the Relay-to-provider request time, so first-output
   wait and network time are included.
 - **Connections** stores accounts, API sources, and proxies.

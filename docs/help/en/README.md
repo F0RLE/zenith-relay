@@ -50,7 +50,7 @@ selection after a short confirmation. The same wizard can be restarted from
   endpoint to ChatGPT/Codex.
 - **Usage** shows request status, selected member, model, tokens, timing,
   generation speed, and API-equivalent estimate without storing ordinary
-  prompt/response bodies. The full-request E2E stream is shown in **Overview**.
+  prompt/response bodies. The full-request E2E speed is shown in **Overview**.
 - **Recovery** restores profile snapshots or removes Relay-managed settings
   without overwriting unrelated user configuration.
 - **Help** renders the same localized mode guides stored in this repository.

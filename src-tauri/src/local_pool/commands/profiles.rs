@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use tauri::State;
 use zenith_relay_core::{
     protocol::{Feature, ProfileKeyRotation},
-    CandidateQuota, QUOTA_STALE_AFTER_MS,
+    CandidateQuota, DefaultServiceTier, QUOTA_STALE_AFTER_MS,
 };
 
 mod catalog;
@@ -117,6 +117,16 @@ pub async fn update_chatgpt_interface_quota_reserve(
     )
     .await;
     state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn sync_codex_default_service_tier(
+    default_service_tier: DefaultServiceTier,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    codex::sync_default_service_tier(&default_codex_home(), default_service_tier)
+        .map_err(Into::into)
 }
 
 #[tauri::command]

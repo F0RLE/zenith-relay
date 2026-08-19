@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, CandidateRuntimeSnapshot, SourceStats, SourceSummary } from "../../api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
 import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
 import { AccountPlanBadge, AccountValueStrip, Button, EmptyState, IconButton, QuotaStack, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
@@ -23,7 +23,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
-  const serviceTier = runtime?.gateway.defaultServiceTier ?? "standard";
+  const [pendingServiceTier, setPendingServiceTier] = useState<DefaultServiceTier | null>(null);
+  const serviceTier = pendingServiceTier ?? runtime?.gateway.defaultServiceTier ?? "standard";
   const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
   const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -140,17 +141,22 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
       : relayCommands.remoteAction({ type: "refresh_account", id: account.id }),
     "feedback.refreshed",
   );
-  const updateServiceTier = (fast: boolean) => {
+  const updateServiceTier = async (fast: boolean) => {
     const defaultServiceTier = fast ? "fast" : "standard";
     if (defaultServiceTier === serviceTier) return;
-    void perform("pool-service-tier", () => persistRoutingPolicy(mode, {
-      maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
-      cooldownAfterFailures: runtime?.gateway.cooldownAfterFailures ?? 3,
-      keepLastCandidateAvailable: runtime?.gateway.keepLastCandidateAvailable ?? true,
-      routingStrategy,
-      defaultServiceTier,
-      subscriptionPlanOrder: runtime?.gateway.subscriptionPlanOrder ?? [],
-    }));
+    setPendingServiceTier(defaultServiceTier);
+    try {
+      await perform("pool-service-tier", () => persistRoutingPolicy(mode, {
+        maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
+        cooldownAfterFailures: runtime?.gateway.cooldownAfterFailures ?? 3,
+        keepLastCandidateAvailable: runtime?.gateway.keepLastCandidateAvailable ?? true,
+        routingStrategy,
+        defaultServiceTier,
+        subscriptionPlanOrder: runtime?.gateway.subscriptionPlanOrder ?? [],
+      }));
+    } finally {
+      setPendingServiceTier(null);
+    }
   };
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
   const statuses = members.map((member) => member.operationalStatus);
@@ -169,7 +175,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
             <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
               <Zap aria-hidden />
               <span className="pool-speed-copy"><small>{t("pool.serviceTier")}</small><strong>{t(`pool.serviceTiers.${serviceTier}`)}</strong></span>
-              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} checked={serviceTier === "fast"} disabled={busy === "pool-service-tier"} onChange={(event) => updateServiceTier(event.target.checked)} />
+              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} checked={serviceTier === "fast"} disabled={busy === "pool-service-tier"} onChange={(event) => void updateServiceTier(event.target.checked)} />
               <span className="pool-speed-track" aria-hidden><span /></span>
             </label>
             <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />

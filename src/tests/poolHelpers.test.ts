@@ -147,7 +147,7 @@ describe("pool helpers", () => {
         models: [{ id: "gpt-test", enabled: false, memberCount: 2, codexVisible: true, codexDisplayName: "", catalogRank: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
       },
     });
-    expect(modelSummaries(explicit)[0]).toMatchObject({ codexDisplayName: "gpt-test", reasoningLevels: [], reasoningAllowedLevels: [], reasoningConfigurable: false });
+    expect(modelSummaries(explicit)[0]).toMatchObject({ codexDisplayName: "gpt-test", reasoningLevels: [], reasoningSupportedLevels: [], reasoningAllowedLevels: [], reasoningConfigurable: false });
 
     const fallback = modelSummaries(runtime({
       gateway: {

@@ -341,7 +341,16 @@ pub fn normalize_native_codex_catalog_entry(
         entry.remove("input_modalities");
     }
     let context_window = entry.get("context_window").and_then(context_window);
-    entry.insert("slug".into(), Value::String(model.to_string()));
+    // Native account rows are identified by the upstream slug. The caller's
+    // model is only a routing fallback; never replace a real upstream ID with
+    // a Relay alias or a configured spelling.
+    let native_model = template
+        .get("slug")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|slug| valid_model_id(slug))
+        .unwrap_or(model);
+    entry.insert("slug".into(), Value::String(native_model.to_string()));
     entry.insert(
         "priority".into(),
         Value::Number(priority.min(i32::MAX as u64).into()),
@@ -876,6 +885,26 @@ mod tests {
         .unwrap();
 
         assert!(entry.get("input_modalities").is_none());
+    }
+
+    #[test]
+    fn native_models_keep_an_arbitrary_upstream_slug_over_the_routing_name() {
+        let template = json!({
+            "slug": "vendor/future-model-2026-08",
+            "display_name": "Future upstream name"
+        });
+
+        let entry = normalize_native_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "configured-alias",
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(entry["slug"], "vendor/future-model-2026-08");
+        assert_eq!(entry["display_name"], "Future upstream name");
+        assert!(!entry["slug"].as_str().unwrap().starts_with("zenith/"));
     }
 
     #[test]

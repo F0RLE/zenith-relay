@@ -111,6 +111,7 @@ export const relayCommands = {
   setModelReasoning: (modelId: string, allowedLevels: string[]) => invoke("set_local_model_reasoning", { input: { modelId, allowedLevels } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, cooldownAfterFailures: number, keepLastCandidateAvailable: boolean, defaultServiceTier: DefaultServiceTier, subscriptionPlanOrder: string[]) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, cooldownAfterFailures, keepLastCandidateAvailable, defaultServiceTier, subscriptionPlanOrder } }),
+  syncCodexDefaultServiceTier: (defaultServiceTier: DefaultServiceTier) => invoke<void>("sync_codex_default_service_tier", { defaultServiceTier }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),

@@ -42,7 +42,7 @@ model capabilities remain unchanged.
 
 ## Application tabs
 
-- **Overview** shows server state and the **Stream (E2E)** chart: all reported
+- **Overview** shows server state and the **E2E speed** chart: all reported
   output tokens divided by the Relay-to-provider request time, including
   first-output wait and network time.
 - **Connections** manages the server connection, accounts, API sources, and

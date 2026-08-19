@@ -156,6 +156,9 @@ pub async fn get_local_runtime_state(
                 .map(Vec::as_slice),
             model_has_native_account_route(&account_summaries, &model_id),
         );
+        model.reasoning_probe = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.reasoning_probe_progress(&model_id));
     }
     let visible_model_ids = models
         .iter()

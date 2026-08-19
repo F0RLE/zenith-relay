@@ -11,10 +11,10 @@ use super::super::errors::{
 };
 use super::super::now_ms;
 use super::super::request::{
-    candidate_protocols, contains_tool_call_output, forwarded_bridge_gemini_headers,
-    forwarded_bridge_messages_headers, normalize_account_request, request_service_tier,
-    tool_use_diagnostics, try_recover_encrypted_content, with_forwarded_tool_diagnostics,
-    CODEX_RESPONSES_LITE_HEADER,
+    apply_default_service_tier_if_missing, candidate_protocols, contains_tool_call_output,
+    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
+    request_service_tier, requested_reasoning_effort, tool_use_diagnostics,
+    try_recover_encrypted_content, with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_error_response,
@@ -53,14 +53,18 @@ pub(in crate::gateway::execution) async fn execute_request(
     allow_previous_response_reset: bool,
     attempt_offset: u16,
 ) -> Response<Body> {
+    if wire_api != WireApi::Messages {
+        apply_default_service_tier_if_missing(&mut request, runtime.default_service_tier());
+    }
     let service_tier = if wire_api != WireApi::Messages {
         request_service_tier(&request)
     } else {
         DefaultServiceTier::Standard
     };
     let client_tool_use = tool_use_diagnostics(&request);
-    if let Some(effort) = requested_reasoning_effort(&request, wire_api) {
-        if !runtime.model_reasoning_effort_is_allowed(&resolved_model, &effort)
+    let requested_reasoning = requested_reasoning_effort(&request, wire_api);
+    if let Some(effort) = requested_reasoning.as_deref() {
+        if !runtime.model_reasoning_effort_is_allowed(&resolved_model, effort)
             && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model)
         {
             return api_error(
@@ -155,6 +159,16 @@ pub(in crate::gateway::execution) async fn execute_request(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.service_tier = service_tier;
+        if let Some(effort) = requested_reasoning.as_deref() {
+            if !runtime.candidate_reasoning_effort_is_allowed(
+                &route.candidate_id,
+                &resolved_model,
+                effort,
+            ) {
+                drop(lease);
+                continue;
+            }
+        }
         let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
@@ -971,19 +985,6 @@ fn replay_native_tool_continuation(
     replay
         .replay_request(request, source_model, stream)
         .map(Some)
-}
-
-fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
-    let effort = match wire_api {
-        WireApi::Responses => request.pointer("/reasoning/effort"),
-        WireApi::ChatCompletions => request.get("reasoning_effort"),
-        WireApi::Messages => None,
-    };
-    effort
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|effort| !effort.is_empty() && !effort.eq_ignore_ascii_case("none"))
-        .map(str::to_ascii_lowercase)
 }
 
 fn adapter_error_response(error: AdapterError) -> Response<Body> {

@@ -73,6 +73,7 @@ export type MockOptions = {
     outputMicroUsdPerMillion: number;
   }>;
   modelReasoning?: Record<string, string[]>;
+  modelReasoningProbe?: Record<string, { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null }>;
   sourceProtocolBindings?: Array<{
     wireApi: "responses" | "messages" | "chat_completions";
     adapter: "native" | "responses_to_messages" | "responses_to_gemini";
@@ -256,7 +257,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       configAvailable: true,
       authAvailable: true,
     }];
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean; reasoningLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningProbe?: { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null } };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -657,6 +658,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
             return structuredClone(localRuntime);
           }
+          case "sync_codex_default_service_tier": return null;
           case "delete_local_account": {
             for (const entry of proxyEntries) entry.assignedAccountIds = entry.assignedAccountIds.filter((accountId) => accountId !== args.accountId);
             localRuntime.accounts = localRuntime.accounts.filter((item) => item.id !== args.accountId);
@@ -1026,6 +1028,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         const current = currentModels.get(id.toLowerCase());
         const hasNativeRoute = runtime.accounts.some((account) => account.inPool && account.models.some((model) => model.toLowerCase() === id.toLowerCase()));
         const confirmedReasoning = input.modelReasoning?.[id.toLowerCase()] ?? [];
+        const reasoningLevels = current?.reasoningLevels ?? (hasNativeRoute ? [] : confirmedReasoning);
         const price = current?.customPrice
           ? { catalogRank: current.catalogRank, inputMicroUsdPerMillion: current.inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion: current.cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion: current.cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion: current.cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion: current.outputMicroUsdPerMillion }
           : modelPrices[id.toLowerCase()] ?? { catalogRank: null, inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null };
@@ -1037,9 +1040,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           codexDisplayName: id.replaceAll("-", " "),
           ...price,
           customPrice: current?.customPrice ?? false,
-          reasoningLevels: current?.reasoningLevels ?? (hasNativeRoute ? [] : confirmedReasoning),
+          reasoningLevels,
+          reasoningSupportedLevels: current?.reasoningSupportedLevels ?? reasoningLevels,
           reasoningAllowedLevels: current?.reasoningAllowedLevels ?? [],
-          reasoningConfigurable: current?.reasoningConfigurable ?? (!hasNativeRoute && confirmedReasoning.length > 0),
+          reasoningConfigurable: current?.reasoningConfigurable ?? (!hasNativeRoute && reasoningLevels.length > 0),
+          reasoningProbe: current?.reasoningProbe ?? input.modelReasoningProbe?.[id.toLowerCase()],
         };
       });
       runtime.gateway.models = input.serverModelOrder
