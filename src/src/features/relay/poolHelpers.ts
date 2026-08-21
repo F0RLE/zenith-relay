@@ -121,6 +121,7 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
       reasoningSupportedLevels: model.reasoningSupportedLevels ?? [],
       reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
       reasoningConfigurable: model.reasoningConfigurable ?? false,
+      reasoningProbeAvailable: model.reasoningProbeAvailable ?? false,
       reasoningProbe: model.reasoningProbe,
     }));
   }
@@ -139,11 +140,13 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
     cacheWrite5mMicroUsdPerMillion: null,
     cacheWrite1hMicroUsdPerMillion: null,
     outputMicroUsdPerMillion: null,
+    imageRequestPrices: [],
     customPrice: false,
     reasoningLevels: [],
     reasoningSupportedLevels: [],
     reasoningAllowedLevels: [],
     reasoningConfigurable: false,
+    reasoningProbeAvailable: false,
     reasoningProbe: undefined,
   }));
 }

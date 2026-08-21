@@ -5,7 +5,6 @@ export const RELAY_STORAGE_KEYS = {
   onboarding: "relay.onboarding",
   theme: "relay.theme",
   profileSwitchBackupPrompt: "relay.profileSwitchBackupPrompt",
-  profileSnapshotBackupBeforeRestore: "relay.profileSnapshotBackupBeforeRestore",
   codexPoolOauthSelection: "relay.codexPoolOauthSelection",
   legacyCodexPoolOauthSelection: "relay.codexPoolOauthAccountId",
   accountIdentitiesVisible: "relay.accountIdentitiesVisible",

@@ -1,6 +1,55 @@
-use std::{cmp::Ordering, collections::HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+};
 
 const MAX_MODEL_ID_BYTES: usize = 256;
+
+const NO_REASONING: &[&str] = &[];
+const CLAUDE_HIGH_REASONING: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const CLAUDE_STANDARD_REASONING: &[&str] = &["low", "medium", "high", "max"];
+const GEMINI_PRO_REASONING: &[&str] = &["low", "medium", "high"];
+const GEMINI_PRO_REDUCED_REASONING: &[&str] = &["low", "high"];
+const GEMINI_FLASH_REASONING: &[&str] = &["minimal", "low", "medium", "high"];
+const GEMINI_FLASH_STANDARD_REASONING: &[&str] = &["low", "medium", "high"];
+const GROK_46_REASONING: &[&str] = &["low", "medium", "high", "xhigh"];
+const GROK_45_REASONING: &[&str] = &["low", "medium", "high"];
+const GROK_43_REASONING: &[&str] = &["none", "low", "medium", "high"];
+const GLM_52_REASONING: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const GLM_53_REASONING: &[&str] = &["low", "high", "max"];
+const GPT_56_REASONING: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+
+const KNOWN_REASONING_DEFAULTS: &[(&str, &[&str])] = &[
+    ("claude-opus-5", CLAUDE_HIGH_REASONING),
+    ("claude-opus-4-8", CLAUDE_HIGH_REASONING),
+    ("claude-opus-4-7", CLAUDE_HIGH_REASONING),
+    ("claude-sonnet-5", CLAUDE_HIGH_REASONING),
+    ("claude-opus-4-6", CLAUDE_STANDARD_REASONING),
+    ("claude-sonnet-4-6", CLAUDE_STANDARD_REASONING),
+    ("claude-haiku-4-5", NO_REASONING),
+    ("gemini-3.1-pro-preview", GEMINI_PRO_REASONING),
+    ("gemini-2.5-pro", GEMINI_PRO_REASONING),
+    ("gemini-3.7-flash", GEMINI_PRO_REASONING),
+    ("gemini-3-pro", GEMINI_PRO_REDUCED_REASONING),
+    ("gemini-3-pro-preview", GEMINI_PRO_REDUCED_REASONING),
+    ("gemini-3.6-flash", GEMINI_FLASH_REASONING),
+    ("gemini-3.5-flash", GEMINI_FLASH_REASONING),
+    ("gemini-3-flash", GEMINI_FLASH_REASONING),
+    ("gemini-3-flash-preview", GEMINI_FLASH_REASONING),
+    ("gemini-3.1-flash-lite", GEMINI_FLASH_REASONING),
+    ("gemini-3.1-flash-lite-preview", GEMINI_FLASH_REASONING),
+    ("gemini-2.5-flash", GEMINI_FLASH_STANDARD_REASONING),
+    ("gemini-2.5-flash-lite", GEMINI_FLASH_STANDARD_REASONING),
+    ("grok-4.6", GROK_46_REASONING),
+    ("grok-4.5", GROK_45_REASONING),
+    ("grok-4.3", GROK_43_REASONING),
+    ("grok-4.20-0309-reasoning", NO_REASONING),
+    ("grok-4.20-0309-non-reasoning", &["none"]),
+    ("grok-build-0.1", NO_REASONING),
+    ("glm-5.2", GLM_52_REASONING),
+    ("glm-5.3", GLM_53_REASONING),
+    ("glm-5.1", NO_REASONING),
+];
 
 #[derive(Clone, Copy)]
 enum KnownModelFamily {
@@ -37,6 +86,48 @@ pub fn is_valid_model_id(value: &str) -> bool {
 /// Checks a model ID that must be safe to use as one unescaped protocol token.
 pub fn is_valid_model_token(value: &str) -> bool {
     is_valid_model_id(value) && !value.chars().any(char::is_whitespace)
+}
+
+/// Returns the persisted reasoning-policy key for a model. Known vendor
+/// families share one operator choice; unknown models retain a per-model
+/// setting because there is no safe grouping evidence.
+pub fn reasoning_policy_key(model: &str) -> String {
+    let leaf = model_leaf(model).to_ascii_lowercase();
+    match known_model_family(&leaf) {
+        Some(KnownModelFamily::OpenAi) => "group:openai".to_string(),
+        Some(KnownModelFamily::Anthropic) => "group:anthropic".to_string(),
+        Some(KnownModelFamily::Gemini) => "group:gemini".to_string(),
+        Some(KnownModelFamily::Grok) => "group:grok".to_string(),
+        Some(KnownModelFamily::Zai) => "group:zai".to_string(),
+        None => model.trim().to_ascii_lowercase(),
+    }
+}
+
+/// Looks up the shared policy first, then preserves a saved model-specific
+/// setting from earlier Relay versions until the user edits that model.
+///
+/// A present empty vector is an explicit "disable every reported mode"
+/// override; `None` means no override and therefore allows provider defaults.
+pub fn reasoning_policy_levels<'a>(
+    policies: &'a BTreeMap<String, Vec<String>>,
+    model: &str,
+) -> Option<&'a [String]> {
+    let key = reasoning_policy_key(model);
+    policies
+        .get(&key)
+        .or_else(|| policies.get(&model.trim().to_ascii_lowercase()))
+        .map(Vec::as_slice)
+}
+
+/// Verified model defaults used when an upstream catalog omits reasoning
+/// metadata. `Some(&[])` deliberately means that the model has no effort
+/// picker, not that Relay should invent a generic list.
+pub fn known_model_reasoning_levels(model: &str) -> Option<&'static [&'static str]> {
+    let leaf = model_leaf(model).to_ascii_lowercase();
+    KNOWN_REASONING_DEFAULTS
+        .iter()
+        .find_map(|(known_model, levels)| (*known_model == leaf).then_some(*levels))
+        .or_else(|| leaf.starts_with("gpt-5.6").then_some(GPT_56_REASONING))
 }
 
 /// Normalize, deduplicate, and order model IDs for a launcher or Codex picker.
@@ -436,5 +527,81 @@ mod tests {
         assert!(!is_valid_model_id(&"x".repeat(MAX_MODEL_ID_BYTES + 1)));
         assert!(is_valid_model_token("gpt-test"));
         assert!(!is_valid_model_token("gpt test"));
+    }
+
+    #[test]
+    fn reasoning_policy_uses_the_openai_company_group() {
+        let policies = BTreeMap::from([
+            ("group:openai".to_string(), vec!["high".to_string()]),
+            ("vendor/private-a".to_string(), vec!["low".to_string()]),
+        ]);
+
+        assert_eq!(reasoning_policy_key("vendor/gpt-5.6"), "group:openai");
+        assert_eq!(
+            reasoning_policy_levels(&policies, "vendor/gpt-5.7").map(ToOwned::to_owned),
+            Some(vec!["high".to_string()])
+        );
+        let gpt_policy = BTreeMap::from([("group:openai".to_string(), vec!["max".to_string()])]);
+        assert_eq!(
+            reasoning_policy_levels(&gpt_policy, "gpt-5.7").map(ToOwned::to_owned),
+            Some(vec!["max".to_string()])
+        );
+        assert_eq!(reasoning_policy_key("o3"), "group:openai");
+        assert_eq!(reasoning_policy_key("vendor/private-a"), "vendor/private-a");
+        assert_eq!(
+            reasoning_policy_levels(&policies, "vendor/private-a").map(ToOwned::to_owned),
+            Some(vec!["low".to_string()])
+        );
+        assert_eq!(reasoning_policy_levels(&policies, "vendor/private-b"), None);
+    }
+
+    #[test]
+    fn known_model_reasoning_levels_match_the_supported_model_contracts() {
+        assert_eq!(
+            known_model_reasoning_levels("vendor/claude-opus-4-8"),
+            Some(["low", "medium", "high", "xhigh", "max"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("claude-opus-4-6"),
+            Some(["low", "medium", "high", "max"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("claude-haiku-4-5"),
+            Some([].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("gpt-5.6-sol"),
+            Some(["none", "low", "medium", "high", "xhigh", "max"].as_slice())
+        );
+        assert_eq!(known_model_reasoning_levels("unknown-model"), None);
+        assert_eq!(
+            known_model_reasoning_levels("gemini-3-pro"),
+            Some(["low", "high"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("gemini-3.6-flash"),
+            Some(["minimal", "low", "medium", "high"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("grok-4.6"),
+            Some(["low", "medium", "high", "xhigh"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("grok-4.20-0309-non-reasoning"),
+            Some(["none"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("grok-build-0.1"),
+            Some([].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("glm-5.2"),
+            Some(["none", "minimal", "low", "medium", "high", "xhigh", "max"].as_slice())
+        );
+        assert_eq!(
+            known_model_reasoning_levels("glm-5.3"),
+            Some(["low", "high", "max"].as_slice())
+        );
+        assert_eq!(known_model_reasoning_levels("glm-5.1"), Some([].as_slice()));
     }
 }

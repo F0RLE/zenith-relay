@@ -22,6 +22,21 @@ or a way to move a user's accounts into Zenith inventory. Secrets remain on the
 chosen device unless the user explicitly transfers them to their own connected
 server through a management operation.
 
+### Provider-policy boundary
+
+Relay does not implement, document, or recommend ways to conceal subscription
+account sharing or bypass an upstream provider's abuse controls. Risk signals
+include multi-user access, public API keys, account rotation, unusual
+parallelism or request frequency, shared proxy/IP infrastructure, and client
+identity or protocol mismatches. IP rotation, TLS or client-fingerprint
+spoofing, User-Agent impersonation, and artificial request shaping are not
+supported evasion features. A loopback endpoint reduces exposure to the local
+machine; it does not establish permission to resell or share an account.
+
+Commercial or shared access must use a provider plan and API whose terms
+explicitly allow that use. Relay must not claim a probability of detection or
+policy compliance without provider-specific evidence.
+
 ## Development direction
 
 Relay develops the supported local and user-managed server paths before adding
@@ -51,6 +66,17 @@ WebView. Windows retains ownership of working-set reclamation and pagefile
 placement, so Relay does not force live process pages to disk.
 
 ## Connections, quotas, and routing
+
+### Desktop storage boundary
+
+Relay desktop state is kept under `%LOCALAPPDATA%\\Zenith Relay`: `data` holds
+the SQLite runtime database and encrypted vault, `cache` holds WebView/import
+working data, and `recovery` holds profile and repair snapshots. The database
+keeps bounded request diagnostics (raw logs are retained for 30 days) and an
+incremental API-equivalent rollup so old logs can be removed without losing
+totals. Relay does not create runtime databases or caches in `%USERPROFILE%\\.codex`;
+that directory is touched only for the Codex files required by the reversible
+client integration.
 
 ### Connections
 
@@ -204,6 +230,11 @@ model assignment to that route. A <code>/models</code> response alone does not
 prove that a provider accepts a completion on every protocol; when one source
 has multiple routes, the binding assignment is the capability declaration and
 must be verified against the provider's documentation or a safe operator test.
+Because a confirmed native Messages binding already proves the upstream
+contract, runtime also exposes its unclaimed models to Responses clients through
+the existing Responses-to-Messages adapter. This linked route is derived at
+runtime and is not written back as new provider evidence. An explicit native
+Responses or Gemini route keeps ownership of any overlapping model.
 The same generic source catalog may optionally declare reasoning through
 <code>capabilities.reasoning</code>, <code>reasoning</code>,
 Codex-compatible fields, <code>reasoningEffortModes</code>, or explicit
@@ -211,35 +242,35 @@ Codex-compatible fields, <code>reasoningEffortModes</code>, or explicit
 their values and default. Relay reads either OpenAI-style <code>data</code>
 rows or a top-level <code>models</code> catalog. A bare
 <code>supportsReasoningEffort</code> flag never invents levels, and an
-explicit false flag suppresses stale option lists. Relay does not infer
-reasoning from a provider or model name. It advertises the union of efforts
-confirmed by eligible Responses routes; when the client explicitly chooses an
-effort, routing excludes API-source candidates that did not confirm that
-effort. If no fresh capability snapshot exists, normal transparent fallback
-continues instead of excluding every candidate. A Responses-to-Messages bridge
-further removes efforts it cannot translate and never advertises reasoning
-summaries. The generic source catalog is cached separately from the provider's
-Codex-specific catalog, so refreshing one endpoint cannot erase the other
-endpoint's confirmed capabilities.
+explicit false flag suppresses stale option lists. For the verified model
+contracts maintained in Relay's reasoning registry, the registry supplies the
+model's exact default levels when a provider omits them; it never adds levels
+outside that model's whitelist. Parsed levels remain source declarations for
+models without a verified registry entry: they provide the default selector
+only for the declaring route, never a global claim about another source. A Responses-to-Messages bridge removes efforts it
+cannot translate and never advertises reasoning summaries. The generic source
+catalog is cached separately from the provider's Codex-specific catalog, so
+refreshing one endpoint cannot erase the other endpoint's declaration.
 The native Messages route preserves successful JSON/SSE bodies verbatim. Chat
 Completions rejects tool definitions and tool-call history instead of
 pretending to translate them. Responses WebSocket remains native-only until a
 separate bidirectional bridge is designed and tested.
 
-For routed API-source rows, Relay does not infer or blacklist reasoning effort
-names from a provider or model name. Model Rules may narrow a model to an
-operator-selected allow-list of confirmed levels: an empty allow-list exposes
-all detected levels, and one allowed level becomes the sole catalog choice.
-This changes catalog availability only; Relay does not overwrite the effort
-chosen by Codex or another Responses client. In automatic mode, `medium` is
-the catalog default when that confirmed level exists; otherwise Relay advertises
-no default rather than inheriting a provider-specific value such as `ultra`.
-Native Responses routes preserve the current per-model source
-declaration, including effort names Relay did not know in advance; when a
-route does not explicitly confirm reasoning metadata, Relay does not advertise
-a selector for that route. Claude's separate compatibility fallback remains
-limited to the previously documented sparse Claude metadata case. Native
-ChatGPT catalog rows remain authoritative and are not rewritten by this policy.
+For routed API-source rows, verified model defaults are enabled by default and
+only their exact whitelist is shown. Source-declared modes are used for models
+without a verified default. Model Rules exposes a manual, experimental
+allow-list at the
+model-group level: a saved empty list explicitly hides the API-source selector,
+while a non-empty list publishes exactly the selected values, including
+provider-specific values not present in the hint. This control is present for
+every current pool model, including a native-account-only model with no parsed
+declaration. Changes apply immediately. The optional local Pool probe sends one
+short request for the selected value to every active API source and reports
+each source separately; the user may add a successful value to the allow-list
+from that result. A selected value is a policy experiment, not proof that every
+source supports it; normal pre-byte fallback remains responsible for provider
+rejection. A manual policy replaces only the picker modes; native account
+requests still use their native upstream contract.
 
 ## Usage and account value
 
@@ -267,21 +298,21 @@ it never decides whether a request may use an account.
 
 ## Profiles and recovery
 
-Profile operations follow one reversible transaction:
+Profile operations follow one explicit full-replacement transaction:
 
 ~~~text
 inspect -> create or reuse snapshot -> apply managed configuration -> verify
-restore -> verify restored state
+restore full snapshot -> verify restored state
 ~~~
 
-Recovery lists snapshots, opens their real location when appropriate, restores
-a selected snapshot, and removes only Relay-managed configuration if no
-snapshot is available. During Relay-managed automatic detach/restore, a user
-or Codex change to the global <code>model_reasoning_effort</code> is preserved.
-An explicitly selected full snapshot restore may restore the snapshot as a
-whole and is not covered by that preservation guarantee. Changes to the
-managed provider, base URL, credentials/auth, or model catalog still block
-managed recovery rather than being overwritten.
+On the first local Relay startup, the current ChatGPT profile is captured once
+as a protected <code>isOriginal</code> snapshot and kept first in the recovery
+list. Users can create additional snapshots at any time. Recovery has one
+mode: after a Да/Нет confirmation it atomically replaces the complete
+<code>config.toml</code> and <code>auth.json</code>; it never creates a hidden
+pre-restore copy or offers a partial/managed variant. Snapshot deletion also
+requires a visible ten-second Да cooldown. Windows extended path prefixes are
+normalized in snapshot metadata and presentation.
 
 ## User-managed server
 
@@ -337,10 +368,9 @@ profile credential, usage, and scheduler remain shared.
 
 - Only the ChatGPT account connector is shipped today.
 - The current ChatGPT/Codex profile integration uses the Responses client
-  contract. Native Messages sources require a separate compatible client
-  integration and are not exposed through the managed profile; a source must
-  opt into the explicit Responses-to-Messages bridge to make a Messages model
-  visible to Codex.
+  contract. Confirmed native Messages source models are exposed through the
+  managed profile by the linked Responses-to-Messages runtime route. A native
+  Messages client still uses the original passthrough route.
 - The bridge does not claim hosted, namespace, dynamic-discovery, structured
   custom result, native encrypted reasoning, or Responses WebSocket
   capabilities. Image support is limited to the validated data-URI formats

@@ -1,20 +1,20 @@
 use crate::local_pool::{
     accounts::{
-        credentials::CredentialStore,
+        credentials::StoredCodexCredentials,
         proxy::{common_proxy_available, effective_proxy_config, proxy_status},
-        NativeSecretBackend,
     },
     error::CommandError,
     models::{LocalAccountRecord, LocalPoolSnapshot, ProviderSourceRecord},
     state::DesktopState,
-    store::secret_store,
 };
+use crate::platform;
 use std::collections::BTreeMap;
 use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    account_operational_state, apply_model_reasoning_summary, model_has_native_account_route,
-    operational_status, pool_model_summaries, source_runtime_available, AccountOperationalInput,
+    account_operational_state, apply_model_reasoning_summary, model_has_api_source_route,
+    model_has_native_account_route, operational_status, pool_model_summaries,
+    pooled_source_runtime_available, source_runtime_available, AccountOperationalInput,
     AccountSummary, Capabilities, GatewaySummary, OperationalStatus, RuntimeStateSnapshot,
     RuntimeTargetSummary, SourceSummary,
 };
@@ -35,8 +35,8 @@ pub async fn get_local_runtime_state(
     state: State<'_, DesktopState>,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let started = Instant::now();
-    let snapshot = state.snapshot().await?;
-    let running = snapshot.runtime_target.connected;
+    let inputs = state.runtime_inputs().await?;
+    let running = inputs.running;
     let runtime = state.gateway.runtime().await;
     if let Some(runtime) = runtime.as_ref() {
         runtime.prefetch_source_model_metadata();
@@ -45,11 +45,11 @@ pub async fn get_local_runtime_state(
         .as_ref()
         .map(|runtime| runtime.candidate_runtime_order())
         .unwrap_or_default();
-    let common_proxy_available = common_proxy_available(&snapshot.gateway);
+    let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
     let equivalents = state.telemetry.api_equivalents_with_price_overrides(
-        &snapshot.gateway.model_price_overrides,
-        &snapshot
+        &inputs.gateway.model_price_overrides,
+        &inputs
             .sources
             .iter()
             .map(|source| {
@@ -70,14 +70,24 @@ pub async fn get_local_runtime_state(
             })
             .collect::<BTreeMap<_, _>>(),
     )?;
-    let source_summaries = snapshot
+    let source_summaries = inputs
         .sources
         .iter()
         .map(|record| {
             local_source_summary(
                 record,
-                (running && record.enabled)
-                    .then(|| source_runtime_available(&routing_order, &record.id)),
+                inputs
+                    .source_api_keys
+                    .get(&record.id)
+                    .and_then(Option::as_ref)
+                    .is_some(),
+                (running && record.enabled).then(|| {
+                    if record.in_pool {
+                        pooled_source_runtime_available(&routing_order, &record.id, record.wire_api)
+                    } else {
+                        source_runtime_available(&routing_order, &record.id)
+                    }
+                }),
                 equivalents
                     .sources
                     .get(&record.id)
@@ -86,13 +96,17 @@ pub async fn get_local_runtime_state(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let account_summaries = snapshot
+    let account_summaries = inputs
         .accounts
         .iter()
         .map(|record| {
             local_account_summary(
                 record,
-                &snapshot.gateway,
+                &inputs.gateway,
+                inputs
+                    .account_credentials
+                    .get(&record.account.id)
+                    .and_then(Option::as_ref),
                 common_proxy_available,
                 equivalents
                     .accounts
@@ -104,9 +118,9 @@ pub async fn get_local_runtime_state(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut warnings = snapshot.warnings;
+    let mut warnings = inputs.warnings;
     if running {
-        for record in &snapshot.accounts {
+        for record in &inputs.accounts {
             if record.account.enabled
                 && record.account.in_pool
                 && !record.account.draining
@@ -114,8 +128,12 @@ pub async fn get_local_runtime_state(
             {
                 warnings.push(account_runtime_warning(
                     record,
-                    &snapshot.gateway,
+                    &inputs.gateway,
                     &record.account.id,
+                    inputs
+                        .account_credentials
+                        .get(&record.account.id)
+                        .and_then(Option::as_ref),
                 ));
             }
         }
@@ -123,11 +141,11 @@ pub async fn get_local_runtime_state(
     let mut models = pool_model_summaries(
         &source_summaries,
         &account_summaries,
-        &snapshot.gateway.hidden_models,
+        &inputs.gateway.hidden_models,
     );
     for model in &mut models {
         let model_id = model.id.clone();
-        if let Some(price) = snapshot
+        if let Some(price) = inputs
             .gateway
             .model_price_overrides
             .get(&model_id.to_ascii_lowercase())
@@ -143,19 +161,20 @@ pub async fn get_local_runtime_state(
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
+        let has_api_source_route = model_has_api_source_route(&source_summaries, &model_id);
         apply_model_reasoning_summary(
             model,
             runtime
                 .as_ref()
                 .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
                 .unwrap_or_default(),
-            snapshot
-                .gateway
-                .model_reasoning_allowed_levels
-                .get(&model_id.to_ascii_lowercase())
-                .map(Vec::as_slice),
-            model_has_native_account_route(&account_summaries, &model_id),
+            zenith_relay_core::reasoning_policy_levels(
+                &inputs.gateway.model_reasoning_allowed_levels,
+                &model_id,
+            ),
+            has_api_source_route || model_has_native_account_route(&account_summaries, &model_id),
         );
+        model.reasoning_probe_available = has_api_source_route;
         model.reasoning_probe = runtime
             .as_ref()
             .and_then(|runtime| runtime.reasoning_probe_progress(&model_id));
@@ -181,17 +200,17 @@ pub async fn get_local_runtime_state(
             .count();
     let base_url = format!(
         "http://{}:{}/v1",
-        snapshot.gateway.client_host, snapshot.gateway.port
+        inputs.gateway.client_host, inputs.gateway.port
     );
     let response = RuntimeStateSnapshot {
-        schema_version: snapshot.schema_version,
+        schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
         configuration_revision: None,
         runtime_target: RuntimeTargetSummary {
             kind: "local".to_string(),
             connected: running,
             origin: Some(format!(
                 "http://{}:{}",
-                snapshot.gateway.client_host, snapshot.gateway.port
+                inputs.gateway.client_host, inputs.gateway.port
             )),
             server_id: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -201,35 +220,33 @@ pub async fn get_local_runtime_state(
             base_url,
             candidate_count,
             visible_model_ids,
-            max_retry_candidates: snapshot.gateway.max_retry_candidates,
-            cooldown_after_failures: snapshot.gateway.cooldown_after_failures,
-            keep_last_candidate_available: snapshot.gateway.keep_last_candidate_available,
-            routing_strategy: snapshot.gateway.routing_strategy,
-            subscription_plan_order: snapshot.gateway.subscription_plan_order.clone(),
-            default_service_tier: snapshot.gateway.default_service_tier,
-            image_base_model: snapshot.gateway.image_base_model.clone(),
+            max_retry_candidates: inputs.gateway.max_retry_candidates,
+            cooldown_after_failures: inputs.gateway.cooldown_after_failures,
+            keep_last_candidate_available: inputs.gateway.keep_last_candidate_available,
+            routing_strategy: inputs.gateway.routing_strategy,
+            subscription_plan_order: inputs.gateway.subscription_plan_order.clone(),
+            default_service_tier: inputs.gateway.default_service_tier,
+            image_base_model: inputs.gateway.image_base_model.clone(),
             models,
-            common_proxy_configured: snapshot.gateway.common_proxy_configured,
+            common_proxy_configured: inputs.gateway.common_proxy_configured,
             common_proxy_available,
             common_proxy_id: None,
-            account_proxy_required: snapshot.gateway.account_proxy_required,
-            quota_request_timeout_seconds: snapshot.gateway.quota_request_timeout_seconds,
+            account_proxy_required: inputs.gateway.account_proxy_required,
+            quota_request_timeout_seconds: inputs.gateway.quota_request_timeout_seconds,
             chatgpt_interface_quota_reserve_basis_points: Some(
-                snapshot
-                    .gateway
-                    .chatgpt_interface_quota_reserve_basis_points,
+                inputs.gateway.chatgpt_interface_quota_reserve_basis_points,
             ),
             routing_order,
         },
-        platform: snapshot.platform.to_string(),
+        platform: platform::platform_name().to_string(),
         capabilities: Capabilities::desktop_local(),
         sources: source_summaries,
         accounts: account_summaries,
-        automations: snapshot.automations,
-        wake_history: snapshot.wake_history,
+        automations: inputs.automations.tasks,
+        wake_history: inputs.automations.state.history().iter().cloned().collect(),
         warnings,
     };
-    let _ = state.record_performance(
+    state.record_performance_async(
         "full_snapshot_native",
         started.elapsed().as_secs_f64() * 1_000.0,
         Some("local"),
@@ -263,10 +280,10 @@ pub async fn get_local_runtime_order(
 
 fn local_source_summary(
     record: &ProviderSourceRecord,
+    secret_available: bool,
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
 ) -> crate::local_pool::error::Result<SourceSummary> {
-    let secret_available = secret_store::load(&record.secret_ref)?.is_some();
     Ok(SourceSummary {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -299,22 +316,14 @@ fn local_source_summary(
 fn local_account_summary(
     record: &LocalAccountRecord,
     settings: &crate::local_pool::models::GatewaySettings,
+    credentials: Option<&StoredCodexCredentials>,
     common_proxy_available: bool,
     api_equivalent: ApiEquivalentSummary,
     now_ms: u64,
     refreshing: bool,
 ) -> crate::local_pool::error::Result<AccountSummary> {
-    let credentials = CredentialStore::from_backend(NativeSecretBackend)
-        .load(&record.account.id)
-        .map_err(|error| {
-            crate::local_pool::error::LocalPoolError::new(
-                crate::local_pool::error::ErrorCode::SecretStoreUnavailable,
-                error.to_string(),
-            )
-        })?;
     let secret_available = credentials.is_some();
     let (proxy_mode, proxy_available) = credentials
-        .as_ref()
         .map(|credentials| proxy_status(settings, credentials, common_proxy_available))
         .unwrap_or((zenith_relay_core::protocol::ProxyMode::Direct, false));
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
@@ -387,18 +396,18 @@ fn oauth_account_runtime_available(
 fn account_runtime_warning(
     record: &LocalAccountRecord,
     settings: &crate::local_pool::models::GatewaySettings,
-    account_id: &str,
+    _account_id: &str,
+    credentials: Option<&StoredCodexCredentials>,
 ) -> String {
-    let code = match CredentialStore::from_backend(NativeSecretBackend).load(account_id) {
-        Err(_) => "account_runtime_credential_unreadable",
-        Ok(None) => "account_runtime_credential_missing",
-        Ok(Some(credentials)) if credentials.provider_account_id().is_none() => {
+    let code = match credentials {
+        None => "account_runtime_credential_missing",
+        Some(credentials) if credentials.provider_account_id().is_none() => {
             "account_runtime_provider_account_id_missing"
         }
-        Ok(Some(credentials)) if effective_proxy_config(settings, &credentials).is_err() => {
+        Some(credentials) if effective_proxy_config(settings, credentials).is_err() => {
             "account_runtime_proxy_invalid"
         }
-        Ok(Some(_)) => "account_runtime_not_registered",
+        Some(_) => "account_runtime_not_registered",
     };
     let redacted = if record.account.id.chars().count() <= 12 {
         record.account.id.clone()
@@ -474,6 +483,7 @@ mod parity_tests {
             in_flight: 0,
             active_request_count: 0,
             active_models: Vec::new(),
+            model_retries: Vec::new(),
             last_used_at_ms: None,
             next_retry_at_ms: None,
             half_open: false,
@@ -490,6 +500,7 @@ mod parity_tests {
             in_flight: 0,
             active_request_count: 0,
             active_models: Vec::new(),
+            model_retries: Vec::new(),
             last_used_at_ms: None,
             next_retry_at_ms: None,
             half_open: false,

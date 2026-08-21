@@ -13,8 +13,8 @@ use codex_models::{
     build_codex_models_response_with_source_reasoning,
 };
 pub(super) use headers::{
-    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_codex_headers,
-    forwarded_messages_headers,
+    client_context_fingerprint, forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers,
+    forwarded_codex_headers, forwarded_messages_headers,
 };
 pub(super) use normalization::{
     apply_default_service_tier_if_missing, normalize_account_request, request_service_tier,
@@ -521,7 +521,17 @@ mod tests {
             .find(|model| model["slug"] == crate::codex_model_alias("vendor/claude-opus-4-8"))
             .expect("routed Claude model");
         assert_eq!(claude["display_name"], "Claude Opus 4.8");
-        assert_eq!(claude["supported_reasoning_levels"], json!([]));
+        assert_eq!(
+            claude["supported_reasoning_levels"],
+            json!([
+                {"effort": "low", "description": "low"},
+                {"effort": "medium", "description": "medium"},
+                {"effort": "high", "description": "high"},
+                {"effort": "xhigh", "description": "xhigh"},
+                {"effort": "max", "description": "max"}
+            ])
+        );
+        assert_eq!(claude["default_reasoning_level"], "medium");
         assert_eq!(claude["input_modalities"], json!(["text", "image"]));
         assert!(models
             .iter()
@@ -529,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn api_source_reasoning_metadata_is_visible_to_codex_without_native_model_identity() {
+    fn api_source_reasoning_metadata_is_enabled_until_overridden() {
         let runtime = GatewayRuntime::from_pool(
             vec![RuntimeSource::unrestricted(ProviderSource {
                 id: "source".into(),
@@ -625,7 +635,7 @@ mod tests {
         runtime
             .set_model_reasoning_allowed_levels(std::collections::BTreeMap::new())
             .unwrap();
-        let automatic = build_codex_models_response_with_source_reasoning(
+        let no_manual_selection = build_codex_models_response_with_source_reasoning(
             &runtime,
             &key,
             &visible,
@@ -634,7 +644,10 @@ mod tests {
             None,
         )
         .expect("coding model catalog");
-        assert_eq!(automatic["models"][0]["default_reasoning_level"], "medium");
+        assert_eq!(
+            no_manual_selection["models"][0]["default_reasoning_level"],
+            "medium"
+        );
     }
 
     #[test]

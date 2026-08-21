@@ -3,8 +3,8 @@ use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
     candidate_protocols, chat_request_is_text_or_image_only, chat_request_uses_tools,
-    forwarded_codex_headers, forwarded_messages_headers, request_id, CODEX_RESPONSES_LITE_HEADER,
-    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    client_context_fingerprint, forwarded_codex_headers, forwarded_messages_headers, request_id,
+    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::request::execute_request;
 use crate::protocol::ClientWireApi;
@@ -131,6 +131,7 @@ pub(in crate::gateway) async fn execute_client_request(
         })
         .flatten();
     let request_id = request_id();
+    let client_context_id = client_context_fingerprint(&headers);
     let forwarded_headers = match wire_api {
         WireApi::Messages => forwarded_messages_headers(&headers),
         WireApi::Responses | WireApi::ChatCompletions => {
@@ -146,6 +147,7 @@ pub(in crate::gateway) async fn execute_client_request(
         stream,
         request_id,
         forwarded_headers,
+        client_context_id,
         response_affinity_key,
         wire_api,
         responses_lite,

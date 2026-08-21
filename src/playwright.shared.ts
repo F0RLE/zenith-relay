@@ -1,5 +1,8 @@
 import type { PlaywrightTestConfig } from "@playwright/test";
 
+const port = process.env.PLAYWRIGHT_PORT ?? "4175";
+const baseURL = `http://127.0.0.1:${port}`;
+
 export const sharedPlaywrightConfig: Pick<
   PlaywrightTestConfig,
   "outputDir" | "expect" | "reporter" | "fullyParallel" | "use" | "webServer"
@@ -9,12 +12,12 @@ export const sharedPlaywrightConfig: Pick<
   reporter: "list",
   fullyParallel: false,
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL,
     viewport: { width: 1160, height: 760 },
   },
   webServer: {
-    command: "bun run build && bun run preview",
-    url: "http://127.0.0.1:4173",
+    command: `bun run build && bun x vite preview --host 127.0.0.1 --port ${port} --strictPort`,
+    url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000,
   },

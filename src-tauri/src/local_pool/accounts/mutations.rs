@@ -209,10 +209,42 @@ pub async fn delete_local_accounts(
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
     ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
-    for account_id in account_ids {
-        delete_local_account_inner(&account_id, &state).await?;
+    let existing_accounts = state.store()?.accounts().to_vec();
+    ensure_accounts_exist(&existing_accounts, &account_ids)?;
+    let total = account_ids.len();
+    for (index, account_id) in account_ids.into_iter().enumerate() {
+        if let Err(error) = delete_local_account_inner(&account_id, &state).await {
+            if index == 0 {
+                return Err(error);
+            }
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!(
+                    "account deletion stopped after {index} of {total} accounts: {}",
+                    error.message
+                ),
+            )
+            .into());
+        }
     }
     state.snapshot().await.map_err(Into::into)
+}
+
+pub(super) fn ensure_accounts_exist(
+    accounts: &[LocalAccountRecord],
+    account_ids: &[String],
+) -> LocalResult<()> {
+    if let Some(account_id) = account_ids.iter().find(|account_id| {
+        !accounts
+            .iter()
+            .any(|account| account.account.id == **account_id)
+    }) {
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            format!("account not found: {account_id}"),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn ensure_accounts_not_in_ownership_operation(

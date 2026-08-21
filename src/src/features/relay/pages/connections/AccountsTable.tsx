@@ -49,7 +49,7 @@ import {
   useConfirm,
 } from "../../components/Ui";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
-import { compareRoutingOrder, routingOrderPositions } from "../../routingOrder";
+import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
 
@@ -69,12 +69,21 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   const [nowMs, setNowMs] = useState(Date.now());
   const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   useEffect(() => {
-    const upcomingTimes = allAccounts.flatMap((account) => [account.subscription.activeUntilMs, account.quota.primary?.resetAtMs, account.quota.secondary?.resetAtMs, ...(account.quota.supplemental ?? []).map((item) => item.window.resetAtMs)]).filter((value): value is number => value != null && value > nowMs);
+    const runtimeOrder = runtime?.gateway.routingOrder ?? [];
+    const upcomingTimes = allAccounts.flatMap((account) => [
+      account.subscription.activeUntilMs,
+      account.quota.primary?.resetAtMs,
+      account.quota.secondary?.resetAtMs,
+      ...(account.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
+      ...(account.inPool
+        ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
+        : []),
+    ]).filter((value): value is number => value != null && value > nowMs);
     if (!upcomingTimes.length) return;
     const urgent = upcomingTimes.some((value) => value - nowMs < 60 * 60_000);
     const timer = window.setTimeout(() => setNowMs(Date.now()), urgent ? 1_000 : 60_000);
     return () => window.clearTimeout(timer);
-  }, [allAccounts, nowMs]);
+  }, [allAccounts, nowMs, runtime?.gateway.routingOrder]);
   const planOptions = new Map<string, { id: string; label: string; count: number }>();
   for (const account of allAccounts) {
     const option = accountPlanOption(account.subscription.planType, t("common.unknown"));
@@ -87,7 +96,11 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   const disabledCount = allAccounts.filter((account) => !account.enabled).length;
   const storedPosition = new Map(allAccounts.map((account, index) => [account.id, index]));
   const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
-  const runtimeByAccount = new Map((runtime?.gateway.routingOrder ?? []).map((candidate) => [candidate.candidateId, candidate]));
+  const runtimeOrder = runtime?.gateway.routingOrder ?? [];
+  const runtimeByAccount = new Map(allAccounts.map((account) => [
+    account.id,
+    account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
+  ]));
   const activePlan = planFilter === "all" || planOptions.has(planFilter) || (planFilter === "errors" && errorCount > 0) ? planFilter : "all";
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
@@ -321,8 +334,21 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         const operationalStatus = account.operationalStatus;
         const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : t(`connections.status.${operationalStatus}`);
         const runtimeState = account.inPool ? runtimeByAccount.get(account.id) : undefined;
-        const runtimeTone = operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, false) : null;
-        const runtimeHint = runtimeState?.halfOpen ? t("pool.recoveryProbe") : null;
+        const modelRetries = [...(runtimeState?.modelRetries ?? [])]
+          .filter((retry) => retry.retryAtMs > nowMs)
+          .sort((left, right) => left.retryAtMs - right.retryAtMs);
+        const modelRetryHint = modelRetries.length
+          ? t("pool.modelRetryAt", {
+            models: modelRetries.map((retry) => retry.model).join(", "),
+            time: formatDetailedRemainingTime(modelRetries[0].retryAtMs, nowMs, t),
+          })
+          : null;
+        const runtimeTone = operationalStatus === "rotation"
+          ? transientCandidateTone(runtimeState, nowMs, false) ?? (modelRetries.length ? "warning" : null)
+          : null;
+        const runtimeHint = runtimeState?.halfOpen
+          ? t("pool.recoveryProbe")
+          : modelRetryHint;
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
         const poolLabel = participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
         const quotaStatus = account.quotaRefreshStatus;
@@ -366,6 +392,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           </div>
           <div className="account-card-quota compact-quota-layout">{accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}</div>
           <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
+          {runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0} title={runtimeHint}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}
           {accountValueVisible ? <AccountValueStrip account={account} /> : null}
           <footer className="account-card-footer"><div className="account-card-actions">
             {onServer

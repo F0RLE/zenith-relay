@@ -213,12 +213,11 @@ pub fn show_main_window(app: &AppHandle) {
     // returns and coalesce repeated clicks while it is in flight.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let window = app
-            .get_webview_window(MAIN_WINDOW_LABEL)
-            .map(Ok)
-            .unwrap_or_else(|| create_main_window(&app));
-        if let Ok(window) = window {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
             reveal_main_window(&window);
+        } else {
+            // The frontend reveals a new window after applying its saved theme.
+            let _ = create_main_window(&app);
         }
         if let Some(state) = app.try_state::<AppState>() {
             state.finish_main_window_open();
@@ -246,6 +245,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
     let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
     WebviewWindowBuilder::from_config(app, config)?
         .data_directory(webview_data)
+        .visible(false)
         .build()
 }
 

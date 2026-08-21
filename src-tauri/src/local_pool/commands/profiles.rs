@@ -710,27 +710,8 @@ pub async fn create_codex_profile_snapshot(
 }
 
 #[tauri::command]
-pub async fn restore_codex_profile_snapshot(
-    snapshot_id: String,
-    safety_name: Option<String>,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    let stopped = stop_codex_and_sync_account(&state).await?;
-    let result = snapshots::restore(
-        &default_codex_home(),
-        &state.profile_backup_root(),
-        &snapshot_id,
-        safety_name.as_deref(),
-    )
-    .map_err(Into::into);
-    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
-}
-
-#[tauri::command]
 pub async fn restore_full_codex_profile_snapshot(
     snapshot_id: String,
-    safety_name: Option<String>,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
@@ -739,7 +720,6 @@ pub async fn restore_full_codex_profile_snapshot(
         &default_codex_home(),
         &state.profile_backup_root(),
         &snapshot_id,
-        safety_name.as_deref(),
     )
     .map_err(Into::into);
     restart_codex_after_restore(stopped, result, launch_codex_with_profile)

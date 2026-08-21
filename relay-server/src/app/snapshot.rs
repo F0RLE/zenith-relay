@@ -14,9 +14,10 @@ use std::{
 };
 use zenith_relay_core::{
     protocol::{
-        apply_model_reasoning_summary, model_has_native_account_route, source_runtime_available,
-        AccountSummary, GatewaySummary, ModelSummary, OperationalStatus, ProxyMode,
-        RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+        apply_model_reasoning_summary, model_has_api_source_route, model_has_native_account_route,
+        pooled_source_runtime_available, source_runtime_available, AccountSummary, GatewaySummary,
+        ModelSummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary,
+        SourceSummary,
     },
     ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
     QUOTA_STALE_AFTER_MS,
@@ -156,11 +157,17 @@ fn source_summaries(
             if !secret_available {
                 warnings.push(format!("source_secret_missing:{}", record.id));
             }
+            let runtime_available = (running && record.enabled).then(|| {
+                if record.in_pool {
+                    pooled_source_runtime_available(routing_order, &record.id, record.wire_api)
+                } else {
+                    source_runtime_available(routing_order, &record.id)
+                }
+            });
             Ok(source_summary(
                 record,
                 secret_available,
-                (running && record.enabled)
-                    .then(|| source_runtime_available(routing_order, &record.id)),
+                runtime_available,
                 equivalents
                     .get(&identity_hint(&record.id))
                     .copied()
@@ -241,16 +248,16 @@ fn model_summaries(
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
+        let has_api_source_route = model_has_api_source_route(source_summaries, &model_id);
         apply_model_reasoning_summary(
             model,
             runtime
                 .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
                 .unwrap_or_default(),
-            model_reasoning_allowed_levels
-                .get(&model_id.to_ascii_lowercase())
-                .map(Vec::as_slice),
-            model_has_native_account_route(account_summaries, &model_id),
+            zenith_relay_core::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
+            has_api_source_route || model_has_native_account_route(account_summaries, &model_id),
         );
+        model.reasoning_probe_available = has_api_source_route;
         model.reasoning_probe =
             runtime.and_then(|runtime| runtime.reasoning_probe_progress(&model_id));
     }

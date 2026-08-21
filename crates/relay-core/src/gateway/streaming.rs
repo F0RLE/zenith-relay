@@ -879,6 +879,7 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
                 source_id: "source".into(),
                 candidate_id: Some("source".into()),
                 account_id: None,
+                client_context_id: None,
                 routing: None,
                 requested_model: Some("model".into()),
                 resolved_model: Some("model".into()),

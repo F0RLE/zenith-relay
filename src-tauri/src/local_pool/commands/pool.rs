@@ -18,8 +18,10 @@ use crate::{
     platform::default_codex_home,
 };
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -30,7 +32,8 @@ use zenith_relay_core::{
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
+    AdapterRequestContext, ApiModelPriceOverride, DefaultServiceTier, ProviderSource,
+    RoutingStrategy, SourceConnector, SourceProtocolBinding, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -199,7 +202,7 @@ pub(super) fn ensure_system_gateway_key(
 
     let id = SYSTEM_GATEWAY_KEY_ID.to_string();
     let key = LocalGatewayKeyRecord {
-        secret_ref: format!("key:{id}"),
+        secret_ref: system_gateway_secret_ref(&id),
         id,
         label: SYSTEM_GATEWAY_KEY_LABEL.into(),
         enabled: true,
@@ -214,6 +217,18 @@ pub(super) fn ensure_system_gateway_key(
     }
     Ok(key)
 }
+
+fn system_gateway_secret_ref(id: &str) -> String {
+    #[cfg(test)]
+    {
+        format!("key:{id}:test_{}", Uuid::new_v4().simple())
+    }
+    #[cfg(not(test))]
+    {
+        format!("key:{id}")
+    }
+}
+
 pub(crate) fn retire_user_gateway_keys(state: &DesktopState) -> LocalResult<()> {
     let (sources, all_keys, canonical_id) = {
         let store = state.store()?;
@@ -406,6 +421,34 @@ pub struct SetModelReasoningInput {
     allowed_levels: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProbeModelReasoningInput {
+    model_id: String,
+    level: String,
+    #[serde(default)]
+    add_successful_to_settings: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelReasoningProbeSourceResult {
+    pub source_id: String,
+    pub source_name: String,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelReasoningProbeResult {
+    pub model_id: String,
+    pub level: String,
+    pub source_count: usize,
+    pub available_count: usize,
+    pub applied_to_settings: bool,
+    pub sources: Vec<ModelReasoningProbeSourceResult>,
+}
+
 #[tauri::command]
 pub async fn set_local_model_enabled(
     input: SetModelEnabledInput,
@@ -467,32 +510,26 @@ pub async fn set_local_model_reasoning(
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
+    let policy_key = zenith_relay_core::reasoning_policy_key(&canonical);
     let mut normalized_allowed_levels =
         zenith_relay_core::normalize_model_reasoning_allowed_levels(BTreeMap::from([(
-            canonical.clone(),
+            policy_key.clone(),
             input.allowed_levels,
         )]))
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     let allowed_levels = normalized_allowed_levels
-        .remove(&canonical.to_ascii_lowercase())
+        .remove(&policy_key)
         .unwrap_or_default();
-    if !allowed_levels.is_empty() && pool_model_has_native_account(&state, &canonical)? {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "native ChatGPT model reasoning settings cannot be configured here",
-        )
-        .into());
-    }
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
-    let key = canonical.to_ascii_lowercase();
-    if allowed_levels.is_empty() {
-        gateway.model_reasoning_allowed_levels.remove(&key);
-    } else {
-        gateway
-            .model_reasoning_allowed_levels
-            .insert(key, allowed_levels);
-    }
+    gateway
+        .model_reasoning_allowed_levels
+        .remove(&canonical.to_ascii_lowercase());
+    // Keep an explicit empty override so the user can disable every
+    // provider-reported mode without losing that choice on the next refresh.
+    gateway
+        .model_reasoning_allowed_levels
+        .insert(policy_key, allowed_levels);
     if gateway == old_gateway {
         return state.snapshot().await.map_err(Into::into);
     }
@@ -509,6 +546,197 @@ pub async fn set_local_model_reasoning(
     drop(_mutation);
     super::refresh_active_codex_catalog_in_background(app);
     Ok(snapshot)
+}
+
+/// Sends one intentionally small Responses request through every eligible API
+/// source that serves this pool model.  It uses the configured adapter so the
+/// probe exercises the same provider-facing request shape as the pool.
+#[tauri::command]
+pub async fn probe_local_model_reasoning(
+    input: ProbeModelReasoningInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ModelReasoningProbeResult> {
+    let canonical = canonical_pool_model(&state, &input.model_id)?;
+    let level = normalized_reasoning_probe_level(&canonical, input.level)?;
+    let sources = state.store()?.sources().to_vec();
+    let mut results = Vec::new();
+    let mut probes = tokio::task::JoinSet::new();
+
+    for source in sources
+        .into_iter()
+        .filter(|source| source.in_pool && source.enabled && !source.draining)
+    {
+        let Some((binding, source_model)) = source_probe_binding(&source, &canonical) else {
+            continue;
+        };
+        let source_id = source.id.clone();
+        let source_name = source.name.clone();
+        if !binding.supports_reasoning_effort(&level) {
+            results.push(ModelReasoningProbeSourceResult {
+                source_id,
+                source_name,
+                available: false,
+            });
+            continue;
+        }
+        let Ok(Some(api_key)) = secret_store::load(&source.secret_ref) else {
+            results.push(ModelReasoningProbeSourceResult {
+                source_id,
+                source_name,
+                available: false,
+            });
+            continue;
+        };
+        let probe_level = level.clone();
+        probes.spawn(async move {
+            probe_source_reasoning(source, api_key, binding, source_model, probe_level).await
+        });
+    }
+    while let Some(result) = probes.join_next().await {
+        if let Ok(result) = result {
+            results.push(result);
+        }
+    }
+    results.sort_by(|left, right| left.source_name.cmp(&right.source_name));
+    if results.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            "no eligible API source can probe this pool model",
+        )
+        .into());
+    }
+    let available_count = results.iter().filter(|result| result.available).count();
+    let applied_to_settings = input.add_successful_to_settings && available_count > 0;
+    if applied_to_settings {
+        let gateway = state.store()?.gateway().clone();
+        let mut allowed_levels = zenith_relay_core::reasoning_policy_levels(
+            &gateway.model_reasoning_allowed_levels,
+            &canonical,
+        )
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+        allowed_levels.push(level.clone());
+        set_local_model_reasoning(
+            SetModelReasoningInput {
+                model_id: canonical.clone(),
+                allowed_levels,
+            },
+            app,
+            state,
+        )
+        .await?;
+    }
+    Ok(ModelReasoningProbeResult {
+        model_id: canonical,
+        level,
+        source_count: results.len(),
+        available_count,
+        applied_to_settings,
+        sources: results,
+    })
+}
+
+fn normalized_reasoning_probe_level(model: &str, level: String) -> LocalResult<String> {
+    let mut normalized = zenith_relay_core::normalize_model_reasoning_allowed_levels(
+        BTreeMap::from([(model.to_string(), vec![level])]),
+    )
+    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    normalized
+        .remove(&model.to_ascii_lowercase())
+        .and_then(|levels| levels.into_iter().next())
+        .ok_or_else(|| {
+            LocalPoolError::new(ErrorCode::InvalidState, "reasoning probe level is invalid")
+        })
+}
+
+fn source_probe_binding(
+    source: &ProviderSourceRecord,
+    model: &str,
+) -> Option<(SourceProtocolBinding, String)> {
+    source
+        .effective_protocol_bindings()
+        .ok()?
+        .into_iter()
+        .filter(|binding| binding.wire_api == WireApi::Responses)
+        .find_map(|binding| {
+            binding
+                .model_ids
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(model))
+                .cloned()
+                .map(|source_model| (binding, source_model))
+        })
+}
+
+async fn probe_source_reasoning(
+    source: ProviderSourceRecord,
+    api_key: String,
+    binding: SourceProtocolBinding,
+    source_model: String,
+    level: String,
+) -> ModelReasoningProbeSourceResult {
+    let source_id = source.id.clone();
+    let source_name = source.name.clone();
+    let available = async {
+        let connector = SourceConnector::new(
+            &ProviderSource {
+                id: source.id,
+                name: source.name,
+                base_url: source.base_url,
+                api_key,
+                wire_api: source.wire_api,
+                models: source.models,
+            },
+            std::slice::from_ref(&binding),
+        )
+        .ok()?;
+        let request = json!({
+            "model": source_model.clone(),
+            "input": "Reply with OK.",
+            "max_output_tokens": 1,
+            "reasoning": { "effort": level },
+        });
+        let prepared = binding
+            .adapter
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &request,
+                model: &source_model,
+                stream: false,
+                reasoning_mode: binding.reasoning_mode,
+                cache_write_ttl: binding.cache_write_ttl,
+                previous: None,
+                response_scope: "reasoning-probe",
+                response_id_seed: "reasoning-probe",
+            })
+            .ok()?;
+        let url = connector.endpoint(binding.key(), &source_model, false)?;
+        let (authorization_name, authorization) = connector.authorization_for_binding(&binding);
+        let mut headers = connector.protocol_headers_for_binding(&binding);
+        headers.insert(authorization_name, authorization);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .ok()?;
+        client
+            .post(url)
+            .headers(headers)
+            .json(prepared.upstream_body())
+            .send()
+            .await
+            .ok()
+            .is_some_and(|response| response.status().is_success())
+            .then_some(())
+    }
+    .await
+    .is_some();
+    ModelReasoningProbeSourceResult {
+        source_id,
+        source_name,
+        available,
+    }
 }
 
 fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
@@ -539,16 +767,6 @@ fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<Str
         .find(|model| model.eq_ignore_ascii_case(requested))
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
-}
-
-fn pool_model_has_native_account(state: &DesktopState, model: &str) -> LocalResult<bool> {
-    Ok(state.store()?.accounts().iter().any(|account| {
-        account.account.in_pool
-            && account
-                .models
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    }))
 }
 
 /// Returns the configured members of the managed Responses pool. Runtime
@@ -630,7 +848,7 @@ pub async fn set_local_pool_membership(
             if !supports_responses {
                 return Err(LocalPoolError::new(
                     ErrorCode::Conflict,
-                    "only Responses API sources can join the local ChatGPT pool",
+                    "only sources with a Responses-compatible route can join the local pool",
                 )
                 .into());
             }
@@ -784,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn local_pool_member_ids_keep_only_configured_responses_sources() {
+    fn local_pool_member_ids_include_native_messages_through_the_runtime_bridge() {
         let (source_ids, account_ids) = local_pool_member_ids(
             &[
                 source("responses", true, WireApi::Responses),
@@ -795,7 +1013,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(source_ids, BTreeSet::from(["responses".to_string()]));
+        assert_eq!(
+            source_ids,
+            BTreeSet::from(["messages".to_string(), "responses".to_string()])
+        );
         assert!(account_ids.is_empty());
     }
 }

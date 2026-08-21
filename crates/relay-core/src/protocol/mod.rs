@@ -19,7 +19,8 @@ pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
 pub use management::{
     account_candidate_enabled, account_operational_state, apply_model_reasoning_summary,
-    model_has_native_account_route, operational_status, pool_model_summaries, quota_refresh_status,
+    model_has_api_source_route, model_has_native_account_route, operational_status,
+    pool_model_summaries, pooled_source_runtime_available, quota_refresh_status,
     source_runtime_available, valid_generated_id, AccountOperationalInput, AccountOperationalState,
     AccountPresetRule, AccountRoutingBlockReason, AccountSummary, ApiError, ClientWireApi,
     ConfigurationPreset, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,

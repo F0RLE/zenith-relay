@@ -73,6 +73,66 @@ fn key(id: &str, secret: &str) -> LocalGatewayKey {
     }
 }
 
+#[test]
+fn websocket_transport_capability_is_model_scoped_and_expires() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source",
+            "provider",
+            &["model-a"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    runtime.mark_websocket_http_only("source", "model-a", 1_000);
+    assert!(runtime.websocket_is_http_only("source", "model-a", 1_001));
+    assert!(!runtime.websocket_is_http_only("source", "model-b", 1_001));
+    assert!(!runtime.websocket_is_http_only(
+        "source",
+        "model-a",
+        1_000 + WEBSOCKET_CAPABILITY_TTL_MS
+    ));
+    runtime.mark_websocket_supported("source", "model-a");
+    assert!(!runtime.websocket_is_http_only("source", "model-a", 1_001));
+}
+
+#[test]
+fn messages_source_models_are_available_to_responses_and_messages_clients() {
+    let mut provider = source("anthropic-source", "provider-secret", &["claude-test"]);
+    provider.wire_api = WireApi::Messages;
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(provider)],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+
+    assert_eq!(
+        runtime
+            .visible_models_for_secret("local-secret", &[WireApi::Responses], current_time_ms(),),
+        ["claude-test"]
+    );
+    assert_eq!(
+        runtime.visible_models_for_secret("local-secret", &[WireApi::Messages], current_time_ms(),),
+        ["claude-test"]
+    );
+
+    let route_ids = runtime
+        .candidate_runtime_order()
+        .into_iter()
+        .map(|route| route.candidate_id)
+        .collect::<Vec<_>>();
+    assert!(route_ids
+        .iter()
+        .any(|id| id == "anthropic-source::messages"));
+    assert!(route_ids
+        .iter()
+        .any(|id| id == "anthropic-source::responses_to_messages"));
+}
+
 fn confirmed_reasoning_probe() -> serde_json::Value {
     serde_json::json!({
         "status": "confirmed",
@@ -607,6 +667,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             source_id: "source-1".into(),
             candidate_id: Some("source-1".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
@@ -898,7 +959,7 @@ async fn management_prefetch_populates_reasoning_before_codex_catalog_request() 
 }
 
 #[tokio::test]
-async fn management_prefetch_confirms_chat_completions_reasoning_for_its_candidate() {
+async fn management_prefetch_reports_chat_completions_reasoning_without_enabling_it() {
     let mut chat_source = source("chat-source", "upstream-secret", &["provider/fable"]);
     chat_source.wire_api = WireApi::ChatCompletions;
     let runtime = Arc::new(
@@ -924,18 +985,28 @@ async fn management_prefetch_confirms_chat_completions_reasoning_for_its_candida
 
     runtime.prefetch_source_model_metadata();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while !runtime.candidate_reasoning_effort_is_allowed(
-            "chat-source",
-            "provider/fable",
-            "high",
-        ) {
+        while runtime
+            .confirmed_source_reasoning_levels("provider/fable")
+            .is_empty()
+        {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("management prefetch confirms the Chat Completions route");
+    .expect("management prefetch reports the Chat Completions route");
 
-    assert!(runtime.candidate_reasoning_effort_is_allowed("chat-source", "provider/fable", "high",));
+    assert!(!runtime.candidate_reasoning_effort_is_allowed(
+        "chat-source",
+        "provider/fable",
+        "high"
+    ));
+    runtime
+        .set_model_reasoning_allowed_levels(BTreeMap::from([(
+            "provider/fable".to_string(),
+            vec!["high".to_string()],
+        )]))
+        .unwrap();
+    assert!(runtime.candidate_reasoning_effort_is_allowed("chat-source", "provider/fable", "high"));
 }
 
 #[tokio::test]
@@ -1143,7 +1214,7 @@ async fn scoped_catalog_refresh_keeps_reasoning_confirmed_by_another_route() {
 }
 
 #[tokio::test]
-async fn reasoning_effort_confirmation_is_scoped_to_the_selected_candidate() {
+async fn manually_enabled_reasoning_effort_is_scoped_to_the_model_group() {
     let runtime = GatewayRuntime::from_pool(
         vec![
             RuntimeSource::unrestricted(source("source-a", "source-a-secret", &["provider/fable"])),
@@ -1187,7 +1258,50 @@ async fn reasoning_effort_confirmation_is_scoped_to_the_selected_candidate() {
 
     assert!(runtime.candidate_reasoning_effort_is_allowed("source-a", "provider/fable", "high"));
     assert!(!runtime.candidate_reasoning_effort_is_allowed("source-b", "provider/fable", "high"));
-    assert!(runtime.candidate_reasoning_effort_is_allowed("source-b", "provider/fable", "low"));
+    runtime
+        .set_model_reasoning_allowed_levels(BTreeMap::from([(
+            "provider/fable".to_string(),
+            vec!["high".to_string()],
+        )]))
+        .unwrap();
+    assert!(runtime.candidate_reasoning_effort_is_allowed("source-a", "provider/fable", "high"));
+    assert!(runtime.candidate_reasoning_effort_is_allowed("source-b", "provider/fable", "high"));
+    assert!(!runtime.candidate_reasoning_effort_is_allowed("source-b", "provider/fable", "low"));
+}
+
+#[test]
+fn manually_enabled_reasoning_skips_a_bridge_that_cannot_carry_it() {
+    let mut bridged = RuntimeSource::unrestricted(source(
+        "source-bridge",
+        "bridge-secret",
+        &["provider/fable"],
+    ));
+    bridged.protocol_bindings = vec![SourceProtocolBinding {
+        wire_api: WireApi::Responses,
+        adapter: SourceAdapter::ResponsesToMessages,
+        reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: Default::default(),
+        model_ids: vec!["provider/fable".into()],
+    }];
+    let runtime = GatewayRuntime::from_pool(
+        vec![bridged],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    runtime
+        .set_model_reasoning_allowed_levels(BTreeMap::from([(
+            "provider/fable".to_string(),
+            vec!["high".to_string()],
+        )]))
+        .unwrap();
+
+    assert!(!runtime.candidate_reasoning_effort_is_allowed(
+        "source-bridge",
+        "provider/fable",
+        "high"
+    ));
 }
 
 #[tokio::test]
@@ -1471,6 +1585,46 @@ async fn known_group_modes_reach_codex_without_being_reported_as_detected() {
     assert!(runtime
         .confirmed_source_reasoning_levels("vendor/gpt-future")
         .is_empty());
+}
+
+#[tokio::test]
+async fn provider_reasoning_modes_override_known_model_fallback_for_routing() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "upstream-secret",
+            &["gpt-5.6-terra"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    runtime.remember_source_model_manifest(
+        "source-1",
+        serde_json::json!({
+            "data": [{
+                "id": "gpt-5.6-terra",
+                "reasoningEffortModes": ["ultra"],
+                "reasoningProbe": confirmed_reasoning_probe()
+            }]
+        }),
+        current_time_ms(),
+    );
+
+    runtime
+        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], current_time_ms())
+        .await;
+
+    assert_eq!(
+        runtime.model_reasoning_allowed_levels("gpt-5.6-terra"),
+        vec!["ultra".to_string()]
+    );
+    assert!(runtime.candidate_reasoning_effort_is_allowed("source-1", "gpt-5.6-terra", "ultra"));
+    assert!(!runtime.model_reasoning_effort_is_allowed("gpt-5.6-terra", "max"));
 }
 
 #[tokio::test]

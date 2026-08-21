@@ -52,7 +52,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [onboardingComplete, setOnboardingComplete] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.onboarding, "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => readRelayPreference(RELAY_STORAGE_KEYS.theme, "system") as "system" | "light" | "dark");
   const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, "1") !== "0");
-  const [profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestoreState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, "1") !== "0");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
   const [accountValueVisible, setAccountValueVisibleState] = useState(readAccountValueVisibility);
@@ -78,9 +77,14 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   });
   const accountIndex = useMemo(() => buildAccountIdentityIndex(runtime?.accounts ?? []), [runtime?.accounts]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = true) => {
     const requestedMode = mode;
     const requestedRevision = stateRevision.current;
+    if (
+      !force
+      && modeRef.current === requestedMode
+      && refreshedRevision.current === requestedRevision
+    ) return;
     const startedAt = performance.now();
     if (mode === "local") {
       const snapshot = await relayCommands.localState();
@@ -147,7 +151,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         do {
-          await refresh();
+          await refresh(false);
         } while (
           modeRef.current === refreshMode
           && isRuntimeRefreshPage(pageRef.current)
@@ -175,6 +179,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
           performance.mark("zenith:interactive");
           const measure = performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
           void recordPerformance("interactive", measure.duration, "startup");
+          window.dispatchEvent(new Event("zenith-startup-ready"));
         }));
       });
     return () => {
@@ -439,11 +444,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSwitchBackupPromptState(enabled);
   }, []);
 
-  const setProfileSnapshotBackupBeforeRestore = useCallback((enabled: boolean) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, enabled ? "1" : "0");
-    setProfileSnapshotBackupBeforeRestoreState(enabled);
-  }, []);
-
   const setCodexPoolOauthSelection = useCallback((selection: string) => {
     writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection);
     removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection);
@@ -516,11 +516,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     profileSwitchBackupPrompt,
     setProfileSwitchBackupPrompt,
-    profileSnapshotBackupBeforeRestore,
-    setProfileSnapshotBackupBeforeRestore,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

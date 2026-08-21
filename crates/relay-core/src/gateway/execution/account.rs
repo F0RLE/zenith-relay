@@ -8,14 +8,16 @@ use super::super::errors::{
 };
 use super::super::now_ms;
 use super::super::request::{
-    account_endpoint_url, apply_default_service_tier_if_missing, forwarded_codex_headers,
-    request_id, request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
-    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
+    account_endpoint_url, apply_default_service_tier_if_missing, client_context_fingerprint,
+    forwarded_codex_headers, request_id, request_service_tier, tool_use_diagnostics,
+    try_recover_encrypted_content, with_forwarded_tool_diagnostics, AccountEndpoint,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
     usage_event,
 };
+use super::super::turn_state::{guard_account_request, relay_account_response_header};
 use crate::protocol::{remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids};
 use crate::runtime::AuthenticatedKey;
 use crate::usage::ReasoningEffortDiagnostics;
@@ -44,6 +46,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let request_id = request_id();
     let service_tier = request_service_tier(&request);
     let client_tool_use = tool_use_diagnostics(&request);
+    let client_context_id = client_context_fingerprint(&client_headers);
     let prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
@@ -100,6 +103,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        route.client_context_id = client_context_id.clone();
         route.service_tier = service_tier;
         let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
@@ -130,12 +134,20 @@ pub(in crate::gateway) async fn execute_account_endpoint(
 
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
+        let mut request_headers = forwarded_codex_headers(&client_headers, &request_id);
+        guard_account_request(
+            &runtime,
+            &key.id,
+            &mut request_headers,
+            route.account_id.as_deref().unwrap_or_default(),
+            now_ms(),
+        );
         let mut upstream_request = runtime
             .request_client(&route.candidate_id, false)
             .post(upstream_url)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
-            .headers(forwarded_codex_headers(&client_headers, &request_id));
+            .headers(request_headers);
         if endpoint == AccountEndpoint::Compact {
             if let Some(value) = responses_lite.as_ref() {
                 upstream_request =
@@ -292,7 +304,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 continue;
             }
             emit_usage(&runtime, event);
-            return proxy_error_response(
+            let mut response = proxy_error_response(
                 status,
                 &response_headers,
                 Body::from(bytes),
@@ -300,6 +312,18 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 failure.category,
                 Some(&request_id),
             );
+            if let Some(account_id) = route.account_id.as_deref() {
+                relay_account_response_header(
+                    &runtime,
+                    &key.id,
+                    &client_headers,
+                    account_id,
+                    &response_headers,
+                    &mut response,
+                    now_ms(),
+                );
+            }
+            return response;
         }
 
         let mut event = usage_event(
@@ -331,7 +355,19 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         );
         emit_usage(&runtime, event);
         drop(lease);
-        return proxy_response(status, &response_headers, Body::from(bytes));
+        let mut response = proxy_response(status, &response_headers, Body::from(bytes));
+        if let Some(account_id) = route.account_id.as_deref() {
+            relay_account_response_header(
+                &runtime,
+                &key.id,
+                &client_headers,
+                account_id,
+                &response_headers,
+                &mut response,
+                now_ms(),
+            );
+        }
+        return response;
     }
 
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);

@@ -9,7 +9,7 @@ use super::super::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
     profiles::codex,
-    state::DesktopState,
+    state::{DesktopState, LocalRuntimeInputs},
     store::secret_store,
 };
 use super::{pool, profiles};
@@ -42,21 +42,21 @@ pub(in crate::local_pool) async fn runtime_from_store(
     } else {
         None
     };
-    let (source_records, account_records, settings) = {
-        let store = state.store()?;
-        (
-            store.sources().to_vec(),
-            store.accounts().to_vec(),
-            store.gateway().clone(),
-        )
-    };
+    let LocalRuntimeInputs {
+        gateway: settings,
+        sources: source_records,
+        accounts: account_records,
+        source_api_keys,
+        account_credentials,
+        ..
+    } = state.runtime_inputs().await?;
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed ChatGPT/Codex profile has one strict Responses-only pool.
     let (pool_source_ids, pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
     let mut sources = Vec::new();
     for source in source_records {
-        let Some(api_key) = secret_store::load(&source.secret_ref)? else {
+        let Some(api_key) = source_api_keys.get(&source.id).cloned().flatten() else {
             continue;
         };
         sources.push(RuntimeSource {
@@ -86,16 +86,16 @@ pub(in crate::local_pool) async fn runtime_from_store(
     let mut agent_identities = HashMap::new();
     for account in account_records {
         let account_id = account.account.id.clone();
-        let Some(secret) = credentials
-            .load(&account_id)
-            .map_err(account_credential_error)?
+        let Some(secret) = account_credentials
+            .get(&account_id)
+            .and_then(Option::as_ref)
         else {
             continue;
         };
         let Some(chatgpt_account_id) = secret.provider_account_id() else {
             continue;
         };
-        let Ok(proxy) = effective_proxy_config(&settings, &secret) else {
+        let Ok(proxy) = effective_proxy_config(&settings, secret) else {
             continue;
         };
         if let Some(agent) = secret.agent_identity() {
@@ -158,7 +158,11 @@ pub(in crate::local_pool) async fn runtime_from_store(
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
-        wire_apis: Some(vec![ClientWireApi::Responses]),
+        wire_apis: Some(vec![
+            ClientWireApi::Responses,
+            ClientWireApi::Messages,
+            ClientWireApi::ChatCompletions,
+        ]),
     }];
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(

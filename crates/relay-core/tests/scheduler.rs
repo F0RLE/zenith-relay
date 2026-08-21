@@ -1555,7 +1555,7 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
 }
 
 #[tokio::test]
-async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
+async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_responses() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let mut mixed = source(
         "mixed",
@@ -1585,7 +1585,7 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
 
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
-        ["gpt-5.4", "shared-model"]
+        ["gpt-5.4", "gpt-5.4-mini", "shared-model"]
     );
 
     let catalog: Value = reqwest::Client::new()
@@ -1610,10 +1610,10 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
         catalog_models,
         [
             zenith_relay_core::codex_model_alias("gpt-5.4"),
+            zenith_relay_core::codex_model_alias("gpt-5.4-mini"),
             zenith_relay_core::codex_model_alias("shared-model"),
         ]
     );
-    assert!(!catalog_models.contains(&zenith_relay_core::codex_model_alias("gpt-5.4-mini")));
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -1638,14 +1638,28 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
+    state.replies.lock().unwrap().push_back(Reply::Json {
+        status: StatusCode::OK,
+        body: json!({
+            "id": "msg_linked",
+            "model": "gpt-5.4-mini",
+            "content": [{"type": "text", "text": "linked"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 2, "output_tokens": 1}
+        }),
+        cache_control: "no-store",
+        retry_after: None,
+    });
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": "gpt-5.4-mini", "input": "must not route"}))
+        .json(&json!({"model": "gpt-5.4-mini", "input": "use messages bridge"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["output"][0]["content"][0]["text"], "linked");
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/messages", gateway.base_url))
@@ -1661,18 +1675,28 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].path, "/v1/models");
-    assert_eq!(requests[1].path, "/v1/responses");
-    assert_eq!(requests[2].path, "/v1/messages");
+    let paths = requests
+        .iter()
+        .map(|request| request.path.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(
-        requests[2].body["tools"][0]["name"].as_str(),
+        paths,
+        [
+            "/v1/models",
+            "/v1/models",
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/messages",
+        ]
+    );
+    assert_eq!(
+        requests[3].body["tools"][0]["name"].as_str(),
         Some("PowerShell")
     );
     drop(requests);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert!(events.iter().any(|event| {
         event.wire_api == WireApi::Responses
             && event.candidate_id.as_deref() == Some("mixed::responses")
@@ -1680,6 +1704,10 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
     assert!(events.iter().any(|event| {
         event.wire_api == WireApi::Messages
             && event.candidate_id.as_deref() == Some("mixed::messages")
+    }));
+    assert!(events.iter().any(|event| {
+        event.wire_api == WireApi::Responses
+            && event.candidate_id.as_deref() == Some("mixed::responses_to_messages")
     }));
 }
 
