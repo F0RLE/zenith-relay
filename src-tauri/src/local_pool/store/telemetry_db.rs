@@ -1535,6 +1535,7 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
+                 ALTER TABLE request_logs DROP COLUMN client_context_id;
                  ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_5m_tokens;
                  ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_1h_tokens;
                  ALTER TABLE usage_candidate_rollups DROP COLUMN unknown_cache_write_tokens;",
