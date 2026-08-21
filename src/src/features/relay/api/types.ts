@@ -141,12 +141,21 @@ export type ModelSummary = {
   cacheWrite5mMicroUsdPerMillion?: number | null;
   cacheWrite1hMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
+  imageRequestPrices?: ImageRequestPrice[];
   customPrice: boolean;
   reasoningLevels?: string[];
   reasoningSupportedLevels?: string[];
   reasoningAllowedLevels?: string[];
   reasoningConfigurable?: boolean;
+  reasoningProbeAvailable?: boolean;
   reasoningProbe?: ReasoningProbeProgress;
+};
+
+export type ImageRequestPrice = {
+  operation: "generation" | "edit" | string;
+  quality: string;
+  size: string;
+  microUsd: number;
 };
 
 export type ReasoningProbeProgress = {
@@ -162,6 +171,21 @@ export type ReasoningProbeProgress = {
   lastProbeAt: string | null;
 };
 
+export type ModelReasoningProbeSourceResult = {
+  sourceId: string;
+  sourceName: string;
+  available: boolean;
+};
+
+export type ModelReasoningProbeResult = {
+  modelId: string;
+  level: string;
+  sourceCount: number;
+  availableCount: number;
+  appliedToSettings: boolean;
+  sources: ModelReasoningProbeSourceResult[];
+};
+
 export type CandidateRuntimeSnapshot = {
   candidateId: string;
   kind: "api_source" | "oauth_account";
@@ -171,6 +195,10 @@ export type CandidateRuntimeSnapshot = {
   activeModels?: Array<{
     model: string;
     requestCount: number;
+  }>;
+  modelRetries?: Array<{
+    model: string;
+    retryAtMs: number;
   }>;
   lastUsedAtMs: number | null;
   nextRetryAtMs: number | null;
@@ -395,6 +423,7 @@ export type LocalUsage = {
   attempt: number;
   sourceId: string;
   accountId?: string | null;
+  clientContextId?: string | null;
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
@@ -659,6 +688,7 @@ export type ProfileSnapshot = {
   createdAtMs: number;
   configAvailable: boolean;
   authAvailable: boolean;
+  isOriginal?: boolean;
 };
 
 export type ProfileSnapshotList = {

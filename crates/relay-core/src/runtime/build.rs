@@ -8,7 +8,7 @@ use super::{
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::{
-    normalize_source_protocol_bindings, normalize_subscription_plan_order, CandidateHealth,
+    normalize_subscription_plan_order, runtime_source_protocol_bindings, CandidateHealth,
     CandidateKind, CandidateQuota, CandidateScope, Error, ModelRegistry, ModelRules, PoolScheduler,
     Result, RuntimeCandidate, RuntimeMixedLocalKey, SourceConnector, WireApi,
 };
@@ -100,7 +100,7 @@ pub(super) fn build_sources(
         if executors.contains_key(&source.source.id) {
             return Err(Error::Validation("source ids must be unique".to_string()));
         }
-        let bindings = normalize_source_protocol_bindings(
+        let bindings = runtime_source_protocol_bindings(
             source.protocol_bindings.clone(),
             source.source.wire_api,
             &source.source.models,

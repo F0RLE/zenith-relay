@@ -301,6 +301,7 @@ mod tests {
             source_id: "openai_codex".to_string(),
             candidate_id: Some(account_id.to_string()),
             account_id: Some(account_id.to_string()),
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".to_string()),
             resolved_model: Some("gpt-test".to_string()),

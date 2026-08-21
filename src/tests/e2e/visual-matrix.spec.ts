@@ -648,6 +648,9 @@ for (const viewport of viewports) {
     await expect(apiCard).toContainText("7,50");
     await expect(apiCard).toContainText("128");
     await expect(apiCard.getByRole("button", { name: "Обновить баланс" })).toBeVisible();
+    await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Режим работы");
+    await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Параллельность");
+    expect(await apiCard.locator(".pool-member-runtime-meta > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members.getByRole("button", { name: "Обновить квоту" })).toHaveCount(5);
     expect(await members.locator(".pool-member-context").evaluateAll((items) => items.every((item) => getComputedStyle(item).justifyContent === "center" && getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members).not.toContainText("Доля");
@@ -1398,7 +1401,7 @@ for (const viewport of viewports) {
     const readMetrics = () => recovery.evaluate((element) => {
       const sections = Array.from(element.querySelectorAll(":scope > .profile-recovery-section"));
       const emptyState = element.querySelector(".profile-recovery-empty-state");
-      if (sections.length !== 2 || !emptyState) return null;
+      if (sections.length !== 1 || !emptyState) return null;
       const box = element.getBoundingClientRect();
       const sectionBoxes = sections.map((section) => section.getBoundingClientRect());
       const contentCenter = (Math.min(...sectionBoxes.map((rect) => rect.top)) + Math.max(...sectionBoxes.map((rect) => rect.bottom))) / 2;

@@ -3,6 +3,11 @@ use crate::{api_model_price, is_valid_model_id, Error, Result};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeSet;
 
+pub(crate) fn is_image_model_id(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-image-") || model.starts_with("dall-e-")
+}
+
 pub fn normalize_image_base_model(value: Option<String>) -> Result<Option<String>> {
     let Some(value) = value else {
         return Ok(None);

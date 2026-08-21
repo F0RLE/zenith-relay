@@ -4,6 +4,7 @@ mod snapshot;
 
 pub(crate) use adapters::DesktopOAuthEvents;
 use coordination::wake_coordinator;
+pub(crate) use snapshot::LocalRuntimeInputs;
 #[cfg(test)]
 use snapshot::{account_secret_available, SecretLookup};
 
@@ -133,6 +134,20 @@ impl DesktopState {
     ) -> Result<()> {
         self.telemetry
             .record_performance(name, duration_ms, context)
+    }
+
+    pub(crate) fn record_performance_async(
+        &self,
+        name: &str,
+        duration_ms: f64,
+        context: Option<&str>,
+    ) {
+        let telemetry = self.telemetry.clone();
+        let name = name.to_string();
+        let context = context.map(str::to_owned);
+        tauri::async_runtime::spawn_blocking(move || {
+            let _ = telemetry.record_performance(&name, duration_ms, context.as_deref());
+        });
     }
 
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -312,6 +327,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
@@ -977,6 +993,7 @@ mod tests {
             source_id: "openai_codex".into(),
             candidate_id: Some("account-1".into()),
             account_id: Some("account-1".into()),
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
@@ -1020,6 +1037,7 @@ mod tests {
             source_id: "openai_codex".into(),
             candidate_id: Some(account_id.into()),
             account_id: Some(account_id.into()),
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),

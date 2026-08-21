@@ -16,10 +16,69 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
     const separator = candidate.candidateId.indexOf("::");
     if (separator > 0) {
       const sourceId = candidate.candidateId.slice(0, separator);
-      if (!positions.has(sourceId)) positions.set(sourceId, index);
+      // Pool requests use the Responses contract. A Messages-only route must
+      // not move an API card ahead of its actual Responses route.
+      if (isResponsesCandidate(candidate.candidateId) && !positions.has(sourceId)) positions.set(sourceId, index);
     }
   }
   return positions;
+}
+
+/** Resolve the runtime state shown for a pool member. Sources may have one
+ * runtime candidate per protocol binding (`sourceId::responses`), while the
+ * UI card is keyed only by the source id. */
+export function runtimeCandidateForMember(
+  memberId: string,
+  kind: "api_source" | "oauth_account",
+  order: CandidateRuntimeSnapshot[],
+  protocol: "responses" | "all" = "all",
+  legacyWireApi?: "responses" | "chat_completions" | "messages",
+): CandidateRuntimeSnapshot | undefined {
+  const candidates = order.filter((candidate) => candidate.kind === kind && (
+    kind === "oauth_account"
+      ? candidate.candidateId === memberId
+      : (candidate.candidateId === memberId || candidate.candidateId.startsWith(`${memberId}::`))
+        && (protocol === "all" || isResponsesCandidate(candidate.candidateId, legacyWireApi))
+  ));
+  if (!candidates.length) return undefined;
+  if (candidates.length === 1 && candidates[0].candidateId === memberId) return candidates[0];
+  return {
+    candidateId: memberId,
+    kind,
+    available: candidates.some((candidate) => candidate.available),
+    inFlight: candidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0),
+    activeRequestCount: candidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0),
+    activeModels: activeModelCounts(candidates),
+    modelRetries: aggregateModelRetries(candidates),
+    lastUsedAtMs: candidates.reduce<number | null>((latest, candidate) =>
+      candidate.lastUsedAtMs != null && (latest == null || candidate.lastUsedAtMs > latest) ? candidate.lastUsedAtMs : latest, null),
+    nextRetryAtMs: candidates.reduce<number | null>((earliest, candidate) =>
+      candidate.nextRetryAtMs != null && (earliest == null || candidate.nextRetryAtMs < earliest) ? candidate.nextRetryAtMs : earliest, null),
+    halfOpen: candidates.some((candidate) => candidate.halfOpen),
+    dispatches: candidates.reduce((total, candidate) => total + candidate.dispatches, 0),
+  };
+}
+
+function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" | "chat_completions" | "messages") {
+  const separator = candidateId.indexOf("::");
+  if (separator < 0) return legacyWireApi == null || legacyWireApi === "responses";
+  const suffix = candidateId.slice(separator + 2);
+  return suffix === "responses" || suffix.startsWith("responses_");
+}
+
+function aggregateModelRetries(candidates: CandidateRuntimeSnapshot[]) {
+  const retries = new Map<string, { model: string; retryAtMs: number }>();
+  for (const candidate of candidates) {
+    for (const retry of candidate.modelRetries ?? []) {
+      if (!retry.model || !Number.isFinite(retry.retryAtMs)) continue;
+      const key = retry.model.toLowerCase();
+      const current = retries.get(key);
+      if (!current || retry.retryAtMs < current.retryAtMs) {
+        retries.set(key, { model: retry.model, retryAtMs: retry.retryAtMs });
+      }
+    }
+  }
+  return [...retries.values()].sort((left, right) => left.retryAtMs - right.retryAtMs || left.model.localeCompare(right.model));
 }
 
 export function compareRoutingOrder(leftId: string, rightId: string, order: Map<string, number>, fallback?: Map<string, number>) {

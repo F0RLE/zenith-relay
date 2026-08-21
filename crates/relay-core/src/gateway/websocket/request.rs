@@ -15,6 +15,7 @@ pub(super) struct ClientRequest {
     value: Value,
     pub(super) requested_model: String,
     pub(super) resolved_model: String,
+    pub(super) stream_id: Option<String>,
     pub(super) responses_lite: bool,
     pub(super) response_affinity_key: Option<String>,
     pub(super) prompt_affinity_key: Option<String>,
@@ -47,6 +48,26 @@ impl ClientRequest {
                 "only response.create messages are supported",
             ));
         }
+        let stream_id = match object.get("stream_id") {
+            None => None,
+            Some(Value::String(stream_id)) => {
+                let stream_id = stream_id.trim();
+                if stream_id.is_empty()
+                    || stream_id.len() > 256
+                    || stream_id.chars().any(char::is_control)
+                {
+                    return Err(GatewayFailure::invalid_request(
+                        "stream_id must be a valid non-empty string",
+                    ));
+                }
+                Some(stream_id.to_string())
+            }
+            Some(_) => {
+                return Err(GatewayFailure::invalid_request(
+                    "stream_id must be a valid non-empty string",
+                ));
+            }
+        };
         let requested_model = object
             .get("model")
             .and_then(Value::as_str)
@@ -80,6 +101,7 @@ impl ClientRequest {
             value,
             requested_model,
             resolved_model,
+            stream_id,
             responses_lite,
             response_affinity_key,
             prompt_affinity_key,
@@ -88,6 +110,18 @@ impl ClientRequest {
 
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
         serde_json::to_string(&self.value_for(route))
+            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn http_payload(&self) -> Result<Vec<u8>, GatewayFailure> {
+        let mut value = self.value.clone();
+        let object = value
+            .as_object_mut()
+            .expect("request object was validated before routing");
+        object.remove("type");
+        object.remove("stream_id");
+        object.insert("stream".to_string(), Value::Bool(true));
+        serde_json::to_vec(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
     }
 

@@ -483,19 +483,20 @@ struct LegacyRemoteTargets {
 }
 
 fn load_or_initialize_state(root: &Path, database: &TelemetryDb) -> Result<PersistedState> {
-    if database.state_count()? == 0 {
+    let values = database.state_json_values()?;
+    if values.is_empty() {
         let state = load_legacy_state(root)?.unwrap_or_default();
         persist_state(database, &state)?;
         return Ok(state);
     }
     Ok(PersistedState {
-        gateway: load_state(database, STATE_GATEWAY)?,
-        sources: load_state(database, STATE_SOURCES)?,
-        accounts: load_state(database, STATE_ACCOUNTS)?,
-        keys: load_state(database, STATE_KEYS)?,
-        automations: load_state(database, STATE_AUTOMATIONS)?,
-        remote_target: load_state(database, STATE_REMOTE_TARGET)?,
-        ownership_operation: load_optional_state(database, STATE_OWNERSHIP_OPERATION)?,
+        gateway: load_state_from_values(&values, STATE_GATEWAY)?,
+        sources: load_state_from_values(&values, STATE_SOURCES)?,
+        accounts: load_state_from_values(&values, STATE_ACCOUNTS)?,
+        keys: load_state_from_values(&values, STATE_KEYS)?,
+        automations: load_state_from_values(&values, STATE_AUTOMATIONS)?,
+        remote_target: load_optional_state_from_values(&values, STATE_REMOTE_TARGET)?,
+        ownership_operation: load_optional_state_from_values(&values, STATE_OWNERSHIP_OPERATION)?,
     })
 }
 
@@ -514,14 +515,14 @@ fn persist_state(database: &TelemetryDb, state: &PersistedState) -> Result<()> {
     ])
 }
 
-fn load_optional_state<T: DeserializeOwned>(
-    database: &TelemetryDb,
+fn load_optional_state_from_values<T: DeserializeOwned>(
+    values: &std::collections::HashMap<String, String>,
     key: &str,
 ) -> Result<Option<T>> {
-    let Some(content) = database.state_json(key)? else {
+    let Some(content) = values.get(key) else {
         return Ok(None);
     };
-    serde_json::from_str(&content).map_err(|error| {
+    serde_json::from_str(content).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("local database state '{key}' is invalid: {error}"),
@@ -529,14 +530,17 @@ fn load_optional_state<T: DeserializeOwned>(
     })
 }
 
-fn load_state<T: DeserializeOwned>(database: &TelemetryDb, key: &str) -> Result<T> {
-    let content = database.state_json(key)?.ok_or_else(|| {
+fn load_state_from_values<T: DeserializeOwned>(
+    values: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Result<T> {
+    let content = values.get(key).ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("local database state '{key}' is missing"),
         )
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    serde_json::from_str(content).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("local database state '{key}' is invalid: {error}"),

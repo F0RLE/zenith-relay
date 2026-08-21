@@ -8,7 +8,7 @@ use zenith_relay_core::{
     normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
-    source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    runtime_source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
     SourceProtocolBinding, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
     DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
@@ -452,7 +452,7 @@ impl ProviderSourceRecord {
     }
 
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        source_models_for_wire_api(
+        runtime_source_models_for_wire_api(
             &self.protocol_bindings,
             self.wire_api,
             &self.models,

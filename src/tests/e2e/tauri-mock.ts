@@ -13,6 +13,7 @@ export type MockOptions = {
   accountHealth?: string;
   staleAccountError?: boolean;
   accountCooldown?: boolean;
+  accountModelCooldown?: boolean;
   usageAccountIndex?: number;
   usagePresent?: boolean;
   usageActive?: boolean;
@@ -61,7 +62,6 @@ export type MockOptions = {
   updateCheckError?: boolean;
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
-  profileSnapshotBackupBeforeRestore?: boolean;
   distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
@@ -74,6 +74,8 @@ export type MockOptions = {
   }>;
   modelReasoning?: Record<string, string[]>;
   modelReasoningProbe?: Record<string, { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null }>;
+  modelReasoningProbeDelayMs?: number;
+  modelReasoningProbeAvailability?: Record<string, Record<string, boolean>>;
   sourceProtocolBindings?: Array<{
     wireApi: "responses" | "messages" | "chat_completions";
     adapter: "native" | "responses_to_messages" | "responses_to_gemini";
@@ -102,9 +104,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     // persisted WebView value just like the packaged desktop application.
     if (localStorage.getItem("relay.profileSwitchBackupPrompt") === null) {
       localStorage.setItem("relay.profileSwitchBackupPrompt", input.profileSwitchBackupPrompt ? "1" : "0");
-    }
-    if (localStorage.getItem("relay.profileSnapshotBackupBeforeRestore") === null) {
-      localStorage.setItem("relay.profileSnapshotBackupBeforeRestore", input.profileSnapshotBackupBeforeRestore === false ? "0" : "1");
     }
 
     type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
@@ -256,9 +255,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       createdAtMs: Date.now() - 3_600_000,
       configAvailable: true,
       authAvailable: true,
+      isOriginal: true,
     }];
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningProbe?: { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null } };
-    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningProbeAvailable: boolean; reasoningProbe?: { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null } };
+    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
       "gpt-5.4-mini": { catalogRank: 6, inputMicroUsdPerMillion: 750_000, cachedInputMicroUsdPerMillion: 75_000, outputMicroUsdPerMillion: 4_500_000 },
@@ -324,6 +324,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         inFlight: item.id === usageAccount.id ? activeRequestCount : 0,
         activeRequestCount: item.id === usageAccount.id ? activeRequestCount : 0,
         activeModels: item.id === usageAccount.id ? structuredClone(activeModelCounts) : [],
+        modelRetries: input.accountModelCooldown && item.id === account.id ? [{ model: "gpt-5.4", retryAtMs: Date.now() + 30 * 60_000 }] : [],
         lastUsedAtMs: usagePresent && item.id === usageAccount.id ? Date.now() - 1_000 : null,
         nextRetryAtMs: input.accountCooldown && item.id === account.id ? Date.now() + 30 * 60_000 : null,
         halfOpen: false,
@@ -640,8 +641,38 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_local_model_reasoning": {
             const request = args.input as { modelId: string; allowedLevels: string[] };
             const target = localRuntime.gateway.models.find((model) => model.id === request.modelId);
-            if (target) target.reasoningAllowedLevels = [...request.allowedLevels];
+            if (target) {
+              target.reasoningAllowedLevels = [...request.allowedLevels];
+              target.reasoningLevels = [...request.allowedLevels];
+            }
             return structuredClone(localRuntime);
+          }
+          case "probe_local_model_reasoning": {
+            const request = args.input as { modelId: string; level: string; addSuccessfulToSettings: boolean };
+            if (input.modelReasoningProbeDelayMs) await new Promise((resolve) => setTimeout(resolve, input.modelReasoningProbeDelayMs));
+            const level = request.level.trim().toLowerCase();
+            const target = localRuntime.gateway.models.find((model) => model.id === request.modelId);
+            const sources = localRuntime.sources
+              .filter((item) => item.enabled && item.inPool && !item.draining && item.secretAvailable && sourceServesResponsesModel(item, request.modelId))
+              .map((item) => ({
+                sourceId: item.id,
+                sourceName: item.name,
+                available: input.modelReasoningProbeAvailability?.[request.modelId.toLowerCase()]?.[item.id] ?? true,
+              }));
+            const availableCount = sources.filter((item) => item.available).length;
+            const appliedToSettings = request.addSuccessfulToSettings && availableCount > 0;
+            if (appliedToSettings && target) {
+              target.reasoningAllowedLevels = [...new Set([...target.reasoningAllowedLevels, level])];
+              target.reasoningLevels = [...target.reasoningAllowedLevels];
+            }
+            return {
+              modelId: request.modelId,
+              level,
+              sourceCount: sources.length,
+              availableCount,
+              appliedToSettings,
+              sources,
+            };
           }
           case "update_chatgpt_interface_quota_reserve": {
             const request = args.input as { reserveBasisPoints: number };
@@ -889,17 +920,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "restore_codex_account_profile": return null;
           case "list_codex_profile_snapshots": if (input.recoveryLoadError) throw { code: "recovery_required" }; return { snapshots: structuredClone(profileSnapshots), invalidCount: 0 };
           case "create_codex_profile_snapshot": {
-            const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.name), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
-            profileSnapshots = [snapshot, ...profileSnapshots];
+            const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.name), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true, isOriginal: false };
+            profileSnapshots = [snapshot, ...profileSnapshots].sort((left, right) => Number(Boolean(right.isOriginal)) - Number(Boolean(left.isOriginal)) || right.createdAtMs - left.createdAtMs);
             return structuredClone(snapshot);
           }
-          case "restore_codex_profile_snapshot":
           case "restore_full_codex_profile_snapshot": {
-            const safetyName = typeof args.safetyName === "string" ? args.safetyName.trim() : "";
-            if (safetyName) {
-              const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: safetyName, profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
-              profileSnapshots = [snapshot, ...profileSnapshots];
-            }
             return null;
           }
           case "delete_codex_profile_snapshot": profileSnapshots = profileSnapshots.filter((snapshot) => snapshot.id !== String(args.snapshotId)); return null;
@@ -1017,6 +1042,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             inFlight: previous?.inFlight ?? memberActiveRequestCount,
             activeRequestCount: previous?.activeRequestCount ?? memberActiveRequestCount,
             activeModels: previous?.activeModels ?? structuredClone(memberActiveModels),
+            modelRetries: previous?.modelRetries ?? (input.accountModelCooldown && member.id === account.id ? [{ model: "gpt-5.4", retryAtMs: Date.now() + 30 * 60_000 }] : []),
             lastUsedAtMs: previous?.lastUsedAtMs ?? (usagePresent && member.id === usageAccount.id ? Date.now() - 1_000 : null),
             nextRetryAtMs: previous?.nextRetryAtMs ?? (input.accountCooldown && member.id === account.id ? Date.now() + 30 * 60_000 : null),
             halfOpen: previous?.halfOpen ?? false,
@@ -1026,9 +1052,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const ids = [...new Map(modelMembers.flatMap((member) => member.models).map((id) => [id.toLowerCase(), id])).values()];
       const models = ids.map((id) => {
         const current = currentModels.get(id.toLowerCase());
-        const hasNativeRoute = runtime.accounts.some((account) => account.inPool && account.models.some((model) => model.toLowerCase() === id.toLowerCase()));
-        const confirmedReasoning = input.modelReasoning?.[id.toLowerCase()] ?? [];
-        const reasoningLevels = current?.reasoningLevels ?? (hasNativeRoute ? [] : confirmedReasoning);
+        const reportedReasoning = input.modelReasoning?.[id.toLowerCase()] ?? [];
+        // A missing manual policy keeps source-declared modes enabled. A saved
+        // empty array is intentional and disables them, so use nullish rather
+        // than truthy fallback here.
+        const manualReasoning = current?.reasoningAllowedLevels ?? reportedReasoning;
+        const hasApiSourceRoute = runtime.sources.some((source) => source.enabled
+          && source.inPool
+          && !source.draining
+          && source.secretAvailable
+          && sourceServesResponsesModel(source, id));
+        const hasNativeAccountRoute = runtime.accounts.some((account) => account.inPool
+          && account.models.some((model) => model.toLowerCase() === id.toLowerCase()));
         const price = current?.customPrice
           ? { catalogRank: current.catalogRank, inputMicroUsdPerMillion: current.inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion: current.cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion: current.cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion: current.cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion: current.outputMicroUsdPerMillion }
           : modelPrices[id.toLowerCase()] ?? { catalogRank: null, inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null };
@@ -1040,10 +1075,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           codexDisplayName: id.replaceAll("-", " "),
           ...price,
           customPrice: current?.customPrice ?? false,
-          reasoningLevels,
-          reasoningSupportedLevels: current?.reasoningSupportedLevels ?? reasoningLevels,
-          reasoningAllowedLevels: current?.reasoningAllowedLevels ?? [],
-          reasoningConfigurable: current?.reasoningConfigurable ?? (!hasNativeRoute && reasoningLevels.length > 0),
+          reasoningLevels: manualReasoning,
+          reasoningSupportedLevels: current?.reasoningSupportedLevels ?? reportedReasoning,
+          reasoningAllowedLevels: manualReasoning,
+          reasoningConfigurable: current?.reasoningConfigurable ?? (hasApiSourceRoute || hasNativeAccountRoute),
+          reasoningProbeAvailable: current?.reasoningProbeAvailable ?? hasApiSourceRoute,
           reasoningProbe: current?.reasoningProbe ?? input.modelReasoningProbe?.[id.toLowerCase()],
         };
       });
@@ -1051,6 +1087,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         ? models
         : models.sort(compareModelOrder);
       runtime.gateway.visibleModelIds = runtime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
+    }
+
+    function sourceServesResponsesModel(source: { models: string[]; wireApi: string; protocolBindings: Array<{ wireApi: string; modelIds: string[] }> }, modelId: string) {
+      const normalized = modelId.toLowerCase();
+      if (source.protocolBindings.length) {
+        return source.protocolBindings.some((binding) => binding.wireApi === "responses" && binding.modelIds.some((model) => model.toLowerCase() === normalized));
+      }
+      return source.wireApi === "responses" && source.models.some((model) => model.toLowerCase() === normalized);
     }
 
     function remoteAction(args: Record<string, unknown>) {
@@ -1163,7 +1207,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (type === "set_model_reasoning") {
         const modelId = String(input.payload?.modelId ?? "");
         const target = remoteRuntime.gateway.models.find((model) => model.id === modelId);
-        if (target) target.reasoningAllowedLevels = [...(input.payload?.allowedLevels as string[] ?? [])];
+        if (target) {
+          target.reasoningAllowedLevels = [...(input.payload?.allowedLevels as string[] ?? [])];
+          target.reasoningLevels = [...target.reasoningAllowedLevels];
+        }
         return structuredClone(remoteRuntime);
       }
       if (type === "set_routing_policy") {

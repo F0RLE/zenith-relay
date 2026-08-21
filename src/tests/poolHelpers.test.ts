@@ -11,7 +11,7 @@ import {
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
-import { routingOrderPositions } from "../src/features/relay/routingOrder";
+import { routingOrderPositions, runtimeCandidateForMember } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -193,5 +193,33 @@ describe("pool helpers", () => {
       { ...source({ id: "gpt-pro", name: "GPT PRO" }), kind: "source" },
       order,
     )).toBeLessThan(0);
+  });
+
+  test("aggregates runtime state for a multi-protocol source card", () => {
+    const state = runtimeCandidateForMember("zenith-api", "api_source", [
+      { candidateId: "zenith-api::responses", kind: "api_source", available: false, inFlight: 1, activeRequestCount: 1, activeModels: [{ model: "gpt-test", requestCount: 1 }], modelRetries: [{ model: "gpt-test", retryAtMs: 500 }], lastUsedAtMs: 10, nextRetryAtMs: 500, halfOpen: false, dispatches: 2 },
+      { candidateId: "zenith-api::messages", kind: "api_source", available: true, inFlight: 2, activeRequestCount: 2, activeModels: [{ model: "gpt-test", requestCount: 2 }], modelRetries: [{ model: "gpt-test", retryAtMs: 900 }, { model: "gpt-other", retryAtMs: 700 }], lastUsedAtMs: 20, nextRetryAtMs: 900, halfOpen: true, dispatches: 3 },
+    ]);
+
+    expect(state).toMatchObject({ candidateId: "zenith-api", available: true, inFlight: 3, activeRequestCount: 3, lastUsedAtMs: 20, nextRetryAtMs: 500, halfOpen: true, dispatches: 5 });
+    expect(state?.activeModels).toEqual([{ model: "gpt-test", requestCount: 3 }]);
+    expect(state?.modelRetries).toEqual([{ model: "gpt-test", retryAtMs: 500 }, { model: "gpt-other", retryAtMs: 700 }]);
+  });
+
+  test("uses only the Responses route for a pooled source", () => {
+    const state = runtimeCandidateForMember("zenith-api", "api_source", [
+      { candidateId: "zenith-api::messages", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 1 },
+      { candidateId: "zenith-api::responses", kind: "api_source", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: 2_000, halfOpen: false, dispatches: 1 },
+    ], "responses", "messages");
+
+    expect(state).toMatchObject({ available: false, nextRetryAtMs: 2_000 });
+  });
+
+  test("does not treat a legacy Messages source candidate as a pooled Responses route", () => {
+    const state = runtimeCandidateForMember("messages-source", "api_source", [
+      { candidateId: "messages-source", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 1 },
+    ], "responses", "messages");
+
+    expect(state).toBeUndefined();
   });
 });

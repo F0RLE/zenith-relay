@@ -255,7 +255,7 @@ async fn source_creation_preserves_native_and_bridged_responses_routes() {
 }
 
 #[tokio::test]
-async fn native_messages_source_stays_outside_the_responses_system_pool() {
+async fn native_messages_source_joins_the_shared_pool_for_messages_and_responses_clients() {
     let root = TempDir::new().unwrap();
     let (responses_upstream, responses_task) = spawn_upstream().await;
     let (messages_upstream, messages_state, messages_task) = spawn_messages_upstream().await;
@@ -316,7 +316,7 @@ async fn native_messages_source_stays_outside_the_responses_system_pool() {
         .unwrap();
     let messages_source_id = messages_source["id"].as_str().unwrap();
 
-    let pool_error = client
+    let membership = client
         .post(format!("{}/pool/members", server.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
@@ -326,11 +326,7 @@ async fn native_messages_source_stays_outside_the_responses_system_pool() {
         .send()
         .await
         .unwrap();
-    assert_eq!(pool_error.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        pool_error.json::<Value>().await.unwrap()["error"]["code"],
-        "source_pool_protocol_unsupported"
-    );
+    assert_eq!(membership.status(), StatusCode::OK);
 
     let started = client
         .post(format!("{}/gateway/start", server.origin))
@@ -366,10 +362,10 @@ async fn native_messages_source_stays_outside_the_responses_system_pool() {
         .filter_map(|model| model["id"].as_str())
         .collect::<Vec<_>>();
     assert!(system_model_ids.contains(&"gpt-test"));
-    assert!(!system_model_ids.contains(&"claude-native"));
+    assert!(system_model_ids.contains(&"claude-native"));
 
-    // Source discovery is allowed during setup. The denied request below must
-    // not reach the native Messages endpoint.
+    // Source discovery is allowed during setup. Count only the two execution
+    // paths below: native Messages and Responses translated to Messages.
     messages_state.lock().unwrap().clear();
 
     let request = json!({
@@ -387,20 +383,44 @@ async fn native_messages_source_stays_outside_the_responses_system_pool() {
         }],
         "tool_choice": {"type": "auto"}
     });
-    let denied = client
+    let native = client
         .post(format!("{}/v1/messages", server.origin))
         .header("x-api-key", system_secret)
         .json(&request)
         .send()
         .await
         .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-    let denied: Value = denied.json().await.unwrap();
-    assert_eq!(denied["type"], "error");
-    assert_eq!(denied["error"]["type"], "permission_error");
+    assert_eq!(native.status(), StatusCode::OK);
+    let native: Value = native.json().await.unwrap();
+    assert_eq!(native["content"][0]["type"], "tool_use");
+
+    let bridged = client
+        .post(format!("{}/v1/responses", server.origin))
+        .bearer_auth(system_secret)
+        .json(&json!({
+            "model": "claude-native",
+            "input": "use the tool",
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bridged.status(), StatusCode::OK);
+    let bridged: Value = bridged.json().await.unwrap();
+    assert_eq!(bridged["output"][0]["type"], "function_call");
+    assert_eq!(bridged["output"][0]["name"], "read_file");
 
     let observed = messages_state.lock().unwrap().clone();
-    assert!(observed.is_empty());
+    assert_eq!(observed.len(), 2);
 
     server.task.abort();
     responses_task.abort();
@@ -628,19 +648,30 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     profile_key = rotated_profile_key;
     let pool_key = profile_key.clone();
 
-    for path in ["/v1/chat/completions", "/v1/images/generations"] {
-        let denied = client
+    for (path, payload) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "test"}]
+            }),
+        ),
+        (
+            "/v1/images/generations",
+            json!({"model": "gpt-image-2", "prompt": "test"}),
+        ),
+    ] {
+        let unavailable = client
             .post(format!("{}{path}", first.origin))
             .bearer_auth(&pool_key)
-            .json(&json!({"model":"gpt-test"}))
+            .json(&payload)
             .send()
             .await
             .unwrap();
-        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            denied.json::<Value>().await.unwrap()["error"]["code"],
-            "client_api_not_allowed"
-        );
+        let status = unavailable.status();
+        let body = unavailable.json::<Value>().await.unwrap();
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        assert_eq!(body["error"]["code"], "model_not_found", "{path}: {body}");
     }
 
     let models = client
@@ -1428,7 +1459,7 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
-async fn model_reasoning_modes_require_gateway_confirmation_and_are_hot_applied() {
+async fn model_reasoning_modes_are_manual_and_hot_applied() {
     let root = TempDir::new().unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
@@ -1524,7 +1555,7 @@ async fn model_reasoning_modes_require_gateway_confirmation_and_are_hot_applied(
             .store
             .model_reasoning_allowed_levels()
             .unwrap()
-            .get("gpt-test"),
+            .get("group:openai"),
         Some(&vec!["high".to_string()])
     );
 
@@ -1549,22 +1580,22 @@ async fn model_reasoning_modes_require_gateway_confirmation_and_are_hot_applied(
     );
     assert_eq!(filtered_model["default_reasoning_level"], "high");
 
-    let unconfirmed = client
+    let manual = client
         .post(format!("{}/models/reasoning", server.origin))
         .bearer_auth(management_key)
         .json(&json!({"modelId": "gpt-test", "allowedLevels": ["ultra"]}))
         .send()
         .await
         .unwrap();
-    assert_eq!(unconfirmed.status(), StatusCode::OK);
+    assert_eq!(manual.status(), StatusCode::OK);
     assert_eq!(
-        unconfirmed.json::<Value>().await.unwrap()["gateway"]["models"]
+        manual.json::<Value>().await.unwrap()["gateway"]["models"]
             .as_array()
             .unwrap()
             .iter()
             .find(|model| model["id"] == "gpt-test")
             .unwrap()["reasoningAllowedLevels"],
-        json!([])
+        json!(["ultra"])
     );
 
     let reset: Value = client
@@ -1589,7 +1620,7 @@ async fn model_reasoning_modes_require_gateway_confirmation_and_are_hot_applied(
         &server.state.runtime().unwrap().unwrap()
     ));
 
-    let automatic_catalog: Value = client
+    let cleared_catalog: Value = client
         .get(format!("{}/v1/models?client_version=1.0.0", server.origin))
         .bearer_auth(pool_key)
         .send()
@@ -1598,13 +1629,14 @@ async fn model_reasoning_modes_require_gateway_confirmation_and_are_hot_applied(
         .json()
         .await
         .unwrap();
-    let automatic_model = automatic_catalog["models"]
+    let cleared_model = cleared_catalog["models"]
         .as_array()
         .unwrap()
         .iter()
         .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
         .unwrap();
-    assert_eq!(automatic_model["default_reasoning_level"], "medium");
+    assert!(cleared_model.get("default_reasoning_level").is_none());
+    assert_eq!(cleared_model["supported_reasoning_levels"], json!([]));
 
     server.task.abort();
     upstream_task.abort();

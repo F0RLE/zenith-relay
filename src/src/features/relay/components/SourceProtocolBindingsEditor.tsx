@@ -326,21 +326,31 @@ export function SourceProtocolBindingsEditor({
         {models.length
           ? <div className="source-route-model-list">
             {models.map((model) => {
-              const messagesBridgeChecked = modelIsSelected(messagesBridgeBinding, model);
+              const explicitMessagesBridgeChecked = modelIsSelected(messagesBridgeBinding, model);
               const geminiBridgeChecked = modelIsSelected(geminiBridgeBinding, model);
               const directResponsesChecked = modelIsSelected(nativeResponsesBinding, model);
-              const messagesBridgeIsLastAvailableRoute = messagesBridgeChecked
+              const nativeMessagesChecked = modelIsSelected(messagesBinding, model);
+              const messagesBridgeLinkedAutomatically = !explicitMessagesBridgeChecked
+                && nativeMessagesChecked
+                && !directResponsesChecked
+                && !geminiBridgeChecked;
+              const messagesBridgeChecked = explicitMessagesBridgeChecked
+                || messagesBridgeLinkedAutomatically;
+              const messagesBridgeIsLastAvailableRoute = explicitMessagesBridgeChecked
                 && messagesBridgeModels.length === 1
                 && bindings.length === 1;
-              const messagesBridgeDisabled = messagesBridgeIsLastAvailableRoute
+              const messagesBridgeDisabled = messagesBridgeLinkedAutomatically
+                || messagesBridgeIsLastAvailableRoute
                 || (!messagesBridgeChecked && (!messagesBinding || directResponsesChecked || geminiBridgeChecked));
-              const messagesBridgeTitle = messagesBridgeIsLastAvailableRoute
-                ? t("sources.modelRouteRequired")
-                : !messagesBridgeChecked && !messagesBinding
-                  ? t("sources.bridgeRequiresMessages")
-                  : !messagesBridgeChecked && (directResponsesChecked || geminiBridgeChecked)
-                    ? t("sources.bridgeRouteConflict")
-                    : undefined;
+              const messagesBridgeTitle = messagesBridgeLinkedAutomatically
+                ? t("sources.bridgeLinkedAutomatically")
+                : messagesBridgeIsLastAvailableRoute
+                  ? t("sources.modelRouteRequired")
+                  : !messagesBridgeChecked && !messagesBinding
+                    ? t("sources.bridgeRequiresMessages")
+                    : !messagesBridgeChecked && (directResponsesChecked || geminiBridgeChecked)
+                      ? t("sources.bridgeRouteConflict")
+                      : undefined;
               const geminiBridgeIsLastAvailableRoute = geminiBridgeChecked
                 && geminiBridgeModels.length === 1
                 && bindings.length === 1;
@@ -365,7 +375,7 @@ export function SourceProtocolBindingsEditor({
                           && modelIsSelected(candidate, model),
                       );
                       const requiredByBridge = wireApi === "messages"
-                        && messagesBridgeChecked;
+                        && explicitMessagesBridgeChecked;
                       const lastSelectedModel = binding != null
                         && checked
                         && selectedModels(binding).length === 1

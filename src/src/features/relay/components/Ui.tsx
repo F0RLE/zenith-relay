@@ -511,13 +511,11 @@ export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { wi
 
 export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: QuotaSnapshot; nowMs?: number; concise?: boolean }) {
   const { t } = useTranslation();
-  const coreBlocked = snapshot.limitReached || [snapshot.primary, snapshot.secondary]
-    .some((window) => window?.availableBasisPoints === 0);
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => {
       const window = snapshot[kind];
       if (!window) return [];
-      return [{ id: kind, label: "", window: coreBlocked ? { ...window, availableBasisPoints: 0 } : window }];
+      return [{ id: kind, label: "", window }];
     }),
     ...(snapshot.supplemental ?? []),
   ];

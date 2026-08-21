@@ -5,8 +5,9 @@ pub use api_equivalent::{
     estimate_api_equivalent_with_cache_ttl,
     estimate_api_equivalent_with_cache_ttl_and_price_override,
     estimate_api_equivalent_with_cache_ttl_and_price_sources,
-    estimate_api_equivalent_with_price_override, normalize_model_price_overrides, ApiModelPrice,
-    ApiModelPriceOverride, ApiModelPriceSources, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
+    official_image_request_prices, ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources,
+    ImageRequestPrice, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.
@@ -376,6 +377,8 @@ pub struct UsageEvent {
     pub candidate_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_context_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
@@ -492,6 +495,7 @@ mod tests {
             source_id: "source".into(),
             candidate_id: Some("candidate".into()),
             account_id: account_id.map(str::to_owned),
+            client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),
             resolved_model: Some("model".into()),

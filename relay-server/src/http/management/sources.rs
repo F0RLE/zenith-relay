@@ -186,7 +186,7 @@ pub async fn update_source(
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
             "source_pool_protocol_unsupported",
-            "only Responses API sources can join the ChatGPT pool",
+            "only sources with a Responses-compatible route can join the pool",
             "pool",
             false,
         ));

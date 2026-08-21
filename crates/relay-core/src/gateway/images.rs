@@ -8,13 +8,13 @@ use super::errors::{
     CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
-use super::request::request_id;
+use super::request::{client_context_fingerprint, request_id};
 use super::response::{
     apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
     proxy_sse_response, usage_event,
 };
 use crate::protocol::{sse_event_end, ClientWireApi};
-use crate::runtime::IMAGE_API_MODEL;
+use crate::runtime::{is_image_model_id, IMAGE_API_MODEL};
 use crate::runtime::{AuthenticatedKey, ExecutorRoute};
 use crate::{GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
@@ -69,6 +69,7 @@ struct PreparedImageRequest {
     content_type: HeaderValue,
     stream: bool,
     response_format: String,
+    client_context_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -197,10 +198,10 @@ async fn prepare_request(
             "model_not_found",
         ));
     };
-    if !resolved_model.eq_ignore_ascii_case(IMAGE_API_MODEL) {
+    if !is_image_model_id(&resolved_model) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "images endpoints require gpt-image-2",
+            "images endpoints require the configured image-generation model",
             "invalid_image_model",
         ));
     }
@@ -242,6 +243,7 @@ async fn prepare_request(
         content_type,
         stream,
         response_format,
+        client_context_id: client_context_fingerprint(headers),
     })
 }
 
@@ -447,6 +449,7 @@ async fn execute_prepared(
         tried.insert(selected.candidate_id.clone());
         let Some(mut route) = runtime.image_executor_route(
             &selected.candidate_id,
+            &prepared.resolved_model,
             &key.scope_snapshot(),
             IMAGE_PROTOCOLS,
         ) else {
@@ -454,6 +457,7 @@ async fn execute_prepared(
         };
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        route.client_context_id = prepared.client_context_id.clone();
         let cooldown_context = CooldownContext {
             scope: &route.scope,
             allowed_protocols: &route.allowed_protocols,
@@ -519,7 +523,7 @@ async fn execute_prepared(
                 let state = apply_attempt_failure_cooldown(
                     &runtime,
                     &route.candidate_id,
-                    IMAGE_API_MODEL,
+                    &prepared.resolved_model,
                     &failure,
                     &HeaderMap::new(),
                     &cooldown_context,
@@ -556,7 +560,7 @@ async fn execute_prepared(
                 &runtime,
                 &route.candidate_id,
                 "*",
-                IMAGE_API_MODEL,
+                &prepared.resolved_model,
                 TRANSIENT_COOLDOWN_MS,
                 &cooldown_context,
                 route.half_open_probe,
@@ -588,7 +592,7 @@ async fn execute_prepared(
                     apply_mandatory_cooldown(
                         &runtime,
                         &route.candidate_id,
-                        IMAGE_API_MODEL,
+                        &prepared.resolved_model,
                         TRANSIENT_COOLDOWN_MS,
                         &cooldown_context,
                         route.half_open_probe,
@@ -597,7 +601,7 @@ async fn execute_prepared(
                     apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
-                        IMAGE_API_MODEL,
+                        &prepared.resolved_model,
                         status,
                         failure.category,
                         &response_headers,
@@ -665,7 +669,7 @@ async fn execute_prepared(
             populate_tokens(&mut event, &bytes);
             let recovered = runtime.record_success_with_metrics(
                 &route.candidate_id,
-                IMAGE_API_MODEL,
+                &prepared.resolved_model,
                 now_ms(),
                 None,
                 event.latency_ms,
@@ -691,7 +695,7 @@ async fn execute_prepared(
                     apply_mandatory_cooldown(
                         &runtime,
                         &route.candidate_id,
-                        IMAGE_API_MODEL,
+                        &prepared.resolved_model,
                         TRANSIENT_COOLDOWN_MS,
                         &cooldown_context,
                         route.half_open_probe,
@@ -700,7 +704,7 @@ async fn execute_prepared(
                     apply_failure_cooldown_with_hint(
                         &runtime,
                         &route.candidate_id,
-                        IMAGE_API_MODEL,
+                        &prepared.resolved_model,
                         failure.status,
                         failure.category,
                         &response_headers,
@@ -761,7 +765,7 @@ async fn execute_prepared(
         }
         let recovered = runtime.record_success_with_metrics(
             &route.candidate_id,
-            IMAGE_API_MODEL,
+            &prepared.resolved_model,
             now_ms(),
             None,
             event.latency_ms,
@@ -855,7 +859,7 @@ fn build_account_request(
     );
     tool.insert(
         "model".to_string(),
-        Value::String(IMAGE_API_MODEL.to_string()),
+        Value::String(request.resolved_model.clone()),
     );
     let mut string_fields = vec![
         "size",
@@ -1283,6 +1287,7 @@ mod tests {
             content_type: HeaderValue::from_static("application/json"),
             stream: false,
             response_format: "b64_json".to_string(),
+            client_context_id: None,
         };
         let body = build_account_request(&request, ImageEndpoint::Generations, "gpt-5.4-mini");
         assert_eq!(body["model"], "gpt-5.4-mini");

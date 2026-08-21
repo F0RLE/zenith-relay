@@ -20,7 +20,8 @@ pub(crate) use context::{
     SourceReasoningCapabilities, SourceReasoningProbeProgress,
 };
 pub use order::{
-    canonicalize_model_ids, is_valid_model_id, is_valid_model_token, normalize_model_ids,
+    canonicalize_model_ids, is_valid_model_id, is_valid_model_token, known_model_reasoning_levels,
+    normalize_model_ids, reasoning_policy_key, reasoning_policy_levels,
 };
 pub use registry::ModelRegistry;
 pub use rules::ModelRules;

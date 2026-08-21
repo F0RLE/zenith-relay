@@ -214,7 +214,28 @@
 
 .model-reasoning-form {
   display: grid;
-  gap: 18px;
+  gap: 12px;
+}
+
+.model-reasoning-form .model-price-context {
+  padding-bottom: 10px;
+}
+
+.model-reasoning-company {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: var(--relay-surface-subtle);
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.model-reasoning-company strong {
+  color: var(--relay-secondary);
 }
 
 .model-reasoning-detected {
@@ -234,14 +255,14 @@
 
 .model-reasoning-options {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 6px;
 }
 
 .model-reasoning-options button,
 .model-reasoning-mode {
-  min-height: 38px;
-  padding: 7px 10px;
+  min-height: 34px;
+  padding: 6px 8px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
   background: var(--relay-surface);
@@ -272,6 +293,162 @@
   border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
   background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-surface));
   color: var(--relay-accent-hover);
+}
+
+.model-reasoning-section-heading {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-reasoning-section-heading .model-reasoning-clear {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.model-reasoning-manual,
+.model-reasoning-probe {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--relay-subtle) 45%, transparent);
+}
+
+.model-reasoning-manual > header,
+.model-reasoning-probe > header {
+  display: grid;
+  gap: 3px;
+}
+
+.model-reasoning-manual header strong,
+.model-reasoning-probe header strong {
+  color: var(--relay-text);
+  font-size: 12px;
+}
+
+.model-reasoning-add,
+.model-reasoning-probe-controls {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.model-reasoning-add .relay-field,
+.model-reasoning-probe-controls .relay-field {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.model-reasoning-add .relay-button,
+.model-reasoning-probe-controls .relay-button {
+  flex: 0 0 auto;
+  min-height: 38px;
+}
+
+.model-reasoning-probe-toggle {
+  display: flex;
+  align-items: start;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.model-reasoning-probe-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: var(--relay-accent);
+}
+
+.model-reasoning-probe-toggle span {
+  display: grid;
+  gap: 2px;
+}
+
+.model-reasoning-probe-toggle strong {
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.model-reasoning-probe-progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  color: var(--relay-accent-hover);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-reasoning-probe-progress svg {
+  width: 16px;
+  height: 16px;
+}
+
+.model-reasoning-probe-result {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.model-reasoning-probe-result > strong {
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.model-reasoning-probe-result > small {
+  color: var(--relay-accent-hover);
+  font-size: 11px;
+}
+
+.model-reasoning-probe-result ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-reasoning-probe-result li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--relay-surface);
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.model-reasoning-probe-result li small {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.model-reasoning-probe-result li[data-available="true"] small {
+  color: var(--relay-accent-hover);
+}
+
+.model-reasoning-probe-result li[data-available="false"] small {
+  color: var(--relay-danger);
+}
+
+@media (max-width: 520px) {
+  .model-reasoning-add,
+  .model-reasoning-probe-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .model-reasoning-add .relay-button,
+  .model-reasoning-probe-controls .relay-button {
+    width: 100%;
+  }
 }
 
 .model-price-context {

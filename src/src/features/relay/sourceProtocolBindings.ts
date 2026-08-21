@@ -111,6 +111,49 @@ function sourceBindingModels(
     : source.models;
 }
 
+/** Mirrors the runtime-only link from a confirmed native Messages route to
+ * the Responses client. Explicit native Responses and Gemini assignments keep
+ * ownership of overlapping models; an existing Messages bridge retains its
+ * configured reasoning/cache policy while gaining unclaimed native models. */
+export function runtimeSourceProtocolBindings(
+  source: ProtocolBindingSource,
+): SourceProtocolBinding[] {
+  const bindings = effectiveSourceProtocolBindings(source);
+  const claimedByOtherResponsesRoutes = new Set(
+    bindings.flatMap((binding) => (
+      binding.wireApi === "responses" && normalizedAdapter(binding) !== "responses_to_messages"
+        ? sourceBindingModels(source, bindings, binding).map((model) => model.toLowerCase())
+        : []
+    )),
+  );
+  const linkedModels = normalizedModelIds(
+    bindings.flatMap((binding) => (
+      binding.wireApi === "messages" && normalizedAdapter(binding) === "native"
+        ? sourceBindingModels(source, bindings, binding)
+        : []
+    )).filter((model) => !claimedByOtherResponsesRoutes.has(model.toLowerCase())),
+    source.models,
+  );
+  if (!linkedModels.length) return bindings;
+
+  const bridge = bindings.find((binding) => (
+    binding.wireApi === "responses" && normalizedAdapter(binding) === "responses_to_messages"
+  ));
+  if (bridge) {
+    return bindings.map((binding) => binding === bridge ? {
+      ...binding,
+      modelIds: normalizedModelIds([...binding.modelIds, ...linkedModels], source.models),
+    } : binding);
+  }
+  return [...bindings, {
+    wireApi: "responses",
+    adapter: "responses_to_messages",
+    reasoningMode: "disabled",
+    cacheWriteTtl: "provider",
+    modelIds: linkedModels,
+  }];
+}
+
 /**
  * Mirrors the runtime's source capability calculation for one client
  * protocol. A sole empty binding retains the legacy source-wide catalog;
@@ -120,7 +163,7 @@ export function sourceModelsForWireApi(
   source: ProtocolBindingSource,
   wireApi: SourceWireApi,
 ) {
-  const bindings = effectiveSourceProtocolBindings(source);
+  const bindings = runtimeSourceProtocolBindings(source);
   const seen = new Set<string>();
   return bindings.flatMap((binding) => {
     if (binding.wireApi !== wireApi) return [];

@@ -10,6 +10,13 @@ pub struct ActiveModelRuntime {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelRetryRuntime {
+    pub model: String,
+    pub retry_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateRuntimeSnapshot {
     pub candidate_id: String,
     pub kind: CandidateKind,
@@ -19,6 +26,10 @@ pub struct CandidateRuntimeSnapshot {
     pub active_request_count: u32,
     #[serde(default)]
     pub active_models: Vec<ActiveModelRuntime>,
+    /// Model-scoped cooldowns that are still active. The aggregate retry
+    /// deadline remains useful for global cooldowns.
+    #[serde(default)]
+    pub model_retries: Vec<ModelRetryRuntime>,
     pub last_used_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
     pub half_open: bool,

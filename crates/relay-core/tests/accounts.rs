@@ -635,7 +635,7 @@ async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
 }
 
 #[tokio::test]
-async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in_pool() {
+async fn official_codex_model_applies_the_explicit_pool_reasoning_picker() {
     let mut upstream_catalog = default_upstream_model_catalog();
     upstream_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     upstream_catalog["models"][0]["display_name"] = Value::String("GPT-5.6 Terra".to_string());
@@ -651,8 +651,8 @@ async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
         GatewayRuntimeOptions {
-            // A saved source-policy rule must not restrict the same bare
-            // model when a native ChatGPT account serves it.
+            // A saved pool-model policy is an explicit picker choice, even
+            // when the selected model is served by a native ChatGPT account.
             model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
                 OFFICIAL_CODEX_MODEL.to_string(),
                 vec!["low".to_string()],
@@ -682,24 +682,17 @@ async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
-    assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
-        json!([
-            {"effort": "low", "description": "Low"},
-            {"effort": "high", "description": "High"},
-            {"effort": "xhigh", "description": "Extra high"}
-        ])
+        json!([{"effort": "low", "description": "Low"}])
     );
     assert_eq!(
         catalog["models"][0]["supports_reasoning_summary_parameter"],
-        true
+        false
     );
-    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
-    assert_eq!(
-        catalog["models"][0]["default_reasoning_summary"],
-        "detailed"
-    );
+    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+    assert_eq!(catalog["models"][0]["default_reasoning_summary"], "none");
 
     // The pool may classify a tier for quota telemetry, but must never
     // translate a ChatGPT/Codex client's native service-tier selection.
@@ -3753,14 +3746,19 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 }
 
 #[tokio::test]
-async fn independent_chat_uses_an_api_source_while_an_oauth_account_is_streaming() {
-    let (stream_upstream, stream_state) = spawn_held_stream_upstream().await;
+async fn independent_chat_keeps_an_occupied_oauth_account_ahead_of_a_reserve_api() {
+    let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("source-response")]).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "stream-account", "stream-access").await;
     let (gateway, events, _, _) = spawn_mixed_gateway(
-        vec![source("api-source", &source_upstream, "source-key", 0)],
+        vec![source(
+            "reserve-api",
+            &source_upstream,
+            "source-key",
+            -1_000_000,
+        )],
         vec![account(
             "stream-account",
             "provider-stream",
@@ -3780,14 +3778,11 @@ async fn independent_chat_uses_an_api_source_while_an_oauth_account_is_streaming
 
     let independent = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
         .await
-        .expect("the independent chat did not use the available API source");
+        .expect("the independent chat did not reuse the OAuth account");
     assert_eq!(independent.status(), StatusCode::OK);
-    assert_eq!(
-        independent.json::<Value>().await.unwrap()["id"],
-        "source-response"
-    );
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
+    let _ = independent.bytes().await.unwrap();
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
+    assert!(source_state.requests.lock().unwrap().is_empty());
 
     stream_state.release.notify_one();
     let _ = open_stream.bytes().await.unwrap();
@@ -3797,55 +3792,7 @@ async fn independent_chat_uses_an_api_source_while_an_oauth_account_is_streaming
     assert!(events
         .iter()
         .any(|event| event.account_id.as_deref() == Some("stream-account")));
-    assert!(events.iter().any(|event| event.source_id == "api-source"));
-}
-
-#[tokio::test]
-async fn independent_chat_waits_for_the_only_oauth_account_to_finish() {
-    let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
-    let authority = ready_authority("stream-account", "stream-access").await;
-    let (gateway, events, _, _) = spawn_mixed_gateway(
-        Vec::new(),
-        vec![account(
-            "stream-account",
-            "provider-stream",
-            &stream_upstream,
-            10,
-        )],
-        vec![mixed_key(None, None)],
-        authority,
-        refresh_adapter(),
-        Arc::new(PersistenceAdapter::default()),
-    )
-    .await;
-
-    let open_stream = request(&gateway, true).await;
-    assert_eq!(open_stream.status(), StatusCode::OK);
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
-
-    let queued = request(&gateway, false);
-    tokio::pin!(queued);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut queued)
-            .await
-            .is_err(),
-        "a second chat must wait while the only OAuth account is occupied"
-    );
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
-
-    stream_state.release.notify_one();
-    let (stream, independent) = tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(open_stream.bytes(), queued)
-    })
-    .await
-    .expect("the queued chat did not resume after the account was released");
-    let _ = stream.unwrap();
-    assert_eq!(independent.status(), StatusCode::OK);
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
-    drop(independent);
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(events.lock().unwrap().len(), 2);
+    assert!(events.iter().all(|event| event.source_id != "reserve-api"));
 }
 
 #[tokio::test]
@@ -3890,15 +3837,6 @@ async fn queued_request_rechecks_scope_after_pool_member_removal() {
     assert_eq!(blocker_request.status(), StatusCode::OK);
     assert_eq!(blocker_state.requests.lock().unwrap().len(), 1);
 
-    let queued = request(&gateway, false);
-    tokio::pin!(queued);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut queued)
-            .await
-            .is_err(),
-        "the third request must wait while both OAuth accounts are occupied"
-    );
-
     assert!(runtime.update_key_scope(
         "local-key",
         CandidateScope {
@@ -3907,23 +3845,19 @@ async fn queued_request_rechecks_scope_after_pool_member_removal() {
             model_rules: Default::default(),
         },
     ));
-    removed_state.release.notify_waiters();
-    let _ = removed_request.bytes().await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut queued)
-            .await
-            .is_err(),
-        "removing the released account must not dispatch the queued request to it"
-    );
+
+    let queued_response = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
+        .await
+        .expect("the scoped request did not stay on the allowed account");
+    assert_eq!(queued_response.status(), StatusCode::OK);
+    let _ = queued_response.bytes().await.unwrap();
     assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(blocker_state.requests.lock().unwrap().len(), 2);
 
     blocker_state.release.notify_waiters();
     let _ = blocker_request.bytes().await.unwrap();
-    let queued_response = tokio::time::timeout(Duration::from_secs(2), queued)
-        .await
-        .expect("the queued request did not resume after the allowed account was released");
-    assert_eq!(queued_response.status(), StatusCode::OK);
-    let _ = queued_response.bytes().await.unwrap();
+    removed_state.release.notify_waiters();
+    let _ = removed_request.bytes().await.unwrap();
     assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
     assert_eq!(blocker_state.requests.lock().unwrap().len(), 2);
 }

@@ -1100,6 +1100,17 @@ fn deleting_account_prunes_explicit_selectors_without_rewriting_wake_state() {
     );
     assert_eq!(pruned.state, original_state);
 }
+
+#[test]
+fn bulk_delete_preflights_every_account_before_mutation() {
+    let accounts = vec![account_record("account_1"), account_record("account_2")];
+    assert!(ensure_accounts_exist(&accounts, &["account_1".into(), "account_2".into()],).is_ok());
+    let error =
+        ensure_accounts_exist(&accounts, &["account_1".into(), "missing".into()]).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert!(error.message.contains("missing"));
+}
+
 #[test]
 fn failed_delete_restores_credentials_quota_and_profile_binding() {
     let root = std::env::temp_dir().join(format!(

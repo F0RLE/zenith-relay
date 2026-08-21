@@ -16,6 +16,7 @@ mod messages;
 mod request;
 mod response;
 mod streaming;
+mod turn_state;
 mod websocket;
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
@@ -50,6 +51,7 @@ mod test_support {
             source_id: "source".into(),
             candidate_id: Some("source".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),
             resolved_model: Some("model".into()),

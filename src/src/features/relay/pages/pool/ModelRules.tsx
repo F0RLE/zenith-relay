@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { BrainCircuit, Loader2, Pencil, Power, RotateCcw } from "lucide-react";
+import { BrainCircuit, FlaskConical, Loader2, Pencil, Power, PowerOff, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { ModelSummary } from "../../api/types";
+import type { ModelReasoningProbeResult, ModelSummary } from "../../api/types";
 import { Button, Dialog, EmptyState, IconButton, StatusIcon } from "../../components/Ui";
-import { supportsCacheWritePricing } from "../../modelGroups";
+import { modelProviderGroup, modelProviderGroupLabel, supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
-import { groupModelSummariesForLauncher, modelSummaries, toggle } from "../../poolHelpers";
+import { groupModelSummariesForLauncher, modelSummaries } from "../../poolHelpers";
 import {
   formatModelPrice,
   formatReasoningEffort,
@@ -40,7 +40,9 @@ export function ModelRulesView() {
       <tr className="model-group-row"><th colSpan={5} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`, { defaultValue: group.label })}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
       {group.items.map((model) => {
       const toggling = busy === `model-toggle-${model.id}`;
-      const hasPrice = model.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null;
+      const imagePrices = model.imageRequestPrices ?? [];
+      const isImageModel = imagePrices.length > 0;
+      const hasPrice = !isImageModel && model.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null;
       const cachedInputPrice = model.cachedInputMicroUsdPerMillion ?? model.inputMicroUsdPerMillion;
       const priceParts = hasPrice ? [
         { label: t("models.inputPriceLabel"), value: formatModelPrice(model.inputMicroUsdPerMillion!, i18n.language) },
@@ -52,13 +54,13 @@ export function ModelRulesView() {
       const displayName = model.codexDisplayName || model.id;
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
       const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0;
-      const canEditReasoning = Boolean(model.reasoningConfigurable && hasReasoningModes);
+      const canEditReasoning = Boolean(model.reasoningConfigurable);
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"}>
         <td data-column="model"><div className="model-rule-identity"><strong title={displayName}>{displayName}</strong>{displayName !== model.id ? <code title={model.id}>{model.id}</code> : null}<span className={`model-rule-state ${model.enabled ? "ready" : "disabled"}`}><StatusIcon status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /><span>{t(model.enabled ? "models.available" : "models.disabled")}</span></span></div></td>
         <td data-column="codex"><div className={`model-codex-state ${model.codexVisible ? "visible" : "hidden"}`}><BrainCircuit aria-hidden /><span><strong>{t(model.codexVisible ? "models.codexVisible" : model.enabled ? "models.codexUnsupported" : "models.codexDisabled")}</strong></span></div></td>
-        <td data-column="price"><div className="model-price">{hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
+        <td data-column="price"><div className="model-price">{isImageModel ? <div className="model-image-price-summary"><small>{t("models.imagePriceUnit")}</small>{imagePrices.filter((price) => price.operation === "generation").slice(0, 3).map((price) => <span className="model-price-value" key={`${price.quality}-${price.size}`}><small>{t(`models.imageQuality.${price.quality}`, { defaultValue: price.quality })} · {price.size}</small><strong>{formatModelPrice(price.microUsd, i18n.language)}</strong></span>)}</div> : hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
         <td data-column="members"><span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span></td>
-        <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}{hasReasoningModes || model.reasoningProbe ? <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} onClick={() => setReasoningModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
+        <td data-column="actions"><div className="model-rule-actions">{(canEditPrice || isImageModel) ? <IconButton data-model-price-edit={model.id} label={t(isImageModel ? "models.viewImagePrice" : "models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}{canEditReasoning || hasReasoningModes ? <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} onClick={() => setReasoningModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
       </tr>;
     })}</tbody>)}
     </table></div>
@@ -66,48 +68,94 @@ export function ModelRulesView() {
 }
 
 function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { mode, perform, busy } = useRelayState();
-  const detectedLevels = model.reasoningLevels ?? [];
   const supportedLevels = model.reasoningSupportedLevels ?? [];
-  const levels = [...new Set([...supportedLevels, ...detectedLevels])];
-  const editable = Boolean(model.reasoningConfigurable && levels.length);
-  const [allowedLevels, setAllowedLevels] = useState(model.reasoningAllowedLevels ?? []);
+  const editable = Boolean(model.reasoningConfigurable);
+  const companyGroup = modelProviderGroup(model.id);
+  const [allowedLevels, setAllowedLevels] = useState(model.reasoningAllowedLevels ?? model.reasoningLevels ?? []);
+  const [customLevel, setCustomLevel] = useState("");
+  const [probeLevel, setProbeLevel] = useState(allowedLevels[0] ?? supportedLevels[0] ?? "medium");
+  const [addSuccessfulProbe, setAddSuccessfulProbe] = useState(false);
+  const [probeResult, setProbeResult] = useState<ModelReasoningProbeResult | null>(null);
   const operation = `model-reasoning-${model.id}`;
-  const probe = model.reasoningProbe;
-  const probeProgress = probe ? t("models.reasoningProbeProgress", probe) : "";
-  const save = async () => {
-    const ok = await perform(operation, () => mode === "local"
-      ? relayCommands.setModelReasoning(model.id, allowedLevels)
-      : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels }), "feedback.saved");
-    if (ok) onClose();
-  };
-  const automatic = allowedLevels.length === 0;
+  const probeOperation = `model-reasoning-probe-${model.id}`;
+  const candidates = uniqueReasoningLevels([...supportedLevels, ...allowedLevels, probeLevel]);
   const label = (level: string) => t(`usage.reasoningEfforts.${level}`, { defaultValue: formatReasoningEffort(level) });
-  const toggleAllowedLevel = (level: string) => setAllowedLevels((current) => {
-    if (current.length) return toggle(current, level);
-    return detectedLevels.includes(level) ? [level] : [...detectedLevels, level];
-  });
-  return <Dialog title={t("models.reasoningTitle")} onClose={onClose} footer={editable ? <><Button variant="secondary" disabled={busy === operation} onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === operation} onClick={() => void save()}>{t("common.save")}</Button></> : <Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
+  const saveLevels = async (next: string[]) => {
+    const ok = await perform(operation, () => mode === "local"
+      ? relayCommands.setModelReasoning(model.id, next)
+      : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels: next }), "feedback.saved");
+    if (ok) setAllowedLevels(next);
+  };
+  const toggleAllowedLevel = (level: string) => {
+    const normalized = normalizeReasoningLevel(level);
+    if (!normalized) return;
+    const next = allowedLevels.includes(normalized)
+      ? allowedLevels.filter((current) => current !== normalized)
+      : uniqueReasoningLevels([...allowedLevels, normalized]);
+    void saveLevels(next);
+  };
+  const addLevel = () => {
+    const normalized = normalizeReasoningLevel(customLevel);
+    if (!normalized) return;
+    setCustomLevel("");
+    if (!allowedLevels.includes(normalized)) void saveLevels(uniqueReasoningLevels([...allowedLevels, normalized]));
+  };
+  const runProbe = async () => {
+    const level = normalizeReasoningLevel(probeLevel);
+    if (!level || mode !== "local") return;
+    await perform(probeOperation, async () => {
+      const result = await relayCommands.probeModelReasoning(model.id, level, addSuccessfulProbe);
+      setProbeResult(result);
+      if (result.appliedToSettings && !allowedLevels.includes(result.level)) {
+        setAllowedLevels(uniqueReasoningLevels([...allowedLevels, result.level]));
+      }
+    });
+  };
+  const probing = busy === probeOperation;
+  return <Dialog title={t("models.reasoningTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
     <div className="model-reasoning-form">
       <div className="model-price-context"><code title={model.id}>{model.id}</code><span>{t(editable ? "models.reasoningHint" : "models.reasoningReadOnlyHint")}</span></div>
-      {probe ? <div className="model-reasoning-detected"><span>{t("models.reasoningProbeStatus")}</span><strong>{t(`models.reasoningProbeStatuses.${probe.status}`, { defaultValue: probe.status })} · {probeProgress}{probe.lastProbeAt ? ` · ${t("models.reasoningProbeLastAt", { value: new Date(probe.lastProbeAt).toLocaleString(i18n.language) })}` : ""}</strong></div> : null}
-      <div className="model-reasoning-detected"><span>{t("models.reasoningAvailable")}</span><strong>{supportedLevels.length ? supportedLevels.map(label).join(", ") : t("models.reasoningDetectedEmpty")}</strong></div>
-      {levels.length && editable ? <>
-        <div className="model-reasoning-detected"><span>{t("models.reasoningDetected")}</span><strong>{detectedLevels.length ? detectedLevels.map(label).join(", ") : t("models.reasoningDetectedEmpty")}</strong></div>
-        <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
-          <button type="button" aria-pressed={automatic} className={automatic ? "selected" : undefined} onClick={() => setAllowedLevels([])}>{t("models.reasoningAuto")}</button>
-          {levels.map((level) => <button key={level} type="button" role="checkbox" aria-checked={!automatic && allowedLevels.includes(level)} className={!automatic && allowedLevels.includes(level) ? "selected" : undefined} onClick={() => toggleAllowedLevel(level)}>{label(level)}</button>)}
-        </div>
-      </> : levels.length ? <div className="model-reasoning-options" role="list" aria-label={t("models.reasoningTitle")}>
-        {levels.map((level) => <span key={level} className="model-reasoning-mode" role="listitem">{label(level)}</span>)}
-      </div> : null}
+      {editable ? <div className="model-reasoning-company"><span>{t("models.reasoningCompanyDefault")}</span><strong>{t(`modelGroups.${companyGroup}`, { defaultValue: modelProviderGroupLabel(companyGroup) })}</strong></div> : null}
+      {editable ? <>
+        <section className="model-reasoning-manual">
+          <header className="model-reasoning-section-heading"><strong>{t("models.reasoningManual")}</strong><Button className="model-reasoning-clear" variant="danger" icon={<PowerOff aria-hidden />} disabled={busy === operation || allowedLevels.length === 0} onClick={() => void saveLevels([])}>{t("models.reasoningClear")}</Button></header>
+          <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningManual")}>
+            {candidates.map((level) => <button key={level} type="button" role="checkbox" aria-checked={allowedLevels.includes(level)} className={allowedLevels.includes(level) ? "selected" : undefined} disabled={busy === operation} onClick={() => toggleAllowedLevel(level)}>{label(level)}</button>)}
+          </div>
+          <div className="model-reasoning-add"><label className="relay-field"><span>{t("models.reasoningCustom")}</span><input value={customLevel} onChange={(event) => setCustomLevel(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addLevel(); } }} placeholder={t("models.reasoningCustomPlaceholder")} /></label><Button variant="secondary" disabled={!normalizeReasoningLevel(customLevel) || busy === operation} onClick={addLevel}>{t("models.reasoningAdd")}</Button></div>
+        </section>
+        {mode === "local" && model.reasoningProbeAvailable ? <section className="model-reasoning-probe">
+          <header><strong>{t("models.reasoningProbeTitle")}</strong></header>
+          <div className="model-reasoning-probe-controls"><label className="relay-field"><span>{t("models.reasoningProbeCandidate")}</span><input aria-label={t("models.reasoningProbeCandidate")} list={`reasoning-candidates-${model.id}`} value={probeLevel} onChange={(event) => setProbeLevel(event.target.value)} /><datalist id={`reasoning-candidates-${model.id}`}>{candidates.map((level) => <option key={level} value={level}>{label(level)}</option>)}</datalist></label><Button variant="secondary" icon={<FlaskConical aria-hidden />} busy={probing} disabled={!normalizeReasoningLevel(probeLevel)} onClick={() => void runProbe()}>{t("models.reasoningProbeAction")}</Button></div>
+          <label className="model-reasoning-probe-toggle"><input type="checkbox" checked={addSuccessfulProbe} disabled={probing} onChange={(event) => setAddSuccessfulProbe(event.target.checked)} /><span><strong>{t("models.reasoningProbeApply")}</strong></span></label>
+          {probing ? <div className="model-reasoning-probe-progress" role="status"><Loader2 className="spin" aria-hidden /><span>{t("models.reasoningProbing")}</span></div> : null}
+          {probeResult ? <div className="model-reasoning-probe-result" role="status"><strong>{t("models.reasoningProbeAvailability", probeResult)}</strong><ul>{probeResult.sources.map((source) => <li key={source.sourceId} data-available={source.available ? "true" : "false"}><span>{source.sourceName}</span><small>{t(source.available ? "models.reasoningProbeAvailable" : "models.reasoningProbeUnavailable")}</small></li>)}</ul>{probeResult.appliedToSettings ? <small>{t("models.reasoningProbeApplied")}</small> : null}</div> : null}
+        </section> : null}
+      </> : <div className="model-reasoning-detected"><span>{t("models.reasoningAvailable")}</span><strong>{(model.reasoningLevels ?? []).length ? (model.reasoningLevels ?? []).map(label).join(", ") : t("models.reasoningDetectedEmpty")}</strong></div>}
     </div>
   </Dialog>;
 }
 
+function normalizeReasoningLevel(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function uniqueReasoningLevels(levels: string[]) {
+  return [...new Set(levels.map(normalizeReasoningLevel).filter(Boolean))];
+}
+
 function ModelPriceDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const imagePrices = model.imageRequestPrices ?? [];
+  if (imagePrices.length) {
+    return <Dialog title={t("models.imagePriceTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
+      <div className="relay-form model-price-form"><div className="model-price-context"><code title={model.id}>{model.id}</code><span>{t("models.imagePriceUnit")}</span></div>
+        {["generation", "edit"].map((operation) => <section className="model-price-section" key={operation}><h3>{t(`models.imageOperation.${operation}`)}</h3><div className="model-price-grid">{imagePrices.filter((price) => price.operation === operation).map((price) => <div className="model-price-value" key={`${operation}-${price.quality}-${price.size}`}><small>{t(`models.imageQuality.${price.quality}`, { defaultValue: price.quality })} · {price.size}</small><strong>{formatModelPrice(price.microUsd, i18n.language)}</strong></div>)}</div></section>)}
+      </div>
+    </Dialog>;
+  }
   const { mode, perform, busy } = useRelayState();
   const [inputPrice, setInputPrice] = useState(formatEditableModelPrice(model.inputMicroUsdPerMillion));
   const [cachedInputPrice, setCachedInputPrice] = useState(formatEditableModelPrice(model.cachedInputMicroUsdPerMillion ?? model.inputMicroUsdPerMillion));

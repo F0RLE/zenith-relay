@@ -499,7 +499,53 @@
 }
 
 .pool-member-context[data-kind="source"] {
+  min-height: 42px;
+  align-items: stretch;
+  padding-top: 8px;
   color: var(--relay-muted);
+}
+
+.pool-member-runtime-meta {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  text-align: center;
+}
+
+.pool-member-runtime-meta > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  place-items: center;
+  padding: 0 8px;
+}
+
+.pool-member-runtime-meta > div + div {
+  border-left: 1px solid var(--relay-border);
+}
+
+.pool-member-runtime-meta span,
+.pool-member-runtime-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-runtime-meta span {
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 13px;
+}
+
+.pool-member-runtime-meta strong {
+  color: var(--relay-secondary);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
 }
 
 .pool-member-context[data-kind="account"] {
@@ -517,6 +563,15 @@
   flex: 0 0 auto;
   overflow: visible;
   color: var(--relay-muted);
+}
+
+.pool-member-runtime-hint[data-warning="true"] {
+  color: var(--relay-warning, #d6a84f);
+}
+
+.pool-member-parallel {
+  color: var(--relay-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .pool-member-card-footer {

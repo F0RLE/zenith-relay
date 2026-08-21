@@ -21,19 +21,20 @@ pub use catalog::{
     canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
     deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
-    normalize_codex_catalog_priorities, normalize_model_ids,
+    known_model_reasoning_levels, normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
-    source_model_declares_image_input, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
-    CODEX_RELAY_CATALOG_HASH,
+    normalize_upstream_codex_catalog_entry, reasoning_policy_key, reasoning_policy_levels,
+    routed_codex_catalog_entry, source_model_declares_image_input, ModelRegistry, ModelRules,
+    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use protocol::{
     bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError,
-    AdapterResponse, AdapterResult, AdapterStreamBridge, GeminiBridgeRequest, GeminiBridgeResponse,
-    GeminiStreamBridge, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
-    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+    AdapterRequestContext, AdapterResponse, AdapterResult, AdapterStreamBridge,
+    GeminiBridgeRequest, GeminiBridgeResponse, GeminiStreamBridge, MessagesBridgeRequest,
+    MessagesBridgeResponse, MessagesBridgeState, MessagesBridgeStore, MessagesReasoningMode,
+    MessagesStreamBridge, NativeResponsesReplayState, NativeResponsesReplayStore,
+    PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
@@ -45,13 +46,14 @@ pub use runtime::{
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
     CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
-    PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection,
-    SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
+    ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
+    Selection, SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,
     discover_source_models_for_protocol_bindings, fetch_source_provider_stats, is_loopback_url,
-    normalize_source_protocol_bindings, source_models_for_wire_api, source_points_to_gateway,
+    normalize_source_protocol_bindings, runtime_source_models_for_wire_api,
+    runtime_source_protocol_bindings, source_models_for_wire_api, source_points_to_gateway,
     CacheWriteTtl, LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery,
     SourceProtocolBinding, SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider,
     WireApi,
@@ -63,8 +65,8 @@ pub use usage::{
     estimate_api_equivalent_with_cache_ttl_and_price_override,
     estimate_api_equivalent_with_cache_ttl_and_price_sources,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
-    normalize_reasoning_effort, sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPrice,
-    ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin, TerminalOutputKind, ToolChoiceMode,
-    ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
-    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    normalize_reasoning_effort, official_image_request_prices, sql_like_contains_pattern,
+    ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin,
+    ImageRequestPrice, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics, UsageCallback,
+    UsageEvent, UsageValue, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };

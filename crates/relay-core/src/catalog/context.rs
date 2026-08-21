@@ -161,14 +161,11 @@ pub(crate) fn source_context_windows(
         .collect()
 }
 
-/// Reads only the reasoning modes published by a Gateway catalog.
+/// Reads reasoning modes declared by a provider/Gateway catalog.
 ///
-/// Provider-declared metadata is a hint, not evidence. The Gateway publishes
-/// `reasoningEffortModes` only from confirmed probe/runtime evidence and emits
-/// the aggregate `reasoningProbe` record beside it. Relay therefore accepts
-/// this narrow envelope and ignores nested/provider-specific reasoning fields.
-/// An ordinary `/models` response, or a response with a running probe but no
-/// confirmed mode, produces no selector.
+/// Declared modes are the default enabled set. They are still operator
+/// editable, and the explicit Relay probe is only an additional manual
+/// diagnostic; it is not required before a declared mode can be used.
 pub(crate) fn source_reasoning_capabilities(
     manifest: &Value,
     configured_models: &BTreeSet<String>,
@@ -310,12 +307,12 @@ pub fn normalize_model_reasoning_allowed_levels(
             }
             model_levels.insert(level);
         }
-        if !model_levels.is_empty() {
-            normalized.insert(
-                model.to_ascii_lowercase(),
-                model_levels.into_iter().collect(),
-            );
-        }
+        // An explicit empty list is meaningful: it is the user's override
+        // that disables every provider-reported mode for this model.
+        normalized.insert(
+            model.to_ascii_lowercase(),
+            model_levels.into_iter().collect(),
+        );
     }
     Ok(normalized)
 }
@@ -361,23 +358,20 @@ fn parse_source_reasoning_capabilities(
         .get("reasoningProbe")
         .or_else(|| model.get("reasoning_probe"))
         .cloned()
-        .and_then(|value| serde_json::from_value::<SourceReasoningProbeProgress>(value).ok())?;
+        .and_then(|value| serde_json::from_value::<SourceReasoningProbeProgress>(value).ok());
     let raw_modes = model
         .get("reasoningEffortModes")
         .or_else(|| model.get("reasoning_effort_modes"))
         .and_then(Value::as_array)?;
-    let fully_rejected = probe.total > 0
-        && probe.running == 0
-        && probe.pending == 0
-        && probe.confirmed == 0
-        && probe.rejected == probe.total;
-    if probe.confirmed <= 0 && !fully_rejected {
-        return None;
-    }
-
-    // Keep the existing strict parser, but feed it only the Gateway-owned
-    // publication field. Nested provider metadata must never become evidence.
+    // Probe state is diagnostic and must never gate the route or defaults.
     if raw_modes.is_empty() {
+        let fully_rejected = probe.is_some_and(|probe| {
+            probe.total > 0
+                && probe.running == 0
+                && probe.pending == 0
+                && probe.confirmed == 0
+                && probe.rejected == probe.total
+        });
         return fully_rejected.then(SourceReasoningCapabilities::empty);
     }
     let mut published = Map::new();
@@ -701,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_confirmed_gateway_modes() {
+    fn accepts_declared_gateway_modes_without_waiting_for_probe() {
         let configured = ["grok-4.5", "provider/unknown"]
             .into_iter()
             .map(str::to_string)
@@ -745,7 +739,7 @@ mod tests {
 
         let capabilities = source_reasoning_capabilities(&manifest, &configured);
 
-        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities.len(), 2);
         assert_eq!(
             capabilities["grok-4.5"].codex_catalog_template(),
             json!({
@@ -760,7 +754,12 @@ mod tests {
             .unwrap()
             .clone()
         );
-        assert!(!capabilities.contains_key("provider/unknown"));
+        assert_eq!(
+            capabilities["provider/unknown"]
+                .effort_ids()
+                .collect::<Vec<_>>(),
+            vec!["high"]
+        );
     }
 
     #[test]

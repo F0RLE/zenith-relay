@@ -55,6 +55,7 @@ pub struct UsageLog {
     pub source_id: String,
     pub candidate_id: Option<String>,
     pub account_id: Option<String>,
+    pub client_context_id: Option<String>,
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
@@ -205,6 +206,12 @@ impl TelemetryDb {
         if version <= 24 {
             connection.execute_batch(MIGRATION_025).map_err(db_error)?;
         }
+        if version <= 25 {
+            connection.execute_batch(MIGRATION_026).map_err(db_error)?;
+        }
+        if version <= 26 {
+            connection.execute_batch(MIGRATION_027).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -286,8 +293,53 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 mod tests {
     use super::*;
     use zenith_relay_core::{
-        ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
+        CacheWriteTtl, ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
     };
+
+    fn aggregate_test_event(
+        request_id: &str,
+        attempt: u16,
+        input_tokens: u64,
+        cache_write_input_tokens: u64,
+        cache_write_ttl: Option<CacheWriteTtl>,
+        output_tokens: u64,
+    ) -> UsageEvent {
+        UsageEvent {
+            request_id: request_id.into(),
+            attempt,
+            local_key_id: "key".into(),
+            source_id: "source".into(),
+            candidate_id: Some("source".into()),
+            account_id: None,
+            client_context_id: None,
+            routing: None,
+            requested_model: Some("model".into()),
+            resolved_model: Some("model".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: None,
+            latency_ms: 1,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: Some(input_tokens),
+            cached_input_tokens: None,
+            cache_write_input_tokens: Some(cache_write_input_tokens),
+            cache_write_ttl,
+            reasoning_tokens: None,
+            output_tokens: Some(output_tokens),
+            total_tokens: Some(input_tokens + output_tokens),
+            quota_snapshot: None,
+        }
+    }
 
     #[test]
     fn usage_survives_database_reopen() {
@@ -301,6 +353,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            client_context_id: Some("client_0123456789ab".into()),
             routing: Some(RoutingDiagnostics {
                 reason: SelectionReason::QuotaHeadroom,
                 eligible_candidates: 4,
@@ -347,6 +400,10 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
+        assert_eq!(
+            logs[0].client_context_id.as_deref(),
+            Some("client_0123456789ab")
+        );
         assert_eq!(logs[0].ttft_ms, Some(4));
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].cache_write_input_tokens, Some(1));
@@ -416,6 +473,228 @@ mod tests {
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_aggregate_replaces_only_the_accepted_attempt() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-aggregate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .record(&aggregate_test_event(
+                "request-aggregate",
+                1,
+                10,
+                5,
+                Some(CacheWriteTtl::FiveMinutes),
+                4,
+            ))
+            .unwrap();
+        database
+            .record(&aggregate_test_event(
+                "request-aggregate",
+                2,
+                20,
+                7,
+                Some(CacheWriteTtl::OneHour),
+                8,
+            ))
+            .unwrap();
+        database
+            .record(&aggregate_test_event(
+                "request-aggregate",
+                1,
+                90,
+                11,
+                None,
+                9,
+            ))
+            .unwrap();
+
+        let row = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT input_tokens, input_samples, cache_write_input_tokens,
+                    cache_write_input_samples, cache_write_5m_tokens, cache_write_1h_tokens,
+                    unknown_cache_write_tokens, output_tokens, output_samples,
+                    total_tokens, total_samples
+                 FROM usage_candidate_rollups
+                 WHERE candidate_kind = 'source' AND candidate_id = 'source' AND model = 'model'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (20, 1, 7, 1, 0, 7, 0, 8, 1, 28, 1));
+
+        database
+            .record(&aggregate_test_event(
+                "request-aggregate",
+                2,
+                30,
+                9,
+                None,
+                12,
+            ))
+            .unwrap();
+        let row: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT input_tokens, input_samples, cache_write_input_tokens,
+                    cache_write_input_samples, cache_write_5m_tokens, cache_write_1h_tokens,
+                    unknown_cache_write_tokens, output_tokens, output_samples,
+                    total_tokens, total_samples
+                 FROM usage_candidate_rollups
+                 WHERE candidate_kind = 'source' AND candidate_id = 'source' AND model = 'model'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (30, 1, 9, 1, 0, 0, 9, 12, 1, 42, 1));
+        assert_eq!(database.list(10).unwrap().len(), 1);
+        database.clear().unwrap();
+        assert!(
+            database
+                .connection
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM usage_candidate_rollups", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+                == 0
+        );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_v26_migration_merges_current_logs_into_existing_rollups() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-relay-usage-v26-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("usage.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        for migration in [
+            MIGRATION_001,
+            MIGRATION_002,
+            MIGRATION_003,
+            MIGRATION_004,
+            MIGRATION_005,
+            MIGRATION_006,
+            MIGRATION_007,
+            MIGRATION_008,
+            MIGRATION_009,
+            MIGRATION_010,
+            MIGRATION_011,
+            MIGRATION_012,
+            MIGRATION_013,
+            MIGRATION_014,
+            MIGRATION_015,
+            MIGRATION_016,
+            MIGRATION_017,
+            MIGRATION_018,
+            MIGRATION_019,
+            MIGRATION_020,
+            MIGRATION_021,
+            MIGRATION_022,
+            MIGRATION_023,
+            MIGRATION_024,
+            MIGRATION_025,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO usage_candidate_rollups(
+                    candidate_kind, candidate_id, model,
+                    input_tokens, input_samples, cache_write_input_tokens,
+                    cache_write_input_samples, output_tokens, output_samples,
+                    total_tokens, total_samples
+                 ) VALUES ('source', 'source', 'model', 2, 1, 3, 1, 4, 1, 5, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO request_logs(
+                    request_id, attempt, local_key_id, source_id, candidate_id, account_id,
+                    requested_model, resolved_model, wire_api, success, http_status, latency_ms,
+                    input_tokens, cache_write_input_tokens, cache_write_ttl, output_tokens, total_tokens
+                 ) VALUES ('request-current', 1, 'key', 'source', 'source', NULL,
+                    'model', 'model', 'responses', 1, 200, 1, 5, 7, '5m', 8, 13)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = TelemetryDb::open(&path).unwrap();
+        let row: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT input_tokens, input_samples, cache_write_input_tokens,
+                    cache_write_input_samples, cache_write_5m_tokens, cache_write_1h_tokens,
+                    unknown_cache_write_tokens, output_tokens, output_samples,
+                    total_tokens, total_samples
+                 FROM usage_candidate_rollups
+                 WHERE candidate_kind = 'source' AND candidate_id = 'source' AND model = 'model'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (7, 2, 10, 2, 7, 0, 3, 12, 2, 18, 2));
+        assert_eq!(database.list(10).unwrap().len(), 1);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -629,6 +908,7 @@ mod tests {
             source_id: "openai-codex".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
@@ -750,6 +1030,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
@@ -822,6 +1103,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
@@ -882,6 +1164,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
@@ -939,6 +1222,7 @@ mod tests {
                 source_id: "source_1".into(),
                 candidate_id: Some("source_1".into()),
                 account_id: None,
+                client_context_id: None,
                 routing: None,
                 requested_model: Some("private-model".into()),
                 resolved_model: Some("private-model".into()),
@@ -1021,6 +1305,7 @@ mod tests {
             source_id: "source_cheap".into(),
             candidate_id: Some("source_cheap".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("private-model".into()),
             resolved_model: Some("private-model".into()),
@@ -1247,7 +1532,13 @@ mod tests {
             .connection
             .lock()
             .unwrap()
-            .execute_batch("ALTER TABLE request_logs DROP COLUMN cache_write_ttl;")
+            .execute_batch(
+                "ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
+                 ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
+                 ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_5m_tokens;
+                 ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_1h_tokens;
+                 ALTER TABLE usage_candidate_rollups DROP COLUMN unknown_cache_write_tokens;",
+            )
             .unwrap();
         database
             .connection
@@ -1419,6 +1710,7 @@ mod tests {
                 source_id: "source".into(),
                 candidate_id: None,
                 account_id: None,
+                client_context_id: None,
                 routing: None,
                 requested_model: None,
                 resolved_model: None,

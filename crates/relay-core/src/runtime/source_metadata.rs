@@ -5,7 +5,7 @@ use super::{
     SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS,
 };
 use crate::catalog::{
-    normalize_model_reasoning_allowed_levels, source_context_windows,
+    normalize_model_reasoning_allowed_levels, reasoning_policy_levels, source_context_windows,
     source_image_input_capabilities, source_reasoning_capabilities,
     source_reasoning_probe_progress, union_source_reasoning_capabilities,
     SourceReasoningCapabilities, SourceReasoningProbeProgress,
@@ -559,48 +559,45 @@ impl GatewayRuntime {
             .cloned()
     }
 
-    /// Returns a model's manually allowed reasoning levels. An empty result
-    /// means the catalog remains automatic and exposes every confirmed level.
+    /// Returns a model's effective reasoning levels. A present empty policy
+    /// is an explicit user choice to disable every reported mode; without a
+    /// policy, provider-reported levels are enabled by default.
     pub fn model_reasoning_allowed_levels(&self, model: &str) -> Vec<String> {
-        self.model_reasoning_allowed_levels
+        let configured = self
+            .model_reasoning_allowed_levels
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&model.trim().to_ascii_lowercase())
-            .cloned()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(levels) = reasoning_policy_levels(&configured, model) {
+            return levels.to_vec();
+        }
+        drop(configured);
+        let confirmed = self.confirmed_source_reasoning_levels(model);
+        if !confirmed.is_empty() {
+            return confirmed;
+        }
+        crate::known_model_reasoning_levels(model)
+            .map(|levels| levels.iter().copied().map(str::to_string).collect())
             .unwrap_or_default()
     }
 
-    pub fn model_reasoning_effort_is_allowed(&self, model: &str, effort: &str) -> bool {
-        let model = model.trim().to_ascii_lowercase();
-        let effort = effort.trim().to_ascii_lowercase();
-        let confirmed = self
-            .model_metadata
-            .confirmed_reasoning
+    pub(crate) fn model_reasoning_policy_levels(&self, model: &str) -> Option<Vec<String>> {
+        let configured = self
+            .model_reasoning_allowed_levels
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .levels
-            .get(&model)
-            .cloned()
-            .unwrap_or_default();
-        if confirmed.is_empty() {
-            return false;
-        }
-        self.model_reasoning_allowed_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&model)
-            .map_or_else(
-                || confirmed.iter().any(|level| level == &effort),
-                |allowed| {
-                    allowed.iter().any(|level| {
-                        level == &effort && confirmed.iter().any(|confirmed| confirmed == level)
-                    })
-                },
-            )
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
     }
 
-    /// Model-level confirmation is not enough when multiple API sources expose
-    /// the same model with different reasoning capabilities.
+    pub fn model_reasoning_effort_is_allowed(&self, model: &str, effort: &str) -> bool {
+        let effort = effort.trim().to_ascii_lowercase();
+        self.model_reasoning_allowed_levels(model)
+            .iter()
+            .any(|level| level == &effort)
+    }
+
+    /// API-source reasoning is an operator-controlled experiment.  A selected
+    /// manual effort may reach every compatible route; a provider rejection is
+    /// handled by the ordinary safe pre-byte fallback path.
     pub(crate) fn candidate_reasoning_effort_is_allowed(
         &self,
         candidate_id: &str,
@@ -610,22 +607,48 @@ impl GatewayRuntime {
         if self.chatgpt_accounts.contains_key(candidate_id) {
             return true;
         }
-        if !self.model_reasoning_effort_is_allowed(model, effort) {
+        let Some(binding) = self.source_candidate_bindings.get(candidate_id) else {
             return false;
-        }
-        if !self.source_candidate_bindings.contains_key(candidate_id) {
-            return false;
-        }
-        let model = model.trim().to_ascii_lowercase();
+        };
         let effort = effort.trim().to_ascii_lowercase();
-        self.model_metadata
-            .confirmed_reasoning
+        let configured = self
+            .model_reasoning_allowed_levels
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .efforts
-            .get(&model)
-            .and_then(|routes| routes.get(candidate_id))
-            .is_some_and(|efforts| efforts.contains(&effort))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(levels) = reasoning_policy_levels(&configured, model) {
+            let manual_effort_enabled = levels.iter().any(|level| level == &effort);
+            return manual_effort_enabled
+                && (binding.adapter.is_passthrough()
+                    || binding.reasoning_mode.supports_effort(&effort));
+        }
+        drop(configured);
+
+        // A confirmed route-specific declaration wins over the model fallback.
+        // This keeps provider-added efforts routable before an operator edits
+        // the manual company policy.
+        if binding.wire_api == WireApi::Responses
+            && self
+                .model_metadata
+                .confirmed_reasoning
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .efforts
+                .get(&model.trim().to_ascii_lowercase())
+                .and_then(|routes| routes.get(candidate_id))
+                .is_some_and(|levels| levels.contains(&effort))
+        {
+            return binding.adapter.is_passthrough()
+                || binding.reasoning_mode.supports_effort(&effort);
+        }
+
+        if crate::known_model_reasoning_levels(model)
+            .is_some_and(|levels| levels.contains(&effort.as_str()))
+        {
+            return binding.adapter.is_passthrough()
+                || binding.reasoning_mode.supports_effort(&effort);
+        }
+
+        false
     }
 
     pub fn set_model_reasoning_allowed_levels(

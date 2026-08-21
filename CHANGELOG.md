@@ -28,6 +28,23 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- The desktop shell now shows a static startup screen immediately while the
+  WebView and first runtime snapshot finish loading, then removes it after the
+  interactive frame with a bounded fallback timeout.
+- Startup runtime snapshots no longer wait for the diagnostic SQLite write;
+  performance telemetry is persisted asynchronously after the state response.
+- WebSocket turn state is now accepted only for a known session/account owner;
+  single-lane WebSocket connections preserve one `stream_id` and reject a
+  second lane instead of silently treating multiplexing as supported.
+- Managed Codex profiles enable Responses WebSocket transport. Relay probes
+  each candidate/model, uses native upstream WebSocket when available, and
+  bridges HTTP/SSE-only providers without removing them from the pool.
+- Image models now show official per-request generation/edit prices, and API
+  image requests keep the selected `gpt-image-*` model instead of forcing
+  `gpt-image-2`; native accounts continue using the Responses image tool.
+- A confirmed native Messages model is now linked into the same pool for
+  Responses clients through Relay's Messages adapter. Explicit native
+  Responses and Gemini assignments still take precedence for that model.
 - Configured API source order now takes precedence over prompt-cache affinity;
   response-owner affinity remains intact for protocol continuations.
 - Pool cards now retain the configured routing order for API sources with multiple protocol routes.
@@ -48,6 +65,15 @@ release entries are kept concise and link to the corresponding tag.
   preserving a readable minimum width and responsive layout.
 - Local snapshots preserve the canonical account state and show a sanitized
   warning when the active gateway has no matching OAuth candidate.
+- Profile recovery now creates one first-launch original snapshot, exposes only
+  full restore with Yes/No confirmation, never saves a hidden pre-restore copy,
+  and guards snapshot deletion with a ten-second confirmation cooldown.
+- Profile recovery now adopts a rotated OAuth token for the same account before
+  restoring the native ChatGPT profile, avoiding false `profile_restore_blocked`
+  errors.
+- History recovery now updates only threads linked to processed rollouts,
+  rewrites every relevant session marker, and keeps recovery paths portable on
+  Windows.
 - Global operation notifications now stay in a bottom-left overlay above the
   Help controls instead of shifting the page from the upper-right corner;
   compact sidebar mode uses a small status toast and opens error details in a
@@ -59,15 +85,19 @@ release entries are kept concise and link to the corresponding tag.
   optional purchase-cost payback beside the provider-reported quota window.
   Relay no longer turns a quota percentage into a monetary potential; legacy
   calculation state migrates to the direct purchase-cost field.
-- API candidates remain eligible when a provider has not supplied reasoning
-  metadata. An explicitly selected reasoning effort is a source/API policy,
-  not proof that an account route supports that effort.
-- Relay-managed profile restore preserves a user-changed
-  `model_reasoning_effort`. Provider, base URL, authentication, and model
-  catalog changes still block managed restore; an explicitly selected full
-  snapshot restore may restore the snapshot as a whole.
+- Reasoning defaults now use a verified model whitelist when available (with
+  separate levels per company/model); provider declarations remain the
+  fallback for unknown models. Model Rules still allows a manual override and
+  an optional local Pool probe.
+- Relay writes the selected model's valid reasoning effort into the managed
+  Codex profile on activation. Profile restore removes Relay's own value,
+  while preserving a user-changed `model_reasoning_effort`; provider, base
+  URL, authentication, and model catalog changes still block managed restore.
 - Provider quota presentation ignores expired reset timestamps and selects the
   next future reset.
+- API-equivalent totals now update incrementally in SQLite instead of regrouping
+  the full request log on every refresh; the 30-day raw-log retention and
+  long-term usage totals remain separate.
 
 ### Maintenance
 
