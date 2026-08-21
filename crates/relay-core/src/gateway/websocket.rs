@@ -1322,7 +1322,7 @@ async fn start_next_request(
         }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
-        route.client_context_id = client_context_fingerprint(&headers);
+        route.client_context_id = client_context_fingerprint(headers);
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
         if let Err(failure) =
