@@ -1,0 +1,166 @@
+openapi: 3.1.0
+info:
+  title: Zenith Relay Compatible Server
+  version: 1.0.0
+  description: >
+    Public management and OpenAI-compatible runtime contract for a server
+    operated by the user. This server is separate from the production Zenith
+    Gateway and Control API and has no contract for Zenith production secrets,
+    customer keys, backend tokens, account-pool inventory, or internal
+    production routing/business logic. Management snapshots, usage, source
+    statistics, and diagnostics are redacted; raw credentials, cookies,
+    authorization headers, prompts, and provider response bodies never appear
+    in those management responses. The /v1 data plane may carry the user's
+    request and provider response as required by the selected API contract.
+servers:
+  - url: https://relay.example.com
+paths:
+  /health:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Server identity and liveness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /capabilities:
+    get:
+      operationId: capabilities
+      security: [{ managementToken: [] }]
+      responses:
+        "200":
+          description: Negotiated protocol versions and optional features
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capabilities"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /state:
+    get:
+      operationId: state
+      security: [{ managementToken: [] }]
+      responses:
+        "200":
+          description: >
+            Canonical redacted runtime snapshot. It contains operational state
+            and aggregates only; credentials, cookies, authorization headers,
+            prompts, raw provider bodies, and vault material are excluded.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /usage:
+    get:
+      operationId: usage
+      security: [{ managementToken: [] }]
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: fromMs, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: toMs, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: >
+            Redacted request metrics and aggregates. Request details never
+            include raw credentials, cookies, authorization headers, prompts,
+            response bodies, or provider session material.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /sources/{id}/stats:
+    get:
+      operationId: sourceStats
+      security: [{ managementToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: >
+            Provider-reported balance and usage for a configured user-owned API
+            source. The response contains aggregate statistics only and never
+            exposes the source credential or raw provider payload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceProviderStats"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Source not found
+  /v1/models:
+    get:
+      operationId: models
+      security: [{ profileCredential: [] }]
+      responses:
+        "200":
+          description: >
+            OpenAI-compatible visible model catalog. Model metadata is returned
+            without management tokens, profile credentials, or source secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { type: object } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/responses:
+    post:
+      operationId: responses
+      security: [{ profileCredential: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: OpenAI Responses JSON or SSE stream
+          content:
+            application/json: { schema: { type: object } }
+            text/event-stream: { schema: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+components:
+  securitySchemes:
+    managementToken: { type: http, scheme: bearer, description: User-managed server administration token; never valid for /v1 and never a Zenith production credential. }
+    profileCredential: { type: http, scheme: bearer, description: Relay-managed data-plane credential for /v1; never valid for management and never a Zenith production credential. }
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema: { type: object }
+  schemas:
+    Health:
+      type: object
+      required: [status, version, serverId, startedAtMs]
+      properties:
+        status: { const: ok }
+        version: { type: string }
+        serverId: { type: string, minLength: 1 }
+        startedAtMs: { type: integer, minimum: 0 }
+    Capabilities:
+      type: object
+      required: [serverId, protocolMin, protocolMax, features]
+      properties:
+        serverId: { type: string, minLength: 1 }
+        protocolMin: { type: integer, minimum: 1 }
+        protocolMax: { type: integer, minimum: 1 }
+        features: { type: array, items: { type: string }, uniqueItems: true }
+    SourceProviderStats:
+      type: object
+      required: [provider, balanceMicroUsd, spentMicroUsd, requests, totalTokens]
+      properties:
+        provider:
+          type: string
+          enum: [zenith, openrouter, unsupported]
+        balanceMicroUsd: { type: [integer, "null"] }
+        spentMicroUsd: { type: [integer, "null"] }
+        requests: { type: [integer, "null"], minimum: 0 }
+        totalTokens: { type: [integer, "null"], minimum: 0 }

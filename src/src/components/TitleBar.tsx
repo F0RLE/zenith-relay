@@ -1,6 +1,6 @@
 import { Minus, Square, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { closeWindow, minimizeWindow, Platform, toggleMaximizeWindow } from "../tauri";
+import { closeWindow, minimizeWindow, toggleMaximizeWindow, type Platform } from "../platform/desktop";
 
 type TitleBarProps = {
   platform: Platform;
@@ -27,7 +27,10 @@ export function TitleBar({ platform }: TitleBarProps) {
   return (
     <header className={`titlebar titlebar-${platform}`} data-tauri-drag-region>
       {macos ? controls : null}
-      <div className="titlebar-drag" data-tauri-drag-region />
+      <div className="titlebar-drag" data-tauri-drag-region>
+        <img className="titlebar-logo" src="/icons/zenith-sword.png" alt="" data-tauri-drag-region />
+        <strong data-tauri-drag-region>{t("app.label")}</strong>
+      </div>
       {!macos ? controls : null}
     </header>
   );

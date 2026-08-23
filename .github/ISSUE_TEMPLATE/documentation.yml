@@ -1,0 +1,38 @@
+name: Documentation
+description: Report missing, unclear, or incorrect documentation
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link to the page or name the file and section.
+      placeholder: docs/help/en/choose-api.md
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear or incorrect?
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: Suggested improvement
+      description: Provide corrected wording, missing steps, or an example if possible.
+    validations:
+      required: true
+  - type: dropdown
+    id: language
+    attributes:
+      label: Documentation language
+      options:
+        - English
+        - Russian
+        - Both
+        - Other
+    validations:
+      required: true

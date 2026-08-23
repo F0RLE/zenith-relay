@@ -1,0 +1,136 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
+  <title id="title">Zenith Relay</title>
+  <desc id="description">A luminous emerald and cyan Zenith sword based on the Zenith website mark.</desc>
+  <defs>
+    <linearGradient id="background" x1="128" y1="96" x2="896" y2="944" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#222A2F"/>
+      <stop offset="0.48" stop-color="#1B2226"/>
+      <stop offset="1" stop-color="#121719"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="150" y1="142" x2="878" y2="886" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4BD5AF"/>
+      <stop offset="0.38" stop-color="#2BB58F"/>
+      <stop offset="0.72" stop-color="#67B7EE"/>
+      <stop offset="1" stop-color="#2BB58F"/>
+    </linearGradient>
+    <linearGradient id="blade-left" x1="391" y1="128" x2="519" y2="656" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D8FFF8"/>
+      <stop offset="0.18" stop-color="#72E9FF"/>
+      <stop offset="0.52" stop-color="#378FC1"/>
+      <stop offset="0.82" stop-color="#246DA8"/>
+      <stop offset="1" stop-color="#303A40"/>
+    </linearGradient>
+    <linearGradient id="blade-right" x1="535" y1="108" x2="631" y2="647" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F1FFFE"/>
+      <stop offset="0.2" stop-color="#A1FFF1"/>
+      <stop offset="0.5" stop-color="#31D9C5"/>
+      <stop offset="0.78" stop-color="#2BB58F"/>
+      <stop offset="1" stop-color="#246DA8"/>
+    </linearGradient>
+    <linearGradient id="blade-core" x1="512" y1="112" x2="512" y2="654" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.16" stop-color="#B8FFFF"/>
+      <stop offset="0.46" stop-color="#4EDBFF"/>
+      <stop offset="0.72" stop-color="#246DA8"/>
+      <stop offset="1" stop-color="#303A40"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="404" y1="214" x2="615" y2="629" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#CFFFF3"/>
+      <stop offset="0.48" stop-color="#4EE5D1"/>
+      <stop offset="1" stop-color="#246DA8"/>
+    </linearGradient>
+    <linearGradient id="blade-metal" x1="420" y1="102" x2="590" y2="620" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.2" stop-color="#DCE5E9"/>
+      <stop offset="0.48" stop-color="#82959E"/>
+      <stop offset="0.72" stop-color="#EEF3F5"/>
+      <stop offset="1" stop-color="#607681"/>
+    </linearGradient>
+    <linearGradient id="guard-fill" x1="214" y1="640" x2="808" y2="748" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#246DA8"/>
+      <stop offset="0.24" stop-color="#2BB58F"/>
+      <stop offset="0.5" stop-color="#405B67"/>
+      <stop offset="0.76" stop-color="#2BB58F"/>
+      <stop offset="1" stop-color="#246DA8"/>
+    </linearGradient>
+    <linearGradient id="guard-highlight" x1="236" y1="630" x2="787" y2="712" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C4CDD2"/>
+      <stop offset="0.5" stop-color="#4BD5AF"/>
+      <stop offset="1" stop-color="#C4CDD2"/>
+    </linearGradient>
+    <linearGradient id="gem" x1="480" y1="630" x2="544" y2="700" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F3FFF8"/>
+      <stop offset="0.26" stop-color="#8DFFD6"/>
+      <stop offset="0.58" stop-color="#24DB91"/>
+      <stop offset="1" stop-color="#08736B"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="473" y1="704" x2="552" y2="902" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#303A40"/>
+      <stop offset="0.45" stop-color="#24463F"/>
+      <stop offset="1" stop-color="#1B2226"/>
+    </linearGradient>
+    <linearGradient id="pommel" x1="478" y1="850" x2="548" y2="936" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B9FFF1"/>
+      <stop offset="0.46" stop-color="#35DAD4"/>
+      <stop offset="1" stop-color="#246DA8"/>
+    </linearGradient>
+    <filter id="sword-shadow" x="144" y="48" width="736" height="928" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#00060B" flood-opacity="0.72"/>
+    </filter>
+    <filter id="soft-glow" x="280" y="22" width="464" height="786" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+    <filter id="gem-glow" x="420" y="614" width="184" height="184" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <clipPath id="badge-clip">
+      <rect x="48" y="48" width="928" height="928" rx="176"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#badge-clip)">
+    <rect x="48" y="48" width="928" height="928" rx="176" fill="url(#background)"/>
+    <path d="M208 520L220 546L246 558L220 570L208 596L196 570L170 558L196 546L208 520Z" fill="#6CEBD8" opacity="0.62"/>
+    <path d="M807 368L816 387L835 396L816 405L807 424L798 405L779 396L798 387L807 368Z" fill="#67B7EE" opacity="0.54"/>
+    <path d="M748 538L755 553L770 560L755 567L748 582L741 567L726 560L741 553L748 538Z" fill="#67F6D3" opacity="0.58"/>
+    <path d="M300 420L306 433L319 439L306 445L300 458L294 445L281 439L294 433L300 420Z" fill="#67B7EE" opacity="0.44"/>
+
+    <path d="M512 82L604 202L570 584L540 628L512 654L484 628L454 584L420 202L512 82Z" fill="#35DCCB" opacity="0.26" filter="url(#soft-glow)" transform="translate(512 0) scale(1.16 1) translate(-512 0)"/>
+
+    <g filter="url(#sword-shadow)">
+      <g transform="translate(512 0) scale(1.16 1) translate(-512 0)">
+      <path d="M512 82L604 202L570 584L540 628L512 654L484 628L454 584L420 202L512 82Z" fill="url(#blade-metal)" stroke="#EAF0F2" stroke-width="5" stroke-linejoin="round"/>
+      <path d="M512 104L586 213L554 572L526 616L512 630L498 616L470 572L438 213L512 104Z" fill="#0A2745"/>
+      <path d="M512 104L438 213L470 572L498 616L512 630V104Z" fill="url(#blade-left)"/>
+      <path d="M512 104L586 213L554 572L526 616L512 630V104Z" fill="url(#blade-right)"/>
+      <path d="M512 120L542 220L530 542L512 608L494 542L482 220L512 120Z" fill="url(#blade-core)"/>
+      <path d="M512 120L494 542L512 608V120Z" fill="#E8FFFF" opacity="0.22"/>
+      <path d="M512 120L530 542L512 608V120Z" fill="#2363D8" opacity="0.24"/>
+      <path d="M512 104L438 213L470 572L498 616" stroke="#F5F8F9" stroke-width="9" stroke-linejoin="round" opacity="0.82"/>
+      <path d="M586 213L554 572L526 616" stroke="#AAB8BE" stroke-width="9" stroke-linejoin="round" opacity="0.72"/>
+      <path d="M512 133V548" stroke="#F5FFFF" stroke-width="7" stroke-linecap="round" opacity="0.62"/>
+      <path d="M463 236L485 210M540 218L563 248" stroke="#F5FFFF" stroke-width="11" stroke-linecap="round" opacity="0.5"/>
+      <path d="M470 315L489 291M536 318L553 338" stroke="#9CFFF1" stroke-width="8" stroke-linecap="round" opacity="0.42"/>
+      </g>
+
+      <path d="M488 715H536V870H488V715Z" fill="url(#grip)" stroke="#36CFC4" stroke-width="8"/>
+      <path d="M492 732L532 754M492 770L532 792M492 808L532 830M492 846L532 868" stroke="#2BB58F" stroke-width="11" stroke-linecap="round"/>
+      <path d="M512 850L558 891L512 936L466 891L512 850Z" fill="#172A50" stroke="url(#pommel)" stroke-width="12" stroke-linejoin="round"/>
+      <path d="M512 871L532 891L512 912L492 891L512 871Z" fill="#75F7E1"/>
+
+      <path d="M488 632L450 614L408 618L370 642L318 628L344 660L298 686L378 702L428 688L488 666V632Z" fill="url(#guard-fill)"/>
+      <path d="M536 632L574 614L616 618L654 642L706 628L680 660L726 686L646 702L596 688L536 666V632Z" fill="url(#guard-fill)"/>
+      <path d="M472 646L443 632L411 637L373 660L344 649L363 671L332 684L381 688L425 674L472 659" stroke="url(#guard-highlight)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="0.82"/>
+      <path d="M552 646L581 632L613 637L651 660L680 649L661 671L692 684L643 688L599 674L552 659" stroke="url(#guard-highlight)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="0.82"/>
+      <path d="M512 604L570 666L512 728L454 666L512 604Z" fill="#24265D" stroke="url(#edge)" stroke-width="14" stroke-linejoin="round"/>
+      <path d="M512 624L552 666L512 708L472 666L512 624Z" fill="#172F40" stroke="#67B7EE" stroke-width="7" stroke-linejoin="round"/>
+
+      <path d="M512 636L542 666L512 697L482 666L512 636Z" fill="#30E49B" opacity="0.42" filter="url(#gem-glow)"/>
+      <path d="M512 636L542 666L512 697L482 666L512 636Z" fill="url(#gem)" stroke="#B6FFEB" stroke-width="7" stroke-linejoin="round"/>
+      <path d="M512 646L530 664L512 660L494 670L512 646Z" fill="#F4FFF9" opacity="0.56"/>
+    </g>
+
+    <rect x="60" y="60" width="904" height="904" rx="164" stroke="url(#frame)" stroke-width="10" opacity="0.58"/>
+    <rect x="77" y="77" width="870" height="870" rx="148" stroke="#EDF2F4" stroke-width="2" opacity="0.16"/>
+  </g>
+</svg>

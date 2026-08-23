@@ -1,76 +1,153 @@
-# Zenith Codex
+<div align="center">
+  <img src="src-tauri/icons/128x128.png" width="112" alt="Zenith Relay">
+  <h1>Zenith Relay</h1>
+  <p>Local-first desktop relay for personal ChatGPT accounts, compatible APIs, and an optional user-managed server.</p>
+  <p>
+    <a href="docs/help/en/README.md">English documentation</a> ·
+    <a href="docs/help/ru/README.md">Русская документация</a>
+  </p>
+  <p>
+    <a href="https://github.com/F0RLE/zenith-relay/releases/latest">Download latest release</a> ·
+    <a href="CHANGELOG.md">Changelog</a> ·
+    <a href="LICENSE">AGPL-3.0-only</a>
+  </p>
+</div>
 
-Desktop app for connecting Codex to Zenith API.
+## Documentation
 
-## What It Does
+Choose a language first. Each overview links directly to a separate guide, so
+the Help Center and GitHub navigation do not depend on one long page.
 
-- Saves your Zenith API key.
-- Writes the Zenith connection into Codex config.
-- Launches Codex from the app.
-- Shows key balance, spending, requests, and token usage.
-- Opens the Telegram bot for balance top-ups.
+| Mode | English | Русский |
+| --- | --- | --- |
+| Overview | [Read](docs/help/en/README.md) | [Открыть](docs/help/ru/README.md) |
+| This computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
+| Choose API | [Guide](docs/help/en/choose-api.md) | [Инструкция](docs/help/ru/choose-api.md) |
+| My server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
 
-Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
+Project references: [planning](PLANNING.md) · [roadmap](ROADMAP.md) ·
+[release history](CHANGELOG.md) · [contributing](CONTRIBUTING.md).
 
-Integration docs: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
+## Release 1.1.0
 
-## API Gateway
+Zenith Relay 1.1.0 is the first full release of the Relay product after the
+Zenith Codex 1.0.5 line. It is no longer a thin Zenith API-key client: it is a
+local-first Tauri desktop application that can manage a user's own ChatGPT
+accounts and compatible API sources behind one private OpenAI-compatible
+endpoint, with an optional server operated by that same user.
 
-The app uses:
+The release adds the complete local pool surface, three explicit operating
+modes, provider-neutral protocol adapters, quota and model monitoring, routing
+and usage diagnostics, reversible Codex profile integration, snapshots and
+recovery, and the user-managed Relay Server contract. The full user-visible
+change list is in [CHANGELOG.md](CHANGELOG.md), including the migration scope
+from 1.0.5.
 
-```text
-https://api.zenithmarket.dev/v1
-```
+This product remains separate from Zenith production Gateway and Control API.
+Production credentials, customer keys, account-pool inventory, backend tokens,
+and internal production business or routing logic never enter this repository.
 
-## Architecture
+## What Is Shipped
 
-The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands. Request handling, API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control belong in the Rust backend under `src-tauri/src`.
+- Local-first Tauri desktop app with a React/Vite UI.
+- Three explicit modes: This computer, Choose API, and My server.
+- ChatGPT OAuth, existing-profile import, and compatible API sources.
+- Local personal pool with quota/health checks, model rules, proxies, routing,
+  response affinity, and redacted usage history.
+- Provider-neutral source discovery with explicit protocol bindings, confirmed
+  reasoning capabilities, API-reported model prices, and optional per-source
+  price overrides.
+- Responses, Messages, Chat Completions, and explicitly validated Gemini
+  adapter routes with bounded continuation behavior.
+- Active-session background policy: model catalogs refresh at startup and every
+  eight hours; reasoning probes remain manual; weekly quota reset automation is
+  explicit and confirmation-safe.
+- Usage diagnostics that distinguish Relay, account, and provider failures
+  without recording prompts, response bodies, or secrets.
+- Runtime snapshots, telemetry, exports, diagnostics, and screenshots are
+  redacted; they are not a transport for credentials or provider payloads.
+- Account views keep provider-reported quota windows separate from direct
+  token-based API-equivalent and optional purchase-cost payback; Relay does
+  not turn a quota percentage into a monetary entitlement.
+- Optional user-managed Relay Server with encrypted vault, SQLite state,
+  management API, managed ChatGPT/Codex profile attachment, backup/restore, and
+  append-only migrations.
+- Live model catalogs and reversible ChatGPT/Codex profile attachment with
+  automatic snapshots.
+- Signed in-app updates, including in-place replacement and rollback for the
+  Windows portable EXE.
 
-### Platform Support
+Relay is a personal deployment. It is not Zenith customer billing, a public
+account marketplace, or the production Zenith account pool. It is also separate
+from the production Zenith Gateway and Control API: production credentials,
+customer keys, backend tokens, account-pool inventory, and internal business
+or routing logic do not enter or leave this repository.
 
-Builds are automatically created for:
-- **Windows**: x64 and ARM64 (EXE portable, Setup installer, MSI)
-- **macOS**: Apple Silicon (ARM64) and Intel (x64) (DMG, .app.tar.gz)
-- **Linux**: x64 and ARM64 (AppImage, DEB, RPM)
+## Privacy Boundary
 
-All platforms support automatic signed updates through GitHub Releases.
+Desktop secrets stay in the operating-system credential store. A server that
+the user owns can keep transferred user-owned secrets in its encrypted vault.
+The transfer is possible only after the user explicitly selects that server and
+confirms the management operation; it is never an implicit upload to Zenith
+systems.
 
-## Updates
+Raw secrets, cookies, authorization headers, prompts, response bodies, and
+provider session material must not appear in UI snapshots, SQLite telemetry,
+logs, exports, diagnostics, screenshots, or ordinary server API snapshots.
+Management tokens and `/v1` profile credentials are separate credentials and
+are never interchangeable. Documentation and examples use placeholders only.
 
-Zenith Codex checks GitHub Releases on startup. When a new version is available, it downloads and installs signed updates silently in the background, then relaunches automatically.
+## Current Direction
 
-Updates are verified using signed artifacts from GitHub Releases. The public key is embedded in the app; releases are signed with `TAURI_SIGNING_PRIVATE_KEY` during CI builds.
+The next work prioritizes reliable, provider-neutral operation over adding
+vendor-specific shortcuts: prove the existing personal-pool and server paths
+with real permitted accounts, measure user-visible latency, and keep model,
+price, and error behavior covered by regression tests. New account connectors,
+client integrations, and multi-server scale remain demand-gated. The exact
+acceptance gates and their order are in [ROADMAP.md](ROADMAP.md).
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/overview.png" width="49%" alt="Overview">
+  <img src="docs/screenshots/connections.png" width="49%" alt="Connections">
+</p>
+<p align="center">
+  <img src="docs/screenshots/pool.png" width="49%" alt="Pool">
+  <img src="docs/screenshots/usage.png" width="49%" alt="Usage">
+</p>
 
 ## Development
 
-```bash
+```powershell
 cd src
 bun install
-bun run app:dev
-```
-
-Source layout:
-
-- `src` - React/Vite frontend package.
-- `src-tauri` - Rust/Tauri backend and desktop packaging.
-- `.github/tools` - local and CI build helpers.
-
-Verify before release:
-
-```bash
-cd src
 bun run verify
+bun run test:e2e
 ```
 
-Clean local frontend artifacts:
+### Playwright QA
 
-```bash
+The default Playwright suite uses the mocked desktop shell and covers the
+interactive product without provider credentials. Use the focused suites when
+iterating on a release surface:
+
+```powershell
 cd src
-bun run clean
+bun run test:e2e
+bunx playwright test tests/e2e/visual-matrix.spec.ts
+bunx playwright test tests/e2e/operations.spec.ts
+bun run screenshots
 ```
 
-Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md). Auto-update details live in [docs/UPDATES.md](docs/UPDATES.md).
+The 1.1.0 release cut was verified with 120 visual-matrix scenarios, 177
+operational browser scenarios, 79 frontend unit tests, and 354 desktop Rust
+tests. `bun run screenshots` regenerates only the committed documentation
+screenshots; it does not replace the full visual matrix.
 
-## License
+For the desktop bundle use `bun run app:build`. Shared runtime and server
+checks are listed in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-MIT
+Current implementation boundaries are in [PLANNING.md](PLANNING.md); unfinished
+acceptance work is in [ROADMAP.md](ROADMAP.md). Release history and the full
+1.0.5 → 1.1.0 scope are in [CHANGELOG.md](CHANGELOG.md).

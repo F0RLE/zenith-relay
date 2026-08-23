@@ -1,66 +1,206 @@
-# Contributing to Zenith Codex
+# Contributing to Zenith Relay
 
-Use `main` as the active development and stable release branch. Open pull requests into `main` when review is needed; small operational fixes may be committed directly after checks pass.
+Zenith Relay is a local-first desktop application. Keep changes small, prove
+the behavior they alter, and do not move private Zenith backend concerns into
+this repository.
 
-## Codex-Specific Rules
+## Repository boundaries
 
-- This is a Tauri desktop app for local Codex setup
-- Stores user key locally (OS keyring)
-- Configures Codex to use Zenith API
-- Must build for Windows, macOS, Linux, x64, and ARM64
-- Frontend: React + TypeScript + Vite
-- Backend: Tauri + Rust
-- Keep the app pointed at the Zenith gateway. Do not add old upstream provider URLs to the public desktop app
+| Area | Owns |
+| --- | --- |
+| <code>src/src</code> | React UI, i18n, typed snapshot rendering, and Tauri command wrappers. |
+| <code>src-tauri/src</code> | Desktop storage, OS secret services, OAuth callbacks, local process lifecycle, profile attach and recovery. |
+| <code>crates/relay-core</code> | Shared account/source state, scheduler, gateway execution, quota, protocol, and redacted usage logic. |
+| <code>relay-server</code> | Standalone user-managed runtime, encrypted vault, SQLite state, migrations, and management API. |
+
+The frontend does not access files, secrets, provider endpoints, or client
+configuration directly. Keep private provider economy, customer billing,
+Zenith inventory, and public gateway business logic out of this repository.
+
+## Secret and logic boundary
+
+Zenith Relay is a separate desktop/personal-pool product. It must not receive
+or forward Zenith production credentials, customer API keys, backend tokens,
+account-pool inventory, provider cabinet credentials, or internal Gateway and
+Control API business/routing logic. Do not copy those values into code,
+fixtures, documentation, tests, or support artifacts.
+
+User-owned provider secrets belong in the existing desktop credential store or
+the encrypted vault of a server owned by that user. A desktop-to-server transfer
+is allowed only through an explicit, confirmed management operation targeting
+that user-managed Relay Server. It is not an upload to Zenith production.
+
+Remote state, usage, telemetry, exports, diagnostics, screenshots, and API
+snapshots must stay redacted. They may contain identifiers, models, timings,
+status, and aggregates, but never raw credentials, cookies, authorization
+headers, prompts, response bodies, or provider session material.
+
+## Safety rules
+
+- Use stable dependencies only.
+- Never put credentials, cookies, authorization headers, session exports, or
+  account identities in source, fixtures, screenshots, logs, snapshots, exports,
+  telemetry, or support output.
+- Keep desktop secrets in the existing credential-store path and server secrets
+  in the existing encrypted vault.
+- Management tokens and pool request keys are different credentials. Do not
+  accept either one in the other's boundary.
+- Never use a management token as a `/v1` profile credential, and never expose
+  either credential in a snapshot, log, export, or example.
+- Preserve the distinction between quota monitoring and routing eligibility.
+  Do not reinstate a Free-account routing policy or a hard-coded quota window.
+- Retry another candidate only before any response bytes have reached the
+  client. Keep response ownership affinity intact.
+- Database migrations are append-only. Add a new numbered migration; never
+  edit a migration that can already have been applied.
+- Update a profile through the existing inspect, snapshot, attach, verify, and
+  restore flow. Never overwrite a newer user login.
+
+Read [AGENTS.md](AGENTS.md), [PLANNING.md](PLANNING.md), and
+[ROADMAP.md](ROADMAP.md) before changing a cross-cutting behavior.
+
+## Documentation policy
+
+The tracked human-facing documentation is deliberately small:
+
+~~~text
+README.md
+CONTRIBUTING.md
+PLANNING.md
+ROADMAP.md
+CHANGELOG.md
+docs/help/<locale>/README.md
+docs/help/<locale>/this-computer.md
+docs/help/<locale>/choose-api.md
+docs/help/<locale>/my-server.md
+docs/screenshots/*.png
+~~~
+
+<code>AGENTS.md</code> is repository guidance, <code>LICENSE</code> is legal
+metadata, and <code>relay-server/openapi.yaml</code> is the machine-readable
+server contract. Do not add parallel architecture, design, handoff, or
+historical planning documents. Fold current behavior into
+<code>PLANNING.md</code>, future work into <code>ROADMAP.md</code>, and user
+steps into localized Help files.
+
+### Changelog and release notes
+
+Record every user-visible change in [CHANGELOG.md](CHANGELOG.md) under
+`Unreleased`, grouped by behavior rather than by branch. Include the relevant
+PR or commit in the entry when the change is ready for review. When publishing
+a tag, move the shipped entries into a dated version section and leave
+`Unreleased` available for the next cycle. Release-body translations used by
+the updater remain separate and must use the `relay-notes:<locale>` markers
+described below.
+
+To add a locale, add its overview and all three Help files, register its
+translation resources, and update the raw Markdown registry in
+<code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep Help documents
+accurate for the UI's current labels and mode order.
+
+Screenshots are generated from the mocked desktop shell. Change the scenario
+when the UI changes, then regenerate rather than editing images by hand:
+
+~~~powershell
+cd src
+bun run screenshots
+~~~
 
 ## Verification
 
-```bash
+Run the narrowest relevant checks while iterating. Before a commit that changes
+the frontend, desktop host, shared runtime, or server, run the corresponding
+commands below.
+
+### Frontend and desktop
+
+~~~powershell
 cd src
 bun run check
+bun run test:unit
 bun run build
-```
+bun run test:e2e
+~~~
 
-Full Tauri build is usually verified through GitHub Actions.
+For a release UI or layout change, run the focused Playwright suites as well:
 
-## Development
-
-```bash
+~~~powershell
 cd src
-bun install
-bun run dev  # starts Vite dev server + Tauri
-```
+bunx playwright test tests/e2e/visual-matrix.spec.ts
+bunx playwright test tests/e2e/operations.spec.ts
+bun run screenshots
+~~~
 
-## Scope
+The visual matrix is the responsive/appearance gate; the operations suite is
+the interaction and state-transition gate. The screenshots command regenerates
+only the committed `docs/screenshots` assets.
 
-- Frontend code lives in `src/src`
-- Focused React components live in `src/src/components`
-- Tauri/Rust app code lives in `src-tauri/src`
-- Tauri capabilities live in `src-tauri/capabilities`
-- App and installer icons live in `src-tauri/icons`
-- Build helpers live in `.github/tools`
-- Release notes and packaging rules live in `docs`
+<code>bun run verify</code> runs the unit tests, frontend build (including the
+TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
 
-## Platform Support
+~~~powershell
+cd src
+bun run app:build
+~~~
 
-See [PLATFORM-SUPPORT.md](PLATFORM-SUPPORT.md) for platform details and signing setup.
+### Shared runtime
 
-## Release Process
+~~~powershell
+cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
+cargo check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
+cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path crates/relay-core/Cargo.toml --locked
+~~~
 
-Tag stable releases from the repository root after CI is green:
+### User-managed server
 
-```bash
-git checkout main
-git pull origin main
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
+~~~powershell
+cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
+cargo check --manifest-path relay-server/Cargo.toml --all-targets --locked
+cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path relay-server/Cargo.toml --locked
+~~~
 
-The release workflow creates GitHub Release artifacts for Windows, macOS, and Linux on x64 and ARM64.
+Use the real server acceptance gate in [ROADMAP.md](ROADMAP.md) before
+claiming that the remote pool works in production. Unit and mocked browser
+tests cannot prove real account, proxy, streaming, or server persistence
+behavior.
 
-## Updates
+## Change and release flow
 
-See [docs/UPDATES.md](docs/UPDATES.md) for auto-update system details.
+1. Inspect the active branch and working tree. Preserve unrelated local work.
+2. Change the owning layer and update its callers only when its contract
+   changes.
+3. Add or update the smallest regression test that would fail without the
+   behavior.
+4. Run the relevant checks and regenerate screenshots if their UI changed.
+5. Review the diff for secret leakage, stale Help wording, and generated-file
+   noise.
+6. Update <code>CHANGELOG.md</code> for user-visible behavior, or state in the
+   PR why no entry is needed.
+7. Merge reviewed work into <code>main</code>. Tag and publish a product release
+   after the release checks pass; reserve a <code>production-ready</code> claim
+   for the live acceptance gates in <code>ROADMAP.md</code>.
 
-## Boundaries & Architecture
+### Updater changelog for release admins
 
-See [AGENTS.md](AGENTS.md) for detailed ownership boundaries and architecture.
+The updater changelog is read from the GitHub Release body. In the published
+Release, put each translation after a <code>relay-notes:&lt;locale&gt;</code>
+marker. A section continues until the next marker:
+
+~~~markdown
+<!-- relay-notes:en -->
+- English changes
+
+<!-- relay-notes:ru -->
+- Изменения на русском
+~~~
+
+Use lowercase locale codes. For a new language, add another section such as
+<code>&lt;!-- relay-notes:zh --&gt;</code>; no updater code change is required. The
+app selects the exact locale, then its base language, then English, and finally
+the first available section.
+
+After editing the Release, rerun the <code>Publish updater manifest</code> job.
+It copies the current Release body into <code>latest.json</code>; editing the
+Release without rerunning that job does not update the in-app changelog.

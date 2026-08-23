@@ -1,0 +1,109 @@
+import { describe, expect, test } from "bun:test";
+import type { AccountSummary } from "../src/features/relay/api/types";
+import {
+  buildAccountIdentityIndex,
+  displayAccountIdentity,
+  replaceRevealedAccountIdentities,
+  revealableAccountIds,
+} from "../src/features/relay/state/accountIdentity";
+import { runAccountIdentityReveal } from "../src/features/relay/state/useAccountIdentityReveal";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+function account(overrides: Partial<AccountSummary>): AccountSummary {
+  return {
+    id: "account",
+    label: "Account",
+    identityHint: "a1b2c3d4e5f6",
+    enabled: true,
+    inPool: true,
+    draining: false,
+    authState: { state: "ready" },
+    health: "ready",
+    operationalStatus: "rotation",
+    models: [],
+    allowedModels: [],
+    excludedModels: [],
+    priority: 1,
+    weight: 1,
+    apiEquivalent: { microUsd: 0, unpricedTokens: 0 },
+    subscription: { planType: null, activeUntilMs: null, status: "active", updatedAtMs: null },
+    quota: {},
+    quotaRefreshStatus: "updated",
+    secretAvailable: true,
+    lastErrorCode: null,
+    ...overrides,
+  };
+}
+
+describe("account identity display", () => {
+  test("does not reveal an identity for ambiguous account references", () => {
+    const index = buildAccountIdentityIndex([
+      account({ id: "duplicate", label: "First" }),
+      account({ id: "duplicate", label: "Second" }),
+      account({ id: "third", label: "First" }),
+    ]);
+    const options = {
+      index,
+      identitiesVisible: true,
+      canReveal: true,
+      mode: "local" as const,
+      revealedIdentities: { "local:duplicate": "secret@example.test" },
+    };
+
+    expect(displayAccountIdentity({ ...options, accountId: "duplicate", fallbackLabel: "Fallback" })).toBe("Fallback");
+    expect(displayAccountIdentity({ ...options, fallbackLabel: "First" })).toBe("First");
+  });
+
+  test("uses a revealed identity only for a supported account with a secret", () => {
+    const visible = account({ id: "visible", label: "Imported name", identityHint: "v1e2a3c4b5l6", secretAvailable: true });
+    const hidden = account({ id: "hidden", label: "Another imported name", identityHint: "h1d2e3n4t5y6", secretAvailable: false });
+    const index = buildAccountIdentityIndex([visible, hidden]);
+    const revealedIdentities = { "remote:visible": "visible@example.test", "remote:hidden": "hidden@example.test" };
+
+    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("visible@example.test");
+    expect(displayAccountIdentity({ index, accountId: hidden.id, fallbackLabel: null, identitiesVisible: true, canReveal: true, mode: "remote", revealedIdentities })).toBe("h1d2e3n4t5y6");
+    expect(displayAccountIdentity({ index, accountId: visible.id, fallbackLabel: null, identitiesVisible: false, canReveal: true, mode: "remote", revealedIdentities })).toBe("v1e2a3c4b5l6");
+  });
+
+  test("keeps revealed identities scoped to the active relay mode", () => {
+    expect(replaceRevealedAccountIdentities(
+      { "local:one": "local@example.test", "remote:stale": "stale@example.test" },
+      "remote",
+      [{ accountId: "two", identity: "remote@example.test" }],
+    )).toEqual({
+      "local:one": "local@example.test",
+      "remote:two": "remote@example.test",
+    });
+    expect(revealableAccountIds([
+      account({ id: "available", secretAvailable: true }),
+      account({ id: "hidden", secretAvailable: false }),
+    ], true)).toEqual(["available"]);
+    expect(revealableAccountIds([account({ id: "available" })], false)).toEqual([]);
+  });
+});
+
+test("stale account identity reveals do not mutate state or clear busy status", async () => {
+  const request = deferred<{ accountId: string; identity: string }>();
+  const revealed: Array<{ accountId: string; identity: string }> = [];
+  let completed = 0;
+  let active = true;
+  const run = runAccountIdentityReveal({
+    accountIds: ["one"],
+    isActive: () => active,
+    reveal: () => request.promise,
+    onRevealed: (identities) => revealed.push(...identities),
+    onComplete: () => { completed += 1; },
+  });
+
+  active = false;
+  request.resolve({ accountId: "one", identity: "stale@example.test" });
+  await run;
+
+  expect(revealed).toEqual([]);
+  expect(completed).toBe(0);
+});

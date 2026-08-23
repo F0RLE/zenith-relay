@@ -1,0 +1,280 @@
+use super::normalize_model_ids;
+use crate::scheduler::{CandidateScope, PoolScheduler};
+use crate::WireApi;
+use std::collections::HashSet;
+
+#[derive(Clone, Debug, Default)]
+pub struct ModelRegistry {
+    candidates: Vec<RegisteredCandidate>,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredCandidate {
+    id: String,
+    models: Vec<String>,
+}
+
+impl ModelRegistry {
+    pub fn replace<I, S>(&mut self, candidate_id: impl Into<String>, models: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let candidate_id = candidate_id.into();
+        let models = normalize_model_ids(models);
+        if models.is_empty() {
+            self.remove(&candidate_id);
+            return;
+        }
+        if let Some(candidate) = self
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+        {
+            candidate.models = models;
+        } else {
+            self.candidates.push(RegisteredCandidate {
+                id: candidate_id,
+                models,
+            });
+        }
+    }
+
+    pub fn remove(&mut self, candidate_id: &str) -> bool {
+        let Some(index) = self
+            .candidates
+            .iter()
+            .position(|candidate| candidate.id == candidate_id)
+        else {
+            return false;
+        };
+        self.candidates.remove(index);
+        true
+    }
+
+    pub fn visible_models(
+        &self,
+        scheduler: &PoolScheduler,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+        _now_ms: u64,
+    ) -> Vec<String> {
+        let mut visible = Vec::new();
+        let mut seen = HashSet::new();
+        // Native ChatGPT account candidates own bare model ids.  Sources are
+        // still registered after them, but an upstream-looking provider id
+        // must not shadow the native entry (or make the picker lose its
+        // native reasoning/service-tier metadata).
+        let mut ordered = self
+            .candidates
+            .iter()
+            .filter(|registered| {
+                scheduler
+                    .candidate(&registered.id)
+                    .is_some_and(|candidate| candidate.kind == crate::CandidateKind::OAuthAccount)
+            })
+            .chain(self.candidates.iter().filter(|registered| {
+                scheduler
+                    .candidate(&registered.id)
+                    .is_none_or(|candidate| candidate.kind != crate::CandidateKind::OAuthAccount)
+            }));
+        for registered in &mut ordered {
+            let Some(candidate) = scheduler.candidate(&registered.id) else {
+                continue;
+            };
+            for model in &registered.models {
+                if candidate.is_catalog_visible(model, allowed_protocols, scope) {
+                    let normalized = model.to_ascii_lowercase();
+                    if seen.insert(normalized) {
+                        visible.push(model.clone());
+                    }
+                }
+            }
+        }
+        visible
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::{CandidateHealth, CandidateKind, CandidateQuota, RuntimeCandidate};
+    use crate::ModelRules;
+    use std::collections::BTreeMap;
+
+    fn candidate(id: &str, source_id: &str) -> RuntimeCandidate {
+        RuntimeCandidate {
+            id: id.to_string(),
+            kind: CandidateKind::ApiSource,
+            source_id: source_id.to_string(),
+            account_id: None,
+            protocol: WireApi::Responses,
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            models: ["gpt-5".to_string()].into(),
+            model_rules: ModelRules::default(),
+            health: CandidateHealth::Healthy,
+            quota: CandidateQuota::Unknown,
+            quota_updated_at_ms: None,
+            quota_reset_at_ms: None,
+            cooldowns: BTreeMap::new(),
+            last_used_at: None,
+            consecutive_failures: 0,
+            secret_available: true,
+        }
+    }
+
+    #[test]
+    fn model_visibility_ignores_cooldown_but_respects_scope_and_protocol() {
+        let mut scheduler = PoolScheduler::new();
+        let mut cooled = candidate("cooled", "source-a");
+        cooled.cooldowns.insert("gpt-5".to_string(), 200);
+        scheduler.upsert(cooled);
+        scheduler.upsert(candidate("ready", "source-b"));
+
+        let mut registry = ModelRegistry::default();
+        registry.replace("cooled", ["gpt-5"]);
+        registry.replace("ready", ["GPT-5", ""]);
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                100,
+            ),
+            vec!["gpt-5"]
+        );
+
+        let scope = CandidateScope {
+            source_ids: Some(["source-a".to_string()].into()),
+            ..CandidateScope::default()
+        };
+        assert_eq!(
+            registry.visible_models(&scheduler, &scope, &[WireApi::Responses], 100),
+            vec!["gpt-5"]
+        );
+        assert!(registry
+            .visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Messages],
+                200,
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn empty_snapshot_unregisters_candidate_models() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("ready", "source-a"));
+        let mut registry = ModelRegistry::default();
+        registry.replace("ready", ["gpt-5"]);
+        registry.replace("ready", [""]);
+
+        assert!(registry
+            .visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                0,
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn exhausted_quota_keeps_catalog_visible_but_unhealthy_accounts_do_not() {
+        let mut scheduler = PoolScheduler::new();
+        let mut exhausted = candidate("exhausted", "source-a");
+        exhausted.quota = CandidateQuota::Exhausted;
+        scheduler.upsert(exhausted);
+        let mut unhealthy = candidate("unhealthy", "source-b");
+        unhealthy.health = CandidateHealth::Unhealthy;
+        scheduler.upsert(unhealthy);
+
+        let mut registry = ModelRegistry::default();
+        registry.replace("exhausted", ["gpt-5"]);
+        registry.replace("unhealthy", ["gpt-private"]);
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                100,
+            ),
+            vec!["gpt-5"]
+        );
+    }
+
+    #[test]
+    fn visible_models_keep_the_first_source_response_order() {
+        let mut scheduler = PoolScheduler::new();
+        let mut source = candidate("source", "source-a");
+        source.models = [
+            "unknown-second".to_string(),
+            "glm-4.7".to_string(),
+            "gpt-5.4-mini".to_string(),
+            "unknown-first".to_string(),
+            "claude-fable-5".to_string(),
+        ]
+        .into();
+        scheduler.upsert(source);
+
+        let mut registry = ModelRegistry::default();
+        registry.replace(
+            "source",
+            [
+                "unknown-second",
+                "glm-4.7",
+                "gpt-5.4-mini",
+                "unknown-first",
+                "claude-fable-5",
+            ],
+        );
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                0,
+            ),
+            [
+                "unknown-second",
+                "glm-4.7",
+                "gpt-5.4-mini",
+                "unknown-first",
+                "claude-fable-5",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_account_model_ids_take_precedence_over_provider_spelling() {
+        let mut scheduler = PoolScheduler::new();
+        let mut source = candidate("source", "source-a");
+        source.models = ["GPT-5.4".to_string()].into();
+        scheduler.upsert(source);
+        let mut account = candidate("account", "source-a");
+        account.kind = CandidateKind::OAuthAccount;
+        account.models = ["gpt-5.4".to_string()].into();
+        scheduler.upsert(account);
+
+        let mut registry = ModelRegistry::default();
+        registry.replace("source", ["GPT-5.4"]);
+        registry.replace("account", ["gpt-5.4"]);
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                0,
+            ),
+            ["gpt-5.4"]
+        );
+    }
+}

@@ -1,0 +1,111 @@
+name: Relay Server
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, relay/local-pool-product-modes]
+    tags: ["v*"]
+    paths:
+      - "crates/relay-core/**"
+      - "relay-server/**"
+      - ".github/workflows/relay-server.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/relay-core/**"
+      - "relay-server/**"
+      - ".github/workflows/relay-server.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Prepare RustSec advisory database
+        run: |
+          RUSTSEC_ADVISORY_DB="$RUNNER_TEMP/rustsec-advisory-db"
+          echo "RUSTSEC_ADVISORY_DB=$RUSTSEC_ADVISORY_DB" >> "$GITHUB_ENV"
+          git init --quiet "$RUSTSEC_ADVISORY_DB"
+          git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
+          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
+          git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
+      - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
+      - run: cargo check --manifest-path relay-server/Cargo.toml --locked
+      - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo test --manifest-path relay-server/Cargo.toml --locked
+      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
+
+  container:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build native smoke image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: relay-server/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: zenith-relay-server:smoke
+      - name: Smoke-test server container
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="zenith-relay-server-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm --force "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          management_token="$(openssl rand -hex 24)"
+          vault_key="$(openssl rand -base64 32 | tr -d '\n')"
+          docker run --detach --name "$container" \
+            --publish 127.0.0.1:14999:14999 \
+            --env ZENITH_RELAY_BIND=0.0.0.0:14999 \
+            --env ZENITH_RELAY_DATA_DIR=/var/lib/zenith-relay \
+            --env ZENITH_RELAY_PUBLIC_BASE_URL=http://127.0.0.1:14999 \
+            --env ZENITH_RELAY_MANAGEMENT_TOKEN="$management_token" \
+            --env ZENITH_RELAY_VAULT_KEY="$vault_key" \
+            zenith-relay-server:smoke >/dev/null
+
+          for _ in $(seq 1 30); do
+            if body="$(curl --fail --silent http://127.0.0.1:14999/health 2>/dev/null)" &&
+              python3 -c 'import json, sys; assert json.load(sys.stdin).get("status") == "ok"' <<<"$body"
+            then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs "$container"
+          exit 1
+      - uses: docker/login-action@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish multi-arch image
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: relay-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/f0rle/zenith-relay-server:${{ github.sha }}
+            ghcr.io/f0rle/zenith-relay-server:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('edge-{0}', github.sha) }}
