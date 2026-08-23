@@ -139,7 +139,16 @@ jobs:
           "@
           $notes = ""
           if ($env:GITHUB_REF -like "refs/tags/*") {
-            $notes = gh api "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$env:GITHUB_REF_NAME" --jq ".body"
+            $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
+            $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
+            $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
+            if ($releaseSection.Success) {
+              $notes = $releaseSection.Value.Trim()
+            } else {
+              # Out-String preserves the line breaks that PowerShell otherwise
+              # collapses when a multiline command result is assigned.
+              $notes = (gh api "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$env:GITHUB_REF_NAME" --jq ".body" | Out-String).Trim()
+            }
           }
           if (-not $notes) {
             $notes = "## Changelog`n`nRelease notes are generated from the tagged commit history."
