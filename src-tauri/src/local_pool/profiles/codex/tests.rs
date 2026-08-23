@@ -155,6 +155,81 @@ fn attach_and_restore_preserve_previous_profile_and_nested_provider() {
 }
 
 #[test]
+fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
+    let (root, home, backups) = profile_dirs("websocket-toggle");
+    fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        &secrets,
+    )
+    .unwrap();
+
+    set_local_gateway_websockets(&home, &backups, false).unwrap();
+    assert!(fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .contains("supports_websockets = false"));
+    let backup_file = backup_path(&backups);
+    let backup: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
+    assert_eq!(backup["managedSupportsWebsockets"], false);
+
+    set_local_gateway_websockets(&home, &backups, true).unwrap();
+    assert!(fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .contains("supports_websockets = true"));
+    let backup: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
+    assert_eq!(backup["managedSupportsWebsockets"], true);
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(restored.contains("model_provider = \"openai\""));
+    assert!(!restored.contains("[model_providers.zenith_relay_local]"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_backup_without_websocket_field_does_not_block_restore() {
+    let (root, home, backups) = profile_dirs("legacy-websocket-backup");
+    fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        &secrets,
+    )
+    .unwrap();
+
+    let config_path = home.join(CONFIG_FILE);
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("supports_websockets = true", "supports_websockets = false"),
+    )
+    .unwrap();
+    let backup_file = backup_path(&backups);
+    let mut backup: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
+    backup
+        .as_object_mut()
+        .unwrap()
+        .remove("managedSupportsWebsockets");
+    fs::write(&backup_file, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = fs::read_to_string(config_path).unwrap();
+    assert!(restored.contains("model_provider = \"openai\""));
+    assert!(!restored.contains("[model_providers.zenith_relay_local]"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn local_gateway_preserves_global_reasoning_override_and_restores_it() {
     let (root, home, backups) = profile_dirs("reasoning-effort-override");
     fs::write(

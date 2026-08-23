@@ -6,8 +6,11 @@ use std::{
 const MAX_MODEL_ID_BYTES: usize = 256;
 
 const NO_REASONING: &[&str] = &[];
-const CLAUDE_HIGH_REASONING: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const CLAUDE_STANDARD_REASONING: &[&str] = &["low", "medium", "high", "max"];
+// Claude's `ultra` is Relay's explicit top tier.  The Messages adapter maps
+// it to Anthropic's `max` effort, so every Claude contract that exposes max
+// can safely advertise ultra as a distinct Codex choice.
+const CLAUDE_HIGH_REASONING: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+const CLAUDE_STANDARD_REASONING: &[&str] = &["low", "medium", "high", "max", "ultra"];
 const GEMINI_PRO_REASONING: &[&str] = &["low", "medium", "high"];
 const GEMINI_PRO_REDUCED_REASONING: &[&str] = &["low", "high"];
 const GEMINI_FLASH_REASONING: &[&str] = &["minimal", "low", "medium", "high"];
@@ -128,6 +131,53 @@ pub fn known_model_reasoning_levels(model: &str) -> Option<&'static [&'static st
         .iter()
         .find_map(|(known_model, levels)| (*known_model == leaf).then_some(*levels))
         .or_else(|| leaf.starts_with("gpt-5.6").then_some(GPT_56_REASONING))
+}
+
+/// Anthropic's highest effort is exposed by Relay as `ultra` while the
+/// upstream Messages contract still receives `max`.  Keep this inference
+/// scoped to Anthropic models; a `max` level from another provider is not
+/// evidence that it supports Relay's `ultra` alias.
+pub fn anthropic_max_implies_ultra(model: &str) -> bool {
+    let leaf = model_leaf(model).to_ascii_lowercase();
+    matches!(known_model_family(&leaf), Some(KnownModelFamily::Anthropic))
+}
+
+/// Normalizes effort identifiers and keeps every level in the order used by
+/// Codex and the Relay picker. Provider-specific/unknown identifiers remain
+/// available after the known levels, preserving their first-seen order.
+pub fn canonicalize_reasoning_levels<I, S>(levels: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::new();
+    for (source_order, level) in levels.into_iter().enumerate() {
+        let level = level.as_ref().trim().to_ascii_lowercase();
+        if !level.is_empty() && seen.insert(level.clone()) {
+            ordered.push((source_order, level));
+        }
+    }
+    ordered.sort_by(|(left_order, left), (right_order, right)| {
+        reasoning_level_rank(left)
+            .cmp(&reasoning_level_rank(right))
+            .then_with(|| left_order.cmp(right_order))
+    });
+    ordered.into_iter().map(|(_, level)| level).collect()
+}
+
+fn reasoning_level_rank(level: &str) -> u8 {
+    match level.replace('-', "_").as_str() {
+        "none" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" | "very_high" | "extra_high" => 5,
+        "max" => 6,
+        "ultra" => 7,
+        _ => 8,
+    }
 }
 
 /// Normalize, deduplicate, and order model IDs for a launcher or Codex picker.
@@ -530,6 +580,29 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_levels_use_the_codex_picker_order_and_keep_unknown_levels() {
+        assert_eq!(
+            canonicalize_reasoning_levels([
+                "high",
+                "very_high",
+                "max",
+                "low",
+                "medium",
+                "provider_custom",
+                "low",
+            ]),
+            [
+                "low",
+                "medium",
+                "high",
+                "very_high",
+                "max",
+                "provider_custom",
+            ]
+        );
+    }
+
+    #[test]
     fn reasoning_policy_uses_the_openai_company_group() {
         let policies = BTreeMap::from([
             ("group:openai".to_string(), vec!["high".to_string()]),
@@ -559,11 +632,11 @@ mod tests {
     fn known_model_reasoning_levels_match_the_supported_model_contracts() {
         assert_eq!(
             known_model_reasoning_levels("vendor/claude-opus-4-8"),
-            Some(["low", "medium", "high", "xhigh", "max"].as_slice())
+            Some(["low", "medium", "high", "xhigh", "max", "ultra"].as_slice())
         );
         assert_eq!(
             known_model_reasoning_levels("claude-opus-4-6"),
-            Some(["low", "medium", "high", "max"].as_slice())
+            Some(["low", "medium", "high", "max", "ultra"].as_slice())
         );
         assert_eq!(
             known_model_reasoning_levels("claude-haiku-4-5"),
@@ -603,5 +676,13 @@ mod tests {
             Some(["low", "high", "max"].as_slice())
         );
         assert_eq!(known_model_reasoning_levels("glm-5.1"), Some([].as_slice()));
+    }
+
+    #[test]
+    fn anthropic_max_is_the_only_provider_max_that_implies_ultra() {
+        assert!(anthropic_max_implies_ultra("vendor/claude-fable-5"));
+        assert!(anthropic_max_implies_ultra("claude-opus-4-8"));
+        assert!(!anthropic_max_implies_ultra("gpt-5.6-sol"));
+        assert!(!anthropic_max_implies_ultra("glm-5.2"));
     }
 }

@@ -48,7 +48,7 @@ impl TelemetryDb {
     }
 
     pub(crate) fn replace_state_json(&self, values: &[(&str, String)]) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, None)
+        self.replace_state_json_with_account_purge(values, &[])
     }
 
     pub(crate) fn replace_state_json_and_delete_account_data(
@@ -56,13 +56,23 @@ impl TelemetryDb {
         values: &[(&str, String)],
         account_id: &str,
     ) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, Some(account_id))
+        let account_ids = vec![account_id.to_string()];
+        self.replace_state_json_and_delete_accounts_data(values, &account_ids)
+    }
+
+    pub(crate) fn replace_state_json_and_delete_accounts_data(
+        &self,
+        values: &[(&str, String)],
+        account_ids: &[String],
+    ) -> Result<()> {
+        let account_ids = account_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        self.replace_state_json_with_account_purge(values, &account_ids)
     }
 
     fn replace_state_json_with_account_purge(
         &self,
         values: &[(&str, String)],
-        account_id: Option<&str>,
+        account_ids: &[&str],
     ) -> Result<()> {
         for (key, value) in values {
             validate_state_key(key)?;
@@ -86,7 +96,7 @@ impl TelemetryDb {
                 )
                 .map_err(db_error)?;
         }
-        if let Some(account_id) = account_id {
+        for account_id in account_ids {
             transaction
                 .execute(
                     "DELETE FROM request_logs WHERE account_id = ?1",
@@ -108,7 +118,7 @@ impl TelemetryDb {
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
-        if account_id.is_some() {
+        if !account_ids.is_empty() {
             self.invalidate_usage_cache();
         }
         Ok(())

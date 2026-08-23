@@ -48,6 +48,7 @@ import {
   copyText,
   useConfirm,
 } from "../../components/Ui";
+import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -390,7 +391,10 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
               <IconButton className="account-select-button" label={selectedAccount ? t("accounts.deselect", { name: account.label }) : t("accounts.select", { name: account.label })} icon={selectedAccount ? <Check aria-hidden /> : <Square aria-hidden />} aria-pressed={selectedAccount} onClick={() => toggleSelected(account.id)} />
             </div>
           </div>
-          <div className="account-card-quota compact-quota-layout">{accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}</div>
+          <div className="account-card-quota compact-quota-layout">
+            {accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}
+            {mode === "local" ? <ResetCreditsControl account={account} onCompleted={() => refresh()} /> : null}
+          </div>
           <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
           {runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0} title={runtimeHint}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}
           {accountValueVisible ? <AccountValueStrip account={account} /> : null}

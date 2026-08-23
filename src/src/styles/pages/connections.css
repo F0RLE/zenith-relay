@@ -12,7 +12,7 @@
   padding: 16px 18px;
 }
 
-.automation-form {
+.relay-form.automation-form {
   gap: 12px;
 }
 
@@ -97,11 +97,19 @@
 
 @media (max-height: 600px) {
   .relay-dialog:has(.automation-form) .relay-dialog-body {
-    padding-block: 10px;
+    padding-block: 8px;
   }
 
-  .automation-form {
+  .relay-form.automation-form {
     gap: 10px;
+  }
+
+  .automation-account-picker {
+    padding: 8px;
+  }
+
+  .automation-rule {
+    padding-top: 6px;
   }
 }
 

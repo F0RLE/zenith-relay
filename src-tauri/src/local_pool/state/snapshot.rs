@@ -71,6 +71,9 @@ impl DesktopState {
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());
         }
+        if let Some(error) = self.catalog_refresh_warning() {
+            warnings.push(error);
+        }
         for source in &sources {
             if secrets.load(&source.secret_ref)?.is_none() {
                 warnings.push(warning_code("source_secret_missing", &source.id));
@@ -136,6 +139,9 @@ impl DesktopState {
         }
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());
+        }
+        if let Some(error) = self.catalog_refresh_warning() {
+            warnings.push(error);
         }
         for source in &sources {
             if source_api_keys

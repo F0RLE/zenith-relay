@@ -70,8 +70,20 @@ pub struct GatewaySummary {
     pub quota_request_timeout_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_interface_quota_reserve_basis_points: Option<u64>,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_background_tasks_enabled: bool,
+    #[serde(default = "default_codex_websockets_enabled")]
+    pub codex_websockets_enabled: bool,
     #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
+}
+
+fn default_codex_websockets_enabled() -> bool {
+    true
+}
+
+fn default_codex_background_tasks_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -112,15 +124,12 @@ pub struct ModelSummary {
 
 /// Adds provider-reported defaults and the operator's manual override to a
 /// pooled management model. Provider-reported modes are enabled until the
-/// operator edits the list; a present empty override disables them all.
-///
-/// Every model that currently belongs to the pool is configurable. This keeps
-/// a missing or incomplete provider declaration from removing the operator's
-/// manual picker controls; it never turns those controls into a claim that an
-/// upstream route will accept the selected value.
+/// operator edits the list; a present empty override disables them all. The
+/// route flag covers both native OAuth accounts and API sources; API probing is
+/// exposed separately by each runtime snapshot.
 pub fn apply_model_reasoning_summary(
     model: &mut ModelSummary,
-    reported_levels: Vec<String>,
+    reported_levels: Option<Vec<String>>,
     saved_manual_levels: Option<&[String]>,
     has_pool_route: bool,
 ) {
@@ -132,29 +141,35 @@ pub fn apply_model_reasoning_summary(
     // Provider metadata is the current route contract. Known model defaults
     // are only a fallback for providers that omit the field entirely; using
     // them first hides newly introduced/provider-specific efforts.
-    let declared_levels = if reported_levels.is_empty() {
-        crate::known_model_reasoning_levels(&model.id)
+    let mut declared_levels = match reported_levels {
+        Some(levels) => levels,
+        None => crate::known_model_reasoning_levels(&model.id)
             .map(|levels| levels.iter().copied().map(str::to_string).collect())
-            .unwrap_or_default()
-    } else {
-        reported_levels
+            .unwrap_or_default(),
     };
-    let mut seen = BTreeSet::new();
-    for level in declared_levels {
-        let level = level.trim().to_ascii_lowercase();
-        if !level.is_empty() && seen.insert(level.clone()) {
-            model.reasoning_supported_levels.push(level.clone());
-        }
+    if crate::anthropic_max_implies_ultra(&model.id)
+        && declared_levels
+            .iter()
+            .any(|level| level.eq_ignore_ascii_case("max"))
+        && !declared_levels
+            .iter()
+            .any(|level| level.eq_ignore_ascii_case("ultra"))
+    {
+        declared_levels.push("ultra".to_string());
     }
+    model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);
     if has_pool_route {
         let effective_levels = saved_manual_levels.unwrap_or(&model.reasoning_supported_levels);
-        for level in effective_levels {
-            let level = level.trim().to_ascii_lowercase();
-            if !level.is_empty() && !model.reasoning_allowed_levels.contains(&level) {
-                model.reasoning_allowed_levels.push(level.clone());
-                model.reasoning_levels.push(level);
-            }
-        }
+        model.reasoning_allowed_levels = crate::canonicalize_reasoning_levels(effective_levels);
+        model.reasoning_levels = model.reasoning_allowed_levels.clone();
+        model.reasoning_allowed_levels.retain(|level| {
+            model
+                .reasoning_supported_levels
+                .iter()
+                .any(|supported| supported.eq_ignore_ascii_case(level))
+                || saved_manual_levels.is_some()
+        });
+        model.reasoning_levels = model.reasoning_allowed_levels.clone();
     }
     model.reasoning_configurable = has_pool_route;
 }
@@ -1257,7 +1272,7 @@ mod tests {
 
         apply_model_reasoning_summary(
             &mut model,
-            vec!["high".into()],
+            Some(vec!["high".into()]),
             Some(&["ultra".into()]),
             false,
         );
@@ -1266,28 +1281,65 @@ mod tests {
         assert!(model.reasoning_allowed_levels.is_empty());
         assert!(!model.reasoning_configurable);
 
-        apply_model_reasoning_summary(&mut model, Vec::new(), None, false);
+        apply_model_reasoning_summary(&mut model, None, None, false);
         assert!(model.reasoning_levels.is_empty());
         assert!(model.reasoning_supported_levels.is_empty());
         assert!(model.reasoning_allowed_levels.is_empty());
         assert!(!model.reasoning_configurable);
 
-        apply_model_reasoning_summary(&mut model, vec!["high".into()], None, true);
+        apply_model_reasoning_summary(&mut model, Some(vec!["high".into()]), None, true);
         assert_eq!(model.reasoning_levels, ["high"]);
         assert_eq!(model.reasoning_supported_levels, ["high"]);
         assert_eq!(model.reasoning_allowed_levels, ["high"]);
         assert!(model.reasoning_configurable);
 
-        apply_model_reasoning_summary(&mut model, Vec::new(), Some(&["max".into()]), true);
+        apply_model_reasoning_summary(&mut model, Some(Vec::new()), Some(&["max".into()]), true);
         assert_eq!(model.reasoning_levels, ["max"]);
         assert!(model.reasoning_supported_levels.is_empty());
         assert_eq!(model.reasoning_allowed_levels, ["max"]);
         assert!(model.reasoning_configurable);
 
         model.id = "gpt-5.6-terra".into();
-        apply_model_reasoning_summary(&mut model, vec!["ultra".into()], None, true);
+        apply_model_reasoning_summary(&mut model, Some(Vec::new()), None, true);
+        assert!(model.reasoning_supported_levels.is_empty());
+        assert!(model.reasoning_allowed_levels.is_empty());
+
+        apply_model_reasoning_summary(&mut model, Some(vec!["ultra".into()]), None, true);
         assert_eq!(model.reasoning_supported_levels, ["ultra"]);
         assert_eq!(model.reasoning_allowed_levels, ["ultra"]);
+    }
+
+    #[test]
+    fn anthropic_max_is_advertised_as_ultra_for_api_sources() {
+        let mut model = ModelSummary {
+            enabled: true,
+            codex_visible: true,
+            codex_display_name: String::new(),
+            id: "claude-opus-4-8".into(),
+            member_count: 1,
+            catalog_rank: None,
+            input_micro_usd_per_million: None,
+            cached_input_micro_usd_per_million: None,
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: None,
+            image_request_prices: Vec::new(),
+            custom_price: false,
+            reasoning_levels: Vec::new(),
+            reasoning_supported_levels: Vec::new(),
+            reasoning_allowed_levels: Vec::new(),
+            reasoning_configurable: false,
+            reasoning_probe_available: false,
+            reasoning_probe: None,
+        };
+        apply_model_reasoning_summary(
+            &mut model,
+            Some(vec!["low".into(), "max".into()]),
+            None,
+            true,
+        );
+        assert_eq!(model.reasoning_supported_levels, ["low", "max", "ultra"]);
+        assert_eq!(model.reasoning_levels, ["low", "max", "ultra"]);
     }
 
     #[test]
@@ -1625,6 +1677,7 @@ mod tests {
                 window_minutes: None,
                 observed_at_ms: 1,
                 full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
             }),
             updated_at_ms: Some(1),
             ..Default::default()

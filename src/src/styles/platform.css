@@ -50,10 +50,12 @@ button {
   min-height: 0;
   padding: 0;
   user-select: none;
+  -webkit-user-select: none;
 }
 
 .app :is(input, textarea, [contenteditable="true"], .config-preview pre, .markdown-description) {
   user-select: text;
+  -webkit-user-select: text;
 }
 
 .titlebar {
@@ -68,6 +70,12 @@ button {
   color: #eaf2ff;
   user-select: none;
   -webkit-app-region: drag;
+}
+
+.titlebar-drag,
+.titlebar-drag * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .titlebar-drag {

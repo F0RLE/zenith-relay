@@ -27,9 +27,7 @@ use crate::codex_catalog_entry_is_compatible;
 use crate::{GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi};
 use axum::body::Body;
 use axum::extract::State;
-#[cfg(test)]
-use axum::http::HeaderValue;
-use axum::http::{Request, Response};
+use axum::http::{HeaderMap, Request, Response};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
@@ -46,6 +44,127 @@ pub(super) const MAX_CLIENT_REQUEST_BODY_ERROR: &str = "request body exceeds 64 
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+
+pub(super) const CODEX_ACTIVITY_SUMMARY: &str = "activity_summary";
+pub(super) const CODEX_TASK_TITLE: &str = "task_title";
+
+/// Classifies only explicit Codex background operations. A model name,
+/// reasoning effort, or ordinary Codex originator is deliberately insufficient
+/// evidence because users can select those values manually.
+pub(super) fn codex_background_request_kind(
+    headers: &HeaderMap,
+    request: &Value,
+) -> Option<&'static str> {
+    let originator = headers
+        .get("originator")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let has_codex_identity = originator.contains("codex")
+        || headers.contains_key("x-codex-turn-metadata")
+        || headers.contains_key("x-openai-subagent");
+    if !has_codex_identity {
+        return None;
+    }
+    if let Some(metadata) = headers
+        .get("x-codex-turn-metadata")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+    {
+        if metadata_has_kind(&metadata, CODEX_ACTIVITY_SUMMARY) {
+            return Some(CODEX_ACTIVITY_SUMMARY);
+        }
+        if metadata_has_kind(&metadata, CODEX_TASK_TITLE) {
+            return Some(CODEX_TASK_TITLE);
+        }
+    }
+    if let Some(kind) = headers
+        .get("x-openai-subagent")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| metadata_kind_text(value))
+    {
+        return Some(kind);
+    }
+    // Prompt text is only a fallback for clients that send the explicit
+    // background marker but omit its structured value. A normal Codex request
+    // can contain the same words and must not be classified from originator
+    // alone.
+    if headers.contains_key("x-codex-turn-metadata") || headers.contains_key("x-openai-subagent") {
+        let mut strings = Vec::new();
+        collect_request_strings(request.get("input"), &mut strings);
+        collect_request_strings(request.get("instructions"), &mut strings);
+        for text in strings {
+            let normalized = text.trim().to_ascii_lowercase();
+            if normalized.starts_with("summarize the activity")
+                || normalized.starts_with("summarise the activity")
+            {
+                return Some(CODEX_ACTIVITY_SUMMARY);
+            }
+            if normalized.starts_with("generate a concise title for this task")
+                || normalized.starts_with("generate a title for this task")
+            {
+                return Some(CODEX_TASK_TITLE);
+            }
+        }
+    }
+    None
+}
+
+fn metadata_has_kind(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let relevant = matches!(
+                key.to_ascii_lowercase().as_str(),
+                "request_type"
+                    | "requesttype"
+                    | "task_type"
+                    | "tasktype"
+                    | "purpose"
+                    | "operation"
+                    | "kind"
+            );
+            (relevant && metadata_kind(value) == Some(expected))
+                || metadata_has_kind(value, expected)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| metadata_has_kind(value, expected)),
+        _ => false,
+    }
+}
+
+fn metadata_kind(value: &Value) -> Option<&'static str> {
+    let Value::String(text) = value else {
+        return None;
+    };
+    let normalized = text.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "activity_summary" | "activity-summary" | "activity summary" | "summarize_activity" => {
+            Some(CODEX_ACTIVITY_SUMMARY)
+        }
+        "task_title" | "task-title" | "task title" | "generate_title" | "title_generation" => {
+            Some(CODEX_TASK_TITLE)
+        }
+        _ => None,
+    }
+}
+
+fn metadata_kind_text(text: &str) -> Option<&'static str> {
+    metadata_kind(&Value::String(text.to_string()))
+}
+
+fn collect_request_strings(value: Option<&Value>, output: &mut Vec<String>) {
+    match value {
+        Some(Value::String(value)) => output.push(value.clone()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .for_each(|value| collect_request_strings(Some(value), output)),
+        Some(Value::Object(object)) => object
+            .values()
+            .for_each(|value| collect_request_strings(Some(value), output)),
+        _ => {}
+    }
+}
 
 pub(super) fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
     let effort = match wire_api {
@@ -268,6 +387,62 @@ mod tests {
         DefaultServiceTier, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
         RuntimeLocalKey, RuntimeSource,
     };
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn background_classifier_requires_explicit_codex_marker() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        assert_eq!(
+            codex_background_request_kind(
+                &headers,
+                &json!({"model":"gpt-5.6-luna","reasoning":{"effort":"low"}})
+            ),
+            None
+        );
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(r#"{"request_type":"task_title"}"#),
+        );
+        assert_eq!(
+            codex_background_request_kind(&headers, &json!({"model":"gpt-5.6-luna"})),
+            Some(CODEX_TASK_TITLE)
+        );
+    }
+
+    #[test]
+    fn background_classifier_accepts_exact_internal_prompt_prefixes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        headers.insert("x-openai-subagent", HeaderValue::from_static("true"));
+        assert_eq!(
+            codex_background_request_kind(
+                &headers,
+                &json!({"input":[{"content":[{"text":"Summarize the activity for this task"}]}]})
+            ),
+            Some(CODEX_ACTIVITY_SUMMARY)
+        );
+        assert_eq!(
+            codex_background_request_kind(
+                &headers,
+                &json!({"instructions":"Generate a concise title for this task"})
+            ),
+            Some(CODEX_TASK_TITLE)
+        );
+    }
+
+    #[test]
+    fn background_classifier_does_not_use_prompt_text_without_marker() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        assert_eq!(
+            codex_background_request_kind(
+                &headers,
+                &json!({"instructions":"Summarize the activity for this task, then answer me"})
+            ),
+            None
+        );
+    }
 
     #[test]
     fn tool_diagnostics_count_codex_tool_definitions_without_names() {
@@ -528,7 +703,8 @@ mod tests {
                 {"effort": "medium", "description": "medium"},
                 {"effort": "high", "description": "high"},
                 {"effort": "xhigh", "description": "xhigh"},
-                {"effort": "max", "description": "max"}
+                {"effort": "max", "description": "max"},
+                {"effort": "ultra", "description": "ultra"}
             ])
         );
         assert_eq!(claude["default_reasoning_level"], "medium");

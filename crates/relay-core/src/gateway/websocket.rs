@@ -95,7 +95,31 @@ async fn handle_connection(
     };
 
     let request_id = request.request_id.clone();
+    if let Some(kind) = request.background_kind {
+        if !runtime.codex_background_tasks_enabled() {
+            runtime.blocked_codex_background_event(
+                &request.request_id,
+                &key.id,
+                &request.requested_model,
+                WireApi::Responses,
+                kind,
+            );
+            let payload = serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": format!("resp_relay_blocked_{}", request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
+            });
+            let _ = downstream
+                .send(Message::Text(payload.to_string().into()))
+                .await;
+            let _ = downstream.send(Message::Close(None)).await;
+            return;
+        }
+    }
     let fallback_request = request.clone();
+    if !runtime.codex_websockets_enabled() {
+        bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+        return;
+    }
     let connected = match connect_upstream(&runtime, &key, &headers, request, true, 0).await {
         Ok(connected) => connected,
         Err(failure) if failure.category == "upstream_websocket_unsupported" => {
@@ -998,6 +1022,7 @@ async fn send_request(
 }
 
 struct InFlight {
+    request: ClientRequest,
     route: ExecutorRoute,
     event: UsageEvent,
     started: Instant,
@@ -1049,6 +1074,7 @@ async fn bridge(
     let mut state = BridgeState {
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
+            request: connected.request.clone(),
             route: connected.route,
             event: initial_event,
             started: connected.started,
@@ -1150,29 +1176,78 @@ async fn bridge(
             }
             message = upstream.next() => {
                 last_activity = TokioInstant::now();
-                let Some(message) = message else {
-                    let active_request = state.in_flight.is_some();
-                    let request_id = state.request_id().map(str::to_owned);
-                    finish_incomplete(&runtime, &mut state, "upstream_websocket_closed");
-                    if active_request {
-                        send_gateway_error(
-                            &mut downstream,
-                            &GatewayFailure::closed(state.upstream_origin),
-                            request_id.as_deref(),
-                        ).await;
+                let (message, failure) = match message {
+                    Some(Ok(message @ (UpstreamMessage::Text(_)
+                        | UpstreamMessage::Binary(_)
+                        | UpstreamMessage::Ping(_)
+                        | UpstreamMessage::Pong(_)))) => (Some(message), None),
+                    Some(Ok(UpstreamMessage::Close { .. })) | None => {
+                        (None, Some(GatewayFailure::closed(state.upstream_origin)))
                     }
-                    break;
+                    Some(Err(_)) => {
+                        (None, Some(GatewayFailure::transport(state.upstream_origin)))
+                    }
                 };
-                let Ok(message) = message else {
-                    let active_request = state.in_flight.is_some();
+                let Some(message) = message else {
+                    let category = failure
+                        .as_ref()
+                        .map(|failure| failure.category)
+                        .unwrap_or("upstream_websocket_closed");
                     let request_id = state.request_id().map(str::to_owned);
-                    finish_incomplete(&runtime, &mut state, "upstream_websocket");
+                    if let Some(request) = retryable_disconnect_request(&state) {
+                        let attempt_offset = state
+                            .in_flight
+                            .as_ref()
+                            .map(|in_flight| in_flight.event.attempt)
+                            .unwrap_or_default();
+                        finish_incomplete(&runtime, &mut state, category);
+                        match connect_upstream(
+                            &runtime,
+                            &key,
+                            &headers,
+                            request,
+                            true,
+                            attempt_offset,
+                        )
+                        .await
+                        {
+                            Ok(connected) => {
+                                if !install_connected(
+                                    &mut downstream,
+                                    &mut upstream,
+                                    &runtime,
+                                    &key,
+                                    &mut state,
+                                    connected,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                            Err(retry_failure) => {
+                                send_gateway_error(
+                                    &mut downstream,
+                                    &retry_failure,
+                                    request_id.as_deref(),
+                                )
+                                .await;
+                                break;
+                            }
+                        }
+                    }
+                    let active_request = state.in_flight.is_some();
+                    finish_incomplete(&runtime, &mut state, category);
                     if active_request {
-                        send_gateway_error(
-                            &mut downstream,
-                            &GatewayFailure::transport(state.upstream_origin),
-                            request_id.as_deref(),
-                        ).await;
+                        if let Some(failure) = failure {
+                            send_gateway_error(
+                                &mut downstream,
+                                &failure,
+                                request_id.as_deref(),
+                            )
+                            .await;
+                        }
                     }
                     break;
                 };
@@ -1182,6 +1257,77 @@ async fn bridge(
             }
         }
     }
+}
+
+fn retryable_disconnect_request(state: &BridgeState) -> Option<ClientRequest> {
+    let in_flight = state.in_flight.as_ref()?;
+    if in_flight.request.has_previous_response_id()
+        || in_flight.request.has_tool_call_output()
+        || in_flight.event.ttft_ms.is_some()
+        || in_flight.event.output_tokens.is_some()
+        || in_flight.event.tool_use.tool_call_count > 0
+        || in_flight.event.tool_use.text_output
+    {
+        return None;
+    }
+    Some(in_flight.request.clone())
+}
+
+async fn install_connected(
+    downstream: &mut WebSocket,
+    upstream: &mut UpstreamWebSocket,
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    state: &mut BridgeState,
+    connected: Connected,
+) -> bool {
+    let Connected {
+        upstream: next_upstream,
+        initial_messages,
+        route,
+        request,
+        lease,
+        attempt,
+        started,
+    } = connected;
+    let event = usage_event(
+        &request.request_id,
+        attempt,
+        &key.id,
+        &route,
+        Some(&request.reasoning_effort_for(&route)),
+        &request.requested_model,
+        true,
+        StatusCode::OK.as_u16(),
+        None,
+        0,
+        request.tool_use_for(&route),
+    );
+    let _ = upstream
+        .send(UpstreamMessage::Close {
+            code: UpstreamCloseCode::Normal,
+            reason: String::new(),
+        })
+        .await;
+    *upstream = next_upstream;
+    state.lease = Some(lease);
+    state.upstream_candidate_id = route.candidate_id.clone();
+    state.upstream_origin = route_error_origin(&route);
+    state.last_response_id = None;
+    state.in_flight = Some(InFlight {
+        request: request.clone(),
+        route,
+        event,
+        started,
+        response_id: None,
+        prompt_affinity_key: request.prompt_affinity_key,
+    });
+    for message in initial_messages {
+        if !handle_upstream_message(downstream, runtime, state, message).await {
+            return false;
+        }
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1347,6 +1493,7 @@ async fn start_next_request(
         state.lease = Some(lease);
         state.upstream_origin = upstream_origin;
         state.in_flight = Some(InFlight {
+            request: request.clone(),
             route: route.clone(),
             event,
             started,
@@ -1390,6 +1537,7 @@ async fn start_next_request(
     state.upstream_origin = route_error_origin(&route);
     state.last_response_id = None;
     state.in_flight = Some(InFlight {
+        request: request.clone(),
         route,
         event,
         started,

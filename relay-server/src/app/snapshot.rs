@@ -50,6 +50,8 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
     let equivalents = state.store.api_equivalents()?;
     let runtime = state.runtime()?;
+    let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
+    let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
     let running = state.store.gateway_enabled()? && runtime.is_some();
     let routing_order = runtime
         .as_ref()
@@ -117,6 +119,8 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             account_proxy_required: proxy_settings.required,
             quota_request_timeout_seconds,
             chatgpt_interface_quota_reserve_basis_points: None,
+            codex_background_tasks_enabled,
+            codex_websockets_enabled,
             routing_order,
         },
         platform: std::env::consts::OS.to_string(),
@@ -249,13 +253,14 @@ fn model_summaries(
             model.custom_price = true;
         }
         let has_api_source_route = model_has_api_source_route(source_summaries, &model_id);
+        let has_pool_route =
+            has_api_source_route || model_has_native_account_route(account_summaries, &model_id);
         apply_model_reasoning_summary(
             model,
             runtime
-                .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
-                .unwrap_or_default(),
+                .and_then(|runtime| runtime.confirmed_source_reasoning_declared_levels(&model_id)),
             zenith_relay_core::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
-            has_api_source_route || model_has_native_account_route(account_summaries, &model_id),
+            has_pool_route,
         );
         model.reasoning_probe_available = has_api_source_route;
         model.reasoning_probe =

@@ -635,7 +635,7 @@ async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
 }
 
 #[tokio::test]
-async fn official_codex_model_applies_the_explicit_pool_reasoning_picker() {
+async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy() {
     let mut upstream_catalog = default_upstream_model_catalog();
     upstream_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     upstream_catalog["models"][0]["display_name"] = Value::String("GPT-5.6 Terra".to_string());
@@ -651,8 +651,8 @@ async fn official_codex_model_applies_the_explicit_pool_reasoning_picker() {
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
         GatewayRuntimeOptions {
-            // A saved pool-model policy is an explicit picker choice, even
-            // when the selected model is served by a native ChatGPT account.
+            // A saved API/pool policy must not rewrite a native ChatGPT
+            // account's upstream Codex catalog.
             model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
                 OFFICIAL_CODEX_MODEL.to_string(),
                 vec!["low".to_string()],
@@ -682,17 +682,24 @@ async fn official_codex_model_applies_the_explicit_pool_reasoning_picker() {
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
-    assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
-        json!([{"effort": "low", "description": "Low"}])
+        json!([
+            {"effort": "low", "description": "Low"},
+            {"effort": "high", "description": "High"},
+            {"effort": "xhigh", "description": "Extra high"}
+        ])
     );
     assert_eq!(
         catalog["models"][0]["supports_reasoning_summary_parameter"],
-        false
+        true
     );
-    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
-    assert_eq!(catalog["models"][0]["default_reasoning_summary"], "none");
+    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
+    assert_eq!(
+        catalog["models"][0]["default_reasoning_summary"],
+        "detailed"
+    );
 
     // The pool may classify a tier for quota telemetry, but must never
     // translate a ChatGPT/Codex client's native service-tier selection.

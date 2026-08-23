@@ -92,7 +92,7 @@ struct ProfileBackup {
     #[serde(default)]
     managed_bearer_in_config: bool,
     #[serde(default)]
-    managed_supports_websockets: bool,
+    managed_supports_websockets: Option<bool>,
     #[serde(default)]
     managed_model_reasoning_effort_cleared: bool,
     #[serde(default)]
@@ -153,10 +153,20 @@ pub(crate) struct BoundOAuthProfile<'a> {
     pub provider_account_id: &'a str,
 }
 
-#[derive(Default)]
 struct LocalAttachOptions<'a> {
     bound_oauth: Option<BoundOAuthProfile<'a>>,
     catalog_json: Option<&'a str>,
+    supports_websockets: bool,
+}
+
+impl<'a> Default for LocalAttachOptions<'a> {
+    fn default() -> Self {
+        Self {
+            bound_oauth: None,
+            catalog_json: None,
+            supports_websockets: true,
+        }
+    }
 }
 
 pub(crate) struct ManagedAccountTokenUpdate {
@@ -216,6 +226,30 @@ pub fn attach_with_catalog(
     )
 }
 
+pub fn attach_with_catalog_and_websockets(
+    codex_home: &Path,
+    backup_root: &Path,
+    key_id: &str,
+    base_url: &str,
+    local_key: &str,
+    catalog_json: &str,
+    supports_websockets: bool,
+) -> Result<ProfileBinding> {
+    switch_to_local_with(
+        codex_home,
+        backup_root,
+        key_id,
+        base_url,
+        local_key,
+        LocalAttachOptions {
+            catalog_json: Some(catalog_json),
+            supports_websockets,
+            ..LocalAttachOptions::default()
+        },
+        &OsSecretBackend,
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn direct_source_model_catalog(
     codex_home: &Path,
@@ -232,14 +266,19 @@ pub(crate) fn direct_source_model_catalog_with_manifest(
     catalog::direct_source_model_catalog_with_manifest(codex_home, source_models, source_manifest)
 }
 
-pub(crate) fn attach_with_oauth_and_catalog(
+pub(crate) struct OAuthAttachOptions<'a> {
+    pub catalog_json: &'a str,
+    pub bound_oauth: BoundOAuthProfile<'a>,
+    pub supports_websockets: bool,
+}
+
+pub(crate) fn attach_with_oauth_and_options(
     codex_home: &Path,
     backup_root: &Path,
     key_id: &str,
     base_url: &str,
     local_key: &str,
-    catalog_json: &str,
-    bound_oauth: BoundOAuthProfile<'_>,
+    options: OAuthAttachOptions<'_>,
 ) -> Result<ProfileBinding> {
     switch_to_local_with(
         codex_home,
@@ -248,8 +287,9 @@ pub(crate) fn attach_with_oauth_and_catalog(
         base_url,
         local_key,
         LocalAttachOptions {
-            bound_oauth: Some(bound_oauth),
-            catalog_json: Some(catalog_json),
+            bound_oauth: Some(options.bound_oauth),
+            catalog_json: Some(options.catalog_json),
+            supports_websockets: options.supports_websockets,
         },
         &OsSecretBackend,
     )
@@ -263,6 +303,79 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
         return Ok(());
     }
     local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
+}
+
+pub fn set_local_gateway_websockets(
+    codex_home: &Path,
+    backup_root: &Path,
+    enabled: bool,
+) -> Result<()> {
+    set_local_gateway_websockets_with_previous(codex_home, backup_root, enabled).map(|_| ())
+}
+
+/// Updates the managed profile and returns the previous provider setting when
+/// the profile was managed. Callers that persist a second copy of this state
+/// can use the returned value to restore the profile if that later write fails.
+pub fn set_local_gateway_websockets_with_previous(
+    codex_home: &Path,
+    backup_root: &Path,
+    enabled: bool,
+) -> Result<Option<bool>> {
+    let _profile_guard = lock_codex_profile();
+    if !codex_home.exists() {
+        return Ok(None);
+    }
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let backup_path = backup_path(backup_root);
+    let original_config = read_optional_bytes(&config_path)?;
+    let Some(config_text) = snapshot_text(&original_config, &config_path)? else {
+        return Ok(None);
+    };
+    let original_backup = read_optional_bytes(&backup_path)?;
+    let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
+        return Ok(None);
+    };
+    let mut document = parse_config(config_text)?;
+    if !managed_config_matches(&document, &backup) {
+        return Ok(None);
+    }
+    let previous_enabled = document
+        .get("model_providers")
+        .and_then(Item::as_table_like)
+        .and_then(|providers| providers.get(PROVIDER_ID))
+        .and_then(Item::as_table_like)
+        .and_then(|provider| provider.get("supports_websockets"))
+        .and_then(Item::as_bool)
+        // A managed provider predates this field in some profiles. The
+        // current Codex contract treats the omitted field as enabled.
+        .or(Some(true));
+    if document
+        .get("model_providers")
+        .and_then(Item::as_table_like)
+        .and_then(|providers| providers.get(PROVIDER_ID))
+        .and_then(Item::as_table_like)
+        .and_then(|provider| provider.get("supports_websockets"))
+        .and_then(Item::as_bool)
+        == Some(enabled)
+        && backup.managed_supports_websockets == Some(enabled)
+    {
+        return Ok(previous_enabled);
+    }
+    if !set_managed_websockets(&mut document, enabled) {
+        return Ok(previous_enabled);
+    }
+    let next_config = document.to_string();
+    backup.managed_supports_websockets = Some(enabled);
+    let next_backup = serialize_backup(&backup)?;
+    if next_config != config_text {
+        replace_if_unchanged(&config_path, &original_config, &next_config)?;
+    }
+    if let Err(error) = replace_if_unchanged(&backup_path, &original_backup, &next_backup) {
+        let rollback = rollback_file(&config_path, &next_config, &original_config);
+        return Err(with_rollback(error, rollback));
+    }
+    Ok(previous_enabled)
 }
 
 pub fn sync_default_service_tier(

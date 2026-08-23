@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{discover_source_models_and_protocol_bindings, ProviderSource};
 
-const INTERVAL: Duration = Duration::from_secs(300);
+const INTERVAL: Duration = Duration::from_secs(8 * 60 * 60);
 
 pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     super::start_periodic(state, shutdown, INTERVAL, |state| async move {

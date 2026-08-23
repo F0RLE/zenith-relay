@@ -417,6 +417,12 @@ impl GatewayRuntime {
                 routes.remove(candidate_id);
             }
             confirmed.efforts.retain(|_, routes| !routes.is_empty());
+            for routes in confirmed.empty_routes.values_mut() {
+                routes.remove(candidate_id);
+            }
+            confirmed
+                .empty_routes
+                .retain(|_, routes| !routes.is_empty());
             let previous_levels = confirmed.levels.clone();
             confirmed.levels = confirmed_source_reasoning_levels(
                 &confirmed.efforts,

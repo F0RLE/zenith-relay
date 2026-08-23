@@ -28,6 +28,22 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Documentation now makes the security boundary explicit: Relay never receives
+  Zenith production secrets, customer keys, backend tokens, account-pool
+  inventory, or internal Gateway/Control API logic. User-owned credentials may
+  move only through an explicit transfer to the user's own Relay Server, while
+  snapshots, telemetry, exports, diagnostics, and usage remain redacted.
+- Source model discovery now runs once after Relay starts and every eight hours
+  while that app session remains active; changing reasoning settings no longer
+  starts a background catalog request, and reasoning probes stay manual.
+- Background quota, model, and wake workers pause with the desktop window and
+  resume only when an active Relay session is open; tray-only startup no longer
+  performs those checks.
+- Model-catalog failures remain visible after a restart, while history-repair
+  backups are cleaned on startup after seven days and capped at one copy.
+- Reasoning policies now apply only to pooled API sources and their API
+  catalog; native OAuth account catalogs and request capabilities remain
+  untouched.
 - The desktop shell now shows a static startup screen immediately while the
   WebView and first runtime snapshot finish loading, then removes it after the
   interactive frame with a bounded fallback timeout.
@@ -50,6 +66,8 @@ release entries are kept concise and link to the corresponding tag.
 - Pool cards now retain the configured routing order for API sources with multiple protocol routes.
 - Source discovery keeps the native Responses catalog fallback fresh when
   other models are assigned to a Messages or Responses-to-Messages route.
+- The Pool reasoning editor now serializes manual changes with an explicit
+  probe and preserves the newest policy when a probe completes.
 - The source-route editor is more compact: formats are added on demand, model
   assignment columns stay aligned, and upstream API keys appear before routes.
 - The OAuth success page is centered and schedules its browser tab to close ten

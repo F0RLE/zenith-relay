@@ -114,3 +114,8 @@ visible.
 
 To return to the previous ChatGPT profile, switch to **This computer**, open
 **Recovery**, and restore the automatic return point.
+
+The provider key remains user-owned local secret material. Relay does not send
+it to Zenith production systems, the Zenith Gateway, or the Control API. It
+must not appear in profile snapshots, telemetry, exports, diagnostics, or
+documentation examples.

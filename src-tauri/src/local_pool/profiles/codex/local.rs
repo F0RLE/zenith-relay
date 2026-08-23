@@ -161,7 +161,7 @@ pub(super) fn attach_local_locked(
         bound_oauth_account_id: None,
         managed_oauth_access_hash: None,
         managed_bearer_in_config: false,
-        managed_supports_websockets: true,
+        managed_supports_websockets: Some(options.supports_websockets),
         managed_model_reasoning_effort_cleared: false,
         managed_model_reasoning_effort: None,
         managed_model_catalog_path: None,
@@ -227,7 +227,7 @@ pub(super) fn attach_local_locked(
         .map(|oauth| oauth.account_id.to_string());
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
     backup.managed_bearer_in_config = true;
-    backup.managed_supports_websockets = true;
+    backup.managed_supports_websockets = Some(options.supports_websockets);
     let previous_managed_catalog_path = backup.managed_model_catalog_path.clone();
     let previous_managed_catalog_hash = backup.managed_model_catalog_hash.clone();
     backup.managed_model_catalog_path = if catalog.is_some() {
@@ -296,6 +296,7 @@ pub(super) fn attach_local_locked(
             .as_deref(),
         backup.previous_model_catalog_json.as_deref(),
         managed_model_reasoning_effort.as_deref(),
+        options.supports_websockets,
     );
     let managed_config = document.to_string();
     if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)

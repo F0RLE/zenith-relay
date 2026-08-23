@@ -269,6 +269,11 @@ pub(super) fn response_service_tier(value: &Value) -> Option<DefaultServiceTier>
 }
 
 pub(super) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
+    if event.success && event.error_category.is_none() {
+        if let Some(origin) = runtime.request_origin(&event.request_id) {
+            event.error_category = Some(format!("codex_{origin}"));
+        }
+    }
     if event
         .account_id
         .as_deref()

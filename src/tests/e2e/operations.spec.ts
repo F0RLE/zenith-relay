@@ -22,6 +22,34 @@ test("application chrome is not text-selectable", async ({ page }) => {
   await expect(page.locator("input").first()).toHaveCSS("user-select", "text");
 });
 
+test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "API & ChatGPT", exact: true }).click();
+
+  const settings = page.locator(".gateway-settings-panel");
+  await expect(settings).toBeVisible();
+  await expect(settings.getByRole("heading", { name: "Codex background requests" })).toBeVisible();
+  await expect(settings.getByRole("heading", { name: "WebSocket for the ChatGPT app" })).toBeVisible();
+
+  const websocket = settings.getByRole("checkbox", { name: "Use WebSocket in the ChatGPT app" });
+  await expect(websocket).toBeChecked();
+  await websocket.uncheck();
+  await expect(websocket).not.toBeChecked();
+  await expect(settings.getByText("Disabled · HTTP is used", { exact: true })).toBeVisible();
+
+  await websocket.check();
+  await expect(websocket).toBeChecked();
+  await expect(settings.getByText("Enabled", { exact: true })).toBeVisible();
+
+  const websocketCalls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean } } }>;
+  }).__TAURI_TEST_INVOKES__
+    .filter((call) => call.command === "set_local_codex_websockets")
+    .map((call) => call.args.input?.enabled));
+  expect(websocketCalls).toEqual([false, true]);
+});
+
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, importDescription: "# Seller package\n\n- Two Business accounts" });
   await page.goto("/");
@@ -170,6 +198,40 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], purchaseCostMicroUsd: 25_500_000 } });
 });
 
+test("reset credits are visible and require explicit account confirmation", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const reset = page.getByRole("button", { name: "Reset available: 1 · Reset weekly quota", exact: true });
+  await expect(reset).toBeVisible();
+  await reset.click();
+  const dialog = page.getByRole("dialog", { name: "Reset weekly quota" });
+  await expect(dialog).toContainText("Reset the weekly quota for this account?");
+  await dialog.getByRole("button", { name: "No", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(reset).toBeVisible();
+
+  await reset.click();
+  await page.getByRole("dialog", { name: "Reset weekly quota" }).getByRole("button", { name: "Yes, reset", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("button", { name: /Reset available: 0/ })).toHaveCount(0);
+
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountId?: string } }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.filter((call) => call.command === "get_local_reset_credits")).toHaveLength(0);
+  expect(calls.filter((call) => call.command === "consume_local_reset_credit")).toHaveLength(1);
+  expect(calls.filter((call) => call.command === "consume_local_reset_credit").at(-1)?.args.accountId).toBe("account_synthetic");
+});
+
+test("reset action is absent when no reset credit is available", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, resetCreditsAvailable: 0 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.locator(".reset-credits-control")).toHaveCount(0);
+});
+
 test("API sources use an explicit fallback order instead of traffic weights", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceCount: 2 });
   await page.goto("/");
@@ -274,6 +336,29 @@ test("automation editor only saves executable local configurations", async ({ pa
     windowKinds: ["primary"],
     modelPolicy: { kind: "explicit", value: "gpt-5.4-mini" },
     executionPolicy: "require_confirmation",
+  });
+});
+
+test("weekly automation is automatic and targets the secondary quota window", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Automations" }).click();
+  await page.getByRole("button", { name: "Edit" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Edit automation" });
+  await chooseOption(page, dialog, "Condition", "weekly");
+  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("group", { name: "Run" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /^Model:/ })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
+  expect(call?.args.input).toMatchObject({
+    trigger: { kind: "weekly" },
+    windowKinds: ["secondary"],
+    modelPolicy: { kind: "lightest_supported" },
+    executionPolicy: "automatic",
   });
 });
 
@@ -1444,6 +1529,20 @@ test("connections and pool show model cooldown without disabling the account", a
   const member = page.locator('[data-member-label="Personal Plus"]');
   await expect(member.locator(".pool-member-runtime-hint")).toContainText("gpt-5.4: retry after");
   await expect(member.locator(".pool-member-kind-icon")).not.toHaveAttribute("data-status", "error");
+});
+
+test("pool source errors use one status indicator without duplicate card text", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceErrorCode: "upstream model discovery failed" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const source = page.locator('.pool-member-card[data-member-kind="source"]');
+  await expect(source.locator('.pool-member-kind-icon[data-status="error"]')).toBeVisible();
+  await expect(source.locator(".pool-member-runtime-hint")).toHaveCount(0);
+  await expect(source).not.toHaveAttribute("title", /upstream model discovery failed/);
+  await expect(source.locator('.pool-member-kind-icon[data-status="error"]')).toHaveAttribute("aria-label", "Error: upstream model discovery failed");
+  await source.locator(".pool-member-kind-icon").hover();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
 });
 
 test("accounts use cards as the only layout", async ({ page }) => {
@@ -2760,6 +2859,28 @@ test("local model reasoning defaults are compact and can be managed manually", a
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_model_reasoning").at(-1)?.args)).toEqual({
     input: { modelId: "claude-opus-4-8", allowedLevels: ["provider_private"] },
   });
+});
+
+test("model availability errors stay visible", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, catalogRefreshWarning: "failed" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+  const alert = page.locator(".model-discovery-alert");
+  await expect(alert).toHaveAttribute("role", "alert");
+  await expect(alert).toContainText("Model availability check failed");
+  await expect(alert).toContainText("gateway_unavailable");
+});
+
+test("deferred model availability checks stay visible", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, catalogRefreshWarning: "deferred" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+  const status = page.locator(".model-discovery-alert");
+  await expect(status).toHaveAttribute("role", "status");
+  await expect(status).toContainText("Model availability check deferred");
+  await expect(status).toContainText("ChatGPT is running");
 });
 
 test("every native pool model exposes manual reasoning settings without an API probe", async ({ page }) => {

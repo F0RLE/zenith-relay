@@ -8,9 +8,7 @@ use crate::{
             credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-        models::{
-            LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord,
-        },
+        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
         profiles::codex,
         state::DesktopState,
         store::secret_store,
@@ -18,27 +16,46 @@ use crate::{
     platform::default_codex_home,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
-use tauri::{AppHandle, Manager, State};
+use serde::Deserialize;
+use std::collections::BTreeSet;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zenith_relay_core::{
-    is_valid_model_id,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetSettings, PresetQuotaPolicy,
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    AdapterRequestContext, ApiModelPriceOverride, DefaultServiceTier, ProviderSource,
-    RoutingStrategy, SourceConnector, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
 };
+
+mod model_policy;
+mod reasoning;
+
+pub(super) use model_policy::{canonical_pool_model, local_pool_member_ids};
+pub use reasoning::ModelReasoningProbeResult;
+use reasoning::{ProbeModelReasoningInput, SetModelReasoningInput};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
 const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+
+#[tauri::command]
+pub async fn set_local_model_reasoning(
+    input: SetModelReasoningInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    reasoning::set_local_model_reasoning(input, state).await
+}
+
+#[tauri::command]
+pub async fn probe_local_model_reasoning(
+    input: ProbeModelReasoningInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ModelReasoningProbeResult> {
+    reasoning::probe_local_model_reasoning(input, state).await
+}
 
 #[tauri::command]
 pub fn export_local_configuration_preset(
@@ -413,42 +430,6 @@ pub struct SetModelPriceInput {
     output_micro_usd_per_million: Option<u64>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelReasoningInput {
-    model_id: String,
-    #[serde(default)]
-    allowed_levels: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProbeModelReasoningInput {
-    model_id: String,
-    level: String,
-    #[serde(default)]
-    add_successful_to_settings: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelReasoningProbeSourceResult {
-    pub source_id: String,
-    pub source_name: String,
-    pub available: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelReasoningProbeResult {
-    pub model_id: String,
-    pub level: String,
-    pub source_count: usize,
-    pub available_count: usize,
-    pub applied_to_settings: bool,
-    pub sources: Vec<ModelReasoningProbeSourceResult>,
-}
-
 #[tauri::command]
 pub async fn set_local_model_enabled(
     input: SetModelEnabledInput,
@@ -500,296 +481,6 @@ pub async fn set_local_model_price(
         store.replace_gateway(gateway)?;
     }
     state.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn set_local_model_reasoning(
-    input: SetModelReasoningInput,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
-    let _mutation = state.setup_guard().await;
-    let canonical = canonical_pool_model(&state, &input.model_id)?;
-    let policy_key = zenith_relay_core::reasoning_policy_key(&canonical);
-    let mut normalized_allowed_levels =
-        zenith_relay_core::normalize_model_reasoning_allowed_levels(BTreeMap::from([(
-            policy_key.clone(),
-            input.allowed_levels,
-        )]))
-        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    let allowed_levels = normalized_allowed_levels
-        .remove(&policy_key)
-        .unwrap_or_default();
-    let old_gateway = state.store()?.gateway().clone();
-    let mut gateway = old_gateway.clone();
-    gateway
-        .model_reasoning_allowed_levels
-        .remove(&canonical.to_ascii_lowercase());
-    // Keep an explicit empty override so the user can disable every
-    // provider-reported mode without losing that choice on the next refresh.
-    gateway
-        .model_reasoning_allowed_levels
-        .insert(policy_key, allowed_levels);
-    if gateway == old_gateway {
-        return state.snapshot().await.map_err(Into::into);
-    }
-    state.store()?.replace_gateway(gateway.clone())?;
-    if let Some(runtime) = state.gateway.runtime().await {
-        if let Err(error) =
-            runtime.set_model_reasoning_allowed_levels(gateway.model_reasoning_allowed_levels)
-        {
-            state.store()?.replace_gateway(old_gateway)?;
-            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
-        }
-    }
-    let snapshot = state.snapshot().await?;
-    drop(_mutation);
-    super::refresh_active_codex_catalog_in_background(app);
-    Ok(snapshot)
-}
-
-/// Sends one intentionally small Responses request through every eligible API
-/// source that serves this pool model.  It uses the configured adapter so the
-/// probe exercises the same provider-facing request shape as the pool.
-#[tauri::command]
-pub async fn probe_local_model_reasoning(
-    input: ProbeModelReasoningInput,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> CommandResult<ModelReasoningProbeResult> {
-    let canonical = canonical_pool_model(&state, &input.model_id)?;
-    let level = normalized_reasoning_probe_level(&canonical, input.level)?;
-    let sources = state.store()?.sources().to_vec();
-    let mut results = Vec::new();
-    let mut probes = tokio::task::JoinSet::new();
-
-    for source in sources
-        .into_iter()
-        .filter(|source| source.in_pool && source.enabled && !source.draining)
-    {
-        let Some((binding, source_model)) = source_probe_binding(&source, &canonical) else {
-            continue;
-        };
-        let source_id = source.id.clone();
-        let source_name = source.name.clone();
-        if !binding.supports_reasoning_effort(&level) {
-            results.push(ModelReasoningProbeSourceResult {
-                source_id,
-                source_name,
-                available: false,
-            });
-            continue;
-        }
-        let Ok(Some(api_key)) = secret_store::load(&source.secret_ref) else {
-            results.push(ModelReasoningProbeSourceResult {
-                source_id,
-                source_name,
-                available: false,
-            });
-            continue;
-        };
-        let probe_level = level.clone();
-        probes.spawn(async move {
-            probe_source_reasoning(source, api_key, binding, source_model, probe_level).await
-        });
-    }
-    while let Some(result) = probes.join_next().await {
-        if let Ok(result) = result {
-            results.push(result);
-        }
-    }
-    results.sort_by(|left, right| left.source_name.cmp(&right.source_name));
-    if results.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::NotFound,
-            "no eligible API source can probe this pool model",
-        )
-        .into());
-    }
-    let available_count = results.iter().filter(|result| result.available).count();
-    let applied_to_settings = input.add_successful_to_settings && available_count > 0;
-    if applied_to_settings {
-        let gateway = state.store()?.gateway().clone();
-        let mut allowed_levels = zenith_relay_core::reasoning_policy_levels(
-            &gateway.model_reasoning_allowed_levels,
-            &canonical,
-        )
-        .map(ToOwned::to_owned)
-        .unwrap_or_default();
-        allowed_levels.push(level.clone());
-        set_local_model_reasoning(
-            SetModelReasoningInput {
-                model_id: canonical.clone(),
-                allowed_levels,
-            },
-            app,
-            state,
-        )
-        .await?;
-    }
-    Ok(ModelReasoningProbeResult {
-        model_id: canonical,
-        level,
-        source_count: results.len(),
-        available_count,
-        applied_to_settings,
-        sources: results,
-    })
-}
-
-fn normalized_reasoning_probe_level(model: &str, level: String) -> LocalResult<String> {
-    let mut normalized = zenith_relay_core::normalize_model_reasoning_allowed_levels(
-        BTreeMap::from([(model.to_string(), vec![level])]),
-    )
-    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    normalized
-        .remove(&model.to_ascii_lowercase())
-        .and_then(|levels| levels.into_iter().next())
-        .ok_or_else(|| {
-            LocalPoolError::new(ErrorCode::InvalidState, "reasoning probe level is invalid")
-        })
-}
-
-fn source_probe_binding(
-    source: &ProviderSourceRecord,
-    model: &str,
-) -> Option<(SourceProtocolBinding, String)> {
-    source
-        .effective_protocol_bindings()
-        .ok()?
-        .into_iter()
-        .filter(|binding| binding.wire_api == WireApi::Responses)
-        .find_map(|binding| {
-            binding
-                .model_ids
-                .iter()
-                .find(|candidate| candidate.eq_ignore_ascii_case(model))
-                .cloned()
-                .map(|source_model| (binding, source_model))
-        })
-}
-
-async fn probe_source_reasoning(
-    source: ProviderSourceRecord,
-    api_key: String,
-    binding: SourceProtocolBinding,
-    source_model: String,
-    level: String,
-) -> ModelReasoningProbeSourceResult {
-    let source_id = source.id.clone();
-    let source_name = source.name.clone();
-    let available = async {
-        let connector = SourceConnector::new(
-            &ProviderSource {
-                id: source.id,
-                name: source.name,
-                base_url: source.base_url,
-                api_key,
-                wire_api: source.wire_api,
-                models: source.models,
-            },
-            std::slice::from_ref(&binding),
-        )
-        .ok()?;
-        let request = json!({
-            "model": source_model.clone(),
-            "input": "Reply with OK.",
-            "max_output_tokens": 1,
-            "reasoning": { "effort": level },
-        });
-        let prepared = binding
-            .adapter
-            .prepare_request(AdapterRequestContext {
-                client_wire_api: WireApi::Responses,
-                request: &request,
-                model: &source_model,
-                stream: false,
-                reasoning_mode: binding.reasoning_mode,
-                cache_write_ttl: binding.cache_write_ttl,
-                previous: None,
-                response_scope: "reasoning-probe",
-                response_id_seed: "reasoning-probe",
-            })
-            .ok()?;
-        let url = connector.endpoint(binding.key(), &source_model, false)?;
-        let (authorization_name, authorization) = connector.authorization_for_binding(&binding);
-        let mut headers = connector.protocol_headers_for_binding(&binding);
-        headers.insert(authorization_name, authorization);
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .ok()?;
-        client
-            .post(url)
-            .headers(headers)
-            .json(prepared.upstream_body())
-            .send()
-            .await
-            .ok()
-            .is_some_and(|response| response.status().is_success())
-            .then_some(())
-    }
-    .await
-    .is_some();
-    ModelReasoningProbeSourceResult {
-        source_id,
-        source_name,
-        available,
-    }
-}
-
-fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
-    let requested = model_id.trim();
-    if !is_valid_model_id(requested) {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "model id is invalid",
-        ));
-    }
-    let store = state.store()?;
-    for source in store.sources().iter().filter(|source| source.in_pool) {
-        let models = source
-            .models_for_wire_api(WireApi::Responses)
-            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        if let Some(model) = models
-            .into_iter()
-            .find(|model| model.eq_ignore_ascii_case(requested))
-        {
-            return Ok(model);
-        }
-    }
-    store
-        .accounts()
-        .iter()
-        .filter(|account| account.account.in_pool)
-        .flat_map(|account| account.models.iter())
-        .find(|model| model.eq_ignore_ascii_case(requested))
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
-}
-
-/// Returns the configured members of the managed Responses pool. Runtime
-/// availability is intentionally applied later from the live scheduler.
-pub(super) fn local_pool_member_ids(
-    sources: &[ProviderSourceRecord],
-    accounts: &[LocalAccountRecord],
-) -> LocalResult<(BTreeSet<String>, BTreeSet<String>)> {
-    let mut source_ids = BTreeSet::new();
-    for source in sources.iter().filter(|source| source.in_pool) {
-        if source
-            .supports_wire_api(WireApi::Responses)
-            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
-        {
-            source_ids.insert(source.id.clone());
-        }
-    }
-    let account_ids = accounts
-        .iter()
-        .filter(|account| account.account.in_pool)
-        .map(|account| account.account.id.clone())
-        .collect();
-    Ok((source_ids, account_ids))
 }
 
 #[tauri::command]
@@ -907,7 +598,9 @@ pub async fn set_local_pool_membership(
     if updated_in_place {
         tauri::async_runtime::spawn(async move {
             let state = app.state::<DesktopState>();
-            let _ = super::profiles::refresh_active_codex_catalog(&state).await;
+            let result = super::profiles::refresh_active_codex_catalog(&state).await;
+            super::record_catalog_refresh_result(&state, &result);
+            let _ = app.emit("zenith-state-changed", ());
         });
     }
     Ok(snapshot)
@@ -1018,5 +711,48 @@ mod tests {
             BTreeSet::from(["messages".to_string(), "responses".to_string()])
         );
         assert!(account_ids.is_empty());
+    }
+
+    #[test]
+    fn reasoning_probe_requires_reasoning_evidence_in_a_success_response() {
+        assert!(!reasoning::reasoning_probe_response_confirms(
+            &serde_json::json!({"id": "resp", "status": "completed", "output": [{"type": "output_text"}]}),
+            "high"
+        ));
+        assert!(reasoning::reasoning_probe_response_confirms(
+            &serde_json::json!({
+                "id": "resp",
+                "status": "completed",
+                "output": [{"type": "output_text"}],
+                "output_config": {"effort": "high"}
+            }),
+            "high"
+        ));
+        assert!(!reasoning::reasoning_probe_response_confirms(
+            &serde_json::json!({"id": "resp", "status": "completed", "error": {"message": "rejected"}}),
+            "high"
+        ));
+    }
+
+    #[test]
+    fn reasoning_probe_accepts_positive_reasoning_token_evidence_without_echoed_effort() {
+        assert!(reasoning::reasoning_probe_response_confirms(
+            &serde_json::json!({
+                "id": "resp",
+                "status": "completed",
+                "output": [{"type": "output_text"}],
+                "usage": {"output_tokens_details": {"reasoning_tokens": 4}}
+            }),
+            "high"
+        ));
+        assert!(!reasoning::reasoning_probe_response_confirms(
+            &serde_json::json!({
+                "id": "resp",
+                "status": "completed",
+                "output": [{"type": "output_text"}],
+                "usage": {"output_tokens_details": {"reasoning_tokens": 0}}
+            }),
+            "high"
+        ));
     }
 }

@@ -36,6 +36,8 @@ the Help Center and GitHub navigation do not depend on one long page.
   price overrides.
 - Usage diagnostics that distinguish Relay, account, and provider failures
   without recording prompts, response bodies, or secrets.
+- Runtime snapshots, telemetry, exports, diagnostics, and screenshots are
+  redacted; they are not a transport for credentials or provider payloads.
 - Account views keep provider-reported quota windows separate from direct
   token-based API-equivalent and optional purchase-cost payback; Relay does
   not turn a quota percentage into a monetary entitlement.
@@ -48,7 +50,24 @@ the Help Center and GitHub navigation do not depend on one long page.
   Windows portable EXE.
 
 Relay is a personal deployment. It is not Zenith customer billing, a public
-account marketplace, or the internal Zenith account pool.
+account marketplace, or the production Zenith account pool. It is also separate
+from the production Zenith Gateway and Control API: production credentials,
+customer keys, backend tokens, account-pool inventory, and internal business
+or routing logic do not enter or leave this repository.
+
+## Privacy Boundary
+
+Desktop secrets stay in the operating-system credential store. A server that
+the user owns can keep transferred user-owned secrets in its encrypted vault.
+The transfer is possible only after the user explicitly selects that server and
+confirms the management operation; it is never an implicit upload to Zenith
+systems.
+
+Raw secrets, cookies, authorization headers, prompts, response bodies, and
+provider session material must not appear in UI snapshots, SQLite telemetry,
+logs, exports, diagnostics, screenshots, or ordinary server API snapshots.
+Management tokens and `/v1` profile credentials are separate credentials and
+are never interchangeable. Documentation and examples use placeholders only.
 
 ## Current Direction
 

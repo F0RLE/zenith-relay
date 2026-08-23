@@ -22,7 +22,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicU64, Arc, Mutex, MutexGuard},
 };
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
 use zenith_relay_core::{
     accounts::TokenAuthority, automations::WakeCoordinator, quota::QuotaRefreshQueue,
 };
@@ -48,6 +48,8 @@ pub struct DesktopState {
     oauth_events: DesktopOAuthEvents,
     failed_usage_writes: Arc<AtomicU64>,
     failed_affinity_writes: Arc<AtomicU64>,
+    catalog_refresh_error: Arc<Mutex<Option<String>>>,
+    background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     subscription_refresh_lock: AsyncMutex<()>,
     setup_lock: tokio::sync::Mutex<()>,
@@ -56,15 +58,15 @@ pub struct DesktopState {
 impl DesktopState {
     pub fn open(root: PathBuf) -> Result<Self> {
         let transient_root = root.join("cache");
-        if transient_root.exists() {
-            let _ = std::thread::Builder::new()
-                .name("transient-cleanup".to_string())
-                .spawn(move || {
-                    let _ = ImportSessionStore::new(transient_root.clone(), NativeSecretBackend)
-                        .cleanup_expired();
-                    let _ = repair::cleanup_expired_previews(&transient_root);
-                });
-        }
+        let history_repair_root = root.join("recovery").join("history-repair");
+        let _ = std::thread::Builder::new()
+            .name("transient-cleanup".to_string())
+            .spawn(move || {
+                let _ = ImportSessionStore::new(transient_root.clone(), NativeSecretBackend)
+                    .cleanup_expired();
+                let _ = repair::cleanup_expired_previews(&transient_root);
+                let _ = repair::cleanup_history_repair_backups(&history_repair_root);
+            });
         let mut store = LocalPoolStore::open(root.clone())?;
         let telemetry = store.database();
         let mut quota_refresh =
@@ -86,6 +88,9 @@ impl DesktopState {
         }
         let failed_usage_writes = Arc::new(AtomicU64::new(0));
         let failed_affinity_writes = Arc::new(AtomicU64::new(0));
+        let catalog_refresh_error =
+            Arc::new(Mutex::new(store.gateway().catalog_refresh_error.clone()));
+        let (background_session_active, _) = watch::channel(false);
         let token_authority = Arc::new(
             TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
                 .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
@@ -110,6 +115,8 @@ impl DesktopState {
             oauth_events,
             failed_usage_writes,
             failed_affinity_writes,
+            catalog_refresh_error,
+            background_session_active,
             quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
             subscription_refresh_lock: AsyncMutex::new(()),
             setup_lock: tokio::sync::Mutex::new(()),
@@ -165,6 +172,32 @@ impl DesktopState {
             .clone())
     }
 
+    pub(crate) fn weekly_reset_was_applied(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .store()?
+            .automations()
+            .weekly_reset_fingerprints
+            .get(account_id)
+            .is_some_and(|applied| applied == fingerprint))
+    }
+
+    pub(crate) fn mark_weekly_reset_applied(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut store = self.store()?;
+        let mut automations = store.automations().clone();
+        automations
+            .weekly_reset_fingerprints
+            .insert(account_id.to_string(), fingerprint.to_string());
+        store.replace_automations(automations)
+    }
+
     pub(crate) fn remove_quota_account_lock(&self, account_id: &str) -> Result<bool> {
         Ok(self
             .quota_account_locks
@@ -176,6 +209,77 @@ impl DesktopState {
 
     pub(crate) async fn subscription_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.subscription_refresh_lock.lock().await
+    }
+
+    pub(crate) fn set_background_session_active(&self, active: bool) {
+        if *self.background_session_active.borrow() == active {
+            return;
+        }
+        self.background_session_active.send_replace(active);
+    }
+
+    pub(crate) fn background_session_active(&self) -> bool {
+        *self.background_session_active.borrow()
+    }
+
+    pub(crate) async fn wait_for_background_session_active(&self) {
+        let mut receiver = self.background_session_active.subscribe();
+        loop {
+            if *receiver.borrow() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_background_session_inactive(&self) {
+        let mut receiver = self.background_session_active.subscribe();
+        loop {
+            if !*receiver.borrow() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn record_catalog_refresh_result(&self, error: Option<&LocalPoolError>) {
+        let error_code = error.map(|error| catalog_refresh_error_code(error.code));
+        let warning = error_code.map(|code| format!("model_catalog_refresh_failed:{code}"));
+        self.persist_catalog_refresh_warning(warning, error_code.map(|_| now_ms()));
+    }
+
+    pub(crate) fn record_catalog_refresh_deferred(&self) {
+        self.persist_catalog_refresh_warning(
+            Some("model_catalog_refresh_deferred:codex_running".to_string()),
+            None,
+        );
+    }
+
+    fn persist_catalog_refresh_warning(&self, warning: Option<String>, at_ms: Option<u64>) {
+        let Ok(mut slot) = self.catalog_refresh_error.lock() else {
+            return;
+        };
+        *slot = warning.clone();
+        drop(slot);
+
+        let Ok(mut store) = self.store() else {
+            return;
+        };
+        let mut gateway = store.gateway().clone();
+        gateway.catalog_refresh_error = warning;
+        gateway.catalog_refresh_error_at_ms = at_ms;
+        let _ = store.replace_gateway(gateway);
+    }
+
+    pub(crate) fn catalog_refresh_warning(&self) -> Option<String> {
+        self.catalog_refresh_error
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     pub fn profile_backup_root(&self) -> PathBuf {
@@ -208,6 +312,20 @@ impl DesktopState {
 
     pub fn cache_root(&self) -> PathBuf {
         self.root.join("cache")
+    }
+}
+
+fn catalog_refresh_error_code(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::Io => "io",
+        ErrorCode::Conflict => "conflict",
+        ErrorCode::GatewayUnavailable => "gateway_unavailable",
+        ErrorCode::InvalidState => "invalid_state",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::ProfileRestoreBlocked => "profile_restore_blocked",
+        ErrorCode::RecoveryRequired => "recovery_required",
+        ErrorCode::SecretStoreUnavailable => "secret_store_unavailable",
+        ErrorCode::UnsupportedSchema => "unsupported_schema",
     }
 }
 
@@ -246,6 +364,109 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &other));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn weekly_reset_fingerprint_is_persisted_per_account_and_cycle() {
+        let root = temp_root("weekly-reset-fingerprint");
+        let state = DesktopState::open(root.clone()).unwrap();
+        assert!(!state
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap());
+        state
+            .mark_weekly_reset_applied("account-1", "cycle-1")
+            .unwrap();
+        assert!(state
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap());
+        assert!(!state
+            .weekly_reset_was_applied("account-1", "cycle-2")
+            .unwrap());
+        drop(state);
+
+        let reopened = DesktopState::open(root.clone()).unwrap();
+        assert!(reopened
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_workers_follow_the_desktop_session_lifecycle() {
+        let root = temp_root("background-session");
+        let state = DesktopState::open(root.clone()).unwrap();
+
+        assert!(!state.background_session_active());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            state.wait_for_background_session_active()
+        )
+        .await
+        .is_err());
+
+        state.set_background_session_active(true);
+        state.wait_for_background_session_active().await;
+        assert!(state.background_session_active());
+
+        state.set_background_session_active(false);
+        state.wait_for_background_session_inactive().await;
+        assert!(!state.background_session_active());
+
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_refresh_warning_survives_restart_and_clears_after_success() {
+        let root = temp_root("catalog-refresh-warning");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let error = LocalPoolError::new(ErrorCode::GatewayUnavailable, "provider unavailable");
+        state.record_catalog_refresh_result(Some(&error));
+        assert_eq!(
+            state.catalog_refresh_warning().as_deref(),
+            Some("model_catalog_refresh_failed:gateway_unavailable")
+        );
+        drop(state);
+
+        let state = DesktopState::open(root.clone()).unwrap();
+        assert_eq!(
+            state.catalog_refresh_warning().as_deref(),
+            Some("model_catalog_refresh_failed:gateway_unavailable")
+        );
+        state.record_catalog_refresh_result(None);
+        drop(state);
+
+        let state = DesktopState::open(root.clone()).unwrap();
+        assert!(state.catalog_refresh_warning().is_none());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deferred_catalog_refresh_warning_survives_restart_without_an_error_timestamp() {
+        let root = temp_root("catalog-refresh-deferred");
+        let state = DesktopState::open(root.clone()).unwrap();
+        state.record_catalog_refresh_deferred();
+        assert_eq!(
+            state.catalog_refresh_warning().as_deref(),
+            Some("model_catalog_refresh_deferred:codex_running")
+        );
+        assert!(state
+            .store()
+            .unwrap()
+            .gateway()
+            .catalog_refresh_error_at_ms
+            .is_none());
+        drop(state);
+
+        let state = DesktopState::open(root.clone()).unwrap();
+        assert_eq!(
+            state.catalog_refresh_warning().as_deref(),
+            Some("model_catalog_refresh_deferred:codex_running")
+        );
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -916,6 +1137,7 @@ mod tests {
                         window_minutes: Some(300),
                         observed_at_ms: 100,
                         full_transition_fingerprint: Some("cycle-1".into()),
+                        exhaustion_transition_fingerprint: None,
                     }),
                     ..QuotaSnapshot::default()
                 },

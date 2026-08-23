@@ -108,6 +108,8 @@ pub enum RemoteServerAction {
     SetModelReasoning,
     StartGateway,
     StopGateway,
+    SetCodexBackgroundTasks,
+    SetCodexWebsockets,
     CreateWakeTask,
     UpdateWakeTask { id: String },
     DeleteWakeTask { id: String },
@@ -669,6 +671,14 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         }
         RemoteServerAction::StartGateway => (Method::POST, "/gateway/start".to_string(), false),
         RemoteServerAction::StopGateway => (Method::POST, "/gateway/stop".to_string(), false),
+        RemoteServerAction::SetCodexBackgroundTasks => (
+            Method::POST,
+            "/gateway/codex-background-tasks".to_string(),
+            true,
+        ),
+        RemoteServerAction::SetCodexWebsockets => {
+            (Method::POST, "/gateway/codex-websockets".to_string(), true)
+        }
         RemoteServerAction::CreateWakeTask => (Method::POST, "/wake-tasks".to_string(), true),
         RemoteServerAction::UpdateWakeTask { id } => {
             (Method::PATCH, object_path("wake-tasks", id)?, true)

@@ -26,6 +26,8 @@ pub enum Feature {
     RuntimeRouting,
     ConfigurationPresets,
     ProfileKeyRotation,
+    CodexBackgroundTasks,
+    CodexWebsockets,
     Images,
 }
 
@@ -52,6 +54,8 @@ impl Feature {
             Self::RuntimeRouting => "runtime_routing",
             Self::ConfigurationPresets => "configuration_presets",
             Self::ProfileKeyRotation => "profile_key_rotation",
+            Self::CodexBackgroundTasks => "codex_background_tasks",
+            Self::CodexWebsockets => "codex_websockets",
             Self::Images => "images",
         }
     }
@@ -114,6 +118,8 @@ impl Capabilities {
             Feature::RuntimeRouting,
             Feature::ConfigurationPresets,
             Feature::ProfileKeyRotation,
+            Feature::CodexBackgroundTasks,
+            Feature::CodexWebsockets,
             Feature::Images,
         ]
         .into_iter()

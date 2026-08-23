@@ -1,6 +1,6 @@
 use super::import_orchestrator::{
-    apply_model_discovery, apply_quota_outcome, credential_local_error, imported_identity,
-    preserve_newer_account_state, ImportItemError, ImportItemStatus,
+    apply_model_discovery, credential_local_error, imported_identity, preserve_newer_account_state,
+    ImportItemError, ImportItemStatus,
 };
 use crate::local_pool::accounts::authority::{CredentialPersistence, StoredRefreshAdapter};
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
@@ -51,8 +51,15 @@ pub(super) const QUOTA_RESET_REFRESH_JITTER_MS: u64 = 10_000;
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum AccountQuotaOutcome {
     Skipped,
-    Updated { transitions: Vec<QuotaTransition> },
-    Failed { code: String, retryable: bool },
+    Updated {
+        transitions: Vec<QuotaTransition>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exhaustion_transitions: Vec<QuotaTransition>,
+    },
+    Failed {
+        code: String,
+        retryable: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,6 +128,8 @@ pub struct ConfirmAccountImportResponse {
 pub struct AccountQuotaRefreshResponse {
     pub account: LocalAccountRecord,
     pub quota: AccountQuotaOutcome,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exhaustion_transitions: Vec<QuotaTransition>,
 }
 
 pub(crate) struct PreparedAccountCredentials {
@@ -140,7 +149,7 @@ pub(super) struct PreparedAccountAuthorization {
 }
 
 impl PreparedAccountAuthorization {
-    fn from_tokens(value: PreparedAccountCredentials) -> LocalResult<Self> {
+    pub(super) fn from_tokens(value: PreparedAccountCredentials) -> LocalResult<Self> {
         let authorization = account_bearer_authorization(value.tokens.access_token())?;
         Ok(Self {
             subscription_authorization: Some(authorization.clone()),
@@ -569,7 +578,6 @@ pub(crate) async fn refresh_account_quota_once(
             apply_subscription_metadata(&mut subscription, metadata, now_ms);
         }
     }
-    let refresh_models = refresh_models || account_before_refresh.models.is_empty();
     let (mut refreshed, mut discovered_models) = request_account_metadata(
         &prepared,
         request_timeout,
@@ -661,7 +669,7 @@ pub(crate) async fn refresh_account_quota_once(
         discovered_models = Some(discover_account_models(&prepared).await);
     }
     let _mutation = state.setup_guard().await;
-    let (old_accounts, old_keys, account, outcome, models_changed) = {
+    let (old_accounts, old_keys, account, outcome, exhaustion_transitions, models_changed) = {
         let mut store = state.store()?;
         let old_accounts = store.accounts().to_vec();
         let old_keys = store.keys().to_vec();
@@ -676,15 +684,26 @@ pub(crate) async fn refresh_account_quota_once(
         {
             account.account.subscription = subscription;
         }
-        let outcome = match refreshed {
-            Ok(outcome) => apply_quota_outcome(&mut account, outcome, now_ms),
+        let (outcome, exhaustion_transitions) = match refreshed {
+            Ok(outcome) => {
+                let (outcome, exhaustion_transitions) =
+                    super::import_orchestrator::apply_quota_outcome_with_transitions(
+                        &mut account,
+                        outcome,
+                        now_ms,
+                    );
+                (outcome, exhaustion_transitions)
+            }
             Err(_) => {
                 let failure = QuotaRefreshFailure::new("quota_timeout", true);
                 apply_quota_failure(&mut account, &failure, now_ms);
-                AccountQuotaOutcome::Failed {
-                    code: failure.code,
-                    retryable: failure.retryable,
-                }
+                (
+                    AccountQuotaOutcome::Failed {
+                        code: failure.code,
+                        retryable: failure.retryable,
+                    },
+                    Vec::new(),
+                )
             }
         };
         if let Some(discovered_models) = discovered_models {
@@ -694,13 +713,21 @@ pub(crate) async fn refresh_account_quota_once(
         let models_changed =
             account.models.iter().cloned().collect::<BTreeSet<_>>() != previous_models;
         store.upsert_account(account.clone())?;
-        (old_accounts, old_keys, account, outcome, models_changed)
+        (
+            old_accounts,
+            old_keys,
+            account,
+            outcome,
+            exhaustion_transitions,
+            models_changed,
+        )
     };
     sync_refreshed_account_or_rollback(state, account_id, models_changed, old_accounts, old_keys)
         .await?;
     Ok(AccountQuotaRefreshResponse {
         account,
         quota: outcome,
+        exhaustion_transitions,
     })
 }
 

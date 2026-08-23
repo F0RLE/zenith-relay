@@ -31,6 +31,25 @@ export type QuotaSnapshot = {
   error: { code: string; occurredAtMs: number } | null;
 };
 
+export type ResetCredit = {
+  status?: string;
+  resetType?: string;
+  grantedAt?: number;
+  expiresAt?: number;
+  redeemedAt?: number;
+};
+
+export type ResetCreditsSnapshot = {
+  availableCount: number | null;
+  credits: ResetCredit[];
+  nextExpiresAt: number | null;
+};
+
+export type ConsumeResetCreditResponse = {
+  refreshed: boolean;
+  refreshError?: string;
+};
+
 export type ApiEquivalentSummary = {
   microUsd: number;
   pricedTokens: number;
@@ -213,7 +232,7 @@ export type WakeTask = {
   accountSelector: { kind: "all_eligible" } | { kind: "account_ids" | "tags"; values: string[] };
   windowKinds: Array<"primary" | "secondary">;
   modelPolicy: { kind: "lightest_supported" } | { kind: "explicit"; value: string };
-  trigger: { kind: "quota_full" };
+  trigger: { kind: "quota_full" } | { kind: "weekly" };
   executionPolicy: "automatic" | "require_confirmation";
   jitterSeconds: number;
   maxAttemptsPerCycle: number;
@@ -254,6 +273,8 @@ export type RuntimeSnapshot = {
     accountProxyRequired?: boolean;
     quotaRequestTimeoutSeconds?: number;
     chatgptInterfaceQuotaReserveBasisPoints?: number;
+    codexBackgroundTasksEnabled?: boolean;
+    codexWebsocketsEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;

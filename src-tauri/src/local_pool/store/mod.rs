@@ -17,9 +17,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zenith_relay_core::{
-    normalize_image_base_model, normalize_subscription_plan_order, quota::QuotaWindowKind,
-};
+use zenith_relay_core::{normalize_image_base_model, normalize_subscription_plan_order};
 
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
@@ -74,10 +72,7 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let accounts = state.accounts;
-        let mut automations = state.automations;
-        for task in &mut automations.tasks {
-            task.window_kinds = [QuotaWindowKind::Primary].into();
-        }
+        let automations = state.automations;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
@@ -241,12 +236,27 @@ impl LocalPoolStore {
         keys: Vec<LocalGatewayKeyRecord>,
         automations: AutomationRecords,
     ) -> Result<()> {
+        self.delete_accounts_state(
+            std::slice::from_ref(&account_id.to_string()),
+            accounts,
+            keys,
+            automations,
+        )
+    }
+
+    pub fn delete_accounts_state(
+        &mut self,
+        account_ids: &[String],
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+        automations: AutomationRecords,
+    ) -> Result<()> {
         self.replace_all_records_inner(
             self.sources.clone(),
             accounts,
             keys,
             automations,
-            Some(account_id),
+            account_ids,
         )
     }
 
@@ -257,7 +267,7 @@ impl LocalPoolStore {
         keys: Vec<LocalGatewayKeyRecord>,
         automations: AutomationRecords,
     ) -> Result<()> {
-        self.replace_all_records_inner(sources, accounts, keys, automations, None)
+        self.replace_all_records_inner(sources, accounts, keys, automations, &[])
     }
 
     fn replace_all_records_inner(
@@ -266,7 +276,7 @@ impl LocalPoolStore {
         accounts: Vec<LocalAccountRecord>,
         keys: Vec<LocalGatewayKeyRecord>,
         automations: AutomationRecords,
-        deleted_account_id: Option<&str>,
+        deleted_account_ids: &[String],
     ) -> Result<()> {
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
@@ -297,11 +307,14 @@ impl LocalPoolStore {
         if changed.automations {
             values.push((STATE_AUTOMATIONS, serialize_state(&automations)?));
         }
-        match deleted_account_id {
-            Some(account_id) => self
-                .database
-                .replace_state_json_and_delete_account_data(&values, account_id)?,
-            None => self.database.replace_state_json(&values)?,
+        if deleted_account_ids.is_empty() {
+            self.database.replace_state_json(&values)?;
+        } else if deleted_account_ids.len() == 1 {
+            self.database
+                .replace_state_json_and_delete_account_data(&values, &deleted_account_ids[0])?;
+        } else {
+            self.database
+                .replace_state_json_and_delete_accounts_data(&values, deleted_account_ids)?;
         }
 
         self.sources = sources;

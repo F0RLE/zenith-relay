@@ -18,8 +18,9 @@ pub const DEFAULT_COOLDOWN_AFTER_FAILURES: u8 = 3;
 pub const DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE: bool = true;
 
 pub use catalog::{
-    canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
-    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
+    anthropic_max_implies_ultra, canonicalize_model_ids, canonicalize_reasoning_levels,
+    codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
+    codex_model_is_picker_eligible, decode_codex_model_alias,
     deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
     known_model_reasoning_levels, normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,

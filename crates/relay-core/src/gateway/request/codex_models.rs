@@ -376,6 +376,7 @@ fn build_codex_models_response_from_manifests<'a>(
             if source_image_models.contains(&normalized) {
                 model["input_modalities"] = json!(["text", "image"]);
             }
+            apply_anthropic_ultra_alias(&mut model, &upstream_id);
         }
         let provider_declared_reasoning = source_reasoning_templates
             .get(&normalized)
@@ -385,17 +386,21 @@ fn build_codex_models_response_from_manifests<'a>(
                 .get(&normalized)
                 .and_then(|entry| entry.get("supported_reasoning_levels"))
                 .is_some();
-        if !provider_declared_reasoning {
+        if !native_account_model && !provider_declared_reasoning {
             apply_known_reasoning_fallback(&mut model, &upstream_id);
         }
-        // A saved model policy is the explicit picker contract, including for
-        // a native account row. Without one, native metadata remains intact.
-        apply_model_reasoning_allowed_levels(
-            &mut model,
-            runtime
-                .model_reasoning_policy_levels(&upstream_id)
-                .as_deref(),
-        );
+        // Manual reasoning settings belong to pooled API routes. A native
+        // OAuth account owns its upstream Codex catalog and must not be
+        // rewritten by the API/pool policy.
+        if !native_account_model {
+            apply_model_reasoning_allowed_levels(
+                &mut model,
+                runtime
+                    .model_reasoning_policy_levels(&upstream_id)
+                    .as_deref(),
+            );
+        }
+        sort_supported_reasoning_levels(&mut model);
         models.push(model);
     }
 
@@ -433,6 +438,58 @@ fn apply_known_reasoning_fallback(model: &mut Value, model_id: &str) {
     }
 }
 
+fn apply_anthropic_ultra_alias(model: &mut Value, model_id: &str) {
+    if !crate::anthropic_max_implies_ultra(model_id) {
+        return;
+    }
+    let Some(levels) = model
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let has_max = levels.iter().any(|level| {
+        level
+            .get("effort")
+            .and_then(Value::as_str)
+            .is_some_and(|effort| effort.eq_ignore_ascii_case("max"))
+    });
+    let has_ultra = levels.iter().any(|level| {
+        level
+            .get("effort")
+            .and_then(Value::as_str)
+            .is_some_and(|effort| effort.eq_ignore_ascii_case("ultra"))
+    });
+    if has_max && !has_ultra {
+        levels.push(json!({"effort": "ultra", "description": "ultra"}));
+    }
+}
+
+fn sort_supported_reasoning_levels(model: &mut Value) {
+    let Some(levels) = model
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let order = crate::canonicalize_reasoning_levels(
+        levels
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str)),
+    );
+    levels.sort_by_key(|level| {
+        let effort = level
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        order
+            .iter()
+            .position(|candidate| candidate == &effort)
+            .unwrap_or(order.len())
+    });
+}
+
 fn apply_model_reasoning_allowed_levels(model: &mut Value, allowed_levels: Option<&[String]>) {
     let Some(allowed_levels) = allowed_levels else {
         // No override: preserve the provider-declared modes already present
@@ -462,11 +519,7 @@ fn apply_model_reasoning_allowed_levels(model: &mut Value, allowed_levels: Optio
             (!effort.is_empty()).then_some((effort, level))
         })
         .collect::<BTreeMap<_, _>>();
-    let levels = allowed_levels
-        .iter()
-        .map(|level| level.trim().to_ascii_lowercase())
-        .filter(|level| !level.is_empty())
-        .collect::<BTreeSet<_>>()
+    let levels = crate::canonicalize_reasoning_levels(allowed_levels.iter())
         .into_iter()
         .map(|effort| {
             detected_by_effort
@@ -604,8 +657,8 @@ mod tests {
             model["supported_reasoning_levels"],
             json!([
                 {"effort": "low", "description": "Provider low"},
-                {"effort": "max", "description": "max"},
-                {"effort": "xhigh", "description": "xhigh"}
+                {"effort": "xhigh", "description": "xhigh"},
+                {"effort": "max", "description": "max"}
             ])
         );
         assert!(model.get("default_reasoning_level").is_none());
@@ -649,6 +702,28 @@ mod tests {
             ])
         );
         assert_eq!(model["default_reasoning_level"], "medium");
+    }
+
+    #[test]
+    fn anthropic_max_catalog_mode_adds_ultra_for_codex() {
+        let mut model = json!({
+            "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "max"}
+            ]
+        });
+
+        apply_anthropic_ultra_alias(&mut model, "vendor/claude-opus-4-8");
+        sort_supported_reasoning_levels(&mut model);
+
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low"},
+                {"effort": "max"},
+                {"effort": "ultra", "description": "ultra"}
+            ])
+        );
     }
 
     #[test]

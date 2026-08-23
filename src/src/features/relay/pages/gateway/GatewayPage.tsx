@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import { isCodexOauthAccountEligible } from "../../accountStatus";
 import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader, SettingToggle, formatAccountPlan } from "../../components/Ui";
+import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTasksControl";
+import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 export function GatewayPage() {
@@ -26,7 +28,7 @@ function GatewayWorkspace({ running, endpoint }: { running: boolean; endpoint: s
   const savePort = () => perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved");
   return <div className="gateway-workspace">
     <section className="gateway-runtime-panel"><div className={`gateway-runtime-state${running ? " running" : ""}`}><span className="gateway-runtime-icon">{running ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />}</span><div><h2>{running ? t("gateway.runtimeOnline") : t("gateway.runtimeOffline")}</h2><p>{t(`gateway.runtimeHints.${mode}`)}</p></div></div>{runtime ? <dl className="gateway-runtime-metrics"><div><dt>{t("common.models")}</dt><dd>{runtime.gateway.visibleModelIds.length}</dd></div><div><dt>{t("pool.members")}</dt><dd>{runtime.gateway.candidateCount}</dd></div></dl> : null}</section>
-    {mode !== "zenith" ? <div className="gateway-settings-panel">{mode === "local" ? <section className="gateway-setting-row gateway-port-section"><header><span className="gateway-config-icon"><Network aria-hidden /></span><div><h2>{t("gateway.settings")}</h2><p>{t("gateway.portHint")}</p></div></header><form className="gateway-port-control" onSubmit={(event) => { event.preventDefault(); void savePort(); }}><label><span>{t("gateway.port")}</span><input type="number" min="1024" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label><Button type="submit" variant="secondary" busy={busy === "gateway-port"} disabled={!portValid || port === currentPort} icon={<Save aria-hidden />}>{running ? t("gateway.applyRestart") : t("common.save")}</Button></form></section> : null}<ClientSetup /></div> : null}
+    {mode !== "zenith" ? <div className="gateway-settings-panel">{mode === "local" ? <section className="gateway-setting-row gateway-port-section"><header><span className="gateway-config-icon"><Network aria-hidden /></span><div><h2>{t("gateway.settings")}</h2><p>{t("gateway.portHint")}</p></div></header><form className="gateway-port-control" onSubmit={(event) => { event.preventDefault(); void savePort(); }}><label><span>{t("gateway.port")}</span><input type="number" min="1024" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label><Button type="submit" variant="secondary" busy={busy === "gateway-port"} disabled={!portValid || port === currentPort} icon={<Save aria-hidden />}>{running ? t("gateway.applyRestart") : t("common.save")}</Button></form></section> : null}<ClientSetup /><CodexBackgroundTasksControl className="gateway-setting-row" /><CodexWebsocketsControl className="gateway-setting-row" /></div> : null}
   </div>;
 }
 

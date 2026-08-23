@@ -4,6 +4,7 @@ use super::{
     WEBSOCKET_PROTOCOLS,
 };
 use crate::gateway::request::apply_default_service_tier_if_missing;
+use crate::gateway::request::codex_background_request_kind;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
@@ -19,6 +20,7 @@ pub(super) struct ClientRequest {
     pub(super) responses_lite: bool,
     pub(super) response_affinity_key: Option<String>,
     pub(super) prompt_affinity_key: Option<String>,
+    pub(super) background_kind: Option<&'static str>,
 }
 
 impl ClientRequest {
@@ -75,6 +77,11 @@ impl ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
+        let background_kind = codex_background_request_kind(headers, &value);
+        let request_id = crate::gateway::request::request_id();
+        if let Some(kind) = background_kind {
+            runtime.mark_request_origin(&request_id, kind);
+        }
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .ok_or_else(GatewayFailure::model_not_found)?;
@@ -97,7 +104,7 @@ impl ClientRequest {
             value.get("prompt_cache_key").and_then(Value::as_str),
         );
         Ok(Self {
-            request_id: crate::gateway::request::request_id(),
+            request_id,
             value,
             requested_model,
             resolved_model,
@@ -105,6 +112,7 @@ impl ClientRequest {
             responses_lite,
             response_affinity_key,
             prompt_affinity_key,
+            background_kind,
         })
     }
 

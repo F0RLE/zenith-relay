@@ -55,6 +55,10 @@ export type RelayContextValue = {
   setProfileSwitchBackupPrompt: (enabled: boolean) => void;
   codexPoolOauthSelection: string;
   setCodexPoolOauthSelection: (selection: string) => void;
+  codexBackgroundTasksEnabled: boolean;
+  setCodexBackgroundTasksEnabled: (enabled: boolean) => Promise<boolean>;
+  codexWebsocketsEnabled: boolean;
+  setCodexWebsocketsEnabled: (enabled: boolean) => Promise<boolean>;
 };
 
 export const RelayContext = createContext<RelayContextValue | null>(null);

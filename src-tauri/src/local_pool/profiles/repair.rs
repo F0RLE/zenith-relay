@@ -24,6 +24,7 @@ const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_REPAIR_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_HISTORY_REPAIR_BACKUPS: usize = 1;
+const HISTORY_REPAIR_BACKUP_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -296,7 +297,6 @@ pub fn synchronize(
     apply(state_root, backup_root, &preview.session_id).map(Some)
 }
 
-#[cfg(test)]
 pub fn cleanup_history_repair_backups(backup_root: &Path) -> Result<usize, String> {
     cleanup_history_repair_backups_preserving(backup_root, None)
 }
@@ -350,6 +350,7 @@ fn cleanup_history_repair_backups_preserving(
     if !backup_root.exists() {
         return Ok(0);
     }
+    let now = now_ms();
     let mut backups = Vec::new();
     for entry in fs::read_dir(backup_root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
@@ -365,9 +366,6 @@ fn cleanup_history_repair_backups_preserving(
         }
         backups.push((backup_created_at_ms(&entry.path()), name, entry.path()));
     }
-    if backups.len() <= MAX_HISTORY_REPAIR_BACKUPS {
-        return Ok(0);
-    }
     backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     let mut keep = HashSet::new();
     if let Some(id) = preserve_id {
@@ -375,11 +373,11 @@ fn cleanup_history_repair_backups_preserving(
             keep.insert(id.to_string());
         }
     }
-    for (_, name, _) in &backups {
-        if keep.len() == MAX_HISTORY_REPAIR_BACKUPS {
-            break;
+    for (created_at_ms, name, _) in &backups {
+        let expired = created_at_ms.saturating_add(HISTORY_REPAIR_BACKUP_TTL_MS) <= now;
+        if !expired && keep.len() < MAX_HISTORY_REPAIR_BACKUPS {
+            keep.insert(name.clone());
         }
-        keep.insert(name.clone());
     }
     let stale = backups
         .into_iter()
@@ -1302,12 +1300,19 @@ mod tests {
         let ids = (1_u64..=4)
             .map(|index| format!("history_repair_{index:032x}"))
             .collect::<Vec<_>>();
+        let now = now_ms();
+        let created_at = [
+            now.saturating_sub(HISTORY_REPAIR_BACKUP_TTL_MS + 1),
+            now.saturating_sub(HISTORY_REPAIR_BACKUP_TTL_MS / 2),
+            now.saturating_sub(HISTORY_REPAIR_BACKUP_TTL_MS / 4),
+            now.saturating_sub(1),
+        ];
         for (index, id) in ids.iter().enumerate() {
             let directory = root.join(id);
             fs::create_dir_all(&directory).unwrap();
             fs::write(
                 directory.join("manifest.json"),
-                format!("{{\"createdAtMs\":{}}}", index + 1),
+                format!("{{\"createdAtMs\":{}}}", created_at[index]),
             )
             .unwrap();
         }

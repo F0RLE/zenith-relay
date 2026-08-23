@@ -1,10 +1,23 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-08-20.
+Last reviewed: 2026-08-23.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
 verification evidence exists, not when its UI is present.
+
+## Security boundary
+
+Every acceptance phase preserves the product boundary: Zenith Relay is a
+separate personal deployment, not a client of the production Zenith Gateway or
+Control API. Production credentials, customer keys, backend tokens, account
+inventory, and internal production routing/business logic must never be copied
+into Relay, its fixtures, or its documentation.
+
+User-owned credentials may move from desktop storage only to a server the same
+user operates, after an explicit management confirmation. State, usage,
+telemetry, diagnostics, exports, and API snapshots must remain redacted. Any
+future feature that cannot prove this boundary is out of scope.
 
 ## Current order
 
@@ -46,10 +59,12 @@ remaining release blockers are real-account pool/server runs, real
 Responses/Messages/client compatibility evidence, and the unmeasured warm
 pool-switch and disk-I/O path. The review found four `repair` risks; the
 history-repair follow-up below now closes those consistency cases. The
-follow-up audit found four more open issues: catalog-refresh failures are
-discarded by startup/restart/background callers, bulk account deletion can
-stop after partially deleting the batch, the reasoning probe treats any HTTP
-2xx as support, and manual reasoning edits can race a probe result.
+follow-up audit found four more open issues: catalog-refresh failures were
+discarded by startup/restart/background callers, bulk account deletion could
+stop after partially deleting the batch, the reasoning probe treated any HTTP
+2xx as support, and manual reasoning edits could race a probe result. All four
+implementation follow-ups are now closed; live provider and client acceptance
+remains open.
 
 The profile-recovery follow-up is now closed in the implementation: the first
 local startup creates one durable original snapshot and orders it first;
@@ -75,21 +90,24 @@ replace the following acceptance gates.
 3. Test an optional proxy route with a real reachable proxy.
 4. Exercise a quota refresh, a real cooldown or unavailable state, recovery
    after a success, and the resulting UI state.
-5. Confirm Usage records the selected member, timings, token split, and
-   classified result without exposing a secret or prompt body.
+5. Confirm Usage, snapshots, and telemetry record the selected member, timings,
+   token split, and classified result without exposing a secret or prompt body.
 
 ### User-managed server acceptance
 
 1. Deploy the server behind HTTPS with a separate management token and vault
    key, then attach the managed ChatGPT/Codex profile.
-2. Transfer or create permitted test connections through the desktop
-   management path and verify the server capability snapshot.
+2. Transfer or create only user-owned permitted test connections through the
+   desktop management path and verify the redacted server capability snapshot;
+   do not use Zenith production credentials or production account inventory.
 3. Send a streaming <code>/v1</code> request through the server.
 4. Close the desktop app, send another request, then reopen the app.
 5. Compare the server quota, account state, request count, token totals,
    timings, and API-equivalent usage with the desktop view.
 6. Take a backup, restore it to a clean test location, and prove that the
    restored runtime passes a request.
+7. Inspect state, usage, source statistics, diagnostics, and exports to confirm
+   that they contain no raw credentials, cookies, prompts, or provider bodies.
 
 Do not call the server pool production-ready until this entire path has passed
 against real accounts and providers.
@@ -150,14 +168,15 @@ rollback contract.
    only for rollouts actually processed, replaces every relevant `session_meta`,
    and normalizes Windows extended paths before writing recovery manifests;
    regression coverage now exists for the latter three consistency cases.
-6. Keep bulk account deletion preflighted and explicit on partial failure. The
-   command now validates every selected account before the first mutation and
-   reports `RecoveryRequired` with the completed count if an operational error
-   still occurs after the batch has started; a future transactional delete may
-   remove that remaining partial-failure path.
+6. Keep bulk account deletion preflighted and transactional. The command
+   validates every selected account before mutation, commits account state and
+   usage telemetry in one SQLite transaction, and restores reversible side
+   effects when preparation or commit fails. Regression coverage covers
+   multi-account telemetry cleanup and rollback.
 7. Serialize manual reasoning edits with local probes and merge against the
-   latest policy revision; the current dialog keeps manual controls active
-   during a probe and can apply a stale result over a newer selection.
+   latest policy revision. The dialog locks overlapping mutations and ignores
+   probe results from an older policy revision; unit and browser coverage keep
+   this ordering explicit.
 
 ## P3 - Dynamic model catalogs and client integrations
 
@@ -205,14 +224,15 @@ restores the previous profile catalog on recovery. Remaining release gates:
    same eligible model visible through the managed profile.
 3. Keep a failure during catalog refresh reversible: the previous verified
    profile must remain usable and native/user settings must not be overwritten.
-4. Surface catalog refresh failures and a Codex-running deferral to the caller
-   or a visible stale-state diagnostic. Startup, restart, and background paths
-   currently discard the refresh result, so an operation can report success
-   while the profile still has the previous catalog.
-5. Define probe acceptance per provider/adapter: an HTTP 2xx proves reachability
-   only, not that the requested reasoning effort was honored. Cover an ignored
-   effort, an explicit provider rejection, native Responses, and bridge routes;
-   label the result as support only when the contract can verify it.
+4. Keep catalog refresh failures and a Codex-running deferral visible to the
+   caller. Startup, restart, and background paths now persist a bounded
+   warning in the local snapshot; live profile acceptance must still prove
+   that the previous verified catalog remains usable after a failed refresh.
+5. Keep probe acceptance provider- and adapter-specific. HTTP 2xx is treated
+   as reachability only; support requires positive reasoning evidence or an
+   explicit provider contract. Fixtures cover ignored effort, explicit
+   rejection, native Responses, and bridge routes; live provider acceptance
+   remains required.
 
 ### Additional client applications
 

@@ -14,7 +14,7 @@ use super::super::{
 };
 use super::{pool, profiles};
 use std::{collections::HashMap, sync::Arc};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use zenith_relay_core::{
     accounts::AccountRecord,
     protocol::{
@@ -29,6 +29,19 @@ use zenith_relay_core::{
 use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
 
 pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms;
+
+pub(in crate::local_pool) fn record_catalog_refresh_result(
+    state: &DesktopState,
+    result: &std::result::Result<profiles::CodexCatalogRefreshStatus, LocalPoolError>,
+) {
+    match result {
+        Ok(profiles::CodexCatalogRefreshStatus::Deferred) => {
+            state.record_catalog_refresh_deferred()
+        }
+        Ok(_) => state.record_catalog_refresh_result(None),
+        Err(error) => state.record_catalog_refresh_result(Some(error)),
+    }
+}
 
 pub(in crate::local_pool) async fn runtime_from_store(
     state: &DesktopState,
@@ -213,6 +226,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
         usage_callback,
     )
     .map_err(core_error)?;
+    runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
+    runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
     runtime.set_protected_candidate(
         protected_account_id.as_deref(),
         settings.chatgpt_interface_quota_reserve_basis_points,
@@ -374,7 +389,9 @@ pub(in crate::local_pool) fn runtime_account_policy(
 pub(in crate::local_pool) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<DesktopState>();
-        let _ = profiles::refresh_active_codex_catalog(&state).await;
+        let result = profiles::refresh_active_codex_catalog(&state).await;
+        record_catalog_refresh_result(&state, &result);
+        let _ = app.emit("zenith-state-changed", ());
     });
 }
 
@@ -496,7 +513,11 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         }
         return Err(error);
     }
-    let _ = profiles::refresh_active_codex_catalog(state).await;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.prefetch_source_model_metadata();
+    }
+    let result = profiles::refresh_active_codex_catalog(state).await;
+    record_catalog_refresh_result(state, &result);
     Ok(())
 }
 

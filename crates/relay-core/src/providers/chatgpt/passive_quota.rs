@@ -231,6 +231,7 @@ mod tests {
             window_minutes: Some(0),
             observed_at_ms: 1_000,
             full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: None,
         };
         let previous = QuotaSnapshot {
             secondary: Some(placeholder),

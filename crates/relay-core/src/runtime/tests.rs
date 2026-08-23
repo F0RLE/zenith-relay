@@ -1628,6 +1628,52 @@ async fn provider_reasoning_modes_override_known_model_fallback_for_routing() {
 }
 
 #[tokio::test]
+async fn explicit_empty_reasoning_metadata_suppresses_known_model_fallback() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "upstream-secret",
+            &["gpt-5.6-terra"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    runtime.remember_source_model_manifest(
+        "source-1",
+        serde_json::json!({
+            "data": [{
+                "id": "gpt-5.6-terra",
+                "reasoningEffortModes": []
+            }]
+        }),
+        current_time_ms(),
+    );
+
+    let metadata = runtime
+        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], current_time_ms())
+        .await;
+
+    assert_eq!(
+        metadata.reasoning_catalog_templates["gpt-5.6-terra"]["supported_reasoning_levels"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        runtime.confirmed_source_reasoning_declared_levels("gpt-5.6-terra"),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        runtime.model_reasoning_allowed_levels("gpt-5.6-terra"),
+        Vec::<String>::new()
+    );
+    assert!(!runtime.candidate_reasoning_effort_is_allowed("source-1", "gpt-5.6-terra", "high"));
+}
+
+#[tokio::test]
 async fn codex_source_metadata_marks_bridge_images_but_requires_native_declaration() {
     let mut bridged = RuntimeSource::unrestricted(source(
         "source-bridge",

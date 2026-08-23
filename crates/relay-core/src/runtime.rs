@@ -36,11 +36,13 @@ use url::Url;
 mod authorization;
 mod build;
 mod candidates;
+mod control;
 mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
 
+use control::RuntimeControl;
 use session_state::CodexTurnStateStore;
 
 use build::{
@@ -60,8 +62,8 @@ use images::{cheapest_image_main_model, select_image_main_model};
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
-const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
-const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 15 * 1_000;
+const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 8 * 60 * 60 * 1_000;
+const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 
 #[derive(Default)]
@@ -89,6 +91,9 @@ fn source_reasoning_for_route(
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
 ) -> Option<SourceReasoningCapabilities> {
+    if capabilities.is_empty() {
+        return Some(capabilities);
+    }
     if adapter.is_passthrough() {
         return Some(capabilities);
     }
@@ -376,6 +381,7 @@ pub struct GatewayRuntime {
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     codex_turn_state_store: CodexTurnStateStore,
+    control: RuntimeControl,
     max_retry_candidates: usize,
     quota_stale_after_ms: u64,
     default_service_tier_fast: AtomicBool,
@@ -400,6 +406,7 @@ struct CachedModelManifest {
 #[derive(Default)]
 struct ConfirmedSourceReasoning {
     efforts: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    empty_routes: BTreeMap<String, BTreeSet<String>>,
     levels: BTreeMap<String, Vec<String>>,
     probe_progress: BTreeMap<String, SourceReasoningProbeProgress>,
 }
@@ -795,6 +802,7 @@ impl GatewayRuntime {
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             codex_turn_state_store: CodexTurnStateStore::default(),
+            control: RuntimeControl::default(),
             max_retry_candidates: options.max_retry_candidates,
             quota_stale_after_ms: options.quota_stale_after_ms,
             default_service_tier_fast: AtomicBool::new(
@@ -803,6 +811,48 @@ impl GatewayRuntime {
             response_affinity_store: affinity_store,
             usage,
         })
+    }
+
+    pub fn codex_background_tasks_enabled(&self) -> bool {
+        self.control.codex_background_tasks_enabled()
+    }
+
+    pub fn set_codex_background_tasks_enabled(&self, enabled: bool) {
+        self.control.set_codex_background_tasks_enabled(enabled);
+    }
+
+    pub fn codex_websockets_enabled(&self) -> bool {
+        self.control.codex_websockets_enabled()
+    }
+
+    pub fn set_codex_websockets_enabled(&self, enabled: bool) {
+        self.control.set_codex_websockets_enabled(enabled);
+    }
+
+    pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
+        self.control.mark_request_origin(request_id, origin);
+    }
+
+    pub(crate) fn request_origin(&self, request_id: &str) -> Option<&'static str> {
+        self.control.request_origin(request_id)
+    }
+
+    pub(crate) fn blocked_codex_background_event(
+        &self,
+        request_id: &str,
+        local_key_id: &str,
+        requested_model: &str,
+        wire_api: WireApi,
+        origin: &'static str,
+    ) {
+        self.control.blocked_codex_background_event(
+            &self.usage,
+            request_id,
+            local_key_id,
+            requested_model,
+            wire_api,
+            origin,
+        );
     }
 
     pub async fn discover_models(&self) -> Result<Vec<String>> {
@@ -831,13 +881,17 @@ impl GatewayRuntime {
         self.keys
             .iter()
             .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
-            .map(|key| AuthenticatedKey {
-                id: key.id.clone(),
-                scope: key.scope.clone(),
-                model_rules: key.model_rules.clone(),
-                model_prefix: key.model_prefix.clone(),
-                client_wire_apis: key.client_wire_apis.clone(),
-            })
+            .map(|key| self.authenticated_key(key))
+    }
+
+    fn authenticated_key(&self, key: &RuntimeKey) -> AuthenticatedKey {
+        AuthenticatedKey {
+            id: key.id.clone(),
+            scope: key.scope.clone(),
+            model_rules: key.model_rules.clone(),
+            model_prefix: key.model_prefix.clone(),
+            client_wire_apis: key.client_wire_apis.clone(),
+        }
     }
 
     pub(crate) fn allows_client_wire_api(
@@ -1014,25 +1068,10 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<String> {
-        let candidate: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
-        let Some(key) = self
-            .keys
-            .iter()
-            .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
-        else {
+        let Some(key) = self.authenticate_secret(secret) else {
             return Vec::new();
         };
-        self.visible_models(
-            &AuthenticatedKey {
-                id: key.id.clone(),
-                scope: key.scope.clone(),
-                model_rules: key.model_rules.clone(),
-                model_prefix: key.model_prefix.clone(),
-                client_wire_apis: key.client_wire_apis.clone(),
-            },
-            allowed_protocols,
-            now_ms,
-        )
+        self.visible_models(&key, allowed_protocols, now_ms)
     }
 
     pub(crate) fn executor_route(

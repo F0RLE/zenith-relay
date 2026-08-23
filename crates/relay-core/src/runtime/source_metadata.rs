@@ -125,7 +125,7 @@ impl GatewayRuntime {
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
         let mut probe_progress_by_model = BTreeMap::new();
-        let mut evaluated_reasoning = Vec::<(String, String, BTreeSet<String>)>::new();
+        let mut evaluated_reasoning = Vec::<(String, String, BTreeSet<String>, bool)>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
         for SourceMetadataManifest {
             candidate_id,
@@ -171,7 +171,10 @@ impl GatewayRuntime {
                     .or_default()
                     .push(supports_image);
                 let capabilities = reasoning.get(&model_key).cloned().and_then(|capabilities| {
-                    source_reasoning_for_route(capabilities, adapter, reasoning_mode)
+                    let mut capabilities =
+                        source_reasoning_for_route(capabilities, adapter, reasoning_mode)?;
+                    capabilities.apply_model_implied_efforts(&model_key);
+                    Some(capabilities)
                 });
                 // Only an explicit Gateway publication is evidence. A normal
                 // provider catalog refresh must not withdraw a previously
@@ -189,6 +192,9 @@ impl GatewayRuntime {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        capabilities
+                            .as_ref()
+                            .is_some_and(SourceReasoningCapabilities::is_empty),
                     ));
                 }
                 if let Some(capabilities) = capabilities {
@@ -216,43 +222,72 @@ impl GatewayRuntime {
                 .reasoning_catalog_templates
                 .insert(model, capabilities.codex_catalog_template());
         }
-        {
-            let mut confirmed = self
-                .model_metadata
-                .confirmed_reasoning
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (model, candidate_id, efforts) in evaluated_reasoning {
-                if efforts.is_empty() {
-                    let remove_model = confirmed.efforts.get_mut(&model).is_some_and(|routes| {
-                        routes.remove(&candidate_id);
-                        routes.is_empty()
-                    });
-                    if remove_model {
-                        confirmed.efforts.remove(&model);
-                    }
-                } else {
-                    confirmed
-                        .efforts
-                        .entry(model)
-                        .or_default()
-                        .insert(candidate_id, efforts);
-                }
-            }
-            let previous_levels = confirmed.levels.clone();
-            confirmed.levels = merge_confirmed_source_reasoning_levels(
-                &confirmed.efforts,
-                &previous_levels,
-                &current_reasoning_levels,
-            );
-            confirmed.probe_progress.extend(probe_progress_by_model);
-        }
+        self.update_confirmed_source_reasoning(
+            evaluated_reasoning,
+            &current_reasoning_levels,
+            probe_progress_by_model,
+        );
         for (model, route_support) in image_support_by_model {
             if route_support.iter().all(|supports_image| *supports_image) {
                 metadata.image_models.insert(model);
             }
         }
         metadata
+    }
+
+    fn update_confirmed_source_reasoning(
+        &self,
+        evaluated_reasoning: Vec<(String, String, BTreeSet<String>, bool)>,
+        current_reasoning_levels: &BTreeMap<String, Vec<String>>,
+        probe_progress_by_model: BTreeMap<String, SourceReasoningProbeProgress>,
+    ) {
+        let mut confirmed = self
+            .model_metadata
+            .confirmed_reasoning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (model, candidate_id, efforts, explicitly_empty) in evaluated_reasoning {
+            if efforts.is_empty() {
+                let remove_model = confirmed.efforts.get_mut(&model).is_some_and(|routes| {
+                    routes.remove(&candidate_id);
+                    routes.is_empty()
+                });
+                if remove_model {
+                    confirmed.efforts.remove(&model);
+                }
+                if explicitly_empty {
+                    confirmed
+                        .empty_routes
+                        .entry(model)
+                        .or_default()
+                        .insert(candidate_id);
+                } else if let Some(routes) = confirmed.empty_routes.get_mut(&model) {
+                    routes.remove(&candidate_id);
+                    if routes.is_empty() {
+                        confirmed.empty_routes.remove(&model);
+                    }
+                }
+            } else {
+                if let Some(routes) = confirmed.empty_routes.get_mut(&model) {
+                    routes.remove(&candidate_id);
+                    if routes.is_empty() {
+                        confirmed.empty_routes.remove(&model);
+                    }
+                }
+                confirmed
+                    .efforts
+                    .entry(model)
+                    .or_default()
+                    .insert(candidate_id, efforts);
+            }
+        }
+        let previous_levels = confirmed.levels.clone();
+        confirmed.levels = merge_confirmed_source_reasoning_levels(
+            &confirmed.efforts,
+            &previous_levels,
+            current_reasoning_levels,
+        );
+        confirmed.probe_progress.extend(probe_progress_by_model);
     }
 
     fn source_metadata_routes(
@@ -308,16 +343,22 @@ impl GatewayRuntime {
         routes: Vec<SourceMetadataRoute>,
         now_ms: u64,
     ) -> Vec<SourceMetadataManifest> {
+        let refresh_allowed = now_ms
+            >= self
+                .model_metadata
+                .prefetch_not_before_ms
+                .load(Ordering::Acquire);
         // A catalog request with fresh manifests must not queue behind an
         // unrelated best-effort refresh. Stale callers still serialize their
         // upstream discovery so they coalesce onto one cache refill.
-        let refresh_required = routes.iter().any(|route| {
-            self.cached_source_model_manifest(&route.candidate_id)
-                .is_none_or(|manifest| {
-                    now_ms.saturating_sub(manifest.observed_at_ms)
-                        > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
-                })
-        });
+        let refresh_required = refresh_allowed
+            && routes.iter().any(|route| {
+                self.cached_source_model_manifest(&route.candidate_id)
+                    .is_none_or(|manifest| {
+                        now_ms.saturating_sub(manifest.observed_at_ms)
+                            > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+                    })
+            });
         let refresh_guard = if refresh_required {
             Some(self.model_metadata.refresh_lock.lock().await)
         } else {
@@ -326,10 +367,16 @@ impl GatewayRuntime {
         let manifests = join_all(
             routes
                 .into_iter()
-                .map(|route| self.source_metadata_manifest(route, now_ms)),
+                .map(|route| self.source_metadata_manifest(route, now_ms, refresh_allowed)),
         )
         .await;
         drop(refresh_guard);
+        if refresh_required {
+            self.model_metadata.prefetch_not_before_ms.store(
+                now_ms.saturating_add(SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS),
+                Ordering::Release,
+            );
+        }
         manifests
     }
 
@@ -337,6 +384,7 @@ impl GatewayRuntime {
         &self,
         route: SourceMetadataRoute,
         now_ms: u64,
+        refresh_allowed: bool,
     ) -> SourceMetadataManifest {
         let SourceMetadataRoute {
             candidate_id,
@@ -349,9 +397,10 @@ impl GatewayRuntime {
             reasoning_mode,
         } = route;
         let cached_manifest = self.cached_source_model_manifest(&candidate_id);
-        let manifest = if cached_manifest.as_ref().is_some_and(|manifest| {
-            now_ms.saturating_sub(manifest.observed_at_ms) <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
-        }) {
+        let manifest = if !refresh_allowed
+            || cached_manifest.as_ref().is_some_and(|manifest| {
+                now_ms.saturating_sub(manifest.observed_at_ms) <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+            }) {
             cached_manifest.map(|manifest| manifest.value)
         } else {
             let fetched_manifest = async {
@@ -549,6 +598,22 @@ impl GatewayRuntime {
             .unwrap_or_default()
     }
 
+    pub fn confirmed_source_reasoning_declared_levels(&self, model: &str) -> Option<Vec<String>> {
+        let model = model.trim().to_ascii_lowercase();
+        let confirmed = self
+            .model_metadata
+            .confirmed_reasoning
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        confirmed.levels.get(&model).cloned().or_else(|| {
+            confirmed
+                .empty_routes
+                .get(&model)
+                .filter(|routes| !routes.is_empty())
+                .map(|_| Vec::new())
+        })
+    }
+
     pub fn reasoning_probe_progress(&self, model: &str) -> Option<SourceReasoningProbeProgress> {
         self.model_metadata
             .confirmed_reasoning
@@ -571,8 +636,7 @@ impl GatewayRuntime {
             return levels.to_vec();
         }
         drop(configured);
-        let confirmed = self.confirmed_source_reasoning_levels(model);
-        if !confirmed.is_empty() {
+        if let Some(confirmed) = self.confirmed_source_reasoning_declared_levels(model) {
             return confirmed;
         }
         crate::known_model_reasoning_levels(model)
@@ -626,19 +690,29 @@ impl GatewayRuntime {
         // A confirmed route-specific declaration wins over the model fallback.
         // This keeps provider-added efforts routable before an operator edits
         // the manual company policy.
-        if binding.wire_api == WireApi::Responses
-            && self
+        if binding.wire_api == WireApi::Responses {
+            let model = model.trim().to_ascii_lowercase();
+            let confirmed = self
                 .model_metadata
                 .confirmed_reasoning
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if confirmed
                 .efforts
-                .get(&model.trim().to_ascii_lowercase())
+                .get(&model)
                 .and_then(|routes| routes.get(candidate_id))
                 .is_some_and(|levels| levels.contains(&effort))
-        {
-            return binding.adapter.is_passthrough()
-                || binding.reasoning_mode.supports_effort(&effort);
+            {
+                return binding.adapter.is_passthrough()
+                    || binding.reasoning_mode.supports_effort(&effort);
+            }
+            if confirmed
+                .empty_routes
+                .get(&model)
+                .is_some_and(|routes| routes.contains(candidate_id))
+            {
+                return false;
+            }
         }
 
         if crate::known_model_reasoning_levels(model)

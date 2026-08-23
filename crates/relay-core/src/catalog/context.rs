@@ -48,6 +48,31 @@ impl SourceReasoningCapabilities {
         self.levels.iter().map(|level| level.effort.as_str())
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.levels.is_empty()
+    }
+
+    /// Adds Relay's Anthropic-only top tier when a provider has published
+    /// `max`. The upstream adapter translates `ultra` back to `max`.
+    pub(crate) fn apply_model_implied_efforts(&mut self, model: &str) {
+        if !crate::anthropic_max_implies_ultra(model)
+            || !self
+                .levels
+                .iter()
+                .any(|level| level.effort.eq_ignore_ascii_case("max"))
+            || self
+                .levels
+                .iter()
+                .any(|level| level.effort.eq_ignore_ascii_case("ultra"))
+        {
+            return;
+        }
+        self.levels.push(SourceReasoningLevel {
+            effort: "ultra".to_string(),
+            description: "ultra".to_string(),
+        });
+    }
+
     /// Removes efforts that cannot be represented by the selected adapter.
     ///
     /// Native Responses routes preserve provider-defined effort names. A
@@ -278,9 +303,9 @@ pub(crate) fn union_source_reasoning_capabilities(
         }
     }
 
-    if combined.levels.is_empty() {
-        return None;
-    }
+    // An explicit empty declaration is meaningful. Keep it through the
+    // merge so the Codex catalog can suppress the model registry fallback.
+    // `None` still means that no route supplied reasoning metadata at all.
     if !combined.supports_summary_parameter && !combined.supports_summaries {
         combined.default_summary = "none".to_string();
     }
@@ -299,19 +324,19 @@ pub fn normalize_model_reasoning_allowed_levels(
         if levels.len() > MAX_MODEL_REASONING_LEVELS {
             return Err("model reasoning allowed levels are invalid");
         }
-        let mut model_levels = BTreeSet::new();
+        let mut model_levels = Vec::new();
         for level in levels {
             let level = level.trim().to_ascii_lowercase();
             if !valid_reasoning_effort(&level) {
                 return Err("model reasoning allowed levels are invalid");
             }
-            model_levels.insert(level);
+            model_levels.push(level);
         }
         // An explicit empty list is meaningful: it is the user's override
         // that disables every provider-reported mode for this model.
         normalized.insert(
             model.to_ascii_lowercase(),
-            model_levels.into_iter().collect(),
+            crate::canonicalize_reasoning_levels(model_levels),
         );
     }
     Ok(normalized)
@@ -354,25 +379,16 @@ pub(crate) fn context_window(value: &Value) -> Option<u64> {
 fn parse_source_reasoning_capabilities(
     model: &Map<String, Value>,
 ) -> Option<SourceReasoningCapabilities> {
-    let probe = model
-        .get("reasoningProbe")
-        .or_else(|| model.get("reasoning_probe"))
-        .cloned()
-        .and_then(|value| serde_json::from_value::<SourceReasoningProbeProgress>(value).ok());
     let raw_modes = model
         .get("reasoningEffortModes")
         .or_else(|| model.get("reasoning_effort_modes"))
         .and_then(Value::as_array)?;
     // Probe state is diagnostic and must never gate the route or defaults.
+    // A missing field means that the provider did not publish reasoning
+    // metadata. An explicitly empty array is a real declaration that this
+    // route has no reasoning modes, even when no probe object is present.
     if raw_modes.is_empty() {
-        let fully_rejected = probe.is_some_and(|probe| {
-            probe.total > 0
-                && probe.running == 0
-                && probe.pending == 0
-                && probe.confirmed == 0
-                && probe.rejected == probe.total
-        });
-        return fully_rejected.then(SourceReasoningCapabilities::empty);
+        return Some(SourceReasoningCapabilities::empty());
     }
     let mut published = Map::new();
     published.insert(
@@ -787,6 +803,28 @@ mod tests {
         let capabilities = source_reasoning_capabilities(&manifest, &configured);
         assert!(capabilities.contains_key("glm-5.2"));
         assert!(capabilities["glm-5.2"].effort_ids().next().is_none());
+        assert_eq!(
+            capabilities["glm-5.2"].codex_catalog_template(),
+            json!({"supported_reasoning_levels": []})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn explicit_empty_modes_without_probe_are_not_treated_as_missing_metadata() {
+        let configured = ["gpt-5.6-terra"].into_iter().map(str::to_string).collect();
+        let manifest = json!({
+            "data": [{
+                "id": "gpt-5.6-terra",
+                "reasoningEffortModes": []
+            }]
+        });
+
+        let capabilities = source_reasoning_capabilities(&manifest, &configured);
+        assert!(capabilities.contains_key("gpt-5.6-terra"));
+        assert!(capabilities["gpt-5.6-terra"].is_empty());
     }
 
     #[test]
@@ -898,6 +936,28 @@ mod tests {
             .as_object()
             .unwrap()
             .clone()
+        );
+    }
+
+    #[test]
+    fn anthropic_max_adds_relay_ultra_to_the_source_catalog() {
+        let mut capabilities = parse_reasoning_object(
+            json!({
+                "reasoningEffortModes": ["low", "medium", "high", "max"]
+            })
+            .as_object()
+            .unwrap(),
+        )
+        .expect("source-declared reasoning levels");
+
+        capabilities.apply_model_implied_efforts("claude-fable-5");
+
+        assert_eq!(
+            capabilities
+                .effort_ids()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "max", "ultra"]
         );
     }
 }

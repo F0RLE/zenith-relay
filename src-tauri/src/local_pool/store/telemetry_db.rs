@@ -805,6 +805,66 @@ mod tests {
     }
 
     #[test]
+    fn deleting_multiple_accounts_removes_all_usage_data_in_one_transaction() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-bulk-delete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO request_logs(
+                    request_id, local_key_id, source_id, candidate_id, account_id,
+                    wire_api, success, http_status, latency_ms
+                 ) VALUES
+                    ('request-delete-1', 'key', 'codex', 'account-delete-1',
+                     'account-delete-1', 'responses', 1, 200, 1),
+                    ('request-delete-2', 'key', 'codex', 'account-delete-2',
+                     'account-delete-2', 'responses', 1, 200, 1);
+                 INSERT INTO usage_candidate_rollups(candidate_kind, candidate_id, model)
+                 VALUES ('account', 'account-delete-1', 'gpt-test'),
+                        ('account', 'account-delete-2', 'gpt-test');
+                 INSERT INTO response_affinity(
+                     response_key, candidate_id, expires_at_ms, updated_at_ms
+                 ) VALUES
+                    ('response-delete-1', 'account-delete-1', 1000, 1),
+                    ('response-delete-2', 'account-delete-2', 1000, 1);",
+            )
+            .unwrap();
+
+        database
+            .replace_state_json_and_delete_accounts_data(
+                &[("accounts", "[]".to_string())],
+                &[
+                    "account-delete-1".to_string(),
+                    "account-delete-2".to_string(),
+                ],
+            )
+            .unwrap();
+
+        let remaining: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM request_logs WHERE account_id LIKE 'account-delete-%') +
+                    (SELECT COUNT(*) FROM usage_candidate_rollups
+                     WHERE candidate_kind = 'account' AND candidate_id LIKE 'account-delete-%') +
+                    (SELECT COUNT(*) FROM response_affinity WHERE candidate_id LIKE 'account-delete-%')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn invalid_state_batch_does_not_partially_save_or_purge_account_data() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-account-delete-rollback-{}",

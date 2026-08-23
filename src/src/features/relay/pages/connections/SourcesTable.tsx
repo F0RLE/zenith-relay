@@ -86,7 +86,9 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
             : null;
           const statusLabel = t(`connections.status.${source.operationalStatus}`);
           const indicatorLabel = [runtimeError, runtimeHint, statusLabel].filter(Boolean).join(" · ");
-          const indicatorTone = source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
+          const indicatorTone = runtimeError
+            ? "error"
+            : source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
             ? operationalStatusTone(source.operationalStatus)
             : runtimeTone ?? operationalStatusTone(source.operationalStatus);
           return <tr key={source.id}>

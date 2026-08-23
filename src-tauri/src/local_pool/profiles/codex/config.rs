@@ -53,6 +53,7 @@ pub(super) fn attach_config(
     model_catalog_path: Option<&str>,
     previous_model_catalog: Option<&str>,
     model_reasoning_effort: Option<&str>,
+    supports_websockets: bool,
 ) {
     // Codex reads the active effort from its root config, while the managed
     // catalog supplies the model-specific list of valid levels. Keep both in
@@ -78,7 +79,20 @@ pub(super) fn attach_config(
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     provider["experimental_bearer_token"] = value(local_key);
-    provider["supports_websockets"] = value(true);
+    provider["supports_websockets"] = value(supports_websockets);
+}
+
+pub(super) fn set_managed_websockets(document: &mut DocumentMut, enabled: bool) -> bool {
+    let Some(provider) = document
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(PROVIDER_ID))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    provider.insert("supports_websockets", value(enabled));
+    true
 }
 
 pub(super) fn restore_config(
@@ -305,8 +319,9 @@ pub(super) fn managed_provider_matches(document: &DocumentMut, backup: &ProfileB
                         .get("experimental_bearer_token")
                         .and_then(Item::as_str)
                         .is_some_and(|token| key_hash(token.trim()) == backup.managed_key_hash))
-                && provider.get("supports_websockets").and_then(Item::as_bool)
-                    == Some(backup.managed_supports_websockets)
+                && backup.managed_supports_websockets.is_none_or(|expected| {
+                    provider.get("supports_websockets").and_then(Item::as_bool) == Some(expected)
+                })
         })
 }
 

@@ -372,7 +372,10 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         }),
     );
     assert_eq!(account.models, ["gpt-future-codex"]);
-    assert!(account.account.last_error_code.is_none());
+    assert_eq!(
+        account.account.last_error_code.as_deref(),
+        Some("models_transport")
+    );
 
     account.models.clear();
     apply_model_discovery(
@@ -1208,12 +1211,15 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
         window_minutes: Some(300),
         observed_at_ms: now_ms,
         full_transition_fingerprint: None,
+        exhaustion_transition_fingerprint: None,
     });
     let updated = AccountQuotaRefreshResponse {
         account: account.clone(),
         quota: AccountQuotaOutcome::Updated {
             transitions: Vec::new(),
+            exhaustion_transitions: Vec::new(),
         },
+        exhaustion_transitions: Vec::new(),
     };
     assert_eq!(
         next_quota_refresh_at(&updated, now_ms),
@@ -1224,7 +1230,9 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
         account: account.clone(),
         quota: AccountQuotaOutcome::Updated {
             transitions: Vec::new(),
+            exhaustion_transitions: Vec::new(),
         },
+        exhaustion_transitions: Vec::new(),
     };
     assert_eq!(
         next_quota_refresh_at(&short_reset, now_ms),
@@ -1235,7 +1243,9 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
         account: account.clone(),
         quota: AccountQuotaOutcome::Updated {
             transitions: Vec::new(),
+            exhaustion_transitions: Vec::new(),
         },
+        exhaustion_transitions: Vec::new(),
     };
     assert_eq!(
         next_quota_refresh_at(&long_window, now_ms),
@@ -1248,6 +1258,7 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
             code: "quota_transport".into(),
             retryable: true,
         },
+        exhaustion_transitions: Vec::new(),
     };
     assert_eq!(
         next_quota_refresh_at(&retryable, now_ms),
@@ -1259,6 +1270,7 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
             code: "quota_invalid_response".into(),
             retryable: false,
         },
+        exhaustion_transitions: Vec::new(),
     };
     assert_eq!(
         next_quota_refresh_at(&parser_failure, now_ms),
@@ -1272,6 +1284,7 @@ fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
             code: "invalid_grant".into(),
             retryable: false,
         },
+        exhaustion_transitions: Vec::new(),
     };
     assert_eq!(next_quota_refresh_at(&terminal, now_ms), None);
     assert_eq!(QUOTA_REFRESH_BATCH_SIZE, 5);

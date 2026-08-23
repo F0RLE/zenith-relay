@@ -1,6 +1,6 @@
 # Zenith Relay Planning
 
-Last reviewed: 2026-08-11.
+Last reviewed: 2026-08-23.
 
 This document describes the implementation that exists today, its boundaries,
 and the design rules for compatible integrations. It is not a historical task
@@ -18,9 +18,30 @@ single OpenAI-compatible endpoint. It has three explicit modes:
 | My server | A user-managed Relay server. | The user's server, encrypted vault, and SQLite database. |
 
 The desktop app is not a public account marketplace, a Zenith billing backend,
-or a way to move a user's accounts into Zenith inventory. Secrets remain on the
-chosen device unless the user explicitly transfers them to their own connected
-server through a management operation.
+or a way to move a user's accounts into Zenith inventory. User-owned secrets
+remain on the chosen device unless the user explicitly transfers them to their
+own connected server through a confirmed management operation. That server is
+outside Zenith production systems.
+
+### Secret and business-logic boundary
+
+Relay is a separate desktop/personal-pool product. It does not receive or
+forward Zenith production credentials, customer API keys, backend tokens,
+account-pool inventory, provider cabinet credentials, or internal Gateway and
+Control API business/routing logic. Those values and decisions remain owned by
+their respective production systems.
+
+Desktop secret material is kept in the operating-system credential store.
+Server secret material is kept in the user-managed server vault. A confirmed
+desktop-to-server management operation may transfer only the selected user's
+own provider/session secret to that user's server. It is never an implicit
+upload to Zenith, and the management token is never reused as a profile
+credential.
+
+Typed snapshots, SQLite state, telemetry, logs, exports, diagnostics, and
+screenshots contain redacted operational data only. They may include model
+names, status, timing, and aggregates, but not credentials, cookies,
+authorization headers, prompts, response bodies, or provider session material.
 
 ### Provider-policy boundary
 
@@ -72,9 +93,10 @@ placement, so Relay does not force live process pages to disk.
 Relay desktop state is kept under `%LOCALAPPDATA%\\Zenith Relay`: `data` holds
 the SQLite runtime database and encrypted vault, `cache` holds WebView/import
 working data, and `recovery` holds profile and repair snapshots. The database
-keeps bounded request diagnostics (raw logs are retained for 30 days) and an
+keeps bounded, redacted request diagnostics (retained for 30 days) and an
 incremental API-equivalent rollup so old logs can be removed without losing
-totals. Relay does not create runtime databases or caches in `%USERPROFILE%\\.codex`;
+totals. Raw secret material is never written to these records. Relay does not
+create runtime databases or caches in `%USERPROFILE%\\.codex`;
 that directory is touched only for the Codex files required by the reversible
 client integration.
 
@@ -82,7 +104,7 @@ client integration.
 
 Current account intake supports ChatGPT OAuth, an existing local profile, and
 compatible imported session material. Compatible API sources are independent
-records with their own address, protocol, credentials, models, priority,
+records with their own address, protocol, credential references, models, priority,
 recovery delay, discovered price metadata, and optional model-price overrides.
 A source catalog also records the route-specific protocol binding and only the
 reasoning options the source explicitly confirms. A proxy is optional and may
@@ -146,8 +168,8 @@ timings and terminal errors are recorded for diagnostics. Each terminal failure
 has a safe origin: `relay` for Relay configuration or translation, `account`
 for account credential or account-route failures, and `provider` for a
 compatible API source or upstream provider. Usage and exports retain the
-origin, category, and HTTP status without retaining raw prompts, secrets, or
-provider response bodies.
+origin, category, and HTTP status without retaining raw prompts, secrets,
+provider response bodies, or other raw provider payloads.
 
 ## Models and client visibility
 
@@ -322,6 +344,8 @@ The server is a personal single-deployment runtime:
 - ChatGPT/Codex receives a server-managed profile credential for <code>/v1</code>;
 - encrypted secrets live in the server vault, while operational state and
   redacted usage live in SQLite;
+- state, capabilities, usage, and source statistics responses stay redacted and
+  never contain credentials, cookies, prompts, or raw provider bodies;
 - migrations are append-only and protect interrupted upgrades with a
   pre-migration backup;
 - backup and restore validate the database and encrypted references before
@@ -330,8 +354,11 @@ The server is a personal single-deployment runtime:
   needed for current totals and diagnostics.
 
 The desktop client negotiates protocol capabilities before it performs a
-remote management action. It can manage accounts, sources, proxies,
+remote management action. It can manage the user's accounts, sources, proxies,
 model/routing settings, usage, and profile attachment through that contract.
+Moving a user-owned secret to the server is a separate explicit operation; the
+contract has no path for Zenith production secrets or internal production
+logic.
 Server backup and restore use the standalone server CLI so they can validate
 the database and encrypted vault while the data directory is locked. The
 server is not yet documented as a multi-replica service: distributed leases

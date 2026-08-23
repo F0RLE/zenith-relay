@@ -442,6 +442,32 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await page.screenshot({ path: "output/playwright/model-rules-disabled-ru-dark-840x560.png" });
 });
 
+test("image model pricing stays compact and does not expose reasoning controls", async ({ page }) => {
+  await installTauriMock(page, {
+    locale: "ru",
+    mode: "local",
+    theme: "light",
+    populated: true,
+    serverModelOrder: ["gpt-5.4", "gpt-image-2"],
+    modelReasoning: { "gpt-image-2": ["low", "medium", "high"] },
+  });
+  await page.setViewportSize({ width: 1268, height: 720 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await page.getByRole("tab", { name: "Правила моделей" }).click();
+
+  const model = page.locator('.model-rules tbody tr[data-model-id="gpt-image-2"]');
+  await expect(model).toBeVisible();
+  await expect(model.locator('[data-model-reasoning-edit="gpt-image-2"]')).toHaveCount(0);
+  await expect(model.locator(".model-image-price-summary")).toBeVisible();
+  await expect(model.locator(".model-image-price-item")).toHaveCount(3);
+  expect(await model.locator(".model-image-price-summary").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, overflow: element.scrollWidth - element.clientWidth };
+  })).toMatchObject({ overflow: 0 });
+  await page.screenshot({ path: "output/playwright/model-rules-image-pricing-ru-light-1268x720.png" });
+});
+
 test("sparse reference tables stay compact and centered in a wide window", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true });
   await page.setViewportSize({ width: 1648, height: 1168 });
@@ -1518,6 +1544,25 @@ test("automation table fits the standard window without horizontal scrolling", a
   expect(await table.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
+test("weekly quota reset confirmation stays concise in the compact dark window", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, resetCreditsAvailable: 1 });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  await page.getByRole("button", { name: "Доступен сброс: 1 · Сбросить недельную квоту", exact: true }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Сбросить недельную квоту" });
+  await expect(dialog.getByText("Сбросить недельную квоту для этой учётной записи?", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Нет", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Да, сбросить", exact: true })).toBeVisible();
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
+      && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/reset-confirm-after-ru-dark-840x560.png" });
+});
+
 test("automation editor fits the compact window without hidden controls", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
   await page.setViewportSize({ width: 840, height: 560 });
@@ -1540,9 +1585,13 @@ test("automation editor fits the compact window without hidden controls", async 
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     const body = element.querySelector(".relay-dialog-body");
+    const execution = element.querySelector(".automation-execution");
+    const bodyRect = body?.getBoundingClientRect();
+    const executionRect = execution?.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
       && element.scrollWidth <= element.clientWidth
-      && Boolean(body && body.scrollHeight <= body.clientHeight);
+      && Boolean(body && body.scrollHeight <= body.clientHeight)
+      && Boolean(bodyRect && executionRect && executionRect.top >= bodyRect.top && executionRect.bottom <= bodyRect.bottom);
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/automation-dialog-ru-dark-840x560.png" });
 
@@ -1553,8 +1602,14 @@ test("automation editor fits the compact window without hidden controls", async 
   await expect(dialog.getByRole("button", { name: "Модель: gpt-5.4-mini" })).toBeVisible();
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
+    const body = element.querySelector(".relay-dialog-body");
+    const execution = element.querySelector(".automation-execution");
+    const bodyRect = body?.getBoundingClientRect();
+    const executionRect = execution?.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
-      && element.scrollWidth <= element.clientWidth;
+      && element.scrollWidth <= element.clientWidth
+      && Boolean(body && body.scrollHeight <= body.clientHeight)
+      && Boolean(bodyRect && executionRect && executionRect.top >= bodyRect.top && executionRect.bottom <= bodyRect.bottom);
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/automation-dialog-selected-ru-dark-840x560.png" });
 });

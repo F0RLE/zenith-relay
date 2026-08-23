@@ -38,9 +38,6 @@ pub async fn get_local_runtime_state(
     let inputs = state.runtime_inputs().await?;
     let running = inputs.running;
     let runtime = state.gateway.runtime().await;
-    if let Some(runtime) = runtime.as_ref() {
-        runtime.prefetch_source_model_metadata();
-    }
     let routing_order = runtime
         .as_ref()
         .map(|runtime| runtime.candidate_runtime_order())
@@ -162,17 +159,18 @@ pub async fn get_local_runtime_state(
             model.custom_price = true;
         }
         let has_api_source_route = model_has_api_source_route(&source_summaries, &model_id);
+        let has_pool_route =
+            has_api_source_route || model_has_native_account_route(&account_summaries, &model_id);
         apply_model_reasoning_summary(
             model,
             runtime
                 .as_ref()
-                .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
-                .unwrap_or_default(),
+                .and_then(|runtime| runtime.confirmed_source_reasoning_declared_levels(&model_id)),
             zenith_relay_core::reasoning_policy_levels(
                 &inputs.gateway.model_reasoning_allowed_levels,
                 &model_id,
             ),
-            has_api_source_route || model_has_native_account_route(&account_summaries, &model_id),
+            has_pool_route,
         );
         model.reasoning_probe_available = has_api_source_route;
         model.reasoning_probe = runtime
@@ -236,6 +234,8 @@ pub async fn get_local_runtime_state(
             chatgpt_interface_quota_reserve_basis_points: Some(
                 inputs.gateway.chatgpt_interface_quota_reserve_basis_points,
             ),
+            codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
+            codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
             routing_order,
         },
         platform: platform::platform_name().to_string(),
@@ -456,6 +456,8 @@ mod parity_tests {
                 account_proxy_required: false,
                 quota_request_timeout_seconds: 20,
                 chatgpt_interface_quota_reserve_basis_points: Some(100),
+                codex_background_tasks_enabled: true,
+                codex_websockets_enabled: true,
                 routing_order: Vec::new(),
             },
             platform: "test".into(),
