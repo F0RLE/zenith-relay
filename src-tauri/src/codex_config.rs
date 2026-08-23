@@ -27,7 +27,6 @@ const LOCAL_POOL_PROVIDER_ID: &str = "zenith_relay_local";
 static CODEX_PROFILE_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) fn lock_codex_profile() -> MutexGuard<'static, ()> {
-    // ponytail: one process-wide lock; compare-before-write protects against external Codex writes.
     CODEX_PROFILE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -526,7 +525,7 @@ fn upsert_zenith_provider(original: &str) -> String {
     ));
     result.push_str("wire_api = \"responses\"\n");
     result.push_str("requires_openai_auth = true\n");
-    result.push_str("supports_websockets = false\n");
+    result.push_str("supports_websockets = true\n");
     result
 }
 
@@ -769,6 +768,7 @@ base_url = "https://old.example/v1"
         assert!(next.contains(r#"model_provider = "codex_local_access""#));
         assert!(next.contains("[model_providers.codex_local_access]"));
         assert!(next.contains(r#"base_url = "https://api.zenithmarket.dev/v1""#));
+        assert!(next.contains("supports_websockets = true"));
         assert!(next.contains("[profiles.default]"));
         assert!(!next.contains("[model_providers.zenith]"));
         assert!(!next.contains(r#"model_provider = "openai""#));

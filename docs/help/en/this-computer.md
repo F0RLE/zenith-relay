@@ -153,3 +153,10 @@ endpoint, credentials, or model catalog block managed recovery for review
 instead of being overwritten.
 Deleting an account from the application also removes its owned local secrets
 and related service data.
+
+This mode is local-first: it does not upload the account/session secret to
+Zenith production systems, the Zenith Gateway, or the Control API. If you later
+choose **My server**, a user-owned secret can be transferred only to the server
+you explicitly select and confirm. Snapshots, telemetry, exports, diagnostics,
+and local API state remain redacted and must not contain raw credentials,
+cookies, prompts, or provider response bodies.

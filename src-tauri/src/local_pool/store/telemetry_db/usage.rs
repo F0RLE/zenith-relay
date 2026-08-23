@@ -411,6 +411,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
     let requested_reasoning_effort: Option<String> = row.get(28)?;
     let effective_reasoning_effort: Option<String> = row.get(29)?;
     let cache_write_ttl: Option<String> = row.get(30)?;
+    let client_context_id: Option<String> = row.get(31)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -419,6 +420,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         source_id: row.get(5)?,
         candidate_id: row.get(6)?,
         account_id: row.get(7)?,
+        client_context_id,
         routing: routing_json
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),

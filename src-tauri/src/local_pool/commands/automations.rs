@@ -23,6 +23,8 @@ pub struct WakeAutomationInput {
     enabled: bool,
     account_selector: AccountSelector,
     model_policy: WakeModelPolicy,
+    #[serde(default = "quota_full_trigger")]
+    trigger: WakeTrigger,
     #[serde(default = "automatic_execution")]
     execution_policy: WakeExecutionPolicy,
     #[serde(default)]
@@ -89,6 +91,7 @@ pub async fn update_quota_wake_automation(
     state.store()?.replace_automations(AutomationRecords {
         tasks,
         state: records.state,
+        weekly_reset_fingerprints: records.weekly_reset_fingerprints,
     })?;
     state.snapshot().await.map_err(Into::into)
 }
@@ -203,16 +206,29 @@ fn build_task(
     created_at_ms: u64,
     updated_at_ms: u64,
 ) -> Result<WakeTask, CommandError> {
+    let is_weekly_reset = input.trigger == WakeTrigger::Weekly;
     let task = WakeTask {
         id,
         name: input.name.trim().to_string(),
         enabled: input.enabled,
         account_selector: input.account_selector,
-        window_kinds: BTreeSet::from([QuotaWindowKind::Primary]),
-        model_policy: trim_model_policy(input.model_policy),
-        trigger: WakeTrigger::QuotaFull,
+        window_kinds: BTreeSet::from([if is_weekly_reset {
+            QuotaWindowKind::Secondary
+        } else {
+            QuotaWindowKind::Primary
+        }]),
+        model_policy: if is_weekly_reset {
+            WakeModelPolicy::LightestSupported
+        } else {
+            trim_model_policy(input.model_policy)
+        },
+        trigger: input.trigger,
         fallback_schedule: None,
-        execution_policy: input.execution_policy,
+        execution_policy: if is_weekly_reset {
+            WakeExecutionPolicy::Automatic
+        } else {
+            input.execution_policy
+        },
         jitter_seconds: input.jitter_seconds,
         max_attempts_per_cycle: input.max_attempts_per_cycle,
         created_at_ms,
@@ -312,6 +328,10 @@ fn default_attempt_limit() -> u8 {
     1
 }
 
+fn quota_full_trigger() -> WakeTrigger {
+    WakeTrigger::QuotaFull
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +351,7 @@ mod tests {
             enabled: true,
             account_selector: AccountSelector::AllEligible,
             model_policy,
+            trigger: WakeTrigger::QuotaFull,
             execution_policy: WakeExecutionPolicy::Automatic,
             jitter_seconds: 60,
             max_attempts_per_cycle: 1,
@@ -358,6 +379,21 @@ mod tests {
             WakeModelPolicy::Explicit("gpt-test".into())
         );
         assert!(!serde_json::to_string(&task).unwrap().contains("prompt"));
+    }
+
+    #[test]
+    fn weekly_input_is_persisted_as_an_automatic_secondary_reset() {
+        let mut input = input(WakeModelPolicy::Explicit("gpt-test".into()));
+        input.trigger = WakeTrigger::Weekly;
+        input.execution_policy = WakeExecutionPolicy::RequireConfirmation;
+        let task = build_task("weekly_reset".into(), input, 10, 20).unwrap();
+        assert_eq!(task.trigger, WakeTrigger::Weekly);
+        assert_eq!(
+            task.window_kinds,
+            BTreeSet::from([QuotaWindowKind::Secondary])
+        );
+        assert_eq!(task.model_policy, WakeModelPolicy::LightestSupported);
+        assert_eq!(task.execution_policy, WakeExecutionPolicy::Automatic);
     }
 
     #[test]

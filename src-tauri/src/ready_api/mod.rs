@@ -227,6 +227,8 @@ pub fn run() {
                         started.elapsed().as_millis()
                     );
                 }
+            } else {
+                relay_state.set_background_session_active(false);
             }
             local_pool::background::start(handle.clone());
             let relay_state = app.state::<local_pool::DesktopState>();
@@ -304,6 +306,8 @@ pub fn run() {
             local_pool::accounts::mutations::delete_local_accounts,
             local_pool::accounts::quota_refresh::refresh_local_account_quota,
             local_pool::accounts::quota_refresh::refresh_all_local_account_quotas,
+            local_pool::accounts::reset_credits::get_local_reset_credits,
+            local_pool::accounts::reset_credits::consume_local_reset_credit,
             local_pool::commands::oauth::start_codex_oauth,
             local_pool::commands::oauth::resume_codex_oauth,
             local_pool::commands::oauth::get_codex_oauth_status,
@@ -320,6 +324,7 @@ pub fn run() {
             local_pool::commands::pool::set_local_model_enabled,
             local_pool::commands::pool::set_local_model_price,
             local_pool::commands::pool::set_local_model_reasoning,
+            local_pool::commands::pool::probe_local_model_reasoning,
             local_pool::commands::pool::export_local_configuration_preset,
             local_pool::commands::pool::update_local_routing,
             local_pool::commands::gateway::start_local_gateway,
@@ -328,6 +333,9 @@ pub fn run() {
             local_pool::commands::gateway::update_local_gateway_port,
             local_pool::commands::gateway::set_local_common_proxy,
             local_pool::commands::gateway::set_local_account_proxy_required,
+            local_pool::commands::gateway::set_local_codex_background_tasks,
+            local_pool::commands::gateway::set_local_codex_websockets,
+            local_pool::commands::gateway::set_codex_profile_websockets,
             local_pool::commands::gateway::diagnose_local_gateway,
             local_pool::commands::usage::get_local_usage,
             local_pool::commands::usage::get_local_usage_page,
@@ -346,7 +354,6 @@ pub fn run() {
             local_pool::commands::profiles::restore_codex_account_profile,
             local_pool::commands::profiles::list_codex_profile_snapshots,
             local_pool::commands::profiles::create_codex_profile_snapshot,
-            local_pool::commands::profiles::restore_codex_profile_snapshot,
             local_pool::commands::profiles::restore_full_codex_profile_snapshot,
             local_pool::commands::profiles::delete_codex_profile_snapshot,
             local_pool::commands::recovery::get_relay_storage_info,

@@ -193,26 +193,114 @@ pub async fn set_local_account_draining(
 #[tauri::command]
 pub async fn delete_local_account(
     account_id: String,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     ensure_accounts_not_in_ownership_operation(&state, std::slice::from_ref(&account_id))?;
     delete_local_account_inner(&account_id, &state).await?;
-    state.snapshot().await.map_err(Into::into)
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    refresh_active_codex_catalog_in_background(app);
+    Ok(snapshot)
 }
 
 #[tauri::command]
 pub async fn delete_local_accounts(
     account_ids: Vec<String>,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
     ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
-    for account_id in account_ids {
-        delete_local_account_inner(&account_id, &state).await?;
+    let existing_accounts = state.store()?.accounts().to_vec();
+    ensure_accounts_exist(&existing_accounts, &account_ids)?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let initial_quota_refresh = state.quota_refresh_snapshot()?;
+    let initial_wake = state.wake_snapshot()?;
+    let initial_automations = state.store()?.automations().clone();
+    let initial_proxy_pool = ProxyPool::load()?;
+    let mut prepared = Vec::with_capacity(account_ids.len());
+    for account_id in &account_ids {
+        match prepare_delete_local_account(account_id, &state, &credentials).await {
+            Ok(deleted) => prepared.push(deleted),
+            Err(error) => {
+                if let Err(rollback) = rollback_batch_delete(
+                    &state,
+                    &credentials,
+                    &prepared,
+                    initial_quota_refresh,
+                    initial_wake,
+                    initial_automations,
+                    &initial_proxy_pool,
+                    &error,
+                ) {
+                    return Err(rollback.into());
+                }
+                return Err(error.into());
+            }
+        }
     }
-    state.snapshot().await.map_err(Into::into)
+    let accounts = existing_accounts
+        .iter()
+        .filter(|account| !account_ids.contains(&account.account.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let old_keys = state.store()?.keys().to_vec();
+    let mut automations = state.store()?.automations().clone();
+    for account_id in &account_ids {
+        automations = prune_account_task_selectors(automations, account_id);
+    }
+    if let Err(error) =
+        state
+            .store()?
+            .delete_accounts_state(&account_ids, accounts, old_keys, automations)
+    {
+        if let Err(rollback) = rollback_batch_delete(
+            &state,
+            &credentials,
+            &prepared,
+            initial_quota_refresh,
+            initial_wake,
+            initial_automations,
+            &initial_proxy_pool,
+            &error,
+        ) {
+            return Err(rollback.into());
+        }
+        return Err(error.into());
+    }
+    if let Some(runtime) = state.gateway.runtime().await {
+        for account_id in &account_ids {
+            runtime.remove_candidate(account_id);
+        }
+    }
+    for account_id in &account_ids {
+        state.token_authority().remove(account_id);
+        let _ = state.remove_quota_account_lock(account_id);
+    }
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    refresh_active_codex_catalog_in_background(app);
+    Ok(snapshot)
+}
+
+pub(super) fn ensure_accounts_exist(
+    accounts: &[LocalAccountRecord],
+    account_ids: &[String],
+) -> LocalResult<()> {
+    if let Some(account_id) = account_ids.iter().find(|account_id| {
+        !accounts
+            .iter()
+            .any(|account| account.account.id == **account_id)
+    }) {
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            format!("account not found: {account_id}"),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn ensure_accounts_not_in_ownership_operation(
@@ -244,11 +332,54 @@ pub(super) async fn delete_local_account_inner(
 ) -> CommandResult<()> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let (old_accounts, old_keys, _) = current_account_state(state)?;
+    let deleted = prepare_delete_local_account(account_id, state, &credentials).await?;
+    let accounts = old_accounts
+        .iter()
+        .filter(|account| account.account.id != account_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let automations =
+        prune_account_task_selectors(state.store()?.automations().clone(), account_id);
+    if let Err(error) =
+        state
+            .store()?
+            .delete_account_state(account_id, accounts, old_keys, automations)
+    {
+        rollback_prepared_delete(state, &credentials, &deleted, &error)?;
+        return Err(error.into());
+    }
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.remove_candidate(account_id);
+    }
+    state.token_authority().remove(account_id);
+    let _ = state.remove_quota_account_lock(account_id);
+    Ok(())
+}
+
+struct PreparedAccountDelete {
+    account_id: String,
+    old_credential: Option<StoredCodexCredentials>,
+    previous_quota_refresh: zenith_relay_core::quota::QuotaRefreshQueue,
+    previous_wake: zenith_relay_core::automations::WakeCoordinator,
+    old_automations: AutomationRecords,
+    restored_bindings: Vec<codex::ProfileBinding>,
+    previous_proxy_pool: Option<ProxyPool>,
+}
+
+async fn prepare_delete_local_account(
+    account_id: &str,
+    state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
+) -> LocalResult<PreparedAccountDelete> {
+    let old_accounts = state.store()?.accounts().to_vec();
     if !old_accounts
         .iter()
         .any(|account| account.account.id == account_id)
     {
-        return Err(LocalPoolError::new(ErrorCode::NotFound, "account not found").into());
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            "account not found",
+        ));
     }
     let old_credential = credentials
         .load(account_id)
@@ -264,15 +395,14 @@ pub(super) async fn delete_local_account_inner(
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "account profile binding exists without stored credentials",
-        )
-        .into());
+        ));
     }
     let restored_bindings =
         restore_bound_account_profiles(state, &bindings, old_credential.as_ref())?;
     if let Err(error) = state.remove_pending_wakes_for_account(account_id) {
         rollback_deleted_account_side_effects(
             state,
-            &credentials,
+            credentials,
             account_id,
             old_credential.as_ref(),
             previous_quota_refresh,
@@ -282,59 +412,33 @@ pub(super) async fn delete_local_account_inner(
             None,
             &error,
         )?;
-        return Err(error.into());
+        return Err(error);
     }
-    let accounts = old_accounts
-        .iter()
-        .filter(|account| account.account.id != account_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    let automations = prune_account_task_selectors(old_automations.clone(), account_id);
-    let previous_proxy_pool = release_account_proxy(account_id)?;
-    if let Err(error) = credentials
-        .delete(account_id)
-        .map_err(credential_local_error)
-    {
-        rollback_deleted_account_side_effects(
-            state,
-            &credentials,
-            account_id,
-            old_credential.as_ref(),
-            previous_quota_refresh,
-            previous_wake,
-            old_automations,
-            &restored_bindings,
-            previous_proxy_pool.as_ref(),
-            &error,
-        )?;
-        return Err(error.into());
-    }
-    match state.remove_quota_refresh(account_id) {
-        Ok(_) => {}
+    let previous_proxy_pool = match release_account_proxy(account_id) {
+        Ok(previous) => previous,
         Err(error) => {
             rollback_deleted_account_side_effects(
                 state,
-                &credentials,
+                credentials,
                 account_id,
                 old_credential.as_ref(),
                 previous_quota_refresh,
                 previous_wake,
                 old_automations,
                 &restored_bindings,
-                previous_proxy_pool.as_ref(),
+                None,
                 &error,
             )?;
-            return Err(error.into());
+            return Err(error);
         }
-    }
-    if let Err(error) =
-        state
-            .store()?
-            .delete_account_state(account_id, accounts, old_keys.clone(), automations)
+    };
+    if let Err(error) = credentials
+        .delete(account_id)
+        .map_err(credential_local_error)
     {
         rollback_deleted_account_side_effects(
             state,
-            &credentials,
+            credentials,
             account_id,
             old_credential.as_ref(),
             previous_quota_refresh,
@@ -344,13 +448,88 @@ pub(super) async fn delete_local_account_inner(
             previous_proxy_pool.as_ref(),
             &error,
         )?;
-        return Err(error.into());
+        return Err(error);
     }
-    if let Some(runtime) = state.gateway.runtime().await {
-        runtime.remove_candidate(account_id);
+    if let Err(error) = state.remove_quota_refresh(account_id) {
+        rollback_deleted_account_side_effects(
+            state,
+            credentials,
+            account_id,
+            old_credential.as_ref(),
+            previous_quota_refresh,
+            previous_wake,
+            old_automations,
+            &restored_bindings,
+            previous_proxy_pool.as_ref(),
+            &error,
+        )?;
+        return Err(error);
     }
-    state.token_authority().remove(account_id);
-    state.remove_quota_account_lock(account_id)?;
+    Ok(PreparedAccountDelete {
+        account_id: account_id.to_string(),
+        old_credential,
+        previous_quota_refresh,
+        previous_wake,
+        old_automations,
+        restored_bindings,
+        previous_proxy_pool,
+    })
+}
+
+fn rollback_prepared_delete(
+    state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
+    deleted: &PreparedAccountDelete,
+    cause: &LocalPoolError,
+) -> LocalResult<()> {
+    rollback_deleted_account_side_effects(
+        state,
+        credentials,
+        &deleted.account_id,
+        deleted.old_credential.as_ref(),
+        deleted.previous_quota_refresh.clone(),
+        deleted.previous_wake.clone(),
+        deleted.old_automations.clone(),
+        &deleted.restored_bindings,
+        deleted.previous_proxy_pool.as_ref(),
+        cause,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_batch_delete(
+    state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
+    deleted: &[PreparedAccountDelete],
+    previous_quota_refresh: zenith_relay_core::quota::QuotaRefreshQueue,
+    previous_wake: zenith_relay_core::automations::WakeCoordinator,
+    old_automations: AutomationRecords,
+    previous_proxy_pool: &ProxyPool,
+    cause: &LocalPoolError,
+) -> LocalResult<()> {
+    for account in deleted.iter().rev() {
+        restore_credential_local(
+            credentials,
+            &account.account_id,
+            account.old_credential.as_ref(),
+            cause,
+        )?;
+        reattach_account_profiles(
+            state,
+            &account.restored_bindings,
+            account.old_credential.as_ref(),
+            cause,
+        )?;
+    }
+    state
+        .restore_quota_refresh(previous_quota_refresh)
+        .map_err(|error| recovery_after_delete(cause, "quota schedule", error))?;
+    state
+        .restore_wake(previous_wake, old_automations)
+        .map_err(|error| recovery_after_delete(cause, "wake state", error))?;
+    previous_proxy_pool
+        .save()
+        .map_err(|error| recovery_after_delete(cause, "proxy assignment", error))?;
     Ok(())
 }
 

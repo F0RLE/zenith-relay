@@ -5,7 +5,8 @@ use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, SinkExt, StreamExt};
+use reqwest_websocket::{Message as ClientWsMessage, Upgrade};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -25,6 +26,51 @@ const LOCAL_KEY: &str = "local-test-key";
 const SOURCE_KEY: &str = "upstream-test-key";
 const OVERSIZED_MODELS_CONTENT_LENGTH: &str = "4194305";
 const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+#[tokio::test]
+async fn responses_websocket_falls_back_to_http_sse_upstream() {
+    let (upstream, state) = spawn_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": "terminal-fragmented"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_completed = false;
+    for _ in 0..8 {
+        let message = match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+            Ok(Some(Ok(message))) => message,
+            _ => panic!("fallback did not produce a websocket event"),
+        };
+        let ClientWsMessage::Text(text) = message else {
+            continue;
+        };
+        let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+        if value["type"] == "response.completed" {
+            saw_completed = true;
+            break;
+        }
+    }
+    assert!(saw_completed, "HTTP/SSE upstream was not bridged to WS");
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert!(events.lock().unwrap().iter().any(|event| event.success));
+}
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -84,6 +130,80 @@ async fn invalid_local_key_stops_before_upstream_execution() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn image_generation_for_api_source_preserves_requested_image_model() {
+    let state = UpstreamState::default();
+    let upstream = spawn(
+        Router::new()
+            .route("/v1/images/generations", post(upstream_image_generation))
+            .with_state(state.clone()),
+    )
+    .await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let usage_events = events.clone();
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource {
+            source: ProviderSource {
+                id: "image-source".to_string(),
+                name: "Synthetic image source".to_string(),
+                base_url: format!("{}/v1", upstream.base_url),
+                api_key: SOURCE_KEY.to_string(),
+                wire_api: WireApi::Responses,
+                models: vec!["gpt-image-1.5".to_string()],
+            },
+            protocol_bindings: vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["gpt-image-1.5".to_string()],
+            }],
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            last_used_at_ms: None,
+        }],
+        vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+            id: "local-key-1".to_string(),
+            secret: LOCAL_KEY.to_string(),
+        })],
+        GatewayRuntimeOptions::default(),
+        Arc::new(move |event| usage_events.lock().unwrap().push(event)),
+    )
+    .unwrap();
+    let gateway = spawn(gateway::router(Arc::new(runtime))).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/images/generations", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-image-1.5","prompt":"draw a test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["data"][0]["b64_json"],
+        "aW1hZ2U="
+    );
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/images/generations");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer upstream-test-key")
+    );
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies[0]["model"], "gpt-image-1.5");
+    assert_eq!(bodies[0]["prompt"], "draw a test");
+    drop(bodies);
+    assert!(events.lock().unwrap()[0].success);
 }
 
 #[tokio::test]
@@ -1505,7 +1625,13 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
                 id: "local-key-1".to_string(),
                 secret: LOCAL_KEY.to_string(),
             })],
-            GatewayRuntimeOptions::default(),
+            GatewayRuntimeOptions {
+                model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
+                    "claude-test".to_string(),
+                    vec!["high".to_string()],
+                )]),
+                ..GatewayRuntimeOptions::default()
+            },
             Arc::new(move |event| usage_events.lock().unwrap().push(event)),
         )
         .unwrap(),
@@ -2108,6 +2234,18 @@ async fn spawn_messages_bridge_gateway(
         wire_api: WireApi::Responses,
         models: vec!["claude-test".to_string()],
     };
+    let mut options = GatewayRuntimeOptions::default();
+    if reasoning_mode != MessagesReasoningMode::Disabled {
+        options.model_reasoning_allowed_levels.insert(
+            "claude-test".to_string(),
+            vec![if reasoning_mode == MessagesReasoningMode::Adaptive {
+                "minimal"
+            } else {
+                "high"
+            }
+            .to_string()],
+        );
+    }
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource {
             source,
@@ -2131,7 +2269,7 @@ async fn spawn_messages_bridge_gateway(
             id: "local-key-1".to_string(),
             secret: LOCAL_KEY.to_string(),
         })],
-        GatewayRuntimeOptions::default(),
+        options,
         Arc::new(move |event| usage_events.lock().unwrap().push(event)),
     )
     .unwrap();
@@ -2369,6 +2507,24 @@ async fn upstream_models(State(state): State<UpstreamState>, headers: HeaderMap)
         .into_response();
     }
     StatusCode::UNAUTHORIZED.into_response()
+}
+
+async fn upstream_image_generation(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    observe(&state, "/v1/images/generations", &headers);
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = serde_json::from_slice(&body).unwrap();
+    state.bodies.lock().unwrap().push(request);
+    Json(json!({
+        "created": 7,
+        "data": [{"b64_json": "aW1hZ2U="}]
+    }))
+    .into_response()
 }
 
 async fn upstream_models_with_shared_catalog(headers: HeaderMap) -> Response<Body> {

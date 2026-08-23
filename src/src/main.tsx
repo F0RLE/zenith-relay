@@ -2,13 +2,35 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./app/App";
 import { initI18n } from "./i18n";
-import { getSystemLocale, recordPerformance } from "./platform/desktop";
+import { getSystemLocale, recordPerformance, revealWindowAfterBackgroundColor } from "./platform/desktop";
 
+const STARTUP_REVEAL_FALLBACK_MS = 10_000;
+let startupFallbackTimer: number | undefined;
+
+function revealStartupShell() {
+  if (document.documentElement.dataset.startupReady === "true") return;
+  if (startupFallbackTimer !== undefined) window.clearTimeout(startupFallbackTimer);
+  document.documentElement.dataset.startupReady = "true";
+  window.setTimeout(() => {
+    document.getElementById("splash-screen")?.remove();
+  }, 320);
+}
+
+window.addEventListener("zenith-startup-ready", revealStartupShell, { once: true });
+const initialTheme = document.documentElement.dataset.theme;
+const initialThemeIsDark = initialTheme === "dark" || (
+  initialTheme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches
+);
+void revealWindowAfterBackgroundColor(initialThemeIsDark ? "#121719" : "#f2f5f6");
 void bootstrap();
 
 async function bootstrap() {
-  const systemLocale = await getSystemLocale().catch(() => navigator.language);
-  await initI18n(systemLocale);
+  startupFallbackTimer = window.setTimeout(revealStartupShell, STARTUP_REVEAL_FALLBACK_MS);
+  const systemLocale = getSystemLocale().catch(() => null);
+  await initI18n(navigator.language);
+  void systemLocale.then((locale) => {
+    if (locale) void initI18n(locale);
+  });
   performance.mark("zenith:i18n-ready");
   performance.measure("zenith:i18n", "zenith:html-start", "zenith:i18n-ready");
 

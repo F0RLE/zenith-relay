@@ -22,6 +22,9 @@ use super::super::response::{
     upstream_body_error_response, usage_event,
 };
 use super::super::streaming::{bootstrap_stream, StreamExecution};
+use super::super::turn_state::{
+    guard_account_request, relay_account_response_header, CODEX_TURN_STATE_HEADER,
+};
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids, AdapterError,
     AdapterRequestContext,
@@ -47,6 +50,7 @@ pub(in crate::gateway::execution) async fn execute_request(
     stream: bool,
     request_id: String,
     forwarded_headers: HeaderMap,
+    client_context_id: Option<String>,
     response_affinity_key: Option<String>,
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
@@ -64,8 +68,11 @@ pub(in crate::gateway::execution) async fn execute_request(
     let client_tool_use = tool_use_diagnostics(&request);
     let requested_reasoning = requested_reasoning_effort(&request, wire_api);
     if let Some(effort) = requested_reasoning.as_deref() {
-        if !runtime.model_reasoning_effort_is_allowed(&resolved_model, effort)
-            && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model)
+        let chat_completions_reasoning_is_unsupported = wire_api == WireApi::ChatCompletions
+            && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model);
+        if chat_completions_reasoning_is_unsupported
+            || (!runtime.model_reasoning_effort_is_allowed(&resolved_model, effort)
+                && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model))
         {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -158,6 +165,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         };
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        route.client_context_id = client_context_id.clone();
         route.service_tier = service_tier;
         if let Some(effort) = requested_reasoning.as_deref() {
             if !runtime.candidate_reasoning_effort_is_allowed(
@@ -260,6 +268,17 @@ pub(in crate::gateway::execution) async fn execute_request(
         };
         for (name, value) in &route.upstream_headers {
             upstream_headers.insert(name.clone(), value.clone());
+        }
+        if account_route && wire_api == WireApi::Responses && route.adapter.is_passthrough() {
+            guard_account_request(
+                &runtime,
+                &key.id,
+                &mut upstream_headers,
+                route.account_id.as_deref().unwrap_or_default(),
+                now_ms(),
+            );
+        } else {
+            upstream_headers.remove(CODEX_TURN_STATE_HEADER);
         }
         let mut upstream_request = client
             .post(route.upstream_url.clone())
@@ -502,7 +521,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             }
             populate_tokens(&mut event, &bytes);
             emit_usage(&runtime, event);
-            return proxy_error_response(
+            let mut response = proxy_error_response(
                 status,
                 &response_headers,
                 Body::from(bytes),
@@ -510,6 +529,20 @@ pub(in crate::gateway::execution) async fn execute_request(
                 failure.category,
                 Some(&request_id),
             );
+            if account_route && adapter_is_passthrough {
+                if let Some(account_id) = route.account_id.as_deref() {
+                    relay_account_response_header(
+                        &runtime,
+                        &key.id,
+                        &forwarded_headers,
+                        account_id,
+                        &response_headers,
+                        &mut response,
+                        now_ms(),
+                    );
+                }
+            }
+            return response;
         }
 
         if !upstream_stream {
@@ -756,7 +789,22 @@ pub(in crate::gateway::execution) async fn execute_request(
                 );
             }
             if account_route || !adapter_is_passthrough {
-                return proxy_json_response(status, &response_headers, Body::from(bytes));
+                let mut response =
+                    proxy_json_response(status, &response_headers, Body::from(bytes));
+                if account_route && adapter_is_passthrough {
+                    if let Some(account_id) = route.account_id.as_deref() {
+                        relay_account_response_header(
+                            &runtime,
+                            &key.id,
+                            &forwarded_headers,
+                            account_id,
+                            &response_headers,
+                            &mut response,
+                            now_ms(),
+                        );
+                    }
+                }
+                return response;
             }
             return proxy_response(status, &response_headers, Body::from(bytes));
         }
@@ -768,14 +816,15 @@ pub(in crate::gateway::execution) async fn execute_request(
             && contains_tool_call_output(&request);
         match bootstrap_stream(upstream, wait_for_native_replay_error).await {
             Ok((headers, first, remaining)) => {
-                return StreamExecution {
+                let account_id = route.account_id.clone();
+                let mut response = StreamExecution {
                     runtime: runtime.clone(),
                     route,
                     lease,
                     adapter_request,
                     request,
                     request_id,
-                    local_key_id: key.id,
+                    local_key_id: key.id.clone(),
                     requested_model,
                     source_model,
                     prompt_affinity_key,
@@ -785,7 +834,19 @@ pub(in crate::gateway::execution) async fn execute_request(
                     attempt,
                     started,
                 }
-                .into_response(status, headers, first, remaining);
+                .into_response(status, headers.clone(), first, remaining);
+                if let Some(account_id) = account_id.as_deref() {
+                    relay_account_response_header(
+                        &runtime,
+                        &key.id,
+                        &forwarded_headers,
+                        account_id,
+                        &headers,
+                        &mut response,
+                        now_ms(),
+                    );
+                }
+                return response;
             }
             Err(bootstrap_failure) => {
                 let zenith_gateway_invalid_request =
@@ -905,6 +966,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 stream,
                 request_id,
                 forwarded_headers,
+                client_context_id,
                 None,
                 wire_api,
                 responses_lite,

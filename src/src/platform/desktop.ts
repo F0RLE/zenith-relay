@@ -55,6 +55,18 @@ export function setWindowBackgroundColor(color: string) {
   }
 }
 
+export function revealWindowAfterBackgroundColor(color: string) {
+  try {
+    const window = getCurrentWebviewWindow();
+    return window.setBackgroundColor(color)
+      .catch(() => undefined)
+      .then(() => window.show())
+      .catch(() => undefined);
+  } catch {
+    return Promise.resolve();
+  }
+}
+
 export function recordPerformance(name: string, durationMs: number, context?: string) {
   if (!Number.isFinite(durationMs) || durationMs < 0) return Promise.resolve();
   return invoke<void>("record_local_performance_sample", {

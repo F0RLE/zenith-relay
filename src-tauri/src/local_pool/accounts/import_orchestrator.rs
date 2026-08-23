@@ -49,7 +49,7 @@ use zenith_relay_core::providers::chatgpt::{
     AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
     ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
-use zenith_relay_core::quota::QuotaRefreshFailure;
+use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition};
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, normalize_error_code, ApiModelPriceOverride,
     ProviderSource, ProxyConfig, SourceProtocolBinding, WireApi,
@@ -1732,18 +1732,33 @@ pub(super) fn apply_quota_outcome(
     outcome: QuotaRefreshOutcome,
     now_ms: u64,
 ) -> AccountQuotaOutcome {
+    apply_quota_outcome_with_transitions(account, outcome, now_ms).0
+}
+
+pub(super) fn apply_quota_outcome_with_transitions(
+    account: &mut LocalAccountRecord,
+    outcome: QuotaRefreshOutcome,
+    now_ms: u64,
+) -> (AccountQuotaOutcome, Vec<QuotaTransition>) {
     match outcome {
         QuotaRefreshOutcome::Updated(data) => match apply_quota_success(account, data) {
-            Ok(applied) => AccountQuotaOutcome::Updated {
-                transitions: applied.transitions,
-            },
+            Ok(applied) => (
+                AccountQuotaOutcome::Updated {
+                    transitions: applied.transitions,
+                    exhaustion_transitions: applied.exhaustion_transitions.clone(),
+                },
+                applied.exhaustion_transitions,
+            ),
             Err(_) => {
                 let failure = QuotaRefreshFailure::new("quota_invalid_response", false);
                 apply_quota_failure(account, &failure, now_ms);
-                AccountQuotaOutcome::Failed {
-                    code: failure.code,
-                    retryable: failure.retryable,
-                }
+                (
+                    AccountQuotaOutcome::Failed {
+                        code: failure.code,
+                        retryable: failure.retryable,
+                    },
+                    Vec::new(),
+                )
             }
         },
         QuotaRefreshOutcome::Failed {
@@ -1752,10 +1767,13 @@ pub(super) fn apply_quota_outcome(
         } => {
             account.account.subscription = subscription;
             apply_quota_failure(account, &failure, now_ms);
-            AccountQuotaOutcome::Failed {
-                code: failure.code,
-                retryable: failure.retryable,
-            }
+            (
+                AccountQuotaOutcome::Failed {
+                    code: failure.code,
+                    retryable: failure.retryable,
+                },
+                Vec::new(),
+            )
         }
     }
 }
@@ -1786,18 +1804,13 @@ pub(super) fn apply_model_discovery(
         Ok(_) if account.models.is_empty() => {
             apply_model_discovery_failure(account, "models_empty", false)
         }
-        Err(error)
-            if account.models.is_empty()
-                || matches!(
-                    error.code,
-                    ModelDiscoveryFailureCode::Unauthorized
-                        | ModelDiscoveryFailureCode::InvalidAccessToken
-                        | ModelDiscoveryFailureCode::InvalidAccountId
-                ) =>
-        {
+        Err(error) => {
+            // Keep the last good catalog for routing, but retain the model
+            // discovery failure so the management UI can show stale model
+            // availability instead of silently looking healthy.
             apply_model_discovery_failure(account, model_failure_code(&error), error.retryable)
         }
-        Ok(_) | Err(_) => {}
+        Ok(_) => {}
     }
 }
 

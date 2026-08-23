@@ -24,6 +24,7 @@ const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_REPAIR_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_HISTORY_REPAIR_BACKUPS: usize = 1;
+const HISTORY_REPAIR_BACKUP_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,8 +96,7 @@ struct RolloutSnapshot {
 
 #[derive(Clone)]
 struct SessionMetadata {
-    first: Option<SessionMeta>,
-    latest: Option<SessionMeta>,
+    records: Vec<SessionMeta>,
 }
 
 #[derive(Clone)]
@@ -113,6 +113,15 @@ struct DatabaseSnapshot {
     path: String,
     hash: String,
     rows: usize,
+    #[serde(default)]
+    threads: Vec<DatabaseThreadSnapshot>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseThreadSnapshot {
+    id: String,
+    rollout_path: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -168,6 +177,10 @@ pub fn preview(
                 &mut total_bytes,
             )?;
         }
+        let eligible_rollout_paths = rollout_files
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<HashSet<_>>();
         for path in [
             root.join("state_5.sqlite"),
             root.join("sqlite").join("state_5.sqlite"),
@@ -179,7 +192,7 @@ pub fn preview(
             if !seen.insert(path.clone()) {
                 continue;
             }
-            let snapshot = scan_database(&path, target)?;
+            let snapshot = scan_database(&path, target, &eligible_rollout_paths)?;
             if snapshot.rows > 0 {
                 databases.push(snapshot);
             }
@@ -223,7 +236,16 @@ pub fn apply(
         }
     }
     for expected in &snapshot.databases {
-        let current = scan_database(Path::new(&expected.path), &snapshot.target_provider)?;
+        let eligible_rollout_paths = snapshot
+            .rollout_files
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<HashSet<_>>();
+        let current = scan_database(
+            Path::new(&expected.path),
+            &snapshot.target_provider,
+            &eligible_rollout_paths,
+        )?;
         if current.hash != expected.hash || current.rows != expected.rows {
             return Err("ChatGPT history database changed after repair preview".to_string());
         }
@@ -275,7 +297,6 @@ pub fn synchronize(
     apply(state_root, backup_root, &preview.session_id).map(Some)
 }
 
-#[cfg(test)]
 pub fn cleanup_history_repair_backups(backup_root: &Path) -> Result<usize, String> {
     cleanup_history_repair_backups_preserving(backup_root, None)
 }
@@ -329,6 +350,7 @@ fn cleanup_history_repair_backups_preserving(
     if !backup_root.exists() {
         return Ok(0);
     }
+    let now = now_ms();
     let mut backups = Vec::new();
     for entry in fs::read_dir(backup_root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
@@ -344,9 +366,6 @@ fn cleanup_history_repair_backups_preserving(
         }
         backups.push((backup_created_at_ms(&entry.path()), name, entry.path()));
     }
-    if backups.len() <= MAX_HISTORY_REPAIR_BACKUPS {
-        return Ok(0);
-    }
     backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     let mut keep = HashSet::new();
     if let Some(id) = preserve_id {
@@ -354,11 +373,11 @@ fn cleanup_history_repair_backups_preserving(
             keep.insert(id.to_string());
         }
     }
-    for (_, name, _) in &backups {
-        if keep.len() == MAX_HISTORY_REPAIR_BACKUPS {
-            break;
+    for (created_at_ms, name, _) in &backups {
+        let expired = created_at_ms.saturating_add(HISTORY_REPAIR_BACKUP_TTL_MS) <= now;
+        if !expired && keep.len() < MAX_HISTORY_REPAIR_BACKUPS {
+            keep.insert(name.clone());
         }
-        keep.insert(name.clone());
     }
     let stale = backups
         .into_iter()
@@ -533,8 +552,7 @@ fn read_session_metadata(path: &Path) -> Result<SessionMetadata, String> {
     }
     let mut reader = BufReader::new(file);
     let mut metadata = SessionMetadata {
-        first: None,
-        latest: None,
+        records: Vec::new(),
     };
     let mut line = Vec::new();
     let mut line_too_large = false;
@@ -593,10 +611,7 @@ fn record_session_metadata(metadata: &mut SessionMetadata, line: &[u8], start: u
         separator,
         value,
     };
-    if metadata.first.is_none() {
-        metadata.first = Some(item.clone());
-    }
-    metadata.latest = Some(item);
+    metadata.records.push(item);
 }
 
 #[cfg(test)]
@@ -625,14 +640,11 @@ fn session_meta_provider(value: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn session_meta_id(value: &Value) -> Option<&str> {
-    value
-        .get("payload")
-        .and_then(|payload| payload.get("id"))
-        .and_then(Value::as_str)
-}
-
-fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> {
+fn scan_database(
+    path: &Path,
+    target: &str,
+    eligible_rollout_paths: &HashSet<String>,
+) -> Result<DatabaseSnapshot, String> {
     let connection =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(db_error)?;
     let exists = connection
@@ -647,6 +659,7 @@ fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> 
             path: path_string(path),
             hash: hex_hash(&[]),
             rows: 0,
+            threads: Vec::new(),
         });
     }
     let mut statement = connection
@@ -663,8 +676,21 @@ fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> 
         .map_err(db_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error)?;
+    let rows = rows
+        .into_iter()
+        .filter_map(|(id, provider, rollout_path)| {
+            let canonical = fs::canonicalize(portable_path_value(&rollout_path)).ok()?;
+            let canonical = path_string(&canonical);
+            eligible_rollout_paths.contains(&canonical).then_some((
+                id,
+                provider,
+                rollout_path,
+                canonical,
+            ))
+        })
+        .collect::<Vec<_>>();
     let mut hasher = Sha256::new();
-    for (id, provider, rollout_path) in &rows {
+    for (id, provider, rollout_path, _) in &rows {
         for value in [id, provider, rollout_path] {
             hasher.update((value.len() as u64).to_le_bytes());
             hasher.update(value.as_bytes());
@@ -674,6 +700,13 @@ fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> 
         path: path_string(path),
         hash: hex::encode(hasher.finalize()),
         rows: rows.len(),
+        threads: rows
+            .iter()
+            .map(|(id, _, rollout_path, _)| DatabaseThreadSnapshot {
+                id: id.clone(),
+                rollout_path: rollout_path.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -712,7 +745,7 @@ fn validate_snapshot_paths(snapshot: &RepairSnapshot) -> Result<(), String> {
     let roots = snapshot
         .profile_roots
         .iter()
-        .map(PathBuf::from)
+        .map(|path| PathBuf::from(portable_path_value(path)))
         .collect::<Vec<_>>();
     for path in snapshot
         .rollout_files
@@ -720,7 +753,7 @@ fn validate_snapshot_paths(snapshot: &RepairSnapshot) -> Result<(), String> {
         .map(|item| &item.path)
         .chain(snapshot.databases.iter().map(|item| &item.path))
     {
-        let canonical = fs::canonicalize(path).map_err(io_error)?;
+        let canonical = portable_canonicalize(Path::new(path))?;
         if !roots.iter().any(|root| canonical.starts_with(root)) {
             return Err("repair preview path escaped its profile".to_string());
         }
@@ -796,13 +829,17 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let changed = transaction
-            .execute(
-                "UPDATE threads SET model_provider = ?1 WHERE model_provider <> ?1",
-                [&snapshot.target_provider],
-            )
-            .map_err(db_error)?;
-        if changed != item.rows {
+        let mut changed = 0_usize;
+        for thread in &item.threads {
+            let count = transaction
+                .execute(
+                    "UPDATE threads SET model_provider = ?1 WHERE id = ?2 AND rollout_path = ?3 AND model_provider <> ?1",
+                    rusqlite::params![snapshot.target_provider, thread.id, thread.rollout_path],
+                )
+                .map_err(db_error)?;
+            changed = changed.saturating_add(count);
+        }
+        if changed != item.rows || item.threads.len() != item.rows {
             return Err("ChatGPT history database changed during repair".to_string());
         }
         transaction.commit().map_err(db_error)?;
@@ -859,24 +896,12 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
 }
 
 fn session_meta_replacements(metadata: &SessionMetadata, target: &str) -> Vec<SessionMeta> {
-    let Some(latest) = metadata.latest.as_ref() else {
-        return Vec::new();
-    };
-    let mut replacements = Vec::new();
-    if session_meta_provider(&latest.value) != Some(target) {
-        replacements.push(latest.clone());
-    }
-    if let Some(first) = metadata.first.as_ref() {
-        let same_session = first.start != latest.start
-            && session_meta_id(&first.value)
-                .is_some_and(|first_id| session_meta_id(&latest.value) == Some(first_id));
-        if same_session && session_meta_provider(&first.value) != Some(target) {
-            replacements.push(first.clone());
-        }
-    }
-    replacements.sort_by_key(|item| item.start);
-    replacements.dedup_by_key(|item| item.start);
-    replacements
+    metadata
+        .records
+        .iter()
+        .filter(|item| session_meta_provider(&item.value) != Some(target))
+        .cloned()
+        .collect()
 }
 
 fn restore_manifest(manifest: &RepairManifest, directory: &Path) -> Result<usize, String> {
@@ -901,15 +926,14 @@ fn restore_manifest(manifest: &RepairManifest, directory: &Path) -> Result<usize
 }
 
 fn validate_manifest_paths(manifest: &RepairManifest, directory: &Path) -> Result<(), String> {
-    let directory = fs::canonicalize(directory).map_err(io_error)?;
+    let directory = portable_canonicalize(directory)?;
     let roots = manifest
         .profile_roots
         .iter()
-        .map(fs::canonicalize)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(io_error)?;
+        .map(|path| PathBuf::from(portable_path_value(path)))
+        .collect::<Vec<_>>();
     for entry in &manifest.entries {
-        let original = fs::canonicalize(&entry.original_path).map_err(io_error)?;
+        let original = portable_canonicalize(Path::new(&entry.original_path))?;
         if !roots.iter().any(|root| original.starts_with(root)) {
             return Err("repair manifest path escaped its profile".to_string());
         }
@@ -979,8 +1003,9 @@ fn replace_file_with(
 }
 
 fn canonical_child(root: &Path, path: &Path) -> Result<PathBuf, String> {
-    let canonical = fs::canonicalize(path).map_err(io_error)?;
-    if !canonical.starts_with(root) {
+    let canonical = portable_canonicalize(path)?;
+    let root = PathBuf::from(path_string(root));
+    if !canonical.starts_with(&root) {
         return Err("repair path escaped its profile".to_string());
     }
     Ok(canonical)
@@ -1023,7 +1048,20 @@ fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    portable_path_value(&path.to_string_lossy())
+}
+
+fn portable_canonicalize(path: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path).map_err(io_error)?;
+    Ok(PathBuf::from(path_string(&canonical)))
+}
+
+fn portable_path_value(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else {
+        value.strip_prefix("\\\\?\\").unwrap_or(value).to_owned()
+    }
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
@@ -1129,6 +1167,78 @@ mod tests {
     }
 
     #[test]
+    fn repair_rewrites_every_session_metadata_record_in_a_rollout() {
+        let (root, state, backups, profile, rollout, database) = fixture("all-session-meta");
+        let mut file = OpenOptions::new().append(true).open(&rollout).unwrap();
+        for id in ["thread-middle", "thread-last"] {
+            writeln!(
+                file,
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"model_provider\":\"openai\"}}}}"
+            )
+            .unwrap();
+        }
+        drop(file);
+
+        let preview = preview(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview.rollout_record_count, 3);
+        apply(&state, &backups, &preview.session_id).unwrap();
+        assert_eq!(
+            rollout_providers_from_file(&rollout),
+            vec![
+                "zenith_relay_local".to_string(),
+                "zenith_relay_local".to_string(),
+                "zenith_relay_local".to_string(),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+        let _ = database;
+    }
+
+    #[test]
+    fn repair_does_not_update_threads_without_a_processed_rollout() {
+        let (root, state, backups, profile, rollout, database) = fixture("linked-threads");
+        let missing = profile.join("sessions/missing-rollout.jsonl");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads(id, model_provider, rollout_path) VALUES ('thread-missing', 'openai', ?1)",
+                [path_string(&missing)],
+            )
+            .unwrap();
+        drop(connection);
+
+        let preview = preview(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview.sqlite_row_count, 1);
+        apply(&state, &backups, &preview.session_id).unwrap();
+
+        let connection = Connection::open(&database).unwrap();
+        let missing_provider: String = connection
+            .query_row(
+                "SELECT model_provider FROM threads WHERE id='thread-missing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(database_provider(&database), "zenith_relay_local");
+        assert_eq!(missing_provider, "openai");
+        assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn changed_rollout_is_rejected_before_backup_or_write() {
         let (root, state, backups, profile, rollout, database) = fixture("changed");
         let preview = preview(&state, &[profile], TargetProvider::ZenithRelayLocal, false).unwrap();
@@ -1190,12 +1300,19 @@ mod tests {
         let ids = (1_u64..=4)
             .map(|index| format!("history_repair_{index:032x}"))
             .collect::<Vec<_>>();
+        let now = now_ms();
+        let created_at = [
+            now.saturating_sub(HISTORY_REPAIR_BACKUP_TTL_MS + 1),
+            now.saturating_sub(HISTORY_REPAIR_BACKUP_TTL_MS / 2),
+            now.saturating_sub(HISTORY_REPAIR_BACKUP_TTL_MS / 4),
+            now.saturating_sub(1),
+        ];
         for (index, id) in ids.iter().enumerate() {
             let directory = root.join(id);
             fs::create_dir_all(&directory).unwrap();
             fs::write(
                 directory.join("manifest.json"),
-                format!("{{\"createdAtMs\":{}}}", index + 1),
+                format!("{{\"createdAtMs\":{}}}", created_at[index]),
             )
             .unwrap();
         }

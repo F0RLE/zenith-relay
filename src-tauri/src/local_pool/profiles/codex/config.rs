@@ -52,11 +52,13 @@ pub(super) fn attach_config(
     local_key: &str,
     model_catalog_path: Option<&str>,
     previous_model_catalog: Option<&str>,
+    model_reasoning_effort: Option<&str>,
+    supports_websockets: bool,
 ) {
-    // A global Codex effort overrides each model catalog entry. Clear a stale
-    // value on attach so automatic models use Relay's `medium` default; if
-    // Codex or the user adds one while Relay is active, preserve it on restore.
-    document.remove("model_reasoning_effort");
+    // Codex reads the active effort from its root config, while the managed
+    // catalog supplies the model-specific list of valid levels. Keep both in
+    // sync when Relay activates a profile.
+    restore_root_string(document, "model_reasoning_effort", model_reasoning_effort);
     document["model_provider"] = value(PROVIDER_ID);
     restore_root_string(
         document,
@@ -77,7 +79,20 @@ pub(super) fn attach_config(
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     provider["experimental_bearer_token"] = value(local_key);
-    provider["supports_websockets"] = value(false);
+    provider["supports_websockets"] = value(supports_websockets);
+}
+
+pub(super) fn set_managed_websockets(document: &mut DocumentMut, enabled: bool) -> bool {
+    let Some(provider) = document
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(PROVIDER_ID))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    provider.insert("supports_websockets", value(enabled));
+    true
 }
 
 pub(super) fn restore_config(
@@ -102,169 +117,67 @@ pub(super) fn restore_local_config(
         previous_model_catalog,
     );
     if backup.managed_model_reasoning_effort_cleared {
+        let managed_effort_is_unchanged =
+            current_model_reasoning_effort == backup.managed_model_reasoning_effort.as_deref();
         restore_root_string(
             document,
             "model_reasoning_effort",
-            current_model_reasoning_effort.or(backup.previous_model_reasoning_effort.as_deref()),
+            if managed_effort_is_unchanged {
+                backup.previous_model_reasoning_effort.as_deref()
+            } else {
+                current_model_reasoning_effort.or(backup.previous_model_reasoning_effort.as_deref())
+            },
         );
     }
 }
 
-pub(super) const MANAGED_SNAPSHOT_AUTH_KEYS: &[&str] =
-    &["OPENAI_API_KEY", "auth_mode", "last_refresh", "tokens"];
-
-pub(super) fn managed_snapshot_scope(
-    profile_dir: &Path,
-    backup_root: &Path,
+pub(super) fn reasoning_effort_for_attach(
     document: &DocumentMut,
-    auth: &Option<Vec<u8>>,
-    auth_path: &Path,
-) -> Result<ManagedSnapshotScope> {
-    if let Some(path) = account_backup_for_profile(profile_dir, backup_root)? {
-        let bytes = read_optional_bytes(&path)?;
-        let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "ChatGPT account profile backup disappeared during snapshot restore",
-            )
-        })?;
-        if backup.profile_dir != profile_dir.to_string_lossy()
-            || !account_managed_config_matches(document)
-            || !account_auth_matches_snapshot(auth, auth_path, &backup.managed_access_hash)?
-        {
-            return Err(profile_restore_blocked());
-        }
-        return Ok(ManagedSnapshotScope::OAuthAccount);
-    }
-
-    let Some(backup) = local_backup(profile_dir, backup_root)? else {
-        return Ok(ManagedSnapshotScope::NoBinding);
+    catalog_json: Option<&str>,
+) -> Option<String> {
+    let current = root_model_reasoning_effort(document);
+    let Some(selected_model) = document.get("model").and_then(Item::as_str) else {
+        return current;
     };
-    if !managed_config_matches(document, &backup)
-        || !managed_auth_matches_snapshot(auth, auth_path, &backup)?
-    {
-        return Err(profile_restore_blocked());
-    }
-    Ok(ManagedSnapshotScope::LocalGateway)
-}
-
-pub(super) fn merge_managed_snapshot_config(
-    current: Option<&str>,
-    snapshot: Option<&str>,
-    scope: ManagedSnapshotScope,
-) -> Result<Option<String>> {
-    let mut document = parse_config(current.unwrap_or_default())?;
-    validate_config_shape(&document)?;
-    let snapshot = snapshot.map(parse_config).transpose()?;
-    if let Some(snapshot) = snapshot.as_ref() {
-        validate_config_shape(snapshot)?;
-    }
-    let before = document.to_string();
-
-    let model_provider = snapshot.as_ref().and_then(root_model_provider);
-    if model_provider.as_deref() == Some(PROVIDER_ID) {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "a Relay-managed snapshot cannot restore another Relay binding",
-        ));
-    }
-    restore_root_string(&mut document, "model_provider", model_provider.as_deref());
-    let snapshot_value = |key| {
-        snapshot
-            .as_ref()
-            .map(|snapshot| optional_root_string(snapshot, key))
-            .transpose()
-            .map(Option::flatten)
+    let Some(catalog_json) = catalog_json else {
+        return current;
     };
-    match scope {
-        ManagedSnapshotScope::LocalGateway => {
-            let catalog = snapshot_value("model_catalog_json")?;
-            restore_root_string(&mut document, "model_catalog_json", catalog.as_deref());
-        }
-        ManagedSnapshotScope::OAuthAccount => {
-            let base_url = snapshot_value("openai_base_url")?;
-            restore_root_string(&mut document, "openai_base_url", base_url.as_deref());
-        }
-        ManagedSnapshotScope::NoBinding => {}
-    }
-    // Snapshot recovery always detaches Relay. Re-creating its provider here
-    // would leave Codex pointed at a credential whose backup was discarded.
-    remove_managed_provider(&mut document);
-
-    let restored = document.to_string();
-    if restored == before {
-        return Ok(current.map(ToOwned::to_owned));
-    }
-    if restored.trim().is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(restored))
-}
-
-pub(super) fn optional_root_string(document: &DocumentMut, key: &str) -> Result<Option<String>> {
-    let Some(item) = document.get(key) else {
-        return Ok(None);
+    let Ok(catalog) = serde_json::from_str::<Value>(catalog_json) else {
+        return current;
     };
-    item.as_str()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                format!("ChatGPT {key} must be a string"),
-            )
+    let model = catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models.iter().find(|model| {
+                model
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .is_some_and(|slug| slug.eq_ignore_ascii_case(selected_model))
+            })
+        });
+    let Some(model) = model else {
+        return current;
+    };
+    let supported_levels = model
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)?;
+    let supports = |effort: &str| {
+        supported_levels.iter().any(|level| {
+            level
+                .get("effort")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
         })
-        .map(Some)
-}
-
-pub(super) fn merge_managed_snapshot_auth(
-    current: Option<&str>,
-    snapshot: Option<&str>,
-) -> Result<Option<String>> {
-    let snapshot = snapshot
-        .map(parse_profile_auth)
-        .transpose()?
-        .unwrap_or_default();
-    let mut current_value = match current {
-        Some(content) => parse_profile_auth(content)?,
-        None => serde_json::Map::new(),
     };
-    let before = current_value.clone();
-    for key in MANAGED_SNAPSHOT_AUTH_KEYS {
-        match snapshot.get(*key) {
-            Some(value) => {
-                current_value.insert((*key).to_string(), value.clone());
-            }
-            None => {
-                current_value.remove(*key);
-            }
-        }
+    if let Some(current) = current.filter(|effort| supports(effort)) {
+        return Some(current);
     }
-    if current_value == before {
-        return Ok(current.map(ToOwned::to_owned));
-    }
-    if current_value.is_empty() {
-        return Ok(None);
-    }
-    let content = serde_json::to_string_pretty(&serde_json::Value::Object(current_value))
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    Ok(Some(format!("{content}\n")))
-}
-
-pub(super) fn parse_profile_auth(
-    content: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let value = serde_json::from_str::<serde_json::Value>(content).map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!("ChatGPT auth is not valid JSON: {error}"),
-        )
-    })?;
-    value.as_object().cloned().ok_or_else(|| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT auth must contain a JSON object",
-        )
-    })
+    model
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .filter(|effort| supports(effort))
+        .map(ToOwned::to_owned)
 }
 
 pub(super) fn restore_root_string(document: &mut DocumentMut, key: &str, previous: Option<&str>) {
@@ -311,7 +224,12 @@ pub(super) fn external_model_catalog(
     backup: &ProfileBackup,
 ) -> Option<String> {
     let current = root_model_catalog_json(document);
-    if current.as_deref() == backup.managed_model_catalog_path.as_deref() {
+    if current.as_deref().map(portable_path_value)
+        == backup
+            .managed_model_catalog_path
+            .as_deref()
+            .map(portable_path_value)
+    {
         backup.previous_model_catalog_json.clone()
     } else {
         current
@@ -346,8 +264,13 @@ pub(super) fn document_has_provider(document: &DocumentMut) -> bool {
 pub(super) fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document).as_deref() == Some(PROVIDER_ID)
         && (backup.managed_model_catalog_path.is_none()
-            || root_model_catalog_json(document).as_deref()
-                == backup.managed_model_catalog_path.as_deref())
+            || root_model_catalog_json(document)
+                .as_deref()
+                .map(portable_path_value)
+                == backup
+                    .managed_model_catalog_path
+                    .as_deref()
+                    .map(portable_path_value))
         && managed_provider_matches(document, backup)
 }
 
@@ -396,8 +319,9 @@ pub(super) fn managed_provider_matches(document: &DocumentMut, backup: &ProfileB
                         .get("experimental_bearer_token")
                         .and_then(Item::as_str)
                         .is_some_and(|token| key_hash(token.trim()) == backup.managed_key_hash))
-                && provider.get("supports_websockets").and_then(Item::as_bool)
-                    == Some(backup.managed_supports_websockets)
+                && backup.managed_supports_websockets.is_none_or(|expected| {
+                    provider.get("supports_websockets").and_then(Item::as_bool) == Some(expected)
+                })
         })
 }
 

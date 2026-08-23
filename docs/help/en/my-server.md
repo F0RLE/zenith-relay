@@ -36,6 +36,12 @@ The server owns participants, quota state, routing, usage logs, and the managed
 profile credential. The desktop application renders server snapshots and sends
 confirmed management operations.
 
+This server is operated by you and is separate from the production Zenith
+Gateway and Control API. A move may transfer only your own provider/session
+secret after an explicit confirmation. Relay never uses this management path
+to upload Zenith production credentials, customer keys, account-pool inventory,
+or internal production routing logic.
+
 Relay lets routed models receive image attachments without guessing support
 from their names. The selected model makes the final decision; native ChatGPT
 model capabilities remain unchanged.
@@ -140,3 +146,8 @@ database and encrypted vault are validated together. Preserve the stable vault
 key separately; a backup without its original key cannot restore account
 sessions. Desktop **Recovery** protects the local ChatGPT profile and does not
 replace a server backup.
+
+The server's state, usage, source statistics, diagnostics, and management
+snapshots are redacted. They contain operational metadata and aggregates, not
+raw credentials, cookies, prompts, authorization headers, or provider response
+bodies.

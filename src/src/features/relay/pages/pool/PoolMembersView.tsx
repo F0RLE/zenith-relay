@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
+import { Activity, CheckCheck, CircleAlert, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
 import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
+import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { AccountPlanBadge, AccountValueStrip, Button, EmptyState, IconButton, QuotaStack, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
-import { activeModelCounts, activeRequestCount, apiSourceRole, routingOrderPositions } from "../../routingOrder";
+import { activeModelCounts, activeRequestCount, apiSourceRole, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
 import { comparePoolMembers, memberName, type PoolMember } from "../../poolHelpers";
 import { formatApiEquivalent, formatProviderMicroUsd } from "../../poolFormatting";
 import { persistRoutingPolicy } from "../../routingPolicy";
@@ -19,7 +20,7 @@ type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: b
 
 export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
+  const { mode, runtime, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
@@ -38,7 +39,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
     ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const })),
   ];
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
-  const runtimeByMember = new Map(runtimeOrder.map((candidate) => [candidate.candidateId, candidate]));
+  const runtimeByMember = new Map(poolMembers.map((member) => [
+    member.id,
+    runtimeCandidateForMember(
+      member.id,
+      member.kind === "source" ? "api_source" : "oauth_account",
+      runtimeOrder,
+      member.kind === "source" ? "responses" : "all",
+      member.kind === "source" ? member.wireApi : undefined,
+    ),
+  ]));
   const orderByMember = routingOrderPositions(runtimeOrder);
   const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, orderByMember));
   const sourceIds = members.filter((member) => member.kind === "source").map((member) => member.id).sort().join("\n");
@@ -93,7 +103,13 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
       : t("pool.activeRequestsUnknown", { count: activeRequestTotal })
     : null;
   const lastUsedRuntime = runtimeOrder.reduce<CandidateRuntimeSnapshot | null>((latest, candidate) => candidate.lastUsedAtMs != null && (latest?.lastUsedAtMs == null || candidate.lastUsedAtMs > latest.lastUsedAtMs) ? candidate : latest, null);
-  const lastUsedMember = lastUsedRuntime ? members.find((member) => member.id === lastUsedRuntime.candidateId) ?? null : null;
+  const lastUsedMember = lastUsedRuntime ? members.find((member) => runtimeCandidateForMember(
+    member.id,
+    member.kind === "source" ? "api_source" : "oauth_account",
+    runtimeOrder,
+    member.kind === "source" ? "responses" : "all",
+    member.kind === "source" ? member.wireApi : undefined,
+  )?.lastUsedAtMs === lastUsedRuntime.lastUsedAtMs) ?? null : null;
   const nextMember = members.find((member) => runtimeByMember.get(member.id)?.available) ?? null;
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
@@ -163,7 +179,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
   const counts = {
     rotation: statuses.filter((status) => status === "rotation").length,
     quotaWait: statuses.filter((status) => status === "quotaWait").length,
-    errors: members.filter((member) => member.kind === "account" ? Boolean(currentAccountErrorCode(member)) : member.operationalStatus === "unavailable").length,
+    errors: members.filter((member) => member.kind === "account" ? Boolean(currentAccountErrorCode(member)) : member.operationalStatus === "unavailable" || Boolean(member.lastErrorCode?.trim())).length,
     disabled: statuses.filter((status) => status === "disabled").length,
   };
   return <>
@@ -195,21 +211,9 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
         const runtimeState = runtimeByMember.get(member.id);
         const statusKey = member.operationalStatus;
         const statusTone = operationalStatusTone(statusKey);
-        const runtimeTone = statusKey === "rotation"
-          ? transientCandidateTone(runtimeState, nowMs, member.kind === "source")
-          : null;
         const quotaStatus = member.kind === "account" ? member.quotaRefreshStatus : "updated";
         const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
-        const indicatorTone = statusKey === "unavailable" || statusKey === "disabled"
-          ? statusTone
-          : quotaStatus === "refreshing"
-            ? "disabled"
-            : quotaStatus === "failed" || quotaStatus === "requires_reauth"
-              ? "error"
-              : quotaStatus === "pending"
-                ? "disabled"
-                : runtimeTone ?? statusTone;
         const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
@@ -221,30 +225,74 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
             : { date: subscriptionExpiryFormat.format(member.subscription.activeUntilMs), remaining: formatDetailedRemainingTime(member.subscription.activeUntilMs, nowMs, t) }
           : null;
         const isCurrent = activeRequestCount(runtimeState) > 0;
-        const isLastUsed = !isCurrent && runtimeState != null && runtimeState.candidateId === lastUsedRuntime?.candidateId && runtimeState.kind === lastUsedRuntime.kind;
+        const isLastUsed = !isCurrent && runtimeState != null && runtimeState.lastUsedAtMs != null && runtimeState.lastUsedAtMs === lastUsedRuntime?.lastUsedAtMs;
+        const modelRetries = [...(runtimeState?.modelRetries ?? [])].filter((retry) => retry.retryAtMs > nowMs).sort((left, right) => left.retryAtMs - right.retryAtMs);
+        const modelRetryHint = modelRetries.length
+          ? t("pool.modelRetryAt", {
+            models: modelRetries.map((retry) => retry.model).join(", "),
+            time: formatDetailedRemainingTime(modelRetries[0].retryAtMs, nowMs, t),
+          })
+          : null;
+        const memberErrorCode = member.kind === "source" ? member.lastErrorCode?.trim() : errorCode;
+        const visibleMemberErrorCode = member.kind === "source" ? memberErrorCode : displayedErrorCode;
+        const runtimeTone = statusKey === "rotation"
+          ? member.kind === "source"
+            ? transientCandidateTone(runtimeState, nowMs, true)
+            : modelRetries.length > 0
+              ? "warning"
+              : transientCandidateTone(runtimeState, nowMs, false)
+          : null;
+        const indicatorTone = visibleMemberErrorCode
+          ? "error"
+          : statusKey === "unavailable" || statusKey === "disabled"
+          ? statusTone
+          : quotaStatus === "refreshing"
+            ? "disabled"
+            : quotaStatus === "failed" || quotaStatus === "requires_reauth"
+              ? "error"
+              : quotaStatus === "pending"
+                ? "disabled"
+                : runtimeTone ?? statusTone;
         const runtimeHint = runtimeState?.halfOpen
           ? t("pool.recoveryProbe")
-          : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
-            ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
+          : modelRetryHint
+            ? modelRetryHint
+            : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
+            ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
             : undefined;
+        const runtimeErrorHint = memberErrorCode
+          ? t("pool.runtimeError", { code: memberErrorCode })
+          : null;
+        const parallelRequests = activeRequestCount(runtimeState);
+        // Source failures are represented by the status icon. Keep only a
+        // retry countdown in the card tooltip so the same error is not shown
+        // again by the WebView title and the card footer.
+        const sourceRuntimeTitle = runtimeHint || undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removing = busy === `pool-remove-${member.id}`;
         const statusLabel = t(`pool.memberStatus.${statusKey}`);
-        const indicatorLabel = displayedErrorCode ? accountErrorLabel(displayedErrorCode, t) : quotaStatus === "updated" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
-        const indicatorHint = runtimeHint ? `${indicatorLabel} · ${runtimeHint}` : indicatorLabel;
-        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" title={codexInterface ? t("pool.codexInterfaceHint") : undefined} data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
+        const indicatorLabel = visibleMemberErrorCode
+          ? member.kind === "account" ? accountErrorLabel(visibleMemberErrorCode, t) : t("pool.runtimeError", { code: visibleMemberErrorCode })
+          : quotaStatus === "updated" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
+        const indicatorHint = member.kind === "source"
+          ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
+          : [runtimeErrorHint, runtimeHint, indicatorLabel].filter(Boolean).join(" · ");
+        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" title={[codexInterface ? t("pool.codexInterfaceHint") : null, member.kind === "source" ? sourceRuntimeTitle : null].filter(Boolean).join(" · ") || undefined} data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
           <header className="pool-member-card-header">
             {member.kind === "account" && displayedErrorCode
               ? <IconButton className="pool-member-kind-icon" data-status="error" label={indicatorHint} icon={<UserRound aria-hidden />} onClick={() => setErrorDetails(member)} />
-              : <StatusIcon className="pool-member-kind-icon" status={indicatorTone} label={indicatorHint}>{member.kind === "source" ? <Cloud aria-hidden /> : <UserRound aria-hidden />}</StatusIcon>}
+              : <StatusIcon className="pool-member-kind-icon" status={indicatorTone} label={indicatorHint} showTooltip={!(member.kind === "source" && visibleMemberErrorCode)}>{member.kind === "source" ? <Cloud aria-hidden /> : <UserRound aria-hidden />}</StatusIcon>}
             <div className="pool-member-identity">
               <strong className="pool-member-name" title={identity === detail ? identity : `${identity} · ${detail}`}>{identity}</strong>
               <div className="pool-member-meta">{member.kind === "account" ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /> : <small title={detail}>{detail}</small>}</div>
             </div>
           </header>
-          <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>{member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}</div>
-          <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}</> : <span>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</span>}</div>
+          <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>
+            {member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}
+            {mode === "local" && member.kind === "account" ? <ResetCreditsControl account={member} onCompleted={() => refresh()} /> : null}
+          </div>
+          <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}{runtimeErrorHint ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-runtime-hint" data-warning="true"><CircleAlert aria-hidden />{runtimeErrorHint}</span></> : null}{runtimeHint ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-runtime-hint" data-warning={Boolean(runtimeErrorHint)}>{runtimeHint}</span></> : null}</> : <div className="pool-member-runtime-meta"><div><span>{t("pool.operationMode")}</span><strong>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</strong></div><div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div>}</div>
           {member.kind === "account" && accountValueVisible ? <AccountValueStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">

@@ -33,7 +33,7 @@ pub enum AccountSelector {
 }
 
 impl AccountSelector {
-    pub(super) fn matches(&self, account: &AccountRecord) -> bool {
+    pub fn matches(&self, account: &AccountRecord) -> bool {
         match self {
             Self::AllEligible => true,
             Self::AccountIds(ids) => ids.contains(&account.id),
@@ -98,7 +98,9 @@ impl WakeTask {
         if self.name.trim().is_empty() {
             return Err(WakeTaskValidationError::InvalidName);
         }
-        if self.trigger != WakeTrigger::QuotaFull || self.fallback_schedule.is_some() {
+        if self.fallback_schedule.is_some()
+            || !matches!(self.trigger, WakeTrigger::QuotaFull | WakeTrigger::Weekly)
+        {
             return Err(WakeTaskValidationError::UnsupportedSchedule);
         }
         if !self.account_selector.is_valid() {
@@ -106,6 +108,12 @@ impl WakeTask {
         }
         if self.window_kinds.is_empty() {
             return Err(WakeTaskValidationError::InvalidWindowSelection);
+        }
+        if self.trigger == WakeTrigger::Weekly
+            && (self.window_kinds != BTreeSet::from([QuotaWindowKind::Secondary])
+                || self.execution_policy != WakeExecutionPolicy::Automatic)
+        {
+            return Err(WakeTaskValidationError::UnsupportedSchedule);
         }
         if matches!(&self.model_policy, WakeModelPolicy::Explicit(id) if id.trim().is_empty()) {
             return Err(WakeTaskValidationError::InvalidModelPolicy);

@@ -225,6 +225,7 @@ pub fn normalize_upstream_codex_catalog_entry(
             .is_some_and(|levels| levels.iter().all(valid_reasoning_level))
         {
             entry.insert("supported_reasoning_levels".into(), value.clone());
+            compact_reasoning_level_descriptions(&mut entry);
         }
     }
     // API routes use Relay's neutral automatic default and never inherit an
@@ -290,6 +291,43 @@ pub fn normalize_upstream_codex_catalog_entry(
 
     let value = Value::Object(entry);
     codex_catalog_entry_is_compatible(&value).then_some(value)
+}
+
+/// Codex renders the reasoning description below the effort label, but its
+/// picker reserves a single compact row for each option. Provider catalogs
+/// often send prose descriptions that wrap into the following option and make
+/// the menu unreadable. Keep short labels intact and collapse verbose copy to
+/// the stable effort identifier; this changes presentation only, not support.
+fn compact_reasoning_level_descriptions(entry: &mut Map<String, Value>) {
+    let Some(levels) = entry
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for level in levels {
+        let Some(level) = level.as_object_mut() else {
+            continue;
+        };
+        let Some(effort) = level
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let verbose = level
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| {
+                description.chars().count() > 24 || description.contains(['\n', '\r'])
+            });
+        if verbose {
+            level.insert("description".into(), Value::String(effort));
+        }
+    }
 }
 
 fn prefer_medium_reasoning_default(entry: &mut Map<String, Value>) {
@@ -768,7 +806,7 @@ mod tests {
             "supported_reasoning_levels": [
                 {"effort": "low", "description": "Low"},
                 {"effort": "medium", "description": "Medium"},
-                {"effort": "ultra", "description": "Ultra"}
+                {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"}
             ]
         });
 
@@ -787,6 +825,10 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+        assert_eq!(
+            entry["supported_reasoning_levels"][2]["description"],
+            "ultra"
         );
     }
 

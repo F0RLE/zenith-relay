@@ -5,6 +5,63 @@ use std::{collections::BTreeMap, sync::OnceLock};
 
 pub const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageRequestPrice {
+    pub operation: String,
+    pub quality: String,
+    pub size: String,
+    pub micro_usd: u64,
+}
+
+/// Official OpenAI image output prices from the current API pricing guide.
+/// Prompt and input-image tokens for edits remain separate usage facts.
+pub fn official_image_request_prices(model: &str) -> Vec<ImageRequestPrice> {
+    let rows: &[(&str, u64, u64, u64)] = match model.trim().to_ascii_lowercase().as_str() {
+        "gpt-image-2" => &[
+            ("low", 6_000, 5_000, 5_000),
+            ("medium", 53_000, 41_000, 41_000),
+            ("high", 211_000, 165_000, 165_000),
+        ],
+        "gpt-image-1.5" => &[
+            ("low", 9_000, 13_000, 13_000),
+            ("medium", 34_000, 50_000, 50_000),
+            ("high", 133_000, 200_000, 200_000),
+        ],
+        "gpt-image-1" => &[
+            ("low", 11_000, 16_000, 16_000),
+            ("medium", 42_000, 63_000, 63_000),
+            ("high", 167_000, 250_000, 250_000),
+        ],
+        "gpt-image-1-mini" => &[
+            ("low", 5_000, 6_000, 6_000),
+            ("medium", 11_000, 15_000, 15_000),
+            ("high", 36_000, 52_000, 52_000),
+        ],
+        _ => return Vec::new(),
+    };
+    ["generation", "edit"]
+        .into_iter()
+        .flat_map(|operation| {
+            rows.iter()
+                .flat_map(move |(quality, square, portrait, landscape)| {
+                    [
+                        ("1024x1024", *square),
+                        ("1024x1536", *portrait),
+                        ("1536x1024", *landscape),
+                    ]
+                    .into_iter()
+                    .map(move |(size, micro_usd)| ImageRequestPrice {
+                        operation: operation.to_string(),
+                        quality: (*quality).to_string(),
+                        size: size.to_string(),
+                        micro_usd,
+                    })
+                })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiModelPrice {
@@ -403,6 +460,18 @@ fn token_cost(tokens: u64, micro_usd_per_million: u64) -> u64 {
 #[cfg(test)]
 mod pricing_tests {
     use super::*;
+
+    #[test]
+    fn official_image_prices_are_request_and_size_based() {
+        let prices = official_image_request_prices("GPT-IMAGE-2");
+        assert_eq!(prices.len(), 18);
+        assert_eq!(prices[0].operation, "generation");
+        assert_eq!(prices[0].quality, "low");
+        assert_eq!(prices[0].size, "1024x1024");
+        assert_eq!(prices[0].micro_usd, 6_000);
+        assert_eq!(prices[9].operation, "edit");
+        assert!(official_image_request_prices("gpt-5.6").is_empty());
+    }
 
     #[test]
     fn official_catalog_prices_known_models_without_floating_point() {

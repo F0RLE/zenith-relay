@@ -17,15 +17,36 @@ The frontend does not access files, secrets, provider endpoints, or client
 configuration directly. Keep private provider economy, customer billing,
 Zenith inventory, and public gateway business logic out of this repository.
 
+## Secret and logic boundary
+
+Zenith Relay is a separate desktop/personal-pool product. It must not receive
+or forward Zenith production credentials, customer API keys, backend tokens,
+account-pool inventory, provider cabinet credentials, or internal Gateway and
+Control API business/routing logic. Do not copy those values into code,
+fixtures, documentation, tests, or support artifacts.
+
+User-owned provider secrets belong in the existing desktop credential store or
+the encrypted vault of a server owned by that user. A desktop-to-server transfer
+is allowed only through an explicit, confirmed management operation targeting
+that user-managed Relay Server. It is not an upload to Zenith production.
+
+Remote state, usage, telemetry, exports, diagnostics, screenshots, and API
+snapshots must stay redacted. They may contain identifiers, models, timings,
+status, and aggregates, but never raw credentials, cookies, authorization
+headers, prompts, response bodies, or provider session material.
+
 ## Safety rules
 
 - Use stable dependencies only.
 - Never put credentials, cookies, authorization headers, session exports, or
-  account identities in source, fixtures, screenshots, logs, or support output.
+  account identities in source, fixtures, screenshots, logs, snapshots, exports,
+  telemetry, or support output.
 - Keep desktop secrets in the existing credential-store path and server secrets
   in the existing encrypted vault.
 - Management tokens and pool request keys are different credentials. Do not
   accept either one in the other's boundary.
+- Never use a management token as a `/v1` profile credential, and never expose
+  either credential in a snapshot, log, export, or example.
 - Preserve the distinction between quota monitoring and routing eligibility.
   Do not reinstate a Free-account routing policy or a hard-coded quota window.
 - Retry another candidate only before any response bytes have reached the
@@ -101,6 +122,19 @@ bun run build
 bun run test:e2e
 ~~~
 
+For a release UI or layout change, run the focused Playwright suites as well:
+
+~~~powershell
+cd src
+bunx playwright test tests/e2e/visual-matrix.spec.ts
+bunx playwright test tests/e2e/operations.spec.ts
+bun run screenshots
+~~~
+
+The visual matrix is the responsive/appearance gate; the operations suite is
+the interaction and state-transition gate. The screenshots command regenerates
+only the committed `docs/screenshots` assets.
+
 <code>bun run verify</code> runs the unit tests, frontend build (including the
 TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
 
@@ -144,8 +178,9 @@ behavior.
    noise.
 6. Update <code>CHANGELOG.md</code> for user-visible behavior, or state in the
    PR why no entry is needed.
-7. Merge reviewed work into <code>main</code>. Tag and publish only after the
-   release checks and live acceptance pass.
+7. Merge reviewed work into <code>main</code>. Tag and publish a product release
+   after the release checks pass; reserve a <code>production-ready</code> claim
+   for the live acceptance gates in <code>ROADMAP.md</code>.
 
 ### Updater changelog for release admins
 

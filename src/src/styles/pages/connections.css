@@ -12,7 +12,7 @@
   padding: 16px 18px;
 }
 
-.automation-form {
+.relay-form.automation-form {
   gap: 12px;
 }
 
@@ -97,11 +97,19 @@
 
 @media (max-height: 600px) {
   .relay-dialog:has(.automation-form) .relay-dialog-body {
-    padding-block: 10px;
+    padding-block: 8px;
   }
 
-  .automation-form {
+  .relay-form.automation-form {
     gap: 10px;
+  }
+
+  .automation-account-picker {
+    padding: 8px;
+  }
+
+  .automation-rule {
+    padding-top: 6px;
   }
 }
 
@@ -791,6 +799,39 @@
 
 .account-subscription-line.expired .account-subscription-countdown {
   color: inherit;
+}
+
+.account-runtime-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 26px;
+  margin: -4px 12px 8px;
+  padding: 0 4px;
+  overflow: hidden;
+  color: var(--relay-info, var(--relay-secondary));
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.account-runtime-line[data-warning="true"] {
+  color: var(--relay-warning, #d6a84f);
+}
+
+.account-runtime-line svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+}
+
+.account-runtime-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .account-error-json {

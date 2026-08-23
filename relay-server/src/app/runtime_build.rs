@@ -35,6 +35,8 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let hidden_models = state.store.hidden_models()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
     let routing_policy = state.store.routing_policy()?;
+    let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
+    let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
     let (mut pool_source_ids, mut pool_account_ids) =
         pool_member_ids(&source_records, &account_records);
     if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
@@ -100,6 +102,8 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
         usage,
     )
     .map_err(|error| error.to_string())?;
+    runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
+    runtime.set_codex_websockets_enabled(codex_websockets_enabled);
     state.replace_runtime(Some(Arc::new(runtime)))
 }
 

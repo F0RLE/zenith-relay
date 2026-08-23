@@ -17,6 +17,8 @@ use zenith_relay_core::unix_time_ms as now_ms;
 const SNAPSHOT_VERSION: u32 = 1;
 const PAYLOAD_VERSION: u32 = 1;
 const SNAPSHOT_DIR: &str = "snapshots";
+const ORIGINAL_MARKER_FILE: &str = "original.snapshot.initialized";
+const ORIGINAL_SNAPSHOT_NAME: &str = "Initial profile";
 const MAX_NAME_CHARS: usize = 80;
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
 const MAX_PROFILE_FILE_BYTES: usize = 1024 * 1024;
@@ -30,6 +32,7 @@ pub struct ProfileSnapshotSummary {
     pub created_at_ms: u64,
     pub config_available: bool,
     pub auth_available: bool,
+    pub is_original: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -49,6 +52,8 @@ struct SnapshotRecord {
     created_at_ms: u64,
     config_available: bool,
     auth_available: bool,
+    #[serde(default)]
+    is_original: bool,
     payload_secret_ref: String,
 }
 
@@ -106,8 +111,9 @@ fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<Profi
     }
     snapshots.sort_by(|left, right| {
         right
-            .created_at_ms
-            .cmp(&left.created_at_ms)
+            .is_original
+            .cmp(&left.is_original)
+            .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
             .then_with(|| right.id.cmp(&left.id))
     });
     Ok(ProfileSnapshotList {
@@ -117,39 +123,18 @@ fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<Profi
 }
 
 pub fn create(codex_home: &Path, backup_root: &Path, name: &str) -> Result<ProfileSnapshotSummary> {
-    create_with(codex_home, backup_root, name, &OsSnapshotSecrets)
+    create_with(codex_home, backup_root, name, false, &OsSnapshotSecrets)
 }
 
-pub fn restore(
-    codex_home: &Path,
-    backup_root: &Path,
-    id: &str,
-    safety_name: Option<&str>,
-) -> Result<()> {
-    restore_with_mode(
-        codex_home,
-        backup_root,
-        id,
-        safety_name,
-        RestoreMode::Managed,
-        &OsSnapshotSecrets,
-    )
+/// Create the one-time first-launch restore point. The marker deliberately
+/// survives deletion of the snapshot so a later startup cannot silently turn
+/// a user-created profile into a new "original" state.
+pub fn ensure_original(codex_home: &Path, backup_root: &Path) -> Result<()> {
+    ensure_original_with(codex_home, backup_root, &OsSnapshotSecrets)
 }
 
-pub fn restore_full(
-    codex_home: &Path,
-    backup_root: &Path,
-    id: &str,
-    safety_name: Option<&str>,
-) -> Result<()> {
-    restore_with_mode(
-        codex_home,
-        backup_root,
-        id,
-        safety_name,
-        RestoreMode::Full,
-        &OsSnapshotSecrets,
-    )
+pub fn restore_full(codex_home: &Path, backup_root: &Path, id: &str) -> Result<()> {
+    restore_full_with(codex_home, backup_root, id, &OsSnapshotSecrets)
 }
 
 pub fn delete(backup_root: &Path, id: &str) -> Result<()> {
@@ -160,6 +145,7 @@ fn create_with(
     codex_home: &Path,
     backup_root: &Path,
     name: &str,
+    is_original: bool,
     secrets: &impl SnapshotSecrets,
 ) -> Result<ProfileSnapshotSummary> {
     let name = normalize_name(name)?;
@@ -183,10 +169,11 @@ fn create_with(
         version: SNAPSHOT_VERSION,
         id: id.clone(),
         name,
-        profile_dir: profile_dir.to_string_lossy().into_owned(),
+        profile_dir: codex::portable_path_string(&profile_dir),
         created_at_ms: now_ms(),
         config_available,
         auth_available,
+        is_original,
         payload_secret_ref: payload_secret_ref.clone(),
     };
     let metadata = serde_json::to_string_pretty(&record).map_err(invalid_data)?;
@@ -197,64 +184,58 @@ fn create_with(
     Ok(summary(&record))
 }
 
-#[cfg(test)]
+fn ensure_original_with(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SnapshotSecrets,
+) -> Result<()> {
+    let root = snapshot_root(backup_root);
+    fs::create_dir_all(&root).map_err(io_error)?;
+    let marker = root.join(ORIGINAL_MARKER_FILE);
+    if marker.exists() {
+        return Ok(());
+    }
+
+    if !list_with(backup_root, secrets)?
+        .snapshots
+        .iter()
+        .any(|snapshot| snapshot.is_original)
+    {
+        create_with(
+            codex_home,
+            backup_root,
+            ORIGINAL_SNAPSHOT_NAME,
+            true,
+            secrets,
+        )?;
+    }
+    atomic_write(&marker, "v1\n").map_err(io_error_message)?;
+    Ok(())
+}
+
 fn restore_full_with(
     codex_home: &Path,
     backup_root: &Path,
     id: &str,
-    safety_name: Option<&str>,
-    secrets: &impl SnapshotSecrets,
-) -> Result<()> {
-    restore_with_mode(
-        codex_home,
-        backup_root,
-        id,
-        safety_name,
-        RestoreMode::Full,
-        secrets,
-    )
-}
-
-#[derive(Clone, Copy)]
-enum RestoreMode {
-    Managed,
-    Full,
-}
-
-fn restore_with_mode(
-    codex_home: &Path,
-    backup_root: &Path,
-    id: &str,
-    safety_name: Option<&str>,
-    mode: RestoreMode,
     secrets: &impl SnapshotSecrets,
 ) -> Result<()> {
     let path = metadata_path(backup_root, id)?;
     let record = read_record(&path)?;
     validate_record(&record, id)?;
     let profile_dir = fs::canonicalize(codex_home).map_err(io_error)?;
-    if record.profile_dir != profile_dir.to_string_lossy() {
+    if codex::portable_path_value(&record.profile_dir) != codex::portable_path_string(&profile_dir)
+    {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "ChatGPT snapshot belongs to another profile",
         ));
     }
     let payload = load_payload(&record, secrets)?;
-    if let Some(safety_name) = safety_name {
-        create_with(&profile_dir, backup_root, safety_name, secrets)?;
-    }
     let snapshot = UserProfileSnapshot {
         config: payload.config,
         auth: payload.auth,
     };
-    match mode {
-        RestoreMode::Managed => {
-            codex::restore_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
-        }
-        RestoreMode::Full => {
-            codex::restore_full_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
-        }
-    }
+    codex::restore_full_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
 }
 
 fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> Result<()> {
@@ -369,10 +350,11 @@ fn summary(record: &SnapshotRecord) -> ProfileSnapshotSummary {
     ProfileSnapshotSummary {
         id: record.id.clone(),
         name: record.name.clone(),
-        profile_dir: record.profile_dir.clone(),
+        profile_dir: codex::portable_path_value(&record.profile_dir),
         created_at_ms: record.created_at_ms,
         config_available: record.config_available,
         auth_available: record.auth_available,
+        is_original: record.is_original,
     }
 }
 
@@ -503,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn named_snapshots_can_save_the_current_profile_before_restore() {
+    fn full_restore_replaces_the_profile_without_creating_an_extra_snapshot() {
         let root =
             std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
         let profile = root.join("profile");
@@ -513,21 +495,14 @@ mod tests {
         fs::write(profile.join("auth.json"), "{\"token\":\"auth-secret\"}").unwrap();
         let secrets = MemorySecrets::default();
 
-        let first = create_with(&profile, &backups, "Original", &secrets).unwrap();
+        let first = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
         let metadata = fs::read_to_string(metadata_path(&backups, &first.id).unwrap()).unwrap();
         assert!(!metadata.contains("original-secret"));
         assert!(!metadata.contains("auth-secret"));
 
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
         fs::write(profile.join("auth.json"), "{\"token\":\"changed\"}").unwrap();
-        restore_full_with(
-            &profile,
-            &backups,
-            &first.id,
-            Some("Before restoring Original"),
-            &secrets,
-        )
-        .unwrap();
+        restore_full_with(&profile, &backups, &first.id, &secrets).unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
@@ -537,27 +512,13 @@ mod tests {
             fs::read_to_string(profile.join("auth.json")).unwrap(),
             "{\"token\":\"auth-secret\"}"
         );
-        let snapshots = list_with(&backups, &secrets).unwrap().snapshots;
-        assert_eq!(snapshots.len(), 2);
-        let safety_copy = snapshots
-            .iter()
-            .find(|snapshot| snapshot.name == "Before restoring Original")
-            .unwrap();
-        restore_full_with(&profile, &backups, &safety_copy.id, None, &secrets).unwrap();
-        assert_eq!(
-            fs::read_to_string(profile.join("config.toml")).unwrap(),
-            "model = \"changed\"\n"
-        );
-        assert_eq!(
-            fs::read_to_string(profile.join("auth.json")).unwrap(),
-            "{\"token\":\"changed\"}"
-        );
+        assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 1);
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn named_snapshots_restore_without_saving_the_current_profile_when_not_requested() {
+    fn full_restore_does_not_save_the_current_profile() {
         let root =
             std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
         let profile = root.join("profile");
@@ -566,9 +527,9 @@ mod tests {
         fs::write(profile.join("config.toml"), "model = \"original\"\n").unwrap();
         let secrets = MemorySecrets::default();
 
-        let original = create_with(&profile, &backups, "Original", &secrets).unwrap();
+        let original = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
-        restore_full_with(&profile, &backups, &original.id, None, &secrets).unwrap();
+        restore_full_with(&profile, &backups, &original.id, &secrets).unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
@@ -590,8 +551,8 @@ mod tests {
         fs::create_dir_all(&profile).unwrap();
         fs::write(profile.join("config.toml"), "model = \"test\"\n").unwrap();
         let secrets = MemorySecrets::default();
-        let snapshot = create_with(&profile, &backups, "Missing", &secrets).unwrap();
-        let valid = create_with(&profile, &backups, "Valid", &secrets).unwrap();
+        let snapshot = create_with(&profile, &backups, "Missing", false, &secrets).unwrap();
+        let valid = create_with(&profile, &backups, "Valid", false, &secrets).unwrap();
 
         secrets.delete(&payload_secret_ref(&snapshot.id)).unwrap();
         let list = list_with(&backups, &secrets).unwrap();
@@ -599,6 +560,35 @@ mod tests {
         assert_eq!(list.invalid_count, 1);
         assert_eq!(list.snapshots.len(), 1);
         assert_eq!(list.snapshots[0].id, valid.id);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn original_snapshot_is_created_once_and_sorted_first() {
+        let root = std::env::temp_dir().join(format!("zenith-profile-original-{}", Uuid::new_v4()));
+        let profile = root.join("profile");
+        let backups = root.join("backups");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("config.toml"), "model = \"initial\"\n").unwrap();
+        let secrets = MemorySecrets::default();
+
+        ensure_original_with(&profile, &backups, &secrets).unwrap();
+        let original = list_with(&backups, &secrets).unwrap().snapshots;
+        assert_eq!(original.len(), 1);
+        assert!(original[0].is_original);
+        create_with(&profile, &backups, "Later", false, &secrets).unwrap();
+        ensure_original_with(&profile, &backups, &secrets).unwrap();
+        let snapshots = list_with(&backups, &secrets).unwrap().snapshots;
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots[0].is_original);
+        assert_eq!(
+            snapshots
+                .iter()
+                .filter(|snapshot| snapshot.is_original)
+                .count(),
+            1
+        );
+
         fs::remove_dir_all(root).unwrap();
     }
 }

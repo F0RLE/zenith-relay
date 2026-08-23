@@ -5,11 +5,12 @@ use crate::{
     accounts::{AccountAuthState, AccountHealthState},
     api_model_price,
     automations::{WakeHistory, WakeTask},
-    codex_model_display_name, codex_model_is_picker_eligible,
+    codex_model_display_name, codex_model_is_picker_eligible, official_image_request_prices,
     quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
-    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, CandidateHealth, CandidateKind,
-    CandidateQuota, CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics,
-    RoutingStrategy, SourceProtocolBinding, WireApi,
+    runtime_source_models_for_wire_api, ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, DefaultServiceTier,
+    ImageRequestPrice, ModelRules, RoutingDiagnostics, RoutingStrategy, SourceProtocolBinding,
+    WireApi,
 };
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -69,8 +70,20 @@ pub struct GatewaySummary {
     pub quota_request_timeout_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_interface_quota_reserve_basis_points: Option<u64>,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_background_tasks_enabled: bool,
+    #[serde(default = "default_codex_websockets_enabled")]
+    pub codex_websockets_enabled: bool,
     #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
+}
+
+fn default_codex_websockets_enabled() -> bool {
+    true
+}
+
+fn default_codex_background_tasks_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -92,6 +105,8 @@ pub struct ModelSummary {
     pub cache_write_1h_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: Option<u64>,
     #[serde(default)]
+    pub image_request_prices: Vec<ImageRequestPrice>,
+    #[serde(default)]
     pub custom_price: bool,
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
@@ -101,44 +116,78 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
+    #[serde(default)]
+    pub reasoning_probe_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_probe: Option<SourceReasoningProbeProgress>,
 }
 
-/// Adds only backend-confirmed reasoning capabilities to a management model.
+/// Adds provider-reported defaults and the operator's manual override to a
+/// pooled management model. Provider-reported modes are enabled until the
+/// operator edits the list; a present empty override disables them all. The
+/// route flag covers both native OAuth accounts and API sources; API probing is
+/// exposed separately by each runtime snapshot.
 pub fn apply_model_reasoning_summary(
     model: &mut ModelSummary,
-    confirmed_levels: Vec<String>,
-    saved_allowed_levels: Option<&[String]>,
-    has_native_account_route: bool,
+    reported_levels: Option<Vec<String>>,
+    saved_manual_levels: Option<&[String]>,
+    has_pool_route: bool,
 ) {
     model.reasoning_levels.clear();
     model.reasoning_supported_levels.clear();
     model.reasoning_allowed_levels.clear();
     model.reasoning_configurable = false;
 
-    let mut seen = BTreeSet::new();
-    for level in confirmed_levels {
-        let level = level.trim().to_ascii_lowercase();
-        if !level.is_empty() && seen.insert(level.clone()) {
-            model.reasoning_supported_levels.push(level.clone());
-            model.reasoning_levels.push(level);
-        }
+    // Provider metadata is the current route contract. Known model defaults
+    // are only a fallback for providers that omit the field entirely; using
+    // them first hides newly introduced/provider-specific efforts.
+    let mut declared_levels = match reported_levels {
+        Some(levels) => levels,
+        None => crate::known_model_reasoning_levels(&model.id)
+            .map(|levels| levels.iter().copied().map(str::to_string).collect())
+            .unwrap_or_default(),
+    };
+    if crate::anthropic_max_implies_ultra(&model.id)
+        && declared_levels
+            .iter()
+            .any(|level| level.eq_ignore_ascii_case("max"))
+        && !declared_levels
+            .iter()
+            .any(|level| level.eq_ignore_ascii_case("ultra"))
+    {
+        declared_levels.push("ultra".to_string());
     }
-    if !has_native_account_route {
-        if let Some(saved_allowed_levels) = saved_allowed_levels {
-            for level in saved_allowed_levels {
-                let level = level.trim().to_ascii_lowercase();
-                if seen.contains(&level)
-                    && !level.is_empty()
-                    && !model.reasoning_allowed_levels.contains(&level)
-                {
-                    model.reasoning_allowed_levels.push(level);
-                }
-            }
-        }
+    model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);
+    if has_pool_route {
+        let effective_levels = saved_manual_levels.unwrap_or(&model.reasoning_supported_levels);
+        model.reasoning_allowed_levels = crate::canonicalize_reasoning_levels(effective_levels);
+        model.reasoning_levels = model.reasoning_allowed_levels.clone();
+        model.reasoning_allowed_levels.retain(|level| {
+            model
+                .reasoning_supported_levels
+                .iter()
+                .any(|supported| supported.eq_ignore_ascii_case(level))
+                || saved_manual_levels.is_some()
+        });
+        model.reasoning_levels = model.reasoning_allowed_levels.clone();
     }
-    model.reasoning_configurable = !has_native_account_route && !model.reasoning_levels.is_empty();
+    model.reasoning_configurable = has_pool_route;
+}
+
+/// Returns whether an eligible pooled API source can serve this model through
+/// the Responses client contract.  Native account capabilities stay owned by
+/// their upstream catalog and are deliberately excluded from manual settings.
+pub fn model_has_api_source_route(sources: &[SourceSummary], model: &str) -> bool {
+    sources.iter().any(|source| {
+        source.enabled
+            && source.in_pool
+            && !source.draining
+            && source.secret_available
+            && source
+                .models_for_wire_api(WireApi::Responses)
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(model))
+    })
 }
 
 pub fn source_runtime_available(
@@ -153,6 +202,30 @@ pub fn source_runtime_available(
                     .candidate_id
                     .strip_prefix(source_id)
                     .is_some_and(|suffix| suffix.starts_with("::")))
+    })
+}
+
+/// Returns whether an API source can serve the Responses contract used by the
+/// pool. A source can expose several protocol candidates, so a healthy
+/// Messages-only candidate must not make a pooled source look available.
+/// Legacy single-protocol candidates keep their source id without a suffix;
+/// their configured wire API disambiguates that form.
+pub fn pooled_source_runtime_available(
+    routing_order: &[CandidateRuntimeSnapshot],
+    source_id: &str,
+    legacy_wire_api: WireApi,
+) -> bool {
+    routing_order.iter().any(|candidate| {
+        if candidate.kind != CandidateKind::ApiSource || !candidate.available {
+            return false;
+        }
+        if candidate.candidate_id == source_id {
+            return legacy_wire_api == WireApi::Responses;
+        }
+        candidate
+            .candidate_id
+            .strip_prefix(source_id)
+            .is_some_and(|suffix| suffix == "::responses" || suffix.starts_with("::responses_"))
     })
 }
 
@@ -405,33 +478,13 @@ impl SourceSummary {
     ///
     /// Legacy records without bindings retain their single `wire_api` surface.
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
-        if self.protocol_bindings.is_empty() {
-            return if self.wire_api == wire_api {
-                self.models.clone()
-            } else {
-                Vec::new()
-            };
-        }
-        let expand_empty_models = self.protocol_bindings.len() == 1;
-        let mut seen = std::collections::HashSet::new();
-        let mut models = Vec::new();
-        for binding in self
-            .protocol_bindings
-            .iter()
-            .filter(|binding| binding.wire_api == wire_api)
-        {
-            let binding_models = if binding.model_ids.is_empty() && expand_empty_models {
-                self.models.as_slice()
-            } else {
-                binding.model_ids.as_slice()
-            };
-            for model in binding_models {
-                if seen.insert(model.to_ascii_lowercase()) {
-                    models.push(model.clone());
-                }
-            }
-        }
-        models
+        runtime_source_models_for_wire_api(
+            &self.protocol_bindings,
+            self.wire_api,
+            &self.models,
+            wire_api,
+        )
+        .unwrap_or_default()
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
@@ -815,6 +868,7 @@ pub fn pool_model_summaries(
         .map(|model| {
             let id = model.id.clone();
             let price = api_model_price(&id);
+            let image_request_prices = official_image_request_prices(&id);
             let enabled = !hidden_models
                 .iter()
                 .any(|hidden| hidden.eq_ignore_ascii_case(&id));
@@ -837,11 +891,13 @@ pub fn pool_model_summaries(
                         .and_then(|price| price.cache_write_1h_micro_usd_per_million),
                     output_micro_usd_per_million: price
                         .map(|price| price.output_micro_usd_per_million),
+                    image_request_prices,
                     custom_price: false,
                     reasoning_levels: Vec::new(),
                     reasoning_supported_levels: Vec::new(),
                     reasoning_allowed_levels: Vec::new(),
                     reasoning_configurable: false,
+                    reasoning_probe_available: false,
                     reasoning_probe: None,
                 },
             )
@@ -1079,6 +1135,7 @@ mod tests {
             in_flight: 0,
             active_request_count: 0,
             active_models: Vec::<ActiveModelRuntime>::new(),
+            model_retries: Vec::new(),
             last_used_at_ms: None,
             next_retry_at_ms: None,
             half_open: false,
@@ -1147,6 +1204,37 @@ mod tests {
             runtime_candidate("source", CandidateKind::OAuthAccount, true),
         ];
         assert!(source_runtime_available(&runtime, "source"));
+        assert!(!pooled_source_runtime_available(
+            &runtime,
+            "source",
+            WireApi::Messages,
+        ));
+        assert!(!pooled_source_runtime_available(
+            &runtime,
+            "source",
+            WireApi::Responses,
+        ));
+        let responses = [runtime_candidate(
+            "source::responses_to_messages",
+            CandidateKind::ApiSource,
+            true,
+        )];
+        assert!(pooled_source_runtime_available(
+            &responses,
+            "source",
+            WireApi::Messages,
+        ));
+        let legacy = [runtime_candidate("source", CandidateKind::ApiSource, true)];
+        assert!(pooled_source_runtime_available(
+            &legacy,
+            "source",
+            WireApi::Responses,
+        ));
+        assert!(!pooled_source_runtime_available(
+            &legacy,
+            "source",
+            WireApi::Messages,
+        ));
         assert!(!source_runtime_available(&runtime, "missing"));
         assert!(!source_runtime_available(&runtime, "sour"));
 
@@ -1159,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn model_reasoning_summary_separates_detected_and_manual_api_levels() {
+    fn model_reasoning_summary_keeps_provider_hints_manual() {
         let mut model = ModelSummary {
             enabled: true,
             codex_visible: true,
@@ -1172,36 +1260,124 @@ mod tests {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: None,
+            image_request_prices: Vec::new(),
             custom_price: false,
             reasoning_levels: Vec::new(),
             reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
+            reasoning_probe_available: false,
             reasoning_probe: None,
         };
 
         apply_model_reasoning_summary(
             &mut model,
-            vec!["high".into()],
+            Some(vec!["high".into()]),
             Some(&["ultra".into()]),
             false,
         );
-        assert_eq!(model.reasoning_levels, ["high"]);
+        assert!(model.reasoning_levels.is_empty());
         assert_eq!(model.reasoning_supported_levels, ["high"]);
         assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(!model.reasoning_configurable);
+
+        apply_model_reasoning_summary(&mut model, None, None, false);
+        assert!(model.reasoning_levels.is_empty());
+        assert!(model.reasoning_supported_levels.is_empty());
+        assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(!model.reasoning_configurable);
+
+        apply_model_reasoning_summary(&mut model, Some(vec!["high".into()]), None, true);
+        assert_eq!(model.reasoning_levels, ["high"]);
+        assert_eq!(model.reasoning_supported_levels, ["high"]);
+        assert_eq!(model.reasoning_allowed_levels, ["high"]);
         assert!(model.reasoning_configurable);
 
-        apply_model_reasoning_summary(&mut model, Vec::new(), None, false);
-        assert!(model.reasoning_levels.is_empty());
+        apply_model_reasoning_summary(&mut model, Some(Vec::new()), Some(&["max".into()]), true);
+        assert_eq!(model.reasoning_levels, ["max"]);
         assert!(model.reasoning_supported_levels.is_empty());
-        assert!(model.reasoning_allowed_levels.is_empty());
-        assert!(!model.reasoning_configurable);
+        assert_eq!(model.reasoning_allowed_levels, ["max"]);
+        assert!(model.reasoning_configurable);
 
-        apply_model_reasoning_summary(&mut model, Vec::new(), Some(&["max".into()]), true);
-        assert!(model.reasoning_levels.is_empty());
+        model.id = "gpt-5.6-terra".into();
+        apply_model_reasoning_summary(&mut model, Some(Vec::new()), None, true);
         assert!(model.reasoning_supported_levels.is_empty());
         assert!(model.reasoning_allowed_levels.is_empty());
-        assert!(!model.reasoning_configurable);
+
+        apply_model_reasoning_summary(&mut model, Some(vec!["ultra".into()]), None, true);
+        assert_eq!(model.reasoning_supported_levels, ["ultra"]);
+        assert_eq!(model.reasoning_allowed_levels, ["ultra"]);
+    }
+
+    #[test]
+    fn anthropic_max_is_advertised_as_ultra_for_api_sources() {
+        let mut model = ModelSummary {
+            enabled: true,
+            codex_visible: true,
+            codex_display_name: String::new(),
+            id: "claude-opus-4-8".into(),
+            member_count: 1,
+            catalog_rank: None,
+            input_micro_usd_per_million: None,
+            cached_input_micro_usd_per_million: None,
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: None,
+            image_request_prices: Vec::new(),
+            custom_price: false,
+            reasoning_levels: Vec::new(),
+            reasoning_supported_levels: Vec::new(),
+            reasoning_allowed_levels: Vec::new(),
+            reasoning_configurable: false,
+            reasoning_probe_available: false,
+            reasoning_probe: None,
+        };
+        apply_model_reasoning_summary(
+            &mut model,
+            Some(vec!["low".into(), "max".into()]),
+            None,
+            true,
+        );
+        assert_eq!(model.reasoning_supported_levels, ["low", "max", "ultra"]);
+        assert_eq!(model.reasoning_levels, ["low", "max", "ultra"]);
+    }
+
+    #[test]
+    fn api_source_reasoning_route_requires_an_active_responses_source() {
+        let source = SourceSummary {
+            id: "source_1".into(),
+            name: "Synthetic".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        };
+        assert!(model_has_api_source_route(
+            std::slice::from_ref(&source),
+            "GPT-TEST"
+        ));
+
+        let mut unavailable = source.clone();
+        unavailable.secret_available = false;
+        assert!(!model_has_api_source_route(&[unavailable], "gpt-test"));
+
+        let mut outside_pool = source;
+        outside_pool.in_pool = false;
+        assert!(!model_has_api_source_route(&[outside_pool], "gpt-test"));
     }
 
     #[test]
@@ -1270,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_model_summaries_exclude_messages_only_source_models() {
+    fn pool_model_summaries_include_the_runtime_messages_bridge() {
         let source = SourceSummary {
             id: "source_1".into(),
             name: "Mixed source".into(),
@@ -1316,7 +1492,7 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-routed"]
+            ["gpt-routed", "claude-native"]
         );
     }
 
@@ -1383,7 +1559,7 @@ mod tests {
         };
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Responses),
-            ["gpt-native", "claude-bridged"]
+            ["gpt-native", "claude-bridged", "claude-native"]
         );
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Messages),
@@ -1501,6 +1677,7 @@ mod tests {
                 window_minutes: None,
                 observed_at_ms: 1,
                 full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
             }),
             updated_at_ms: Some(1),
             ..Default::default()

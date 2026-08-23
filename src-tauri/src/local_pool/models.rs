@@ -8,7 +8,7 @@ use zenith_relay_core::{
     normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
-    source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    runtime_source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
     SourceProtocolBinding, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
     DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
@@ -61,6 +61,14 @@ pub struct GatewaySettings {
     pub quota_request_timeout_seconds: u64,
     #[serde(default = "default_chatgpt_interface_quota_reserve_basis_points")]
     pub chatgpt_interface_quota_reserve_basis_points: u64,
+    #[serde(default = "default_codex_background_tasks_enabled")]
+    pub codex_background_tasks_enabled: bool,
+    #[serde(default = "default_codex_websockets_enabled")]
+    pub codex_websockets_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_refresh_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_refresh_error_at_ms: Option<u64>,
     #[serde(default)]
     pub hidden_models: Vec<String>,
     #[serde(default)]
@@ -297,6 +305,8 @@ impl LocalAccountRecord {
 pub struct AutomationRecords {
     pub tasks: Vec<WakeTask>,
     pub state: WakeAutomationState,
+    #[serde(default)]
+    pub weekly_reset_fingerprints: BTreeMap<String, String>,
 }
 
 impl Default for AutomationRecords {
@@ -305,6 +315,7 @@ impl Default for AutomationRecords {
             tasks: Vec::new(),
             state: WakeAutomationState::new(1_024, 256)
                 .expect("static wake automation bounds are valid"),
+            weekly_reset_fingerprints: BTreeMap::new(),
         }
     }
 }
@@ -328,6 +339,10 @@ impl Default for GatewaySettings {
             quota_request_timeout_seconds: DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS,
             chatgpt_interface_quota_reserve_basis_points:
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
+            codex_background_tasks_enabled: true,
+            codex_websockets_enabled: true,
+            catalog_refresh_error: None,
+            catalog_refresh_error_at_ms: None,
             hidden_models: Vec::new(),
             model_price_overrides: BTreeMap::new(),
             model_reasoning_allowed_levels: BTreeMap::new(),
@@ -391,6 +406,14 @@ fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {
     DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS
 }
 
+fn default_codex_background_tasks_enabled() -> bool {
+    true
+}
+
+fn default_codex_websockets_enabled() -> bool {
+    true
+}
+
 impl ProviderSourceRecord {
     pub fn normalize(&mut self) {
         self.name = self.name.trim().to_string();
@@ -452,7 +475,7 @@ impl ProviderSourceRecord {
     }
 
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        source_models_for_wire_api(
+        runtime_source_models_for_wire_api(
             &self.protocol_bindings,
             self.wire_api,
             &self.models,

@@ -273,6 +273,7 @@ impl WakeCoordinator {
         if !task.enabled
             || account.auth_mode != AccountAuthMode::OAuth
             || !task.account_selector.matches(account)
+            || task.trigger != WakeTrigger::QuotaFull
             || transition.window_kind != QuotaWindowKind::Primary
             || !task.window_kinds.contains(&QuotaWindowKind::Primary)
             || transition.fingerprint.trim().is_empty()
@@ -786,6 +787,7 @@ mod tests {
             window_minutes: Some(300),
             observed_at_ms,
             full_transition_fingerprint: Some("cycle-1".into()),
+            exhaustion_transition_fingerprint: None,
         }
     }
 

@@ -64,16 +64,6 @@ impl GatewayFailure {
         }
     }
 
-    pub(super) fn adapter_unsupported() -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            category: "adapter_websocket_not_supported",
-            message: "the selected source adapter does not support Responses WebSocket transport",
-            retry_at_ms: None,
-            origin: ErrorOrigin::Relay,
-        }
-    }
-
     pub(super) fn model_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -101,6 +91,16 @@ impl GatewayFailure {
             message: "client closed the WebSocket connection",
             retry_at_ms: None,
             origin: ErrorOrigin::Relay,
+        }
+    }
+
+    pub(super) fn websocket_http_fallback(origin: ErrorOrigin) -> Self {
+        Self {
+            status: StatusCode::UPGRADE_REQUIRED,
+            category: "upstream_websocket_unsupported",
+            message: "upstream WebSocket is unavailable; using HTTP streaming",
+            retry_at_ms: None,
+            origin,
         }
     }
 

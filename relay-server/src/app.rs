@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_runtime_requires_a_responses_pool_member_for_the_system_key() {
+    async fn rebuild_runtime_accepts_messages_sources_for_the_multi_protocol_system_key() {
         let root = TempDir::new().unwrap();
         let state = snapshot_test_state(&root);
         let mut messages = snapshot_test_source("source-messages", "claude-native-test");
@@ -361,7 +361,10 @@ mod tests {
             .unwrap();
 
         state.rebuild_runtime().await.unwrap();
-        assert!(state.runtime().unwrap().is_none());
+        let snapshot = state.snapshot().unwrap();
+        assert!(snapshot.gateway.running);
+        assert_eq!(snapshot.gateway.candidate_count, 1);
+        assert_eq!(snapshot.gateway.visible_model_ids, ["claude-native-test"]);
 
         let responses = snapshot_test_source("source-responses", "gpt-runtime-test");
         state.store.save_source(&responses).unwrap();
@@ -373,8 +376,11 @@ mod tests {
         state.rebuild_runtime().await.unwrap();
         let snapshot = state.snapshot().unwrap();
         assert!(snapshot.gateway.running);
-        assert_eq!(snapshot.gateway.candidate_count, 1);
-        assert_eq!(snapshot.gateway.visible_model_ids, ["gpt-runtime-test"]);
+        assert_eq!(snapshot.gateway.candidate_count, 2);
+        assert_eq!(
+            snapshot.gateway.visible_model_ids,
+            ["claude-native-test", "gpt-runtime-test"]
+        );
 
         state.shutdown_runtime().await.unwrap();
     }
@@ -397,6 +403,7 @@ mod tests {
             source_id: "source_test".into(),
             candidate_id: Some("source_test".into()),
             account_id: None,
+            client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
@@ -442,6 +449,7 @@ mod tests {
             reset_at_ms: None,
             window_minutes: None,
             full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: None,
             observed_at_ms: 1_000,
         };
         let quota = QuotaSnapshot {
@@ -532,6 +540,7 @@ mod tests {
                 window_minutes: None,
                 observed_at_ms: 1_000,
                 full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
             }),
             updated_at_ms: Some(1_000),
             ..Default::default()

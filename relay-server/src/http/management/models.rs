@@ -1,15 +1,13 @@
 use super::{runtime_error, store_error, ManagementError};
 use crate::state::AppState;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zenith_relay_core::{
-    is_valid_model_id, normalize_model_reasoning_allowed_levels,
-    protocol::{model_has_native_account_route, RuntimeStateSnapshot},
-    ApiModelPriceOverride,
+    is_valid_model_id, normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot,
+    reasoning_policy_key, ApiModelPriceOverride,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -135,37 +133,27 @@ pub async fn set_model_reasoning(
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
+    let policy_key = reasoning_policy_key(&canonical);
     let mut normalized_allowed_levels =
         normalize_model_reasoning_allowed_levels(BTreeMap::from([(
-            canonical.clone(),
+            policy_key.clone(),
             input.allowed_levels,
         )]))
         .map_err(|message| ManagementError::validation("reasoning_levels_invalid", message))?;
     let allowed_levels = normalized_allowed_levels
-        .remove(&canonical)
+        .remove(&policy_key)
         .unwrap_or_default();
     let runtime = state.runtime().map_err(runtime_error)?;
-    if !allowed_levels.is_empty() && model_has_native_account_route(&snapshot.accounts, &canonical)
-    {
-        return Err(ManagementError::new(
-            StatusCode::CONFLICT,
-            "native_reasoning_managed",
-            "native ChatGPT model reasoning settings cannot be configured here",
-            "configuration",
-            false,
-        ));
-    }
 
     let previous = state
         .store
         .model_reasoning_allowed_levels()
         .map_err(store_error)?;
     let mut configured = previous.clone();
-    if allowed_levels.is_empty() {
-        configured.remove(&canonical);
-    } else {
-        configured.insert(canonical, allowed_levels);
-    }
+    configured.remove(&canonical);
+    // Keep an explicit empty override so the user can disable every
+    // provider-reported mode without losing that choice on the next refresh.
+    configured.insert(policy_key, allowed_levels);
     if configured == previous {
         return Ok(Json(snapshot));
     }

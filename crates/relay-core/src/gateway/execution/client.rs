@@ -3,14 +3,15 @@ use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
     candidate_protocols, chat_request_is_text_or_image_only, chat_request_uses_tools,
-    forwarded_codex_headers, forwarded_messages_headers, request_id, CODEX_RESPONSES_LITE_HEADER,
+    client_context_fingerprint, codex_background_request_kind, forwarded_codex_headers,
+    forwarded_messages_headers, request_id, CODEX_RESPONSES_LITE_HEADER,
     MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::request::execute_request;
 use crate::protocol::ClientWireApi;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderValue, Request, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
@@ -89,6 +90,10 @@ pub(in crate::gateway) async fn execute_client_request(
             "invalid_request",
         );
     };
+    let background_kind = (wire_api == WireApi::Responses)
+        .then(|| codex_background_request_kind(&headers, &request))
+        .flatten();
+    let request_id = request_id();
     let stream = match request.get("stream") {
         Some(Value::Bool(stream)) => *stream,
         Some(_) => {
@@ -100,6 +105,19 @@ pub(in crate::gateway) async fn execute_client_request(
         }
         None => false,
     };
+    if let Some(kind) = background_kind {
+        runtime.mark_request_origin(&request_id, kind);
+        if !runtime.codex_background_tasks_enabled() {
+            runtime.blocked_codex_background_event(
+                &request_id,
+                &key.id,
+                &requested_model,
+                wire_api,
+                kind,
+            );
+            return blocked_background_response(wire_api, stream, &request_id, kind);
+        }
+    }
     let Some(resolved_model) = runtime.resolve_visible_model(
         &key,
         &requested_model,
@@ -130,7 +148,7 @@ pub(in crate::gateway) async fn execute_client_request(
                 .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
         })
         .flatten();
-    let request_id = request_id();
+    let client_context_id = client_context_fingerprint(&headers);
     let forwarded_headers = match wire_api {
         WireApi::Messages => forwarded_messages_headers(&headers),
         WireApi::Responses | WireApi::ChatCompletions => {
@@ -146,6 +164,7 @@ pub(in crate::gateway) async fn execute_client_request(
         stream,
         request_id,
         forwarded_headers,
+        client_context_id,
         response_affinity_key,
         wire_api,
         responses_lite,
@@ -153,4 +172,48 @@ pub(in crate::gateway) async fn execute_client_request(
         0,
     )
     .await
+}
+
+fn blocked_background_response(
+    wire_api: WireApi,
+    stream: bool,
+    request_id: &str,
+    kind: &str,
+) -> Response<Body> {
+    let response_id = format!("resp_relay_blocked_{request_id}");
+    let body = if stream {
+        format!(
+            "event: response.completed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": response_id, "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
+            })
+        )
+    } else {
+        match wire_api {
+            WireApi::Responses => serde_json::json!({
+                "id": response_id,
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}
+            })
+            .to_string(),
+            WireApi::ChatCompletions => serde_json::json!({"id": response_id, "object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}).to_string(),
+            WireApi::Messages => serde_json::json!({"id": response_id, "type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 0, "output_tokens": 0}}).to_string(),
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            CONTENT_TYPE,
+            if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        )
+        .body(Body::from(body))
+        .expect("blocked response builder is valid")
 }

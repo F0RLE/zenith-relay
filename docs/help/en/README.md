@@ -78,7 +78,15 @@ exchanged.
 Keep the server behind HTTPS, keep its vault key outside the data-directory
 backup, and test a restore before depending on it. Relay redacts credentials,
 cookies, authorization headers, prompts, and account identities from normal
-diagnostics and usage records.
+diagnostics and usage records; the same rule applies to snapshots, telemetry,
+exports, screenshots, and ordinary server management API responses.
+
+Zenith Relay is separate from the production Zenith Gateway and Control API. It
+does not receive production credentials, customer keys, backend tokens,
+account-pool inventory, or internal production routing/business logic. A
+user-owned provider/session secret may leave this computer only after an
+explicit confirmation that targets a server operated by that same user. It is
+never an implicit upload to Zenith, and documentation examples use placeholders.
 
 ## Screenshots
 

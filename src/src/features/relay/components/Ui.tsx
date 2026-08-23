@@ -58,7 +58,7 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   );
 }
 
-type ConfirmOptions = { title?: string; confirmLabel?: string; danger?: boolean };
+type ConfirmOptions = { title?: string; confirmLabel?: string; cancelLabel?: string; danger?: boolean };
 type ConfirmRequest = ConfirmOptions & { message: string };
 type ConfirmHandler = (message: string, options?: ConfirmOptions) => Promise<boolean>;
 
@@ -85,7 +85,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     {request ? <Dialog
       title={request.title ?? t("common.confirmationTitle")}
       onClose={() => settle(false)}
-      footer={<><Button variant="secondary" onClick={() => settle(false)}>{t("common.cancel")}</Button><Button variant={request.danger ? "danger" : "primary"} onClick={() => settle(true)}>{request.confirmLabel ?? t("common.confirm")}</Button></>}
+      footer={<><Button variant="secondary" onClick={() => settle(false)}>{request.cancelLabel ?? t("common.cancel")}</Button><Button variant={request.danger ? "danger" : "primary"} onClick={() => settle(true)}>{request.confirmLabel ?? t("common.confirm")}</Button></>}
     ><p className="confirm-dialog-message">{request.message}</p></Dialog> : null}
   </ConfirmContext.Provider>;
 }
@@ -200,11 +200,11 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
   </>;
 }
 
-export function StatusIcon({ status, label, className = "", children }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string; className?: string; children?: ReactNode }) {
+export function StatusIcon({ status, label, className = "", children, showTooltip = true }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string; className?: string; children?: ReactNode; showTooltip?: boolean }) {
   const tooltip = useTooltip<HTMLSpanElement>(label);
   return <>
-    <span ref={tooltip.anchorRef} className={`relay-status-icon ${className}`.trim()} data-status={status} role="img" tabIndex={0} aria-label={label} aria-describedby={tooltip.describedBy} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}>{children ?? <StatusBadge status={status} label="" />}</span>
-    {tooltip.tooltip}
+    <span ref={tooltip.anchorRef} className={`relay-status-icon ${className}`.trim()} data-status={status} role="img" tabIndex={0} aria-label={label} aria-describedby={showTooltip ? tooltip.describedBy : undefined} onMouseEnter={showTooltip ? tooltip.show : undefined} onMouseLeave={showTooltip ? tooltip.hideAfterHover : undefined} onFocus={showTooltip ? tooltip.showAfterFocus : undefined} onBlur={showTooltip ? tooltip.hide : undefined} onPointerDown={showTooltip ? tooltip.pointerStart : undefined}>{children ?? <StatusBadge status={status} label="" />}</span>
+    {showTooltip ? tooltip.tooltip : null}
   </>;
 }
 
@@ -511,13 +511,11 @@ export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { wi
 
 export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: QuotaSnapshot; nowMs?: number; concise?: boolean }) {
   const { t } = useTranslation();
-  const coreBlocked = snapshot.limitReached || [snapshot.primary, snapshot.secondary]
-    .some((window) => window?.availableBasisPoints === 0);
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => {
       const window = snapshot[kind];
       if (!window) return [];
-      return [{ id: kind, label: "", window: coreBlocked ? { ...window, availableBasisPoints: 0 } : window }];
+      return [{ id: kind, label: "", window }];
     }),
     ...(snapshot.supplemental ?? []),
   ];

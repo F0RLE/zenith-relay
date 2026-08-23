@@ -1,5 +1,5 @@
 import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useState } from "react";
-import { Activity, CreditCard, SlidersHorizontal, TrendingUp, X } from "lucide-react";
+import { Activity, Bot, CreditCard, SlidersHorizontal, TrendingUp, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
@@ -58,7 +58,18 @@ export type UsageRow = {
   accountId: string | null;
   candidateKind: "account" | "source";
   apiEquivalent: UsageTotals["apiEquivalent"] | null;
+  requestOrigin: CodexRequestOrigin;
 };
+
+export type CodexRequestOrigin = "activity_summary" | "task_title" | "blocked_activity_summary" | "blocked_task_title" | null;
+
+export function codexRequestOriginFromErrorCategory(category: string | null): CodexRequestOrigin {
+  if (category === "codex_activity_summary") return "activity_summary";
+  if (category === "codex_task_title") return "task_title";
+  if (category === "codex_background_blocked_activity_summary") return "blocked_activity_summary";
+  if (category === "codex_background_blocked_task_title") return "blocked_task_title";
+  return null;
+}
 
 export function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setModelQuery, connectionQuery, poolMemberOptions, setConnectionQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; modelOptions: Array<{ value: string; label: string }>; setModelQuery: (value: string) => void; connectionQuery: string; poolMemberOptions: Array<{ value: string; label: string }>; setConnectionQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t } = useTranslation();
@@ -91,7 +102,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
 
   const columns: Record<RequestColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
     time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
-    status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} /> },
+    status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"} label={requestStatusLabel(row, t)} /> },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
@@ -251,7 +262,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   return <Dialog title={t("usage.requestDetails")} onClose={onClose} wide className="request-details-dialog" closeOnBackdrop>
     <div className="request-details-header">
       <div className="request-details-identity">
-        <StatusBadge status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} />
+        <StatusBadge status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"} label={requestStatusLabel(row, t)} />
         <code title={row.model ?? undefined}>{row.model ?? "-"}</code>
       </div>
       <div className="request-details-id"><span>{t("usage.requestId")}</span><code title={row.requestId ?? undefined}>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</div>
@@ -269,6 +280,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
         <div><dt>{t("usage.protocol")}</dt><dd><code>{formatWireApi(row.wireApi, t)}</code></dd></div>
         <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
         <div><dt>{t("usage.reasoning")}</dt><dd>{formatReasoningSummary(row, t)}</dd></div>
+        {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd title={t("codex.backgroundRequestHint")}>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
       </dl>
       {!row.success ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
         <h3>{t("usage.errorDetails")}</h3>
@@ -323,16 +335,29 @@ function formatDurationMs(value: number | null, locale: string, t: TFunction): s
   return t("usage.durationMilliseconds", { value: Math.round(value) });
 }
 
-function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort"> }) {
+function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort" | "requestOrigin"> }) {
   const { t } = useTranslation();
   const requested = row.requestedReasoningEffort;
   const effective = row.effectiveReasoningEffort;
   const effort = effective ?? requested;
   const changed = Boolean(requested && effective && requested !== effective);
+  const requestOrigin = row.requestOrigin;
   return <span className="usage-model-value">
     <code>{row.model ?? "-"}</code>
+    {requestOrigin ? <span className="usage-request-origin" title={t("codex.backgroundRequestHint")}><Bot aria-hidden /></span> : null}
     {effort ? <small title={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
   </span>;
+}
+
+function requestStatusLabel(row: Pick<UsageRow, "success" | "requestOrigin">, t: TFunction): string {
+  if (row.requestOrigin?.startsWith("blocked_")) return t("codex.backgroundBlocked");
+  if (row.requestOrigin) return t("common.success");
+  return row.success ? t("common.success") : t("common.failed");
+}
+
+function formatRequestOrigin(origin: Exclude<CodexRequestOrigin, null>, t: TFunction): string {
+  if (origin === "activity_summary" || origin === "blocked_activity_summary") return t("codex.activitySummary");
+  return t("codex.taskTitle");
 }
 
 function formatReasoningEffort(effort: ReasoningEffort | null, t: TFunction): string {

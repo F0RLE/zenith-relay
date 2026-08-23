@@ -5,12 +5,14 @@ import { relayCommands } from "../../api/commands";
 import type { SourceSummary } from "../../api/types";
 import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolRoutingDisclosure";
+import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { effectiveSourceProtocolBindings, sourceSupportsNativeResponses, sourceSupportsWireApi } from "../../sourceProtocolBindings";
 import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
+import { runtimeCandidateForMember } from "../../routingOrder";
 export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: SourceSummary) => void }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
   const [nowMs, setNowMs] = useState(Date.now());
@@ -33,7 +35,7 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
   ));
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
-  const runtimeBySource = new Map((runtime.gateway.routingOrder ?? []).map((candidate) => [candidate.candidateId, candidate]));
+  const runtimeOrder = runtime.gateway.routingOrder ?? [];
   const updateParticipation = (source: SourceSummary, inPool: boolean) => perform(
     `source-pool-${source.id}`,
     () => localSource
@@ -64,16 +66,29 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
               : !source.enabled || !source.secretAvailable
                 ? t("sources.launchUnavailable")
                 : t("sources.launch");
-          const runtimeState = source.inPool ? runtimeBySource.get(source.id) : undefined;
+          const runtimeState = source.inPool
+            ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "responses", source.wireApi)
+            : undefined;
           const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
+          const modelRetries = [...(runtimeState?.modelRetries ?? [])].filter((retry) => retry.retryAtMs > nowMs).sort((left, right) => left.retryAtMs - right.retryAtMs);
           const runtimeHint = runtimeState?.halfOpen
             ? t("pool.recoveryProbe")
+            : modelRetries.length
+              ? t("pool.modelRetryAt", {
+                models: modelRetries.map((retry) => retry.model).join(", "),
+                time: formatDetailedRemainingTime(modelRetries[0].retryAtMs, nowMs, t),
+              })
             : runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
-              ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
+              ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
               : null;
+          const runtimeError = source.lastErrorCode?.trim()
+            ? t("pool.runtimeError", { code: source.lastErrorCode.trim() })
+            : null;
           const statusLabel = t(`connections.status.${source.operationalStatus}`);
-          const indicatorLabel = runtimeHint ? `${statusLabel} · ${runtimeHint}` : statusLabel;
-          const indicatorTone = source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
+          const indicatorLabel = [runtimeError, runtimeHint, statusLabel].filter(Boolean).join(" · ");
+          const indicatorTone = runtimeError
+            ? "error"
+            : source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
             ? operationalStatusTone(source.operationalStatus)
             : runtimeTone ?? operationalStatusTone(source.operationalStatus);
           return <tr key={source.id}>

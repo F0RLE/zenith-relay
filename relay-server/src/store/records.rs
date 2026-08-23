@@ -14,6 +14,32 @@ impl Store {
         self.set_metadata("gateway_enabled", if enabled { "true" } else { "false" })
     }
 
+    pub fn codex_websockets_enabled(&self) -> Result<bool, String> {
+        Ok(self
+            .metadata("codex_websockets_enabled")?
+            .is_none_or(|value| value == "true"))
+    }
+
+    pub fn set_codex_websockets_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.set_metadata(
+            "codex_websockets_enabled",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn codex_background_tasks_enabled(&self) -> Result<bool, String> {
+        Ok(self
+            .metadata("codex_background_tasks_enabled")?
+            .is_none_or(|value| value == "true"))
+    }
+
+    pub fn set_codex_background_tasks_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.set_metadata(
+            "codex_background_tasks_enabled",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
     pub fn sources(&self) -> Result<Vec<SourceRecord>, String> {
         self.list_records("sources")
     }

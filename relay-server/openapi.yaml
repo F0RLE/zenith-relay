@@ -2,7 +2,16 @@ openapi: 3.1.0
 info:
   title: Zenith Relay Compatible Server
   version: 1.0.0
-  description: Public management and OpenAI-compatible runtime contract for user-managed servers.
+  description: >
+    Public management and OpenAI-compatible runtime contract for a server
+    operated by the user. This server is separate from the production Zenith
+    Gateway and Control API and has no contract for Zenith production secrets,
+    customer keys, backend tokens, account-pool inventory, or internal
+    production routing/business logic. Management snapshots, usage, source
+    statistics, and diagnostics are redacted; raw credentials, cookies,
+    authorization headers, prompts, and provider response bodies never appear
+    in those management responses. The /v1 data plane may carry the user's
+    request and provider response as required by the selected API contract.
 servers:
   - url: https://relay.example.com
 paths:
@@ -34,7 +43,10 @@ paths:
       security: [{ managementToken: [] }]
       responses:
         "200":
-          description: Canonical redacted runtime snapshot
+          description: >
+            Canonical redacted runtime snapshot. It contains operational state
+            and aggregates only; credentials, cookies, authorization headers,
+            prompts, raw provider bodies, and vault material are excluded.
           content:
             application/json:
               schema: { type: object }
@@ -50,7 +62,10 @@ paths:
         - { name: toMs, in: query, schema: { type: integer, minimum: 0 } }
       responses:
         "200":
-          description: Redacted request metrics and aggregates
+          description: >
+            Redacted request metrics and aggregates. Request details never
+            include raw credentials, cookies, authorization headers, prompts,
+            response bodies, or provider session material.
           content:
             application/json:
               schema: { type: object }
@@ -66,7 +81,10 @@ paths:
           schema: { type: string, minLength: 1 }
       responses:
         "200":
-          description: Provider-reported balance and usage for a configured API source
+          description: >
+            Provider-reported balance and usage for a configured user-owned API
+            source. The response contains aggregate statistics only and never
+            exposes the source credential or raw provider payload.
           content:
             application/json:
               schema:
@@ -80,7 +98,9 @@ paths:
       security: [{ profileCredential: [] }]
       responses:
         "200":
-          description: OpenAI-compatible visible model catalog
+          description: >
+            OpenAI-compatible visible model catalog. Model metadata is returned
+            without management tokens, profile credentials, or source secrets.
           content:
             application/json:
               schema:
@@ -108,8 +128,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
-    managementToken: { type: http, scheme: bearer, description: Management-only token; never valid for /v1. }
-    profileCredential: { type: http, scheme: bearer, description: Relay-managed profile credential for /v1; never valid for management. }
+    managementToken: { type: http, scheme: bearer, description: User-managed server administration token; never valid for /v1 and never a Zenith production credential. }
+    profileCredential: { type: http, scheme: bearer, description: Relay-managed data-plane credential for /v1; never valid for management and never a Zenith production credential. }
   responses:
     Unauthorized:
       description: Missing or invalid token
