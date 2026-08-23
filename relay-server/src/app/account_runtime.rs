@@ -259,7 +259,11 @@ pub(super) fn runtime_key(
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
-        wire_apis: Some(vec![zenith_relay_core::protocol::ClientWireApi::Responses]),
+        wire_apis: Some(vec![
+            zenith_relay_core::protocol::ClientWireApi::Responses,
+            zenith_relay_core::protocol::ClientWireApi::Messages,
+            zenith_relay_core::protocol::ClientWireApi::ChatCompletions,
+        ]),
     }
 }
 

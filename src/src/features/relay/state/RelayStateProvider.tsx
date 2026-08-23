@@ -17,21 +17,20 @@ import {
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
 import { RelayContext, type Feedback, type RelayContextValue } from "./relayStateContext";
+import {
+  ERROR_FEEDBACK_TIMEOUT_MS,
+  ROUTING_REFRESH_INTERVAL_MS,
+  RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
+  RUNTIME_REFRESH_INTERVAL_MS,
+  SUCCESS_FEEDBACK_TIMEOUT_MS,
+  USAGE_EVENT_REFRESH_DEBOUNCE_MS,
+  isRuntimeRefreshPage,
+} from "./refreshPolicy";
 import { projectRuntimeAccountLabels } from "./runtimeDisplay";
+import { loadRuntimeSnapshot } from "./snapshotLoader";
 
 export { useRelayState } from "./relayStateContext";
 export type { Feedback } from "./relayStateContext";
-
-const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
-const ROUTING_REFRESH_INTERVAL_MS = 2_000;
-const RUNTIME_EVENT_REFRESH_DEBOUNCE_MS = 500;
-const USAGE_EVENT_REFRESH_DEBOUNCE_MS = 250;
-const SUCCESS_FEEDBACK_TIMEOUT_MS = 4_000;
-const ERROR_FEEDBACK_TIMEOUT_MS = 60_000;
-
-function isRuntimeRefreshPage(page: PageId) {
-  return page === "overview" || page === "pool" || page === "connections";
-}
 
 export function RelayStateProvider({ children }: { children: ReactNode }) {
   const { i18n, t } = useTranslation();
@@ -52,7 +51,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [onboardingComplete, setOnboardingComplete] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.onboarding, "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => readRelayPreference(RELAY_STORAGE_KEYS.theme, "system") as "system" | "light" | "dark");
   const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, "1") !== "0");
-  const [profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestoreState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, "1") !== "0");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
   const [accountValueVisible, setAccountValueVisibleState] = useState(readAccountValueVisibility);
@@ -77,41 +75,33 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setRevealedIdentities: setRevealedAccountIdentities,
   });
   const accountIndex = useMemo(() => buildAccountIdentityIndex(runtime?.accounts ?? []), [runtime?.accounts]);
+  const codexWebsocketsEnabled = runtime?.gateway.codexWebsocketsEnabled ?? true;
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = true) => {
     const requestedMode = mode;
     const requestedRevision = stateRevision.current;
+    if (
+      !force
+      && modeRef.current === requestedMode
+      && refreshedRevision.current === requestedRevision
+    ) return;
     const startedAt = performance.now();
-    if (mode === "local") {
-      const snapshot = await relayCommands.localState();
-      void recordPerformance("full_snapshot", performance.now() - startedAt, "local");
-      if (modeRef.current !== requestedMode) return;
-      setRuntime(snapshot);
+    const loaded = await loadRuntimeSnapshot(requestedMode, relayCommands);
+    void recordPerformance("full_snapshot", performance.now() - startedAt, requestedMode);
+    if (modeRef.current !== requestedMode) return;
+    if (requestedMode === "zenith") setReadyState(loaded.readyState);
+    setRuntime(loaded.snapshot);
+    if (requestedMode === "local") {
       setRemoteUsage([]);
       setRemoteUsagePage(null);
-      refreshedRevision.current = requestedRevision;
-      setRuntimeRevision((current) => current + 1);
-      return;
-    }
-    if (mode === "remote") {
-      const snapshot = await relayCommands.remoteState();
-      void recordPerformance("full_snapshot", performance.now() - startedAt, "remote");
-      if (modeRef.current !== requestedMode) return;
-      setRuntime(snapshot);
+    } else if (requestedMode === "remote") {
       setLocalUsage([]);
       setLocalUsagePage(null);
-      refreshedRevision.current = requestedRevision;
-      setRuntimeRevision((current) => current + 1);
-      return;
+    } else {
+      setLocalUsagePage(null);
+      setRemoteUsage([]);
+      setRemoteUsagePage(null);
     }
-    const [state, snapshot] = await Promise.all([relayCommands.readyState(), relayCommands.localState()]);
-    void recordPerformance("full_snapshot", performance.now() - startedAt, "zenith");
-    if (modeRef.current !== requestedMode) return;
-    setReadyState(state);
-    setRuntime(snapshot);
-    setLocalUsagePage(null);
-    setRemoteUsage([]);
-    setRemoteUsagePage(null);
     refreshedRevision.current = requestedRevision;
     setRuntimeRevision((current) => current + 1);
   }, [mode]);
@@ -147,7 +137,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         do {
-          await refresh();
+          await refresh(false);
         } while (
           modeRef.current === refreshMode
           && isRuntimeRefreshPage(pageRef.current)
@@ -175,6 +165,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
           performance.mark("zenith:interactive");
           const measure = performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
           void recordPerformance("interactive", measure.duration, "startup");
+          window.dispatchEvent(new Event("zenith-startup-ready"));
         }));
       });
     return () => {
@@ -439,16 +430,44 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSwitchBackupPromptState(enabled);
   }, []);
 
-  const setProfileSnapshotBackupBeforeRestore = useCallback((enabled: boolean) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, enabled ? "1" : "0");
-    setProfileSnapshotBackupBeforeRestoreState(enabled);
-  }, []);
-
   const setCodexPoolOauthSelection = useCallback((selection: string) => {
     writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection);
     removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection);
     setCodexPoolOauthSelectionState(selection);
   }, []);
+
+  const setCodexBackgroundTasksEnabled = useCallback((enabled: boolean) => perform(
+    "codex-background-tasks",
+    mode === "local"
+      ? () => relayCommands.setCodexBackgroundTasks(enabled)
+      : mode === "remote"
+        ? () => relayCommands.setRemoteCodexBackgroundTasks(enabled)
+        : () => Promise.reject(new Error("Codex background tasks are not available in hosted mode")),
+    "feedback.saved",
+  ), [mode, perform]);
+
+  const setCodexWebsocketsEnabled = useCallback((enabled: boolean) => perform(
+    "codex-websockets",
+      mode === "remote"
+      ? async () => {
+        const previous = codexWebsocketsEnabled;
+        await relayCommands.setRemoteCodexWebsockets(enabled);
+        try {
+          return await relayCommands.setCodexProfileWebsockets(enabled);
+        } catch (error) {
+          try {
+            await relayCommands.setRemoteCodexWebsockets(previous);
+          } catch {
+            // Keep the original profile error; the remote action is best-effort rollback.
+          }
+          throw error;
+        }
+      }
+      : mode === "local"
+        ? () => relayCommands.setCodexWebsockets(enabled)
+        : () => Promise.reject(new Error("Codex WebSockets are not available in hosted mode")),
+    "feedback.saved",
+  ), [codexWebsocketsEnabled, mode, perform]);
 
   const setAccountIdentitiesVisible = useCallback((visible: boolean) => {
     writeRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, visible ? "1" : "0");
@@ -516,11 +535,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     profileSwitchBackupPrompt,
     setProfileSwitchBackupPrompt,
-    profileSnapshotBackupBeforeRestore,
-    setProfileSnapshotBackupBeforeRestore,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+    codexBackgroundTasksEnabled: displayRuntime?.gateway.codexBackgroundTasksEnabled ?? true,
+    setCodexBackgroundTasksEnabled,
+    setCodexWebsocketsEnabled,
+    codexWebsocketsEnabled: displayRuntime?.gateway.codexWebsocketsEnabled ?? true,
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection, setCodexBackgroundTasksEnabled, setCodexWebsocketsEnabled]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

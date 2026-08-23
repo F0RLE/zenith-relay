@@ -16,7 +16,8 @@ impl TelemetryDb {
                     ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
-                    requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl
+                    requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
+                    client_context_id
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -91,7 +92,8 @@ impl TelemetryDb {
                 ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                 cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                 service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
-                requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl
+                requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
+                client_context_id
              FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -202,32 +204,11 @@ impl TelemetryDb {
         let mut statement = connection
             .prepare(
                 "SELECT candidate_kind, candidate_id, model,
-                    SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                    SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens), SUM(unknown_cache_write_tokens),
-                    SUM(output_tokens), SUM(total_tokens), SUM(input_samples),
-                    SUM(cached_input_samples), SUM(cache_write_input_samples)
-                 FROM (
-                    SELECT candidate_kind, candidate_id, model,
-                        input_tokens, cached_input_tokens, cache_write_input_tokens,
-                        0 AS cache_write_5m_tokens, 0 AS cache_write_1h_tokens,
-                        cache_write_input_tokens AS unknown_cache_write_tokens,
-                        output_tokens, total_tokens, input_samples,
-                        cached_input_samples, cache_write_input_samples
-                    FROM usage_candidate_rollups
-                    UNION ALL
-                    SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
-                        COALESCE(account_id, source_id),
-                        COALESCE(resolved_model, requested_model, ''),
-                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
-                        COALESCE(SUM(cache_write_input_tokens), 0),
-                        COALESCE(SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), 0),
-                        COALESCE(SUM(output_tokens), 0),
-                        COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
-                        COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
-                    FROM request_logs GROUP BY 1, 2, 3
-                 ) GROUP BY candidate_kind, candidate_id, model",
+                    input_tokens, cached_input_tokens, cache_write_input_tokens,
+                    cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
+                    output_tokens, total_tokens, input_samples,
+                    cached_input_samples, cache_write_input_samples
+                 FROM usage_candidate_rollups",
             )
             .map_err(db_error)?;
         let rows = statement

@@ -17,8 +17,8 @@ use zenith_relay_core::{
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
-    source_models_for_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime,
-    SourceProtocolBinding, WireApi,
+    runtime_source_models_for_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot,
+    GatewayRuntime, SourceProtocolBinding, WireApi,
 };
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
@@ -68,7 +68,7 @@ pub struct SourceRecord {
 
 impl SourceRecord {
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        source_models_for_wire_api(
+        runtime_source_models_for_wire_api(
             &self.protocol_bindings,
             self.wire_api,
             &self.models,

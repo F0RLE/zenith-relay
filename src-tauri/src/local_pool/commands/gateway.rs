@@ -45,6 +45,18 @@ pub struct SetAccountProxyPolicyInput {
     required: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCodexBackgroundTasksInput {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCodexWebsocketsInput {
+    enabled: bool,
+}
+
 #[tauri::command]
 pub async fn start_local_gateway(
     app: AppHandle,
@@ -55,7 +67,11 @@ pub async fn start_local_gateway(
         let runtime = runtime_from_store(&state).await?;
         let port = state.store()?.gateway().port;
         state.gateway.start(runtime, port).await?;
-        let _ = super::profiles::refresh_active_codex_catalog(&state).await;
+        if let Some(runtime) = state.gateway.runtime().await {
+            runtime.prefetch_source_model_metadata();
+        }
+        let result = super::profiles::refresh_active_codex_catalog(&state).await;
+        super::record_catalog_refresh_result(&state, &result);
         let enable_result = { state.store()?.set_gateway_enabled(true) };
         if let Err(error) = enable_result {
             state.gateway.stop().await;
@@ -162,6 +178,97 @@ pub async fn set_local_account_proxy_required(
     state.store()?.replace_gateway(next_gateway)?;
     restart_or_rollback(&state, || state.store()?.replace_gateway(old_gateway)).await?;
     state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_codex_background_tasks(
+    input: SetCodexBackgroundTasksInput,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let mut gateway = state.store()?.gateway().clone();
+    if gateway.codex_background_tasks_enabled == input.enabled {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    gateway.codex_background_tasks_enabled = input.enabled;
+    state.store()?.replace_gateway(gateway)?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_codex_background_tasks_enabled(input.enabled);
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_codex_websockets(
+    input: SetCodexWebsocketsInput,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let previous_gateway = state.store()?.gateway().clone();
+    let previous_profile =
+        crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
+            &crate::platform::default_codex_home(),
+            &state.profile_backup_root(),
+            input.enabled,
+        )
+        .map_err(CommandError::from)?;
+    let restore_profile = || -> Result<(), CommandError> {
+        let Some(previous) = previous_profile else {
+            return Ok(());
+        };
+        crate::local_pool::profiles::codex::set_local_gateway_websockets(
+            &crate::platform::default_codex_home(),
+            &state.profile_backup_root(),
+            previous,
+        )
+        .map_err(CommandError::from)
+    };
+    let previous_enabled = previous_gateway.codex_websockets_enabled;
+    let mut gateway = previous_gateway.clone();
+    gateway.codex_websockets_enabled = input.enabled;
+    if let Err(error) = state.store()?.replace_gateway(gateway) {
+        let _ = restore_profile();
+        return Err(error.into());
+    }
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_codex_websockets_enabled(input.enabled);
+    }
+    match state.snapshot().await {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            let store_rollback = state
+                .store()
+                .and_then(|mut store| store.replace_gateway(previous_gateway));
+            if let Some(runtime) = state.gateway.runtime().await {
+                runtime.set_codex_websockets_enabled(previous_enabled);
+            }
+            let profile_rollback = restore_profile();
+            if store_rollback.is_err() || profile_rollback.is_err() {
+                return Err(CommandError::from(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!(
+                        "WebSocket setting failed and rollback was incomplete: {}",
+                        error.message
+                    ),
+                )));
+            }
+            Err(error.into())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn set_codex_profile_websockets(
+    input: SetCodexWebsocketsInput,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    crate::local_pool::profiles::codex::set_local_gateway_websockets(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+        input.enabled,
+    )
+    .map_err(Into::into)
 }
 
 fn save_optional_proxy(value: Option<&str>) -> crate::local_pool::error::Result<()> {
@@ -290,6 +397,13 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
             .gateway
             .start(runtime_from_store(state).await?, port)
             .await?;
+        if state.background_session_active() {
+            if let Some(runtime) = state.gateway.runtime().await {
+                runtime.prefetch_source_model_metadata();
+            }
+            let result = super::profiles::refresh_active_codex_catalog(state).await;
+            super::record_catalog_refresh_result(state, &result);
+        }
     }
     Ok(())
 }

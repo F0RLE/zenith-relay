@@ -7,6 +7,7 @@ use zenith_relay_core::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppliedQuota {
     pub transitions: Vec<QuotaTransition>,
+    pub exhaustion_transitions: Vec<QuotaTransition>,
 }
 
 pub fn apply_quota_success(
@@ -27,8 +28,12 @@ pub fn apply_quota_success(
         AccountQuotaOutcome::Updated { transitions } => transitions.clone(),
         AccountQuotaOutcome::Failed { .. } => return Err("quota result kind is invalid"),
     };
+    let exhaustion_transitions = update.exhaustion_transitions.clone();
     apply_update(account, update);
-    Ok(AppliedQuota { transitions })
+    Ok(AppliedQuota {
+        transitions,
+        exhaustion_transitions,
+    })
 }
 
 pub fn apply_quota_failure(

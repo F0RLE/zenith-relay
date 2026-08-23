@@ -16,10 +16,13 @@ use zenith_relay_core::{
 };
 
 const IDLE_QUOTA_REFRESH_SECONDS: u64 = 15 * 60;
+const MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 
 pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut next_model_refresh = tokio::time::Instant::now();
         loop {
+            let refresh_models = tokio::time::Instant::now() >= next_model_refresh;
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -27,16 +30,21 @@ pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinH
                     }
                 }
                 _ = async {
-                    let _ = run(&state).await;
+                    let _ = run(&state, refresh_models).await;
                     tokio::time::sleep(Duration::from_secs(IDLE_QUOTA_REFRESH_SECONDS)).await;
-                } => {}
+                } => {
+                    if refresh_models {
+                        next_model_refresh = tokio::time::Instant::now()
+                            + Duration::from_secs(MODEL_REFRESH_INTERVAL_SECONDS);
+                    }
+                }
             }
         }
     })
 }
 
-async fn run(state: &Arc<AppState>) -> Result<(), String> {
-    super::refresh_automatic_accounts_now(state)
+async fn run(state: &Arc<AppState>, refresh_models: bool) -> Result<(), String> {
+    super::refresh_automatic_accounts_now(state, refresh_models)
         .await
         .map(|_| ())
 }
@@ -47,7 +55,6 @@ pub async fn refresh_account_metadata(
     force_subscription_refresh: bool,
     refresh_models: bool,
 ) -> Result<(ServerAccountRecord, Vec<QuotaTransition>), String> {
-    let refresh_models = refresh_models || account.models.is_empty();
     if !refresh_models {
         return refresh_one(state, account, force_subscription_refresh).await;
     }
@@ -227,18 +234,12 @@ fn apply_discovered_models(
             }
         }
         Ok(_) if account.models.is_empty() => apply_model_failure(account, "models_empty", false),
-        Err((code, retryable))
-            if account.models.is_empty()
-                || matches!(
-                    code.as_str(),
-                    "models_unauthorized"
-                        | "models_invalid_access_token"
-                        | "models_invalid_account_id"
-                ) =>
-        {
+        Err((code, retryable)) => {
+            // Cached model slugs remain routable, but the failed refresh must
+            // remain visible to management clients as stale availability.
             apply_model_failure(account, &code, retryable)
         }
-        Ok(_) | Err(_) => {}
+        Ok(_) => {}
     }
 }
 
@@ -390,7 +391,7 @@ mod tests {
 
         apply_discovered_models(&mut record, Err(("models_transport".into(), true)));
         assert_eq!(record.models, ["gpt-future-codex"]);
-        assert!(record.last_error_code.is_none());
+        assert_eq!(record.last_error_code.as_deref(), Some("models_transport"));
 
         let mut empty = account(&[]);
         apply_discovered_models(&mut empty, Err(("models_transport".into(), true)));

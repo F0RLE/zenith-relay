@@ -474,6 +474,17 @@
 }
 
 @media (max-width: 700px) {
+  .codex-background-tasks-control,
+  .codex-websockets-control {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .codex-background-tasks-toggle,
+  .codex-websockets-toggle {
+    width: 100%;
+  }
+
   .profile-snapshot-create {
     align-items: stretch;
     flex-direction: column;
@@ -491,6 +502,14 @@
   }
   .relay-page-actions .relay-button span {
     white-space: normal;
+  }
+  .pool-header-actions,
+  .pool-preset-actions {
+    flex-wrap: wrap;
+  }
+  .pool-header-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
   .metric-band,
   .pool-summary,

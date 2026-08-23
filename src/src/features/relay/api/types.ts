@@ -31,6 +31,25 @@ export type QuotaSnapshot = {
   error: { code: string; occurredAtMs: number } | null;
 };
 
+export type ResetCredit = {
+  status?: string;
+  resetType?: string;
+  grantedAt?: number;
+  expiresAt?: number;
+  redeemedAt?: number;
+};
+
+export type ResetCreditsSnapshot = {
+  availableCount: number | null;
+  credits: ResetCredit[];
+  nextExpiresAt: number | null;
+};
+
+export type ConsumeResetCreditResponse = {
+  refreshed: boolean;
+  refreshError?: string;
+};
+
 export type ApiEquivalentSummary = {
   microUsd: number;
   pricedTokens: number;
@@ -141,12 +160,21 @@ export type ModelSummary = {
   cacheWrite5mMicroUsdPerMillion?: number | null;
   cacheWrite1hMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
+  imageRequestPrices?: ImageRequestPrice[];
   customPrice: boolean;
   reasoningLevels?: string[];
   reasoningSupportedLevels?: string[];
   reasoningAllowedLevels?: string[];
   reasoningConfigurable?: boolean;
+  reasoningProbeAvailable?: boolean;
   reasoningProbe?: ReasoningProbeProgress;
+};
+
+export type ImageRequestPrice = {
+  operation: "generation" | "edit" | string;
+  quality: string;
+  size: string;
+  microUsd: number;
 };
 
 export type ReasoningProbeProgress = {
@@ -162,6 +190,21 @@ export type ReasoningProbeProgress = {
   lastProbeAt: string | null;
 };
 
+export type ModelReasoningProbeSourceResult = {
+  sourceId: string;
+  sourceName: string;
+  available: boolean;
+};
+
+export type ModelReasoningProbeResult = {
+  modelId: string;
+  level: string;
+  sourceCount: number;
+  availableCount: number;
+  appliedToSettings: boolean;
+  sources: ModelReasoningProbeSourceResult[];
+};
+
 export type CandidateRuntimeSnapshot = {
   candidateId: string;
   kind: "api_source" | "oauth_account";
@@ -171,6 +214,10 @@ export type CandidateRuntimeSnapshot = {
   activeModels?: Array<{
     model: string;
     requestCount: number;
+  }>;
+  modelRetries?: Array<{
+    model: string;
+    retryAtMs: number;
   }>;
   lastUsedAtMs: number | null;
   nextRetryAtMs: number | null;
@@ -185,7 +232,7 @@ export type WakeTask = {
   accountSelector: { kind: "all_eligible" } | { kind: "account_ids" | "tags"; values: string[] };
   windowKinds: Array<"primary" | "secondary">;
   modelPolicy: { kind: "lightest_supported" } | { kind: "explicit"; value: string };
-  trigger: { kind: "quota_full" };
+  trigger: { kind: "quota_full" } | { kind: "weekly" };
   executionPolicy: "automatic" | "require_confirmation";
   jitterSeconds: number;
   maxAttemptsPerCycle: number;
@@ -226,6 +273,8 @@ export type RuntimeSnapshot = {
     accountProxyRequired?: boolean;
     quotaRequestTimeoutSeconds?: number;
     chatgptInterfaceQuotaReserveBasisPoints?: number;
+    codexBackgroundTasksEnabled?: boolean;
+    codexWebsocketsEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
@@ -395,6 +444,7 @@ export type LocalUsage = {
   attempt: number;
   sourceId: string;
   accountId?: string | null;
+  clientContextId?: string | null;
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
@@ -659,6 +709,7 @@ export type ProfileSnapshot = {
   createdAtMs: number;
   configAvailable: boolean;
   authAvailable: boolean;
+  isOriginal?: boolean;
 };
 
 export type ProfileSnapshotList = {

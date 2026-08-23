@@ -49,7 +49,7 @@ pub(super) fn valid_managed_model_catalog(
             && !backup.managed_model_catalog_pending_remove
             && content.is_none();
     };
-    if Path::new(path) != expected_path {
+    if portable_path_value(path) != portable_path_string(expected_path) {
         return false;
     }
     if backup.restore_pending && content.is_none() {
@@ -190,7 +190,7 @@ fn migrate_legacy_managed_catalog_metadata(
         return Ok(());
     }
 
-    backup.managed_model_catalog_path = Some(catalog_path.to_string_lossy().into_owned());
+    backup.managed_model_catalog_path = Some(portable_path_string(catalog_path));
     backup.managed_model_catalog_hash = Some(bytes_hash(content));
     if backup.previous_model_catalog_json.is_none() {
         let config_path = codex_home.join(CONFIG_FILE);
@@ -220,13 +220,13 @@ fn migrate_legacy_managed_catalog_metadata(
 }
 
 fn configured_catalog_matches_path(codex_home: &Path, configured: &str, expected: &Path) -> bool {
-    let configured = Path::new(configured);
+    let configured = PathBuf::from(portable_path_value(configured));
     let resolved = if configured.is_absolute() {
-        configured.to_path_buf()
+        configured
     } else {
         codex_home.join(configured)
     };
-    resolved == expected
+    portable_path_string(&resolved) == portable_path_string(expected)
 }
 
 fn is_relay_managed_model_catalog(content: &[u8]) -> bool {

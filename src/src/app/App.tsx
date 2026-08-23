@@ -9,6 +9,18 @@ export function App() {
   const [platform, setPlatform] = useState<Platform>("windows");
 
   useEffect(() => {
+    const preventChromeSelectAll = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "a" || (!event.ctrlKey && !event.metaKey)) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=\"true\"]")) return;
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+    };
+    document.addEventListener("keydown", preventChromeSelectAll, true);
+    return () => document.removeEventListener("keydown", preventChromeSelectAll, true);
+  }, []);
+
+  useEffect(() => {
     getPlatform().then(setPlatform).catch(() => setPlatform("windows"));
   }, []);
 

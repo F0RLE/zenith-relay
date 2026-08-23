@@ -376,11 +376,31 @@ fn build_codex_models_response_from_manifests<'a>(
             if source_image_models.contains(&normalized) {
                 model["input_modalities"] = json!(["text", "image"]);
             }
-            apply_source_reasoning_allowed_levels(
+            apply_anthropic_ultra_alias(&mut model, &upstream_id);
+        }
+        let provider_declared_reasoning = source_reasoning_templates
+            .get(&normalized)
+            .and_then(|template| template.get("supported_reasoning_levels"))
+            .is_some()
+            || upstream_by_model
+                .get(&normalized)
+                .and_then(|entry| entry.get("supported_reasoning_levels"))
+                .is_some();
+        if !native_account_model && !provider_declared_reasoning {
+            apply_known_reasoning_fallback(&mut model, &upstream_id);
+        }
+        // Manual reasoning settings belong to pooled API routes. A native
+        // OAuth account owns its upstream Codex catalog and must not be
+        // rewritten by the API/pool policy.
+        if !native_account_model {
+            apply_model_reasoning_allowed_levels(
                 &mut model,
-                &runtime.model_reasoning_allowed_levels(&upstream_id),
+                runtime
+                    .model_reasoning_policy_levels(&upstream_id)
+                    .as_deref(),
             );
         }
+        sort_supported_reasoning_levels(&mut model);
         models.push(model);
     }
 
@@ -392,47 +412,120 @@ fn build_codex_models_response_from_manifests<'a>(
     }
 }
 
-fn apply_source_reasoning_allowed_levels(model: &mut Value, allowed_levels: &[String]) {
-    if allowed_levels.is_empty() {
-        let automatic_default = model
+fn apply_known_reasoning_fallback(model: &mut Value, model_id: &str) {
+    let Some(levels) = crate::known_model_reasoning_levels(model_id) else {
+        return;
+    };
+    if levels.is_empty()
+        || model
             .get("supported_reasoning_levels")
             .and_then(Value::as_array)
-            .and_then(|levels| {
-                levels.iter().find_map(|level| {
-                    level
-                        .get("effort")
-                        .and_then(Value::as_str)
-                        .filter(|effort| effort.eq_ignore_ascii_case("medium"))
-                })
-            })
-            .map(str::to_owned);
-        if let Some(effort) = automatic_default {
-            model["default_reasoning_level"] = Value::String(effort);
-        } else {
-            model
-                .as_object_mut()
-                .expect("normalized catalog entry is an object")
-                .remove("default_reasoning_level");
-        }
+            .is_some_and(|levels| !levels.is_empty())
+    {
         return;
     }
-    let allowed = allowed_levels
+    model["supported_reasoning_levels"] = Value::Array(
+        levels
+            .iter()
+            .map(|effort| json!({"effort": effort, "description": effort}))
+            .collect(),
+    );
+    if levels
         .iter()
-        .map(|level| level.trim().to_ascii_lowercase())
-        .filter(|level| !level.is_empty())
-        .collect::<BTreeSet<_>>();
+        .any(|effort| effort.eq_ignore_ascii_case("medium"))
+    {
+        model["default_reasoning_level"] = Value::String("medium".into());
+    }
+}
+
+fn apply_anthropic_ultra_alias(model: &mut Value, model_id: &str) {
+    if !crate::anthropic_max_implies_ultra(model_id) {
+        return;
+    }
+    let Some(levels) = model
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let has_max = levels.iter().any(|level| {
+        level
+            .get("effort")
+            .and_then(Value::as_str)
+            .is_some_and(|effort| effort.eq_ignore_ascii_case("max"))
+    });
+    let has_ultra = levels.iter().any(|level| {
+        level
+            .get("effort")
+            .and_then(Value::as_str)
+            .is_some_and(|effort| effort.eq_ignore_ascii_case("ultra"))
+    });
+    if has_max && !has_ultra {
+        levels.push(json!({"effort": "ultra", "description": "ultra"}));
+    }
+}
+
+fn sort_supported_reasoning_levels(model: &mut Value) {
+    let Some(levels) = model
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let order = crate::canonicalize_reasoning_levels(
+        levels
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str)),
+    );
+    levels.sort_by_key(|level| {
+        let effort = level
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        order
+            .iter()
+            .position(|candidate| candidate == &effort)
+            .unwrap_or(order.len())
+    });
+}
+
+fn apply_model_reasoning_allowed_levels(model: &mut Value, allowed_levels: Option<&[String]>) {
+    let Some(allowed_levels) = allowed_levels else {
+        // No override: preserve the provider-declared modes already present
+        // in the source template. A probe is never required for defaults.
+        return;
+    };
+    if allowed_levels.is_empty() {
+        model["supported_reasoning_levels"] = Value::Array(Vec::new());
+        model["default_reasoning_summary"] = Value::String("none".into());
+        model["supports_reasoning_summary_parameter"] = Value::Bool(false);
+        model["supports_reasoning_summaries"] = Value::Bool(false);
+        model
+            .as_object_mut()
+            .expect("normalized catalog entry is an object")
+            .remove("default_reasoning_level");
+        return;
+    }
     let detected_levels = model
         .get("supported_reasoning_levels")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let levels = detected_levels
+    let detected_by_effort = detected_levels
         .into_iter()
-        .filter(|level| {
-            level
-                .get("effort")
-                .and_then(Value::as_str)
-                .is_some_and(|effort| allowed.contains(&effort.to_ascii_lowercase()))
+        .filter_map(|level| {
+            let effort = level.get("effort")?.as_str()?.trim().to_ascii_lowercase();
+            (!effort.is_empty()).then_some((effort, level))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let levels = crate::canonicalize_reasoning_levels(allowed_levels.iter())
+        .into_iter()
+        .map(|effort| {
+            detected_by_effort
+                .get(&effort)
+                .cloned()
+                .unwrap_or_else(|| json!({"effort": effort, "description": effort}))
         })
         .collect::<Vec<_>>();
     let (has_levels, default_reasoning_level) = {
@@ -467,6 +560,11 @@ fn apply_source_reasoning_allowed_levels(model: &mut Value, allowed_levels: &[St
             .expect("normalized catalog entry is an object")
             .remove("default_reasoning_level");
     }
+    // A manually exposed effort does not prove a provider-specific summary
+    // contract.  Keep the selector narrow and let the actual route decide.
+    model["default_reasoning_summary"] = Value::String("none".into());
+    model["supports_reasoning_summary_parameter"] = Value::Bool(false);
+    model["supports_reasoning_summaries"] = Value::Bool(false);
 }
 
 fn upstream_codex_models(payload: &Value) -> Option<&Vec<Value>> {
@@ -504,7 +602,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn confirmed_reasoning_modes_prefer_medium_over_provider_ultra_default() {
+    fn manual_reasoning_modes_prefer_medium_over_provider_ultra_default() {
         let mut model = json!({
             "default_reasoning_level": "ultra",
             "supported_reasoning_levels": [
@@ -514,16 +612,16 @@ mod tests {
             ]
         });
 
-        apply_source_reasoning_allowed_levels(
+        apply_model_reasoning_allowed_levels(
             &mut model,
-            &["low".to_string(), "medium".to_string(), "ultra".to_string()],
+            Some(&["low".to_string(), "medium".to_string(), "ultra".to_string()]),
         );
 
         assert_eq!(model["default_reasoning_level"], "medium");
     }
 
     #[test]
-    fn confirmed_reasoning_modes_do_not_keep_provider_ultra_default_without_medium() {
+    fn manual_reasoning_modes_do_not_keep_provider_ultra_default_without_medium() {
         let mut model = json!({
             "default_reasoning_level": "ultra",
             "supported_reasoning_levels": [
@@ -533,16 +631,16 @@ mod tests {
             ]
         });
 
-        apply_source_reasoning_allowed_levels(
+        apply_model_reasoning_allowed_levels(
             &mut model,
-            &["low".to_string(), "high".to_string(), "ultra".to_string()],
+            Some(&["low".to_string(), "high".to_string(), "ultra".to_string()]),
         );
 
         assert!(model.get("default_reasoning_level").is_none());
     }
 
     #[test]
-    fn unconfirmed_reasoning_modes_are_not_synthesized() {
+    fn manual_reasoning_modes_allow_provider_specific_efforts() {
         let mut model = json!({
             "default_reasoning_level": "low",
             "supported_reasoning_levels": [
@@ -550,20 +648,24 @@ mod tests {
             ]
         });
 
-        apply_source_reasoning_allowed_levels(
+        apply_model_reasoning_allowed_levels(
             &mut model,
-            &["low".to_string(), "xhigh".to_string(), "max".to_string()],
+            Some(&["low".to_string(), "xhigh".to_string(), "max".to_string()]),
         );
 
         assert_eq!(
             model["supported_reasoning_levels"],
-            json!([{"effort": "low", "description": "Provider low"}])
+            json!([
+                {"effort": "low", "description": "Provider low"},
+                {"effort": "xhigh", "description": "xhigh"},
+                {"effort": "max", "description": "max"}
+            ])
         );
-        assert_eq!(model["default_reasoning_level"], "low");
+        assert!(model.get("default_reasoning_level").is_none());
     }
 
     #[test]
-    fn automatic_reasoning_does_not_keep_provider_ultra_default_without_medium() {
+    fn no_manual_override_preserves_provider_reasoning_modes() {
         let mut model = json!({
             "default_reasoning_level": "ultra",
             "supported_reasoning_levels": [
@@ -573,8 +675,65 @@ mod tests {
             ]
         });
 
-        apply_source_reasoning_allowed_levels(&mut model, &[]);
+        apply_model_reasoning_allowed_levels(&mut model, None);
 
-        assert!(model.get("default_reasoning_level").is_none());
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([{"effort": "low"}, {"effort": "high"}, {"effort": "ultra"}])
+        );
+        assert_eq!(model["default_reasoning_level"], "ultra");
+    }
+
+    #[test]
+    fn known_reasoning_fallback_reaches_codex_when_provider_omits_metadata() {
+        let mut model = json!({"supported_reasoning_levels": []});
+
+        apply_known_reasoning_fallback(&mut model, "vendor/gpt-5.6-terra");
+
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "none", "description": "none"},
+                {"effort": "low", "description": "low"},
+                {"effort": "medium", "description": "medium"},
+                {"effort": "high", "description": "high"},
+                {"effort": "xhigh", "description": "xhigh"},
+                {"effort": "max", "description": "max"}
+            ])
+        );
+        assert_eq!(model["default_reasoning_level"], "medium");
+    }
+
+    #[test]
+    fn anthropic_max_catalog_mode_adds_ultra_for_codex() {
+        let mut model = json!({
+            "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "max"}
+            ]
+        });
+
+        apply_anthropic_ultra_alias(&mut model, "vendor/claude-opus-4-8");
+        sort_supported_reasoning_levels(&mut model);
+
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low"},
+                {"effort": "max"},
+                {"effort": "ultra", "description": "ultra"}
+            ])
+        );
+    }
+
+    #[test]
+    fn provider_empty_reasoning_metadata_is_not_replaced_by_known_defaults() {
+        let mut model = json!({"supported_reasoning_levels": []});
+
+        // The caller skips this fallback when the provider explicitly sent an
+        // empty field; the helper itself remains a no-op for unknown models.
+        apply_known_reasoning_fallback(&mut model, "vendor/unknown-model");
+
+        assert_eq!(model["supported_reasoning_levels"], json!([]));
     }
 }

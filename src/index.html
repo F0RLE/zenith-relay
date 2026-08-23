@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script src="/theme-init.js"></script>
+    <link rel="preload" href="./public/icons/zenith-sword.png" as="image" type="image/png" />
     <style>
       html {
         --bootstrap-bg: #f2f5f6;
@@ -30,10 +31,94 @@
         margin: 0;
         background: var(--bootstrap-bg);
       }
+
+      /* Keep the first paint useful while WebView2 and React finish booting. */
+      #splash-screen {
+        position: fixed;
+        z-index: 1000;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: var(--bootstrap-bg);
+        color: #172025;
+        opacity: 1;
+        visibility: visible;
+        transition: opacity 280ms ease, visibility 0s linear 280ms;
+      }
+
+      html[data-theme="dark"] #splash-screen {
+        color: #edf2f4;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        html[data-theme="system"] #splash-screen {
+          color: #edf2f4;
+        }
+      }
+
+      html[data-startup-ready="true"] #splash-screen {
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        transition-delay: 0s, 280ms;
+      }
+
+      .splash-content {
+        display: grid;
+        justify-items: center;
+        gap: 12px;
+      }
+
+      .splash-brand {
+        font: 650 16px/1 "Segoe UI", system-ui, sans-serif;
+        letter-spacing: 0;
+      }
+
+      .splash-mark {
+        width: 72px;
+        height: 72px;
+        display: block;
+        object-fit: contain;
+      }
+
+      .splash-progress {
+        width: 88px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: color-mix(in srgb, #0d9270 18%, transparent);
+      }
+
+      .splash-progress::after {
+        display: block;
+        width: 42%;
+        height: 100%;
+        border-radius: inherit;
+        background: #0d9270;
+        content: "";
+        animation: splash-progress 1.1s ease-in-out infinite;
+      }
+
+      @keyframes splash-progress {
+        0% { transform: translateX(-115%); }
+        50%, 100% { transform: translateX(250%); }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #splash-screen { transition: none; }
+        .splash-progress::after { animation: none; transform: translateX(70%); }
+      }
     </style>
     <title>Zenith Relay</title>
   </head>
   <body>
+    <div id="splash-screen" role="status" aria-live="polite" aria-label="Zenith Relay">
+      <div class="splash-content">
+        <img class="splash-mark" src="./public/icons/zenith-sword.png" alt="" width="72" height="72" />
+        <div class="splash-brand">Zenith Relay</div>
+        <div class="splash-progress" aria-hidden="true"></div>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

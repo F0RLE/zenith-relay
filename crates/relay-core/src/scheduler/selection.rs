@@ -14,7 +14,8 @@ use routing_policy::{API_SOURCE_PRIMARY_PRIORITY, API_SOURCE_RESERVE_PRIORITY};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 pub use snapshot::{
-    ActiveModelRuntime, CandidateRuntimeSnapshot, RoutingDiagnostics, SelectionReason,
+    ActiveModelRuntime, CandidateRuntimeSnapshot, ModelRetryRuntime, RoutingDiagnostics,
+    SelectionReason,
 };
 
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
@@ -22,7 +23,6 @@ pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const PROMPT_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const PROMPT_AFFINITY_TTL_MS: u64 = 60 * 60 * 1_000;
 const PROMPT_AFFINITY_QUOTA_SLACK_BPS: u64 = 500;
-const MAX_OAUTH_TEXT_IN_FLIGHT: u32 = 1;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 const PROVIDER_STORM_WINDOW_MS: u64 = 10_000;
 const PROVIDER_STORM_OPEN_MS: u64 = 30_000;
@@ -278,6 +278,16 @@ impl PoolScheduler {
             .into_iter()
             .map(|(candidate, available, in_flight)| {
                 let active_models = self.active_models_for(&candidate.id);
+                let mut model_retries = candidate
+                    .cooldowns
+                    .iter()
+                    .filter(|(model, retry_at_ms)| model.as_str() != "*" && **retry_at_ms > now_ms)
+                    .map(|(model, retry_at_ms)| ModelRetryRuntime {
+                        model: model.clone(),
+                        retry_at_ms: *retry_at_ms,
+                    })
+                    .collect::<Vec<_>>();
+                model_retries.sort_by_key(|retry| retry.retry_at_ms);
                 CandidateRuntimeSnapshot {
                     candidate_id: candidate.id.clone(),
                     kind: candidate.kind,
@@ -285,6 +295,7 @@ impl PoolScheduler {
                     in_flight,
                     active_request_count: self.active_request_count(&candidate.id),
                     active_models,
+                    model_retries,
                     last_used_at_ms: candidate.last_used_at,
                     next_retry_at_ms: candidate
                         .cooldowns
@@ -559,41 +570,10 @@ impl PoolScheduler {
     }
 
     fn lane_allows(&self, candidate: &RuntimeCandidate, lane: InFlightLane) -> bool {
-        if candidate.kind != CandidateKind::OAuthAccount {
+        if candidate.kind != CandidateKind::OAuthAccount || lane == InFlightLane::Text {
             return true;
         }
-        match lane {
-            InFlightLane::Text => {
-                self.in_flight_count(&candidate.id, lane) < MAX_OAUTH_TEXT_IN_FLIGHT
-            }
-            InFlightLane::Image => {
-                self.in_flight_count(&candidate.id, lane) < MAX_OAUTH_IMAGE_IN_FLIGHT
-            }
-        }
-    }
-
-    pub(crate) fn has_waitable_text_candidate(&mut self, request: SelectionRequest<'_>) -> bool {
-        let response_affinity_candidate = request.response_affinity_key.and_then(|key| {
-            self.response_affinity
-                .get(key, request.now_ms)
-                .map(str::to_string)
-        });
-        let is_waitable = |candidate: &RuntimeCandidate| {
-            candidate.kind == CandidateKind::OAuthAccount
-                && !request.tried.contains(&candidate.id)
-                && !self.lane_allows(candidate, InFlightLane::Text)
-                && self.is_eligible(
-                    candidate,
-                    request.model,
-                    request.allowed_protocols,
-                    request.scope,
-                    request.now_ms,
-                )
-        };
-        if let Some(candidate_id) = response_affinity_candidate {
-            return self.candidates.get(&candidate_id).is_some_and(is_waitable);
-        }
-        self.candidates.values().any(is_waitable)
+        self.in_flight_count(&candidate.id, InFlightLane::Image) < MAX_OAUTH_IMAGE_IN_FLIGHT
     }
 
     fn is_half_open_probe(&self, candidate_id: &str, model: &str, now_ms: u64) -> bool {

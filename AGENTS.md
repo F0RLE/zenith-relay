@@ -14,20 +14,27 @@
   hosted API state returned by the selected provider integration.
 - Do not hardcode provider, model, price, routing, or admin assumptions in the desktop UI.
 - Keep public local-pool features local-first. User-owned accounts must stay on
-  the user's device by default and must not be uploaded into Zenith server
-  account-pool.
+  the user's device by default and must not be uploaded into the Zenith
+  production account-pool.
+- Zenith Relay is separate from the production Zenith Gateway and Control API.
+  Do not bring production credentials, customer keys, backend tokens, account
+  inventory, or internal production routing/business logic into this repository.
+- Transfer a user-owned secret only through an explicit, confirmed operation to
+  a server operated by that same user. Never make that transfer implicit.
+- Keep snapshots, telemetry, logs, exports, diagnostics, screenshots, and
+  management API
+  responses redacted: no raw credentials, cookies, authorization headers,
+  prompts, response bodies, or provider session material.
 - Local gateway mode should expose a generated local API key and local
   OpenAI-compatible base URL, then configure Codex/OpenCode through reversible
   config attach/restore.
 - Local provider sources are generic user-owned records: display name, base URL,
-  API key, protocol mode, model filters, priority, and weight.
+  secret reference, protocol mode, model filters, priority, and weight.
 - A user's Zenith API key is one preset personal local-pool source. Treat it as
   user-owned local configuration, not internal Zenith provider routing. Do not
   hardcode local pool behavior around Zenith API only.
-- Treat server operator upload as a private/admin capability for Zenith-owned
-  accounts only.
-- Keep hosted API selection, personal local pool, and private operator upload
-  mode separate in UI, storage, and docs.
+- Keep hosted API selection, personal local pool, and user-managed server
+  transfer mode separate in UI, storage, and docs.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
 - Treat `PLANNING.md` as the canonical source for public boundaries, target
@@ -80,4 +87,4 @@ bun run app:build
   `PLANNING.md`; incomplete work and acceptance gates live in
   `ROADMAP.md`.
 - Personal local-pool account data is local user data. It is not Zenith
-  customer billing state and not server account-pool inventory.
+  customer billing state and not production account-pool inventory.

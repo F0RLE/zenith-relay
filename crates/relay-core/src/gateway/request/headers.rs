@@ -1,4 +1,5 @@
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use sha2::{Digest, Sha256};
 
 pub(in crate::gateway) const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
 
@@ -41,6 +42,40 @@ const FORWARDED_CODEX_HEADERS: &[&str] = &[
     "x-responsesapi-include-timing-metrics",
     "x-session-id",
 ];
+
+const CLIENT_CONTEXT_HEADERS: &[&str] = &[
+    "x-session-id",
+    "session_id",
+    "session-id",
+    "thread-id",
+    "x-codex-parent-thread-id",
+    "x-codex-window-id",
+    "x-codex-installation-id",
+];
+
+/// Returns a stable, privacy-safe identifier for the client stream that sent
+/// a request. Raw session, thread, installation, and window values never
+/// leave this function.
+pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap) -> Option<String> {
+    let mut digest = Sha256::new();
+    let mut found = false;
+    for &name in CLIENT_CONTEXT_HEADERS {
+        let Some(value) = client_headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        found = true;
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update(value.as_bytes());
+        digest.update([0]);
+    }
+    found.then(|| format!("client_{}", hex::encode(&digest.finalize()[..12])))
+}
 
 pub(in crate::gateway) fn forwarded_codex_headers(
     client_headers: &HeaderMap,
@@ -147,6 +182,42 @@ mod tests {
 
         let synthesized = forwarded_codex_headers(&HeaderMap::new(), "relay-request");
         assert_eq!(synthesized[CLAUDE_CODE_SESSION_HEADER], "relay-request");
+    }
+
+    #[test]
+    fn client_context_fingerprint_is_stable_and_ignores_untrusted_headers() {
+        let mut first = HeaderMap::new();
+        first.insert("thread-id", HeaderValue::from_static("thread-42"));
+        first.insert("x-session-id", HeaderValue::from_static("session-42"));
+        first.insert("authorization", HeaderValue::from_static("secret-a"));
+        first.insert("cookie", HeaderValue::from_static("session=secret-a"));
+        first.insert("user-agent", HeaderValue::from_static("codex-a"));
+
+        let mut second = first.clone();
+        second.insert("authorization", HeaderValue::from_static("secret-b"));
+        second.insert("cookie", HeaderValue::from_static("session=secret-b"));
+        second.insert("user-agent", HeaderValue::from_static("codex-b"));
+
+        let fingerprint = client_context_fingerprint(&first).unwrap();
+        assert_eq!(
+            Some(fingerprint.clone()),
+            client_context_fingerprint(&second)
+        );
+        assert!(fingerprint.starts_with("client_"));
+        assert_eq!(fingerprint.len(), "client_".len() + 24);
+
+        let mut different_thread = first.clone();
+        different_thread.insert("thread-id", HeaderValue::from_static("thread-43"));
+        assert_ne!(
+            Some(fingerprint),
+            client_context_fingerprint(&different_thread)
+        );
+        assert!(serde_json::to_string(&client_context_fingerprint(&first))
+            .unwrap()
+            .contains("client_"));
+        assert!(!serde_json::to_string(&client_context_fingerprint(&first))
+            .unwrap()
+            .contains("thread-42"));
     }
 
     #[test]

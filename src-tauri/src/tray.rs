@@ -197,6 +197,9 @@ fn tooltip_text(running: bool) -> String {
 
 pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        if let Some(state) = app.try_state::<DesktopState>() {
+            state.set_background_session_active(true);
+        }
         reveal_main_window(&window);
         return;
     }
@@ -213,12 +216,11 @@ pub fn show_main_window(app: &AppHandle) {
     // returns and coalesce repeated clicks while it is in flight.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let window = app
-            .get_webview_window(MAIN_WINDOW_LABEL)
-            .map(Ok)
-            .unwrap_or_else(|| create_main_window(&app));
-        if let Ok(window) = window {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
             reveal_main_window(&window);
+        } else {
+            // The frontend reveals a new window after applying its saved theme.
+            let _ = create_main_window(&app);
         }
         if let Some(state) = app.try_state::<AppState>() {
             state.finish_main_window_open();
@@ -244,14 +246,22 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
         .find(|window| window.label == MAIN_WINDOW_LABEL)
         .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
     let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
-    WebviewWindowBuilder::from_config(app, config)?
+    let window = WebviewWindowBuilder::from_config(app, config)?
         .data_directory(webview_data)
-        .build()
+        .visible(false)
+        .build()?;
+    if let Some(state) = app.try_state::<DesktopState>() {
+        state.set_background_session_active(true);
+    }
+    Ok(window)
 }
 
 /// Releases the WebView renderer while preserving the native process, tray,
 /// managed state, and local gateway. Opening Relay from the tray recreates it.
 pub fn close_main_window(app: &AppHandle) {
+    if let Some(state) = app.try_state::<DesktopState>() {
+        state.set_background_session_active(false);
+    }
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.destroy();
     }

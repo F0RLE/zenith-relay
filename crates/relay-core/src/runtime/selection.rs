@@ -12,30 +12,17 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
         let (response_affinity_key, prompt_affinity_key) = affinity_keys;
-        let mut selection_now_ms = now_ms;
-        loop {
-            // Register before evaluating candidates so a completed request cannot
-            // release the only OAuth account between the failed selection and wait.
-            let notified = self.candidate_availability.notified();
-            let (reserved, wait_for_release) = self.try_select_and_reserve_for(
-                key,
-                model,
-                allowed_protocols,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                selection_now_ms,
-                CandidateLeaseLane::Text,
-            );
-            if let Some(reserved) = reserved {
-                return Some(reserved);
-            }
-            if !wait_for_release {
-                return None;
-            }
-            notified.await;
-            selection_now_ms = runtime_now_ms();
-        }
+        self.try_select_and_reserve_for(
+            key,
+            model,
+            allowed_protocols,
+            tried,
+            response_affinity_key,
+            prompt_affinity_key,
+            now_ms,
+            CandidateLeaseLane::Text,
+        )
+        .0
     }
 
     pub(crate) fn select_and_reserve_image(
@@ -132,17 +119,6 @@ impl GatewayRuntime {
                 (selection, lease)
             })
         });
-        let wait_for_release = matches!(lane, CandidateLeaseLane::Text)
-            && reserved.is_none()
-            && scheduler.has_waitable_text_candidate(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            });
         drop(scheduler);
         drop(scope);
         if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
@@ -150,7 +126,7 @@ impl GatewayRuntime {
                 self.persist_response_affinity(key, &selection.candidate_id, now_ms);
             }
         }
-        (reserved, wait_for_release)
+        (reserved, false)
     }
 
     pub(crate) fn earliest_retry_at(

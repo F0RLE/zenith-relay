@@ -4,10 +4,10 @@ use super::{
             next_quota_refresh_at, prepare_account_credentials, record_quota_refresh_error,
             refresh_account_quota_once, AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
+        reset_credits::consume_local_reset_credit_for_account,
         wake::{completion_from_execution, CodexWakeClient},
     },
     error::{ErrorCode, LocalPoolError, Result},
-    models::LocalAccountRecord,
     state::DesktopState,
 };
 use std::{collections::HashMap, time::Duration};
@@ -16,13 +16,18 @@ use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
     accounts::AccountAuthState,
     automations::{
-        model_lightness_rank, verify_wake_countdown, WakeAdapterPolicy, WakeCompletion,
-        WakeCompletionOutcome, WakeModel, WakePermit, WakeVerificationOutcome,
+        verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
+        WakeVerificationOutcome,
     },
     providers::chatgpt::CodexQuotaClient,
-    quota::QuotaAdapterCapabilities,
     unix_time_ms as current_time_ms,
 };
+
+mod timing;
+mod wake_policy;
+
+use timing::{due_wait, DueWait};
+use wake_policy::codex_wake_policy;
 
 const QUOTA_BATCH_SIZE: usize = 5;
 const WAKE_BATCH_SIZE: usize = 2;
@@ -30,7 +35,8 @@ const WORKER_ERROR_RETRY_MS: u64 = 60_000;
 const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
 const SOURCE_MODEL_REFRESH_START_DELAY_SECONDS: u64 = 5;
-const SOURCE_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const SOURCE_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
+const ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 
 pub(crate) fn start(app: AppHandle) {
     let recovery_app = app.clone();
@@ -62,17 +68,32 @@ pub(crate) async fn run_due_confirmation_wakes(
 }
 
 async fn quota_loop(app: AppHandle) {
+    let mut next_model_refresh_at_ms = current_time_ms();
     loop {
-        let wait_result = {
-            let state = app.state::<DesktopState>();
-            wait_for_quota_due(&state).await
+        let state = app.state::<DesktopState>();
+        let session_was_inactive = !state.background_session_active();
+        state.wait_for_background_session_active().await;
+        if session_was_inactive {
+            next_model_refresh_at_ms = current_time_ms();
+        }
+        let wait_result = tokio::select! {
+            _ = state.wait_for_background_session_inactive() => continue,
+            result = wait_for_quota_due(&state) => result,
         };
         if wait_result.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
             continue;
         }
-        if run_due_quota_refreshes(&app).await.is_err() {
+        if !state.background_session_active() {
+            continue;
+        }
+        let refresh_models = current_time_ms() >= next_model_refresh_at_ms;
+        if run_due_quota_refreshes(&app, refresh_models).await.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
+        }
+        if refresh_models {
+            next_model_refresh_at_ms = current_time_ms()
+                .saturating_add(ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS.saturating_mul(1_000));
         }
     }
 }
@@ -83,8 +104,9 @@ async fn source_model_loop(app: AppHandle) {
     ))
     .await;
     loop {
+        let state = app.state::<DesktopState>();
+        state.wait_for_background_session_active().await;
         let source_ids = {
-            let state = app.state::<DesktopState>();
             state.store().map(|store| {
                 store
                     .sources()
@@ -96,25 +118,44 @@ async fn source_model_loop(app: AppHandle) {
         };
         if let Ok(source_ids) = source_ids {
             for source_id in source_ids {
-                let state = app.state::<DesktopState>();
+                if !state.background_session_active() {
+                    break;
+                }
                 let _ =
                     super::commands::connections::refresh_local_source_models(&state, &source_id)
                         .await;
                 let _ = app.emit("zenith-state-changed", ());
             }
+            if !state.background_session_active() {
+                continue;
+            }
+            if let Some(runtime) = state.gateway.runtime().await {
+                runtime.prefetch_source_model_metadata();
+            }
+            let _mutation = state.setup_guard().await;
+            let result = super::commands::profiles::refresh_active_codex_catalog(&state).await;
+            super::commands::record_catalog_refresh_result(&state, &result);
         }
-        tokio::time::sleep(Duration::from_secs(SOURCE_MODEL_REFRESH_INTERVAL_SECONDS)).await;
+        tokio::select! {
+            _ = state.wait_for_background_session_inactive() => {},
+            _ = tokio::time::sleep(Duration::from_secs(SOURCE_MODEL_REFRESH_INTERVAL_SECONDS)) => {},
+        }
     }
 }
 
 async fn wake_loop(app: AppHandle) {
     loop {
-        let wait_result = {
-            let state = app.state::<DesktopState>();
-            wait_for_automatic_wake(&state).await
+        let state = app.state::<DesktopState>();
+        state.wait_for_background_session_active().await;
+        let wait_result = tokio::select! {
+            _ = state.wait_for_background_session_inactive() => continue,
+            result = wait_for_automatic_wake(&state) => result,
         };
         if wait_result.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
+            continue;
+        }
+        if !state.background_session_active() {
             continue;
         }
         let Ok(permits) = app
@@ -160,22 +201,16 @@ async fn wait_for_automatic_wake(state: &DesktopState) -> Result<()> {
     Ok(())
 }
 
-async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
-    let permits = app
-        .state::<DesktopState>()
-        .claim_due_quota_refreshes(current_time_ms(), QUOTA_BATCH_SIZE)?;
-    let mut claimed = permits.len();
+async fn run_due_quota_refreshes(app: &AppHandle, refresh_models: bool) -> Result<usize> {
     let mut workers = JoinSet::new();
-    let mut active_permits = HashMap::with_capacity(claimed);
-    for permit in permits {
-        let worker_app = app.clone();
-        let account_id = permit.account_id.clone();
-        let task = workers.spawn(async move {
-            let state = worker_app.state::<DesktopState>();
-            refresh_account_quota_once(&state, &account_id, false, false).await
-        });
-        active_permits.insert(task.id(), permit);
-    }
+    let mut active_permits = HashMap::with_capacity(QUOTA_BATCH_SIZE);
+    let mut claimed = claim_and_spawn_quota_workers(
+        app,
+        &mut workers,
+        &mut active_permits,
+        QUOTA_BATCH_SIZE,
+        refresh_models,
+    )?;
     if claimed > 0 {
         let _ = app.emit("zenith-state-changed", ());
     }
@@ -195,7 +230,7 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
         match joined {
             Ok((_, response)) => {
                 let state = app.state::<DesktopState>();
-                if let Err(error) = settle_quota_refresh(&state, permit, response) {
+                if let Err(error) = settle_quota_refresh(&state, permit, response).await {
                     first_error.get_or_insert(error);
                 }
             }
@@ -219,28 +254,45 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
         if open_slots == 0 {
             continue;
         }
-        match app
-            .state::<DesktopState>()
-            .claim_due_quota_refreshes(current_time_ms(), open_slots)
-        {
-            Ok(permits) => {
-                claimed = claimed.saturating_add(permits.len());
-                for permit in permits {
-                    let worker_app = app.clone();
-                    let account_id = permit.account_id.clone();
-                    let task = workers.spawn(async move {
-                        let state = worker_app.state::<DesktopState>();
-                        refresh_account_quota_once(&state, &account_id, false, false).await
-                    });
-                    active_permits.insert(task.id(), permit);
-                }
-            }
+        match claim_and_spawn_quota_workers(
+            app,
+            &mut workers,
+            &mut active_permits,
+            open_slots,
+            refresh_models,
+        ) {
+            Ok(new_claims) => claimed = claimed.saturating_add(new_claims),
             Err(error) => {
                 first_error.get_or_insert(error);
             }
         }
     }
     first_error.map_or(Ok(claimed), Err)
+}
+
+fn claim_and_spawn_quota_workers(
+    app: &AppHandle,
+    workers: &mut JoinSet<Result<AccountQuotaRefreshResponse>>,
+    active_permits: &mut HashMap<TaskId, zenith_relay_core::quota::QuotaRefreshPermit>,
+    max_claims: usize,
+    refresh_models: bool,
+) -> Result<usize> {
+    let state = app.state::<DesktopState>();
+    if !state.background_session_active() {
+        return Ok(0);
+    }
+    let permits = state.claim_due_quota_refreshes(current_time_ms(), max_claims)?;
+    let claimed = permits.len();
+    for permit in permits {
+        let worker_app = app.clone();
+        let account_id = permit.account_id.clone();
+        let task = workers.spawn(async move {
+            let state = worker_app.state::<DesktopState>();
+            refresh_account_quota_once(&state, &account_id, false, refresh_models).await
+        });
+        active_permits.insert(task.id(), permit);
+    }
+    Ok(claimed)
 }
 
 fn quota_worker_id<T>(result: &std::result::Result<(TaskId, T), JoinError>) -> TaskId {
@@ -259,7 +311,7 @@ fn reschedule_failed_quota_worker(
     Ok(())
 }
 
-fn settle_quota_refresh(
+async fn settle_quota_refresh(
     state: &DesktopState,
     permit: zenith_relay_core::quota::QuotaRefreshPermit,
     response: Result<AccountQuotaRefreshResponse>,
@@ -271,7 +323,8 @@ fn settle_quota_refresh(
             } else {
                 state.complete_quota_refresh(permit)?;
             }
-            evaluate_updated_transitions(state, &response)?;
+            let _ = evaluate_updated_transitions(state, &response);
+            evaluate_weekly_exhaustions(state, &response).await?;
         }
         Err(error) => {
             let account_id = permit.account_id.clone();
@@ -309,7 +362,7 @@ fn evaluate_updated_transitions(
     state: &DesktopState,
     response: &AccountQuotaRefreshResponse,
 ) -> Result<()> {
-    let AccountQuotaOutcome::Updated { transitions } = &response.quota else {
+    let AccountQuotaOutcome::Updated { transitions, .. } = &response.quota else {
         return Ok(());
     };
     if transitions.is_empty() {
@@ -330,6 +383,50 @@ fn evaluate_updated_transitions(
                 &policy,
                 now_ms,
             )?;
+        }
+    }
+    Ok(())
+}
+
+async fn evaluate_weekly_exhaustions(
+    state: &DesktopState,
+    response: &AccountQuotaRefreshResponse,
+) -> Result<()> {
+    if response.exhaustion_transitions.is_empty()
+        || response.account.remote_location.is_some()
+        || response
+            .account
+            .account
+            .quota
+            .reset_credits_available
+            .unwrap_or(0)
+            == 0
+    {
+        return Ok(());
+    }
+    let tasks = state.store()?.automations().tasks.clone();
+    let has_weekly_task = tasks.iter().any(|task| {
+        task.enabled
+            && task.trigger == WakeTrigger::Weekly
+            && task.account_selector.matches(&response.account.account)
+    });
+    if !has_weekly_task {
+        return Ok(());
+    }
+    for transition in &response.exhaustion_transitions {
+        if transition.window_kind != zenith_relay_core::quota::QuotaWindowKind::Secondary
+            || state
+                .weekly_reset_was_applied(&response.account.account.id, &transition.fingerprint)?
+        {
+            continue;
+        }
+        if consume_local_reset_credit_for_account(state, &response.account.account.id)
+            .await
+            .is_ok()
+        {
+            state
+                .mark_weekly_reset_applied(&response.account.account.id, &transition.fingerprint)?;
+            break;
         }
     }
     Ok(())
@@ -395,6 +492,7 @@ async fn execute_wake_permit(
             Ok(response) => {
                 let _ = settle_verification_quota(state, &permit.account_id, &response);
                 let _ = evaluate_updated_transitions(state, &response);
+                let _ = evaluate_weekly_exhaustions(state, &response).await;
                 verification_from_refresh(permit, &response)
             }
             Err(_) => WakeVerificationOutcome::Unconfirmed,
@@ -457,59 +555,10 @@ fn credential_error_code(error: &LocalPoolError) -> &'static str {
     }
 }
 
-fn codex_wake_policy(
-    account: &LocalAccountRecord,
-    capabilities: &QuotaAdapterCapabilities,
-) -> WakeAdapterPolicy {
-    let models = account
-        .models
-        .iter()
-        .filter(|model| model_allowed(account, model))
-        .enumerate()
-        .map(|(index, model)| WakeModel {
-            id: model.clone(),
-            lightness_rank: model_lightness_rank(model, index),
-            wake_capable: true,
-        })
-        .collect();
-    WakeAdapterPolicy {
-        windows_requiring_activity: capabilities.wake_windows.clone(),
-        models,
-        verification_delay_ms: WAKE_VERIFICATION_DELAY_MS,
-        output_token_cap: WAKE_OUTPUT_TOKEN_CAP,
-    }
-}
-
-fn model_allowed(account: &LocalAccountRecord, model: &str) -> bool {
-    (account.allowed_models.is_empty()
-        || account
-            .allowed_models
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(model)))
-        && !account
-            .excluded_models
-            .iter()
-            .any(|excluded| excluded.eq_ignore_ascii_case(model))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DueWait {
-    Ready,
-    Notify,
-    Sleep(Duration),
-}
-
-fn due_wait(next_due_at_ms: Option<u64>, now_ms: u64) -> DueWait {
-    match next_due_at_ms {
-        None => DueWait::Notify,
-        Some(due_at_ms) if due_at_ms <= now_ms => DueWait::Ready,
-        Some(due_at_ms) => DueWait::Sleep(Duration::from_millis(due_at_ms - now_ms)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_pool::models::LocalAccountRecord;
     use std::collections::BTreeSet;
     use zenith_relay_core::{
         accounts::{
@@ -517,19 +566,16 @@ mod tests {
             ReauthReason,
         },
         automations::{WakeExecutionRequest, WakeTrigger, WakeVerificationMetadata},
-        quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
+        quota::{
+            QuotaAdapterCapabilities, QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription,
+        },
         WireApi,
     };
 
     #[test]
-    fn due_wait_uses_deadline_or_notification_without_polling() {
-        assert_eq!(due_wait(None, 100), DueWait::Notify);
-        assert_eq!(due_wait(Some(100), 100), DueWait::Ready);
-        assert_eq!(due_wait(Some(90), 100), DueWait::Ready);
-        assert_eq!(
-            due_wait(Some(150), 100),
-            DueWait::Sleep(Duration::from_millis(50))
-        );
+    fn source_models_refresh_at_startup_then_every_eight_hours() {
+        assert_eq!(SOURCE_MODEL_REFRESH_START_DELAY_SECONDS, 5);
+        assert_eq!(SOURCE_MODEL_REFRESH_INTERVAL_SECONDS, 8 * 60 * 60);
     }
 
     #[test]
@@ -730,6 +776,7 @@ mod tests {
             window_minutes: Some(300),
             observed_at_ms,
             full_transition_fingerprint: Some("cycle-1".into()),
+            exhaustion_transition_fingerprint: None,
         }
     }
 
@@ -769,7 +816,9 @@ mod tests {
             account,
             quota: AccountQuotaOutcome::Updated {
                 transitions: Vec::new(),
+                exhaustion_transitions: Vec::new(),
             },
+            exhaustion_transitions: Vec::new(),
         }
     }
 }

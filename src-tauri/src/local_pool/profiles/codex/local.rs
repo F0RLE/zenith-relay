@@ -145,6 +145,7 @@ pub(super) fn attach_local_locked(
             )
         })
         .transpose()?;
+    let managed_model_reasoning_effort = reasoning_effort_for_attach(&document, catalog.as_deref());
 
     let created_backup = existing_backup.is_none();
     let mut backup = existing_backup.unwrap_or(ProfileBackup {
@@ -160,8 +161,9 @@ pub(super) fn attach_local_locked(
         bound_oauth_account_id: None,
         managed_oauth_access_hash: None,
         managed_bearer_in_config: false,
-        managed_supports_websockets: false,
+        managed_supports_websockets: Some(options.supports_websockets),
         managed_model_reasoning_effort_cleared: false,
+        managed_model_reasoning_effort: None,
         managed_model_catalog_path: None,
         managed_model_catalog_hash: None,
         managed_model_catalog_pending_hash: None,
@@ -179,6 +181,7 @@ pub(super) fn attach_local_locked(
         backup.previous_model_reasoning_effort = root_model_reasoning_effort(&document);
     }
     backup.managed_model_reasoning_effort_cleared = true;
+    backup.managed_model_reasoning_effort = managed_model_reasoning_effort.clone();
     let rebased_secret = if external_takeover {
         backup.previous_model_provider = root_model_provider(&document);
         backup.previous_model_catalog_json = external_model_catalog(&document, &backup);
@@ -224,11 +227,11 @@ pub(super) fn attach_local_locked(
         .map(|oauth| oauth.account_id.to_string());
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
     backup.managed_bearer_in_config = true;
-    backup.managed_supports_websockets = false;
+    backup.managed_supports_websockets = Some(options.supports_websockets);
     let previous_managed_catalog_path = backup.managed_model_catalog_path.clone();
     let previous_managed_catalog_hash = backup.managed_model_catalog_hash.clone();
     backup.managed_model_catalog_path = if catalog.is_some() {
-        Some(catalog_path.to_string_lossy().into_owned())
+        Some(portable_path_string(&catalog_path))
     } else {
         previous_managed_catalog_path
     };
@@ -289,9 +292,11 @@ pub(super) fn attach_local_locked(
         local_key,
         catalog
             .as_ref()
-            .map(|_| catalog_path.to_string_lossy().into_owned())
+            .map(|_| portable_path_string(&catalog_path))
             .as_deref(),
         backup.previous_model_catalog_json.as_deref(),
+        managed_model_reasoning_effort.as_deref(),
+        options.supports_websockets,
     );
     let managed_config = document.to_string();
     if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)
@@ -355,7 +360,7 @@ pub(super) fn attach_local_locked(
     let mut committed_backup = backup.clone();
     committed_backup.managed_model_catalog_path = catalog
         .as_ref()
-        .map(|_| catalog_path.to_string_lossy().into_owned());
+        .map(|_| portable_path_string(&catalog_path));
     committed_backup.managed_model_catalog_hash = catalog.as_deref().map(key_hash);
     committed_backup.managed_model_catalog_pending_hash = None;
     committed_backup.managed_model_catalog_pending_remove = false;

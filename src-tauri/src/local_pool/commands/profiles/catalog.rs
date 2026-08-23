@@ -175,6 +175,13 @@ pub(super) enum CodexCatalogRefreshTarget {
     DirectSource(Box<ProviderSourceRecord>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::local_pool) enum CodexCatalogRefreshStatus {
+    Updated,
+    Skipped,
+    Deferred,
+}
+
 pub(super) fn active_catalog_refresh_target(
     binding: &codex::ProfileBinding,
     keys: &[LocalGatewayKeyRecord],
@@ -198,11 +205,11 @@ pub(super) fn active_catalog_refresh_target(
         })
 }
 
-pub(in crate::local_pool::commands) async fn refresh_active_codex_catalog(
+pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     state: &DesktopState,
-) -> LocalResult<()> {
+) -> LocalResult<CodexCatalogRefreshStatus> {
     if is_codex_running() {
-        return Ok(());
+        return Ok(CodexCatalogRefreshStatus::Deferred);
     }
     let profile_dir = default_codex_home();
     let backup_root = state.profile_backup_root();
@@ -212,19 +219,19 @@ pub(in crate::local_pool::commands) async fn refresh_active_codex_catalog(
             binding.active && binding.credential_kind == codex::ProfileCredentialKind::LocalGateway
         })
     else {
-        return Ok(());
+        return Ok(CodexCatalogRefreshStatus::Skipped);
     };
     let target = {
         let store = state.store()?;
         active_catalog_refresh_target(&binding, store.keys(), store.sources())
     };
     let Some(target) = target else {
-        return Ok(());
+        return Ok(CodexCatalogRefreshStatus::Skipped);
     };
     let catalog = match target {
         CodexCatalogRefreshTarget::LocalGateway(key_id) => {
             let Some(address) = state.gateway.address().await else {
-                return Ok(());
+                return Ok(CodexCatalogRefreshStatus::Skipped);
             };
             let Some(key) = state
                 .store()?
@@ -232,7 +239,7 @@ pub(in crate::local_pool::commands) async fn refresh_active_codex_catalog(
                 .filter(|key| key.system)
                 .cloned()
             else {
-                return Ok(());
+                return Ok(CodexCatalogRefreshStatus::Skipped);
             };
             let secret = super::super::pool::ensure_local_gateway_key_secret(&key)?;
             fetch_codex_model_catalog(&format!("http://{address}/v1"), &secret)
@@ -248,22 +255,24 @@ pub(in crate::local_pool::commands) async fn refresh_active_codex_catalog(
                 load_api_key_for_launch,
                 secret_store::save,
             )?;
-            let manifest = fetch_direct_source_model_manifest(&source.base_url, &api_key)
-                .await
-                .ok();
+            let manifest = Some(
+                fetch_direct_source_model_manifest(&source.base_url, &api_key)
+                    .await
+                    .map_err(|error| LocalPoolError::new(error.code, error.message))?,
+            );
             let Some(catalog) = codex::direct_source_model_catalog_with_manifest(
                 &profile_dir,
                 &models,
                 manifest.as_ref(),
             )?
             else {
-                return Ok(());
+                return Ok(CodexCatalogRefreshStatus::Skipped);
             };
             catalog
         }
     };
     codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog)?;
-    Ok(())
+    Ok(CodexCatalogRefreshStatus::Updated)
 }
 
 pub(super) fn direct_source_response_models(

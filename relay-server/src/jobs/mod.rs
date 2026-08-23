@@ -83,11 +83,12 @@ pub(crate) async fn refresh_all_accounts_now(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), String> {
     let accounts = state.store.accounts()?;
-    refresh_accounts_now(state, accounts, true).await
+    refresh_accounts_now(state, accounts, true, true).await
 }
 
 pub(crate) async fn refresh_automatic_accounts_now(
     state: &Arc<AppState>,
+    refresh_models: bool,
 ) -> Result<(usize, usize), String> {
     let accounts = state
         .store
@@ -95,13 +96,14 @@ pub(crate) async fn refresh_automatic_accounts_now(
         .into_iter()
         .filter(|account| automatic_quota_monitoring_eligible(account.enabled, account.auth_state))
         .collect::<Vec<_>>();
-    refresh_accounts_now(state, accounts, false).await
+    refresh_accounts_now(state, accounts, false, refresh_models).await
 }
 
 async fn refresh_accounts_now(
     state: &Arc<AppState>,
     accounts: Vec<ServerAccountRecord>,
     force_subscription_refresh: bool,
+    refresh_models: bool,
 ) -> Result<(usize, usize), String> {
     let results = stream::iter(accounts.into_iter().map(|account| {
         let state = Arc::clone(state);
@@ -110,7 +112,7 @@ async fn refresh_accounts_now(
                 &state,
                 account,
                 force_subscription_refresh,
-                false,
+                refresh_models,
             )
             .await
         }

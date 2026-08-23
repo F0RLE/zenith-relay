@@ -144,7 +144,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
         </label>
         {view === "automations" && mode === "local" ? <Button variant="secondary" icon={<Play aria-hidden />} busy={busy === "wake-due"} onClick={() => perform("wake-due", relayCommands.runWakeConfirmations, "feedback.checked")}>{t("automations.runDue")}</Button> : null}
-        <Button variant="secondary" icon={<RefreshCw aria-hidden />} onClick={refresh}>{t("common.refresh")}</Button>
+        <Button variant="secondary" icon={<RefreshCw aria-hidden />} onClick={() => void refresh()}>{t("common.refresh")}</Button>
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}

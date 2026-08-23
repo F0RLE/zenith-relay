@@ -30,11 +30,11 @@ use zenith_relay_core::{
 
 mod catalog;
 
-pub(super) use catalog::refresh_active_codex_catalog;
 use catalog::{
     fetch_codex_model_catalog, fetch_direct_source_model_manifest, load_direct_source_api_key,
     validate_direct_source,
 };
+pub(in crate::local_pool) use catalog::{refresh_active_codex_catalog, CodexCatalogRefreshStatus};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,11 +138,12 @@ pub async fn attach_codex_to_local_gateway(
     let _mutation = state.setup_guard().await;
     let key = super::pool::ensure_system_gateway_key(&state)?;
     let key_id = key.id.clone();
-    let (port, reserve_basis_points) = {
+    let (port, reserve_basis_points, supports_websockets) = {
         let store = state.store()?;
         (
             store.gateway().port,
             store.gateway().chatgpt_interface_quota_reserve_basis_points,
+            store.gateway().codex_websockets_enabled,
         )
     };
     if !key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
@@ -170,26 +171,30 @@ pub async fn attach_codex_to_local_gateway(
         let base_url = format!("http://127.0.0.1:{port}/v1");
         let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
         let attached: Result<_, CommandError> = match bound_oauth.as_ref() {
-            Some((account_id, prepared)) => codex::attach_with_oauth_and_catalog(
+            Some((account_id, prepared)) => codex::attach_with_oauth_and_options(
                 &profile_dir,
                 &state.profile_backup_root(),
                 &key_id,
                 &base_url,
                 &secret,
-                &catalog,
-                codex::BoundOAuthProfile {
-                    account_id,
-                    tokens: prepared.tokens(),
-                    provider_account_id: prepared.provider_account_id(),
+                codex::OAuthAttachOptions {
+                    catalog_json: &catalog,
+                    bound_oauth: codex::BoundOAuthProfile {
+                        account_id,
+                        tokens: prepared.tokens(),
+                        provider_account_id: prepared.provider_account_id(),
+                    },
+                    supports_websockets,
                 },
             ),
-            None => codex::attach_with_catalog(
+            None => codex::attach_with_catalog_and_websockets(
                 &profile_dir,
                 &state.profile_backup_root(),
                 &key_id,
                 &base_url,
                 &secret,
                 &catalog,
+                supports_websockets,
             ),
         }
         .map_err(Into::into);
@@ -231,6 +236,12 @@ pub async fn attach_codex_to_remote_gateway(
         .profile_credential()
         .await
         .map_err(super::remote_server::remote_error)?;
+    let supports_websockets = client
+        .state()
+        .await
+        .map_err(super::remote_server::remote_error)?
+        .gateway
+        .codex_websockets_enabled;
     let rotate_profile_key = capabilities.supports(Feature::ProfileKeyRotation);
     let profile_dir = default_codex_home();
     let stopped = stop_codex_and_sync_account(&state).await?;
@@ -278,13 +289,14 @@ pub async fn attach_codex_to_remote_gateway(
                 return Err(error);
             }
         };
-        let attached = codex::attach_with_catalog(
+        let attached = codex::attach_with_catalog_and_websockets(
             &profile_dir,
             &state.profile_backup_root(),
             key_id,
             base_url,
             secret,
             &catalog,
+            supports_websockets,
         )
         .map_err(Into::into);
         let binding = match rollback_history_on_error(&state, history_backup.as_deref(), attached) {
@@ -710,27 +722,8 @@ pub async fn create_codex_profile_snapshot(
 }
 
 #[tauri::command]
-pub async fn restore_codex_profile_snapshot(
-    snapshot_id: String,
-    safety_name: Option<String>,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    let stopped = stop_codex_and_sync_account(&state).await?;
-    let result = snapshots::restore(
-        &default_codex_home(),
-        &state.profile_backup_root(),
-        &snapshot_id,
-        safety_name.as_deref(),
-    )
-    .map_err(Into::into);
-    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
-}
-
-#[tauri::command]
 pub async fn restore_full_codex_profile_snapshot(
     snapshot_id: String,
-    safety_name: Option<String>,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
@@ -739,7 +732,6 @@ pub async fn restore_full_codex_profile_snapshot(
         &default_codex_home(),
         &state.profile_backup_root(),
         &snapshot_id,
-        safety_name.as_deref(),
     )
     .map_err(Into::into);
     restart_codex_after_restore(stopped, result, launch_codex_with_profile)

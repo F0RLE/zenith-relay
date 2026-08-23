@@ -4,10 +4,16 @@ use super::errors::{
     failure_requires_independent_source_endpoint, rate_limit_body_hint, CooldownContext,
     RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
+use super::execution::execute_client_request;
 use super::now_ms;
-use super::request::{forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER};
+use super::request::{
+    client_context_fingerprint, forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
+};
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event};
-use super::streaming::has_output_delta;
+use super::streaming::{has_output_delta, parse_sse_event};
+use super::turn_state::{
+    guard_account_request, note_account_response_header, CODEX_TURN_STATE_HEADER,
+};
 use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
 use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, WireApi};
@@ -15,7 +21,7 @@ use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{
     CloseCode as UpstreamCloseCode, Message as UpstreamMessage, Upgrade,
@@ -89,8 +95,37 @@ async fn handle_connection(
     };
 
     let request_id = request.request_id.clone();
+    if let Some(kind) = request.background_kind {
+        if !runtime.codex_background_tasks_enabled() {
+            runtime.blocked_codex_background_event(
+                &request.request_id,
+                &key.id,
+                &request.requested_model,
+                WireApi::Responses,
+                kind,
+            );
+            let payload = serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": format!("resp_relay_blocked_{}", request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
+            });
+            let _ = downstream
+                .send(Message::Text(payload.to_string().into()))
+                .await;
+            let _ = downstream.send(Message::Close(None)).await;
+            return;
+        }
+    }
+    let fallback_request = request.clone();
+    if !runtime.codex_websockets_enabled() {
+        bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+        return;
+    }
     let connected = match connect_upstream(&runtime, &key, &headers, request, true, 0).await {
         Ok(connected) => connected,
+        Err(failure) if failure.category == "upstream_websocket_unsupported" => {
+            bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
+            return;
+        }
         Err(failure) => {
             send_gateway_error(&mut downstream, &failure, Some(&request_id)).await;
             return;
@@ -131,6 +166,158 @@ async fn read_initial_request(
             Message::Close(_) => return Err(GatewayFailure::client_closed()),
         }
     }
+}
+
+/// Keeps the client-facing Responses WebSocket usable when every selected
+/// provider only exposes HTTP/SSE. The normal HTTP executor remains the single
+/// source of routing, adapters, retries, usage, and quota accounting.
+async fn bridge_http_fallback(
+    mut downstream: WebSocket,
+    runtime: Arc<GatewayRuntime>,
+    key: AuthenticatedKey,
+    headers: HeaderMap,
+    mut request: ClientRequest,
+) {
+    let stream_id = request.stream_id.clone();
+    loop {
+        if let Err(failure) =
+            serve_http_fallback_request(&mut downstream, runtime.clone(), &key, &headers, &request)
+                .await
+        {
+            let request_id = Some(request.request_id.as_str());
+            send_gateway_error(&mut downstream, &failure, request_id).await;
+            return;
+        }
+
+        let next = timeout(WEBSOCKET_IDLE_TIMEOUT, async {
+            loop {
+                let message = downstream.recv().await?;
+                let Ok(message) = message else {
+                    return None;
+                };
+                match message {
+                    Message::Text(text) => return Some(Some(text.to_string().into_bytes())),
+                    Message::Binary(bytes) => return Some(Some(bytes.to_vec())),
+                    Message::Ping(payload) => {
+                        if downstream.send(Message::Pong(payload)).await.is_err() {
+                            return None;
+                        }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(frame) => {
+                        let _ = downstream.send(Message::Close(frame)).await;
+                        return None;
+                    }
+                }
+            }
+        })
+        .await;
+        let Ok(Some(Some(payload))) = next else {
+            return;
+        };
+        let next_request = match ClientRequest::parse(&runtime, &key, &headers, &payload) {
+            Ok(request) => request,
+            Err(failure) => {
+                send_gateway_error(&mut downstream, &failure, None).await;
+                return;
+            }
+        };
+        if let Some(expected) = stream_id.as_deref() {
+            if next_request.stream_id.as_deref() != Some(expected) {
+                let failure = GatewayFailure::invalid_request(
+                    "only one WebSocket stream_id is supported per connection",
+                );
+                send_gateway_error(&mut downstream, &failure, Some(&next_request.request_id)).await;
+                return;
+            }
+        }
+        request = next_request;
+    }
+}
+
+async fn serve_http_fallback_request(
+    downstream: &mut WebSocket,
+    runtime: Arc<GatewayRuntime>,
+    _key: &AuthenticatedKey,
+    client_headers: &HeaderMap,
+    request: &ClientRequest,
+) -> Result<(), GatewayFailure> {
+    let mut headers = client_headers.clone();
+    for name in [
+        "connection",
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "content-length",
+    ] {
+        headers.remove(name);
+    }
+    let http_request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses")
+        .header("host", "localhost")
+        .body(Body::from(request.http_payload()?))
+        .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+        .map(|mut request| {
+            *request.headers_mut() = headers;
+            request
+        })?;
+    let response = execute_client_request(runtime, http_request, WireApi::Responses).await;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), MAX_WEBSOCKET_ERROR_BYTES)
+            .await
+            .ok();
+        return Err(GatewayFailure::upstream_status(
+            status,
+            body.as_deref(),
+            ErrorOrigin::Relay,
+        ));
+    }
+
+    let mut body = response.into_body().into_data_stream();
+    let mut pending = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|_| GatewayFailure::transport(ErrorOrigin::Relay))?;
+        if pending.len().saturating_add(chunk.len()) > MAX_WEBSOCKET_ERROR_BYTES {
+            return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
+        }
+        pending.extend_from_slice(&chunk);
+        while let Some(end) = crate::protocol::sse_event_end(&pending) {
+            let event = pending.drain(..end).collect::<Vec<_>>();
+            let terminal = parse_sse_event(&event);
+            if terminal.has_data && !terminal.valid {
+                return Err(GatewayFailure::transport(ErrorOrigin::Relay));
+            }
+            if let Some(payload) = terminal.payload {
+                let payload = serde_json::to_string(&payload)
+                    .map_err(|_| GatewayFailure::transport(ErrorOrigin::Relay))?;
+                if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+                    return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
+                }
+                downstream
+                    .send(Message::Text(payload.into()))
+                    .await
+                    .map_err(|_| GatewayFailure::client_closed())?;
+            }
+            if terminal.outcome.is_some() {
+                return Ok(());
+            }
+        }
+    }
+    Err(GatewayFailure::closed(ErrorOrigin::Relay))
+}
+
+fn websocket_transport_fallback_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::NOT_FOUND
+            | StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::UPGRADE_REQUIRED
+            | StatusCode::NOT_IMPLEMENTED
+    )
 }
 
 struct Connected {
@@ -204,13 +391,24 @@ async fn connect_upstream(
         }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        route.client_context_id = client_context_fingerprint(client_headers);
         let source_error_origin = route_error_origin(&route);
         if route.wire_api != WireApi::Responses {
             continue;
         }
         if !route.adapter.is_passthrough() {
+            runtime.mark_websocket_http_only(
+                &route.candidate_id,
+                &request.resolved_model,
+                now_ms(),
+            );
             drop(lease);
-            last_failure = Some(GatewayFailure::adapter_unsupported());
+            last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
+            continue;
+        }
+        if runtime.websocket_is_http_only(&route.candidate_id, &request.resolved_model, now_ms()) {
+            drop(lease);
+            last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
             continue;
         }
         attempt = attempt.saturating_add(1);
@@ -234,12 +432,17 @@ async fn connect_upstream(
         let mut prepared = prepared;
         let mut refresh_fence = None;
         let upgrade = loop {
-            let headers = upstream_headers(
+            let mut headers = upstream_headers(
                 client_headers,
                 &prepared,
                 request.responses_lite,
                 &request.request_id,
             );
+            if let Some(account_id) = route.account_id.as_deref() {
+                guard_account_request(runtime, &key.id, &mut headers, account_id, now_ms());
+            } else {
+                headers.remove(CODEX_TURN_STATE_HEADER);
+            }
             let upgrade = runtime
                 .websocket_client(&route.candidate_id)
                 .get(route.upstream_url.clone())
@@ -290,6 +493,18 @@ async fn connect_upstream(
             &response_headers,
             now_ms(),
         );
+        if status == StatusCode::SWITCHING_PROTOCOLS {
+            if let Some(account_id) = route.account_id.as_deref() {
+                note_account_response_header(
+                    runtime,
+                    &key.id,
+                    client_headers,
+                    account_id,
+                    &response_headers,
+                    now_ms(),
+                );
+            }
+        }
         if status != StatusCode::SWITCHING_PROTOCOLS {
             let response = upgrade.into_inner();
             let body = timeout(
@@ -301,6 +516,15 @@ async fn connect_upstream(
             .and_then(Result::ok);
             let failure =
                 GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin);
+            if websocket_transport_fallback_status(status) {
+                runtime.mark_websocket_http_only(
+                    &route.candidate_id,
+                    &request.resolved_model,
+                    now_ms(),
+                );
+                last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
+                continue 'candidates;
+            }
             if failure.category == "upstream_encrypted_content_invalid"
                 && !encrypted_content_recovered
                 && request.recover_invalid_encrypted_content()
@@ -371,6 +595,7 @@ async fn connect_upstream(
             last_failure = Some(failure);
             continue;
         };
+        runtime.mark_websocket_supported(&route.candidate_id, &request.resolved_model);
         if send_request(&mut upstream, payload, source_error_origin)
             .await
             .is_err()
@@ -797,6 +1022,7 @@ async fn send_request(
 }
 
 struct InFlight {
+    request: ClientRequest,
     route: ExecutorRoute,
     event: UsageEvent,
     started: Instant,
@@ -807,6 +1033,7 @@ struct InFlight {
 struct BridgeState {
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
+    stream_id: Option<String>,
     upstream_candidate_id: String,
     upstream_origin: ErrorOrigin,
     last_response_id: Option<String>,
@@ -847,12 +1074,14 @@ async fn bridge(
     let mut state = BridgeState {
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
+            request: connected.request.clone(),
             route: connected.route,
             event: initial_event,
             started: connected.started,
             response_id: None,
             prompt_affinity_key,
         }),
+        stream_id: connected.request.stream_id.clone(),
         upstream_candidate_id,
         upstream_origin,
         last_response_id: None,
@@ -947,29 +1176,78 @@ async fn bridge(
             }
             message = upstream.next() => {
                 last_activity = TokioInstant::now();
-                let Some(message) = message else {
-                    let active_request = state.in_flight.is_some();
-                    let request_id = state.request_id().map(str::to_owned);
-                    finish_incomplete(&runtime, &mut state, "upstream_websocket_closed");
-                    if active_request {
-                        send_gateway_error(
-                            &mut downstream,
-                            &GatewayFailure::closed(state.upstream_origin),
-                            request_id.as_deref(),
-                        ).await;
+                let (message, failure) = match message {
+                    Some(Ok(message @ (UpstreamMessage::Text(_)
+                        | UpstreamMessage::Binary(_)
+                        | UpstreamMessage::Ping(_)
+                        | UpstreamMessage::Pong(_)))) => (Some(message), None),
+                    Some(Ok(UpstreamMessage::Close { .. })) | None => {
+                        (None, Some(GatewayFailure::closed(state.upstream_origin)))
                     }
-                    break;
+                    Some(Err(_)) => {
+                        (None, Some(GatewayFailure::transport(state.upstream_origin)))
+                    }
                 };
-                let Ok(message) = message else {
-                    let active_request = state.in_flight.is_some();
+                let Some(message) = message else {
+                    let category = failure
+                        .as_ref()
+                        .map(|failure| failure.category)
+                        .unwrap_or("upstream_websocket_closed");
                     let request_id = state.request_id().map(str::to_owned);
-                    finish_incomplete(&runtime, &mut state, "upstream_websocket");
+                    if let Some(request) = retryable_disconnect_request(&state) {
+                        let attempt_offset = state
+                            .in_flight
+                            .as_ref()
+                            .map(|in_flight| in_flight.event.attempt)
+                            .unwrap_or_default();
+                        finish_incomplete(&runtime, &mut state, category);
+                        match connect_upstream(
+                            &runtime,
+                            &key,
+                            &headers,
+                            request,
+                            true,
+                            attempt_offset,
+                        )
+                        .await
+                        {
+                            Ok(connected) => {
+                                if !install_connected(
+                                    &mut downstream,
+                                    &mut upstream,
+                                    &runtime,
+                                    &key,
+                                    &mut state,
+                                    connected,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                            Err(retry_failure) => {
+                                send_gateway_error(
+                                    &mut downstream,
+                                    &retry_failure,
+                                    request_id.as_deref(),
+                                )
+                                .await;
+                                break;
+                            }
+                        }
+                    }
+                    let active_request = state.in_flight.is_some();
+                    finish_incomplete(&runtime, &mut state, category);
                     if active_request {
-                        send_gateway_error(
-                            &mut downstream,
-                            &GatewayFailure::transport(state.upstream_origin),
-                            request_id.as_deref(),
-                        ).await;
+                        if let Some(failure) = failure {
+                            send_gateway_error(
+                                &mut downstream,
+                                &failure,
+                                request_id.as_deref(),
+                            )
+                            .await;
+                        }
                     }
                     break;
                 };
@@ -979,6 +1257,77 @@ async fn bridge(
             }
         }
     }
+}
+
+fn retryable_disconnect_request(state: &BridgeState) -> Option<ClientRequest> {
+    let in_flight = state.in_flight.as_ref()?;
+    if in_flight.request.has_previous_response_id()
+        || in_flight.request.has_tool_call_output()
+        || in_flight.event.ttft_ms.is_some()
+        || in_flight.event.output_tokens.is_some()
+        || in_flight.event.tool_use.tool_call_count > 0
+        || in_flight.event.tool_use.text_output
+    {
+        return None;
+    }
+    Some(in_flight.request.clone())
+}
+
+async fn install_connected(
+    downstream: &mut WebSocket,
+    upstream: &mut UpstreamWebSocket,
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    state: &mut BridgeState,
+    connected: Connected,
+) -> bool {
+    let Connected {
+        upstream: next_upstream,
+        initial_messages,
+        route,
+        request,
+        lease,
+        attempt,
+        started,
+    } = connected;
+    let event = usage_event(
+        &request.request_id,
+        attempt,
+        &key.id,
+        &route,
+        Some(&request.reasoning_effort_for(&route)),
+        &request.requested_model,
+        true,
+        StatusCode::OK.as_u16(),
+        None,
+        0,
+        request.tool_use_for(&route),
+    );
+    let _ = upstream
+        .send(UpstreamMessage::Close {
+            code: UpstreamCloseCode::Normal,
+            reason: String::new(),
+        })
+        .await;
+    *upstream = next_upstream;
+    state.lease = Some(lease);
+    state.upstream_candidate_id = route.candidate_id.clone();
+    state.upstream_origin = route_error_origin(&route);
+    state.last_response_id = None;
+    state.in_flight = Some(InFlight {
+        request: request.clone(),
+        route,
+        event,
+        started,
+        response_id: None,
+        prompt_affinity_key: request.prompt_affinity_key,
+    });
+    for message in initial_messages {
+        if !handle_upstream_message(downstream, runtime, state, message).await {
+            return false;
+        }
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1053,6 +1402,17 @@ async fn start_next_request(
         ));
     }
     let request = ClientRequest::parse(runtime, key, headers, payload)?;
+    if let Some(stream_id) = request.stream_id.as_deref() {
+        if let Some(active_stream_id) = state.stream_id.as_deref() {
+            if active_stream_id != stream_id {
+                return Err(GatewayFailure::invalid_request(
+                    "only one WebSocket stream_id is supported per connection",
+                ));
+            }
+        } else {
+            state.stream_id = Some(stream_id.to_string());
+        }
+    }
     if request
         .previous_response_id()
         .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
@@ -1108,6 +1468,7 @@ async fn start_next_request(
         }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        route.client_context_id = client_context_fingerprint(headers);
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
         if let Err(failure) =
@@ -1132,6 +1493,7 @@ async fn start_next_request(
         state.lease = Some(lease);
         state.upstream_origin = upstream_origin;
         state.in_flight = Some(InFlight {
+            request: request.clone(),
             route: route.clone(),
             event,
             started,
@@ -1175,6 +1537,7 @@ async fn start_next_request(
     state.upstream_origin = route_error_origin(&route);
     state.last_response_id = None;
     state.in_flight = Some(InFlight {
+        request: request.clone(),
         route,
         event,
         started,
@@ -1635,5 +1998,36 @@ mod tests {
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.category, "invalid_request");
         assert_eq!(error.message, "only response.create messages are supported");
+    }
+
+    #[test]
+    fn client_request_accepts_and_preserves_a_stream_id() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let request = match ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            br#"{"type":"response.create","stream_id":"main","model":"relay/upstream-model","input":"hello"}"#,
+        ) {
+            Ok(request) => request,
+            Err(error) => panic!("stream_id should be accepted: {}", error.message),
+        };
+        assert_eq!(request.stream_id.as_deref(), Some("main"));
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .expect("test source should be routable");
+        let payload = request
+            .payload_for(&route)
+            .unwrap_or_else(|error| panic!("payload should serialize: {}", error.message));
+        assert!(payload.contains("\"stream_id\":\"main\""));
     }
 }

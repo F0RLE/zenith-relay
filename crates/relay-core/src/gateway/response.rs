@@ -209,6 +209,7 @@ pub(super) fn usage_event(
         source_id: route.source_id.clone(),
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
+        client_context_id: route.client_context_id.clone(),
         routing: route.routing.clone(),
         requested_model: Some(requested_model.to_string()),
         resolved_model: Some(route.source_model.clone()),
@@ -268,6 +269,11 @@ pub(super) fn response_service_tier(value: &Value) -> Option<DefaultServiceTier>
 }
 
 pub(super) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
+    if event.success && event.error_category.is_none() {
+        if let Some(origin) = runtime.request_origin(&event.request_id) {
+            event.error_category = Some(format!("codex_{origin}"));
+        }
+    }
     if event
         .account_id
         .as_deref()
@@ -528,6 +534,10 @@ mod tests {
         upstream.insert("retry-after", HeaderValue::from_static("12"));
         upstream.insert("request-id", HeaderValue::from_static("req_native"));
         upstream.insert(
+            "x-codex-turn-state",
+            HeaderValue::from_static("account-scoped-state"),
+        );
+        upstream.insert(
             "anthropic-ratelimit-requests-reset",
             HeaderValue::from_static("2026-08-02T00:00:00Z"),
         );
@@ -543,6 +553,7 @@ mod tests {
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
         assert_eq!(response.headers()["retry-after"], "12");
         assert_eq!(response.headers()["request-id"], "req_native");
+        assert!(response.headers().get("x-codex-turn-state").is_none());
         assert_eq!(
             response.headers()["anthropic-ratelimit-requests-reset"],
             "2026-08-02T00:00:00Z"

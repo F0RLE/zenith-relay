@@ -36,10 +36,14 @@ use url::Url;
 mod authorization;
 mod build;
 mod candidates;
+mod control;
 mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
+
+use control::RuntimeControl;
+use session_state::CodexTurnStateStore;
 
 use build::{
     build_accounts, build_keys, build_sources, configure_scheduler, validate_reachability,
@@ -50,6 +54,7 @@ use build::{
 use crate::{
     normalize_source_protocol_bindings, unix_time_ms as current_time_ms, CandidateKind, UsageEvent,
 };
+pub(crate) use images::is_image_model_id;
 pub use images::normalize_image_base_model;
 #[cfg(test)]
 use images::{cheapest_image_main_model, select_image_main_model};
@@ -57,8 +62,9 @@ use images::{cheapest_image_main_model, select_image_main_model};
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
-const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
-const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 15 * 1_000;
+const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 8 * 60 * 60 * 1_000;
+const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
+pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 
 #[derive(Default)]
 pub(crate) struct CodexSourceModelMetadata {
@@ -85,6 +91,9 @@ fn source_reasoning_for_route(
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
 ) -> Option<SourceReasoningCapabilities> {
+    if capabilities.is_empty() {
+        return Some(capabilities);
+    }
     if adapter.is_passthrough() {
         return Some(capabilities);
     }
@@ -297,8 +306,8 @@ pub struct GatewayRuntimeOptions {
     /// Optional text model used as the Responses image-generation bridge.
     /// `None` selects the cheapest known compatible model per account.
     pub image_base_model: Option<String>,
-    /// Optional source-model allow-lists for reasoning efforts. An absent
-    /// model keeps every effort that its sources have confirmed.
+    /// Manually enabled source-model reasoning efforts. An absent model
+    /// exposes no reasoning selector for API sources.
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     pub provider_storm_breaker: bool,
@@ -365,11 +374,14 @@ pub struct GatewayRuntime {
     candidate_availability: Arc<tokio::sync::Notify>,
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
+    websocket_http_only: Mutex<BTreeMap<(String, String), u64>>,
     model_metadata: SourceModelMetadataState,
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
+    codex_turn_state_store: CodexTurnStateStore,
+    control: RuntimeControl,
     max_retry_candidates: usize,
     quota_stale_after_ms: u64,
     default_service_tier_fast: AtomicBool,
@@ -394,6 +406,7 @@ struct CachedModelManifest {
 #[derive(Default)]
 struct ConfirmedSourceReasoning {
     efforts: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    empty_routes: BTreeMap<String, BTreeSet<String>>,
     levels: BTreeMap<String, Vec<String>>,
     probe_progress: BTreeMap<String, SourceReasoningProbeProgress>,
 }
@@ -548,6 +561,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) candidate_id: String,
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
+    pub(crate) client_context_id: Option<String>,
     pub(crate) scope: CandidateScope,
     pub(crate) allowed_protocols: Vec<WireApi>,
     pub(crate) wire_api: WireApi,
@@ -781,11 +795,14 @@ impl GatewayRuntime {
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
+            websocket_http_only: Mutex::new(BTreeMap::new()),
             model_metadata: SourceModelMetadataState::default(),
             model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
+            codex_turn_state_store: CodexTurnStateStore::default(),
+            control: RuntimeControl::default(),
             max_retry_candidates: options.max_retry_candidates,
             quota_stale_after_ms: options.quota_stale_after_ms,
             default_service_tier_fast: AtomicBool::new(
@@ -794,6 +811,48 @@ impl GatewayRuntime {
             response_affinity_store: affinity_store,
             usage,
         })
+    }
+
+    pub fn codex_background_tasks_enabled(&self) -> bool {
+        self.control.codex_background_tasks_enabled()
+    }
+
+    pub fn set_codex_background_tasks_enabled(&self, enabled: bool) {
+        self.control.set_codex_background_tasks_enabled(enabled);
+    }
+
+    pub fn codex_websockets_enabled(&self) -> bool {
+        self.control.codex_websockets_enabled()
+    }
+
+    pub fn set_codex_websockets_enabled(&self, enabled: bool) {
+        self.control.set_codex_websockets_enabled(enabled);
+    }
+
+    pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
+        self.control.mark_request_origin(request_id, origin);
+    }
+
+    pub(crate) fn request_origin(&self, request_id: &str) -> Option<&'static str> {
+        self.control.request_origin(request_id)
+    }
+
+    pub(crate) fn blocked_codex_background_event(
+        &self,
+        request_id: &str,
+        local_key_id: &str,
+        requested_model: &str,
+        wire_api: WireApi,
+        origin: &'static str,
+    ) {
+        self.control.blocked_codex_background_event(
+            &self.usage,
+            request_id,
+            local_key_id,
+            requested_model,
+            wire_api,
+            origin,
+        );
     }
 
     pub async fn discover_models(&self) -> Result<Vec<String>> {
@@ -822,13 +881,17 @@ impl GatewayRuntime {
         self.keys
             .iter()
             .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
-            .map(|key| AuthenticatedKey {
-                id: key.id.clone(),
-                scope: key.scope.clone(),
-                model_rules: key.model_rules.clone(),
-                model_prefix: key.model_prefix.clone(),
-                client_wire_apis: key.client_wire_apis.clone(),
-            })
+            .map(|key| self.authenticated_key(key))
+    }
+
+    fn authenticated_key(&self, key: &RuntimeKey) -> AuthenticatedKey {
+        AuthenticatedKey {
+            id: key.id.clone(),
+            scope: key.scope.clone(),
+            model_rules: key.model_rules.clone(),
+            model_prefix: key.model_prefix.clone(),
+            client_wire_apis: key.client_wire_apis.clone(),
+        }
     }
 
     pub(crate) fn allows_client_wire_api(
@@ -1005,25 +1068,10 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<String> {
-        let candidate: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
-        let Some(key) = self
-            .keys
-            .iter()
-            .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
-        else {
+        let Some(key) = self.authenticate_secret(secret) else {
             return Vec::new();
         };
-        self.visible_models(
-            &AuthenticatedKey {
-                id: key.id.clone(),
-                scope: key.scope.clone(),
-                model_rules: key.model_rules.clone(),
-                model_prefix: key.model_prefix.clone(),
-                client_wire_apis: key.client_wire_apis.clone(),
-            },
-            allowed_protocols,
-            now_ms,
-        )
+        self.visible_models(&key, allowed_protocols, now_ms)
     }
 
     pub(crate) fn executor_route(
@@ -1042,6 +1090,7 @@ impl GatewayRuntime {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
+                client_context_id: None,
                 scope: scope.clone(),
                 allowed_protocols: allowed_protocols.to_vec(),
                 wire_api: binding.wire_api,
@@ -1066,6 +1115,7 @@ impl GatewayRuntime {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            client_context_id: None,
             scope: scope.clone(),
             allowed_protocols: allowed_protocols.to_vec(),
             wire_api: WireApi::Responses,
@@ -1084,6 +1134,7 @@ impl GatewayRuntime {
     pub(crate) fn image_executor_route(
         &self,
         candidate_id: &str,
+        model: &str,
         scope: &CandidateScope,
         allowed_protocols: &[WireApi],
     ) -> Option<ExecutorRoute> {
@@ -1093,11 +1144,12 @@ impl GatewayRuntime {
             }
             let source = self.sources.get(&binding.source_id)?;
             let source_binding = source.binding_for(binding.binding_key)?;
-            let source_model = source.canonical_model_for(binding.binding_key, IMAGE_API_MODEL)?;
+            let source_model = source.canonical_model_for(binding.binding_key, model)?;
             return Some(ExecutorRoute {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
+                client_context_id: None,
                 scope: scope.clone(),
                 allowed_protocols: allowed_protocols.to_vec(),
                 wire_api: binding.wire_api,
@@ -1117,6 +1169,7 @@ impl GatewayRuntime {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            client_context_id: None,
             scope: scope.clone(),
             allowed_protocols: allowed_protocols.to_vec(),
             wire_api: WireApi::Responses,
@@ -1148,6 +1201,35 @@ impl GatewayRuntime {
             .get(candidate_id)
             .map(|account| &account.clients.websocket)
             .unwrap_or(&self.clients.websocket)
+    }
+
+    pub(crate) fn websocket_is_http_only(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        now_ms: u64,
+    ) -> bool {
+        self.websocket_http_only
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(candidate_id.to_string(), model.to_string()))
+            .is_some_and(|observed_at| {
+                now_ms.saturating_sub(*observed_at) < WEBSOCKET_CAPABILITY_TTL_MS
+            })
+    }
+
+    pub(crate) fn mark_websocket_supported(&self, candidate_id: &str, model: &str) {
+        self.websocket_http_only
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(candidate_id.to_string(), model.to_string()));
+    }
+
+    pub(crate) fn mark_websocket_http_only(&self, candidate_id: &str, model: &str, now_ms: u64) {
+        self.websocket_http_only
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((candidate_id.to_string(), model.to_string()), now_ms);
     }
 
     pub(crate) fn max_retry_candidates(&self) -> usize {

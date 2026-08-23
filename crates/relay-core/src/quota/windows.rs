@@ -58,6 +58,8 @@ pub struct QuotaWindow {
     pub window_minutes: Option<u32>,
     pub observed_at_ms: u64,
     pub full_transition_fingerprint: Option<String>,
+    #[serde(default)]
+    pub exhaustion_transition_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -99,6 +101,23 @@ impl QuotaWindow {
         } else {
             None
         };
+        let exhausted = available_basis_points == Some(0);
+        let exhaustion_transition_fingerprint = if exhausted {
+            previous
+                .filter(|previous| previous.is_exhausted())
+                .and_then(|previous| previous.exhaustion_transition_fingerprint.clone())
+                .or_else(|| {
+                    Some(exhaustion_transition_fingerprint(
+                        input.kind,
+                        reset_at_ms,
+                        input.window_minutes,
+                        input.provider_cycle_id.as_deref(),
+                        input.observed_at_ms,
+                    ))
+                })
+        } else {
+            None
+        };
         Ok(Self {
             kind: input.kind,
             provider_cycle_id: input.provider_cycle_id,
@@ -111,6 +130,7 @@ impl QuotaWindow {
             window_minutes: input.window_minutes,
             observed_at_ms: input.observed_at_ms,
             full_transition_fingerprint,
+            exhaustion_transition_fingerprint,
         })
     }
 
@@ -119,6 +139,10 @@ impl QuotaWindow {
             self.available_basis_points
                 .is_some_and(|value| value >= DEFAULT_FULL_THRESHOLD_BASIS_POINTS)
         })
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.available_basis_points == Some(0)
     }
 
     pub(crate) fn is_empty_provider_placeholder(&self) -> bool {
@@ -146,6 +170,28 @@ impl QuotaWindow {
                 }),
                 transitioned_at_ms: self.observed_at_ms,
             })
+    }
+
+    pub fn exhaustion_transition_from(&self, previous: Option<&Self>) -> Option<QuotaTransition> {
+        let previous = previous?;
+        (previous.kind == self.kind && !previous.is_exhausted() && self.is_exhausted()).then(|| {
+            QuotaTransition {
+                window_kind: self.kind,
+                fingerprint: self
+                    .exhaustion_transition_fingerprint
+                    .clone()
+                    .unwrap_or_else(|| {
+                        exhaustion_transition_fingerprint(
+                            self.kind,
+                            self.reset_at_ms,
+                            self.window_minutes,
+                            self.provider_cycle_id.as_deref(),
+                            self.observed_at_ms,
+                        )
+                    }),
+                transitioned_at_ms: self.observed_at_ms,
+            }
+        })
     }
 }
 
@@ -345,6 +391,24 @@ fn transition_fingerprint(
     ))
 }
 
+fn exhaustion_transition_fingerprint(
+    kind: QuotaWindowKind,
+    reset_at_ms: Option<u64>,
+    window_minutes: Option<u32>,
+    provider_cycle_id: Option<&str>,
+    observed_at_ms: u64,
+) -> String {
+    hex::encode(Sha256::digest(
+        format!(
+            "exhausted\0{kind:?}\0{}\0{}\0{}\0{observed_at_ms}",
+            reset_at_ms.unwrap_or_default(),
+            window_minutes.unwrap_or_default(),
+            provider_cycle_id.unwrap_or_default().trim(),
+        )
+        .as_bytes(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +463,33 @@ mod tests {
             next_full.full_transition_fingerprint,
             full.full_transition_fingerprint
         );
+    }
+
+    #[test]
+    fn exhaustion_transition_is_emitted_once_and_survives_refreshes() {
+        let available =
+            QuotaWindow::normalize(input(QuotaWindowKind::Secondary, 25.0, 1_000), None).unwrap();
+        let exhausted = QuotaWindow::normalize(
+            input(QuotaWindowKind::Secondary, 0.0, 2_000),
+            Some(&available),
+        )
+        .unwrap();
+        let transition = exhausted
+            .exhaustion_transition_from(Some(&available))
+            .unwrap();
+        assert_eq!(transition.window_kind, QuotaWindowKind::Secondary);
+        let repeated = QuotaWindow::normalize(
+            input(QuotaWindowKind::Secondary, 0.0, 3_000),
+            Some(&exhausted),
+        )
+        .unwrap();
+        assert_eq!(
+            repeated.exhaustion_transition_fingerprint,
+            exhausted.exhaustion_transition_fingerprint
+        );
+        assert!(repeated
+            .exhaustion_transition_from(Some(&exhausted))
+            .is_none());
     }
 
     #[test]

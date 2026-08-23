@@ -1,23 +1,95 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-08-11.
+Last reviewed: 2026-08-23.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
 verification evidence exists, not when its UI is present.
 
+## Security boundary
+
+Every acceptance phase preserves the product boundary: Zenith Relay is a
+separate personal deployment, not a client of the production Zenith Gateway or
+Control API. Production credentials, customer keys, backend tokens, account
+inventory, and internal production routing/business logic must never be copied
+into Relay, its fixtures, or its documentation.
+
+User-owned credentials may move from desktop storage only to a server the same
+user operates, after an explicit management confirmation. State, usage,
+telemetry, diagnostics, exports, and API snapshots must remain redacted. Any
+future feature that cannot prove this boundary is out of scope.
+
+## Release baseline - v1.1.0
+
+The product implementation gate is closed for the 1.1.0 release: the local
+desktop surface, provider-neutral routing contracts, profile recovery, quota
+automation, model availability handling, redaction rules, and responsive UI
+are covered by the release verification snapshot documented in
+[CHANGELOG.md](CHANGELOG.md).
+
+This does not turn mocked or local checks into a production claim. Live P0
+acceptance remains deferred until permitted real accounts are available and the
+user explicitly resumes it. The user-managed server portion is the final P0
+step and must be tested after the local desktop path, not in parallel with it.
+
 ## Current order
 
-1. P0 is blocked only on permitted real accounts and resumes when the user
-   explicitly supplies them.
-2. Until then, work proceeds through P1, P2, and P3: measure visible latency,
-   protect the shared reliability contracts, and collect real client/provider
-   compatibility evidence.
-3. P4 and P5 remain demand-gated. Do not add speculative account connectors or
+1. The v1.1.0 implementation baseline is complete; no live production claim is
+   made without the deferred P0 evidence below.
+2. P0 live acceptance is deferred until permitted real accounts are available;
+   the user-managed server path is last.
+3. P1 is in progress: explain the reported slow pool switch with warm timing
+   and disk-I/O evidence before changing the loading architecture.
+4. P2 is in progress: keep the shared reliability contracts and close the
+   remaining `repair` consistency risks.
+5. P3 is in progress: the catalog, reasoning, usage, and adapter foundations
+   are implemented, but real client/provider acceptance evidence is still open.
+6. P4 and P5 remain demand-gated. Do not add speculative account connectors or
    multi-server coordination ahead of the existing acceptance gates.
-4. P6 through P8 are long-term design records only. Do not start profile,
+7. P6 through P8 are long-term design records only. Do not start named-profile,
    grouping, or Zenith runtime-convergence work until P0-P3 are complete and
    the current Zenith production Gateway/Control API path is stable.
+8. P9 remains the release-evidence gate for any production claim.
+
+## Review record — 2026-08-20
+
+The previous review was stale by one implementation cycle. The current tree
+already contains the following foundations, so they are no longer described as
+unstarted work:
+
+- performance samples for startup, page open, mode switch, and full snapshots;
+- usage and generation-throughput diagnostics, including protocol, cache, and
+  reasoning fields;
+- verified reasoning defaults, manual model-group overrides, and the local
+  source probe;
+- semantic model ordering, provider/launcher presentation grouping, and
+  explicit `Responses -> Gemini` route support;
+- configuration preset export, preview, validation, revision CAS, runtime
+  rebuild, and rollback.
+- incremental API-equivalent totals backed by the existing usage rollup,
+  including migration-safe handling of retained request logs.
+
+These are implementation and fixture results, not production acceptance. The
+remaining release blockers are real-account pool/server runs, real
+Responses/Messages/client compatibility evidence, and the unmeasured warm
+pool-switch and disk-I/O path. The review found four `repair` risks; the
+history-repair follow-up below now closes those consistency cases. The
+follow-up audit found four more open issues: catalog-refresh failures were
+discarded by startup/restart/background callers, bulk account deletion could
+stop after partially deleting the batch, the reasoning probe treated any HTTP
+2xx as support, and manual reasoning edits could race a probe result. All four
+implementation follow-ups are now closed; live provider and client acceptance
+remains open.
+
+The profile-recovery follow-up is now closed in the implementation: the first
+local startup creates one durable original snapshot and orders it first;
+manual snapshots remain available at any time; restore is full-only and never
+creates a hidden pre-restore copy; and deletion uses an explicit ten-second
+confirmation cooldown. Snapshot metadata also stores portable Windows paths.
+The history-repair path now preserves its rollback handle during cleanup,
+updates only SQLite threads whose rollout was actually processed, rewrites
+every relevant session metadata record, and normalizes extended Windows paths
+in preview and backup validation.
 
 ## P0 - Prove the personal pool in production (deferred)
 
@@ -33,21 +105,24 @@ replace the following acceptance gates.
 3. Test an optional proxy route with a real reachable proxy.
 4. Exercise a quota refresh, a real cooldown or unavailable state, recovery
    after a success, and the resulting UI state.
-5. Confirm Usage records the selected member, timings, token split, and
-   classified result without exposing a secret or prompt body.
+5. Confirm Usage, snapshots, and telemetry record the selected member, timings,
+   token split, and classified result without exposing a secret or prompt body.
 
 ### User-managed server acceptance
 
 1. Deploy the server behind HTTPS with a separate management token and vault
    key, then attach the managed ChatGPT/Codex profile.
-2. Transfer or create permitted test connections through the desktop
-   management path and verify the server capability snapshot.
+2. Transfer or create only user-owned permitted test connections through the
+   desktop management path and verify the redacted server capability snapshot;
+   do not use Zenith production credentials or production account inventory.
 3. Send a streaming <code>/v1</code> request through the server.
 4. Close the desktop app, send another request, then reopen the app.
 5. Compare the server quota, account state, request count, token totals,
    timings, and API-equivalent usage with the desktop view.
 6. Take a backup, restore it to a clean test location, and prove that the
    restored runtime passes a request.
+7. Inspect state, usage, source statistics, diagnostics, and exports to confirm
+   that they contain no raw credentials, cookies, prompts, or provider bodies.
 
 Do not call the server pool production-ready until this entire path has passed
 against real accounts and providers.
@@ -64,13 +139,23 @@ state at 200.07 ms, Pool opening at 12.22 ms, and a full snapshot at 46.57 ms.
 Pool no longer reads Usage and has a local/remote browser regression test.
 Policy-only source and account edits hot-apply their candidate state; network
 and secret changes remain explicit rebuild operations.
+The browser regression records page and mode timing, but it does not explain
+the user's slow pool switch or measure file/SQLite/JSONL bytes read. No warm
+or representative local/remote disk-I/O baseline has been accepted yet.
 
 1. Measure warm startup, mode switch, Connections, Usage, and policy-save
-   latency with a representative account set.
-2. Prove by regression test that policy edits do not reopen the local listener
-   or discard active state; endpoint, port, and secret changes may rebuild.
-3. Keep API-equivalent cached until usage or pricing changes and skip identical
-   full snapshots when the state revision has not changed.
+   latency with a representative account set. Measure local/remote pool
+   switching separately, including wall-clock phases, disk bytes read, and
+   history/SQLite/rollout reads; identify any synchronous reread that causes
+   gigabytes of disk I/O.
+2. Prove by regression test that policy-only source and account edits do not
+   reopen the local listener or discard active state; endpoint, port, and
+   secret changes may rebuild. Existing hot-apply code and UI coverage do not
+   yet prove this listener/state invariant.
+3. Skip identical full snapshots when the state revision has not changed. The
+   shared desktop refresh path now keeps explicit/manual refreshes forced while
+   periodic background refreshes return without invoking the native snapshot
+   command for an unchanged revision.
 4. Turn a measured regression into a small reproducible check before
    optimizing it.
 
@@ -81,7 +166,8 @@ work that makes account state stale.
 
 The broad ownership cleanup is complete. Do not reopen it for cosmetic module
 moves. Continue only where a new regression shows two owners for the same
-behavior.
+behavior or where the repair review below violates a shared ownership or
+rollback contract.
 
 1. Keep local and remote account mutations on their canonical transactional
    paths and add a regression test before consolidating a proven duplicate.
@@ -92,24 +178,46 @@ behavior.
    continuation rules covered at their public protocol boundaries.
 4. Keep server migrations append-only and prove upgrade, interrupted migration
    recovery, backup, and restore against a real server before a release claim.
+5. Keep `repair` atomic and reversible. The current implementation retains the
+   backup/rollback handle when post-apply cleanup fails, updates SQLite threads
+   only for rollouts actually processed, replaces every relevant `session_meta`,
+   and normalizes Windows extended paths before writing recovery manifests;
+   regression coverage now exists for the latter three consistency cases.
+6. Keep bulk account deletion preflighted and transactional. The command
+   validates every selected account before mutation, commits account state and
+   usage telemetry in one SQLite transaction, and restores reversible side
+   effects when preparation or commit fails. Regression coverage covers
+   multi-account telemetry cleanup and rollback.
+7. Serialize manual reasoning edits with local probes and merge against the
+   latest policy revision. The dialog locks overlapping mutations and ignores
+   probe results from an older policy revision; unit and browser coverage keep
+   this ordering explicit.
 
 ## P3 - Dynamic model catalogs and client integrations
+
+The implementation is ahead of the previous review: reasoning policy,
+semantic catalog presentation, usage evidence, and the Gemini bridge have
+fixture and browser coverage. This phase remains open because no fixture can
+replace a permitted live provider/client acceptance run.
 
 ### Provider-neutral source adapter acceptance
 
 The source catalog must remain provider-neutral. A source contributes model
-capabilities, confirmed reasoning options, optional catalog prices, and an
-explicit client/upstream binding; the scheduler does not branch on vendor
-names. Fixture coverage exists for this contract. The remaining gates require
-real endpoint and client evidence.
+capabilities, non-authoritative reasoning hints, optional catalog prices, and
+an explicit client/upstream binding; the scheduler does not branch on vendor
+names. Manual reasoning policy is a model-group setting, and the local Pool
+probe is the explicit operator check. Fixture coverage exists for this
+contract. The remaining gates require real endpoint and client evidence.
 
 1. Run source discovery against real Responses and Messages endpoints and prove
-   that model availability, protocol bindings, confirmed reasoning, discovered
+   that model availability, protocol bindings, reasoning hints, discovered
    prices, and manual price overrides remain separate across refreshes. Keep
    account API-equivalent estimates on the official account catalog path, while
    API sources resolve provider evidence, official fallback, then manual price.
-2. Keep native passthrough as the default and require an explicit adapter for
-   every protocol conversion.
+2. Keep native passthrough as the provider contract and use a named adapter for
+   every protocol conversion. A confirmed native Messages binding may derive
+   the existing Responses-to-Messages runtime route; it must not be treated as
+   evidence for an unrelated upstream protocol.
    `ResponsesToGemini` now covers discovered `generateContent` models and the
    text/usage/SSE path. Do not expand that binding to tools, vision, thinking,
    caching, continuation, or WebSocket traffic without a protocol-specific
@@ -131,6 +239,15 @@ restores the previous profile catalog on recovery. Remaining release gates:
    same eligible model visible through the managed profile.
 3. Keep a failure during catalog refresh reversible: the previous verified
    profile must remain usable and native/user settings must not be overwritten.
+4. Keep catalog refresh failures and a Codex-running deferral visible to the
+   caller. Startup, restart, and background paths now persist a bounded
+   warning in the local snapshot; live profile acceptance must still prove
+   that the previous verified catalog remains usable after a failed refresh.
+5. Keep probe acceptance provider- and adapter-specific. HTTP 2xx is treated
+   as reachability only; support requires positive reasoning evidence or an
+   explicit provider contract. Fixtures cover ignored effort, explicit
+   rejection, native Responses, and bridge routes; live provider acceptance
+   remains required.
 
 ### Additional client applications
 
@@ -193,10 +310,13 @@ place until a real personal deployment demonstrates the need to resume it.
 Do not add distributed coordination to the current single-user server without
 this demand and acceptance evidence.
 
-## P6 - Named pool profiles and explicit server publication
+## P6 - Named pool profiles and explicit server publication (future)
 
-Build this on the existing configuration preset contract. Do not introduce a
-parallel source/account configuration format.
+Configuration preset export, preview, validation, revision CAS, runtime
+rebuild, and rollback already exist. Build named profiles on that contract;
+do not introduce a parallel source/account configuration format. This phase
+starts only when named profiles or multiple publication targets are actually
+needed.
 
 1. Store named profile metadata and immutable profile revisions separately from
    the active runtime. A revision contains source/account rules, routing and
@@ -216,7 +336,11 @@ parallel source/account configuration format.
    references, runtime rebuild rollback, restart persistence, secret-free
    exports, and switching profiles while requests are in flight.
 
-## P7 - Model identity, ordering, aliases, and provider groups
+## P7 - Model identity, ordering, aliases, and provider groups (future; partial)
+
+Semantic sorting and provider/launcher grouping now exist as presentation
+helpers. They are not durable profile metadata, a user-editable rank, or a
+complete alias contract; keep those distinctions explicit.
 
 1. Separate upstream model id, canonical client id, and localized display name.
    Alias rules are explicit and scoped to a source/binding; reject cycles and
@@ -224,10 +348,12 @@ parallel source/account configuration format.
    suggestions only.
 2. Add independent model fields for enabled state, display rank, canonical
    alias, and price override. Drag-and-drop edits display rank without changing
-   source priority, scheduler order, or price.
-3. Move launcher grouping out of static UI family guesses into optional profile
-   presentation metadata. A group can collect models and provider sources, but
-   route eligibility still comes from current capabilities and health.
+   source priority, scheduler order, or price; current semantic ordering is
+   presentation-only.
+3. When named profiles exist, move launcher grouping out of static UI family
+   guesses into optional profile presentation metadata. A group can collect
+   models and provider sources, but route eligibility still comes from current
+   capabilities and health.
 4. Model protocol, prompt-cache, quota, usage, and price dimensions explicitly
    per binding. Claude-style cache write/read behavior must not leak into other
    providers, and provider names must not become scheduler branches.

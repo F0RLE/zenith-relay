@@ -17,6 +17,7 @@ pub struct AccountQuotaUpdate {
     pub health: AccountHealthState,
     pub last_error_code: Option<String>,
     pub outcome: AccountQuotaOutcome,
+    pub exhaustion_transitions: Vec<QuotaTransition>,
 }
 
 pub fn reduce_account_quota(
@@ -38,6 +39,14 @@ pub fn reduce_account_quota(
                     quota
                         .window(kind)
                         .and_then(|window| window.full_transition_from(previous_quota.window(kind)))
+                })
+                .collect();
+            let exhaustion_transitions = [QuotaWindowKind::Primary, QuotaWindowKind::Secondary]
+                .into_iter()
+                .filter_map(|kind| {
+                    quota.window(kind).and_then(|window| {
+                        window.exhaustion_transition_from(previous_quota.window(kind))
+                    })
                 })
                 .collect();
             let health = if data.allowed == Some(false) && data.reported_limit_reached != Some(true)
@@ -69,6 +78,7 @@ pub fn reduce_account_quota(
                 health,
                 last_error_code,
                 outcome: AccountQuotaOutcome::Updated { transitions },
+                exhaustion_transitions,
             })
         }
         Err(failure) => {
@@ -98,6 +108,7 @@ pub fn reduce_account_quota(
                     code: failure.code,
                     retryable: failure.retryable,
                 },
+                exhaustion_transitions: Vec::new(),
             })
         }
     }
@@ -231,5 +242,54 @@ mod tests {
         .unwrap();
         assert_eq!(recovered.health, AccountHealthState::Healthy);
         assert_eq!(recovered.last_error_code, None);
+    }
+
+    #[test]
+    fn weekly_exhaustion_transition_is_emitted_only_on_positive_to_zero() {
+        let previous = reduce_account_quota(
+            &QuotaSnapshot::default(),
+            &subscription(),
+            AccountHealthState::Unknown,
+            None,
+            Ok(parse_codex_usage(
+                br#"{"rate_limit":{"secondary_window":{"used_percent":50,"limit_window_seconds":604800,"reset_at":1700000600}}}"#,
+                1_000,
+            )
+            .unwrap()),
+            1_000,
+        )
+        .unwrap();
+        let exhausted = reduce_account_quota(
+            &previous.quota,
+            &previous.subscription,
+            previous.health,
+            previous.last_error_code.as_deref(),
+            Ok(parse_codex_usage(
+                br#"{"rate_limit":{"secondary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":1700000600}}}"#,
+                2_000,
+            )
+            .unwrap()),
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(exhausted.exhaustion_transitions.len(), 1);
+        assert_eq!(
+            exhausted.exhaustion_transitions[0].window_kind,
+            QuotaWindowKind::Secondary
+        );
+        let repeated = reduce_account_quota(
+            &exhausted.quota,
+            &exhausted.subscription,
+            exhausted.health,
+            exhausted.last_error_code.as_deref(),
+            Ok(parse_codex_usage(
+                br#"{"rate_limit":{"secondary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":1700000600}}}"#,
+                3_000,
+            )
+            .unwrap()),
+            3_000,
+        )
+        .unwrap();
+        assert!(repeated.exhaustion_transitions.is_empty());
     }
 }

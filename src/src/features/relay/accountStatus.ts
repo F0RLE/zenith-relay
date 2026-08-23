@@ -24,6 +24,8 @@ export function isCodexOauthAccountEligible(account: AccountSummary) {
 }
 
 export function currentAccountErrorCode(account: AccountSummary) {
+  const modelError = account.lastErrorCode?.trim();
+  if (modelError?.startsWith("models_")) return modelError;
   const quotaError = account.quota.error?.code.trim();
   if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
   if (account.routingBlockReason === "reauth_required" || account.authState.state === "requires_reauth") {

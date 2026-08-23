@@ -68,6 +68,7 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         in_flight: 0,
         active_request_count: 0,
         active_models: Vec::new(),
+        model_retries: Vec::new(),
         last_used_at_ms: None,
         next_retry_at_ms: None,
         half_open: false,
@@ -77,6 +78,7 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
     let value = serde_json::to_value(snapshot).unwrap();
     assert_eq!(value["activeRequestCount"], 0);
     assert_eq!(value["activeModels"], serde_json::json!([]));
+    assert_eq!(value["modelRetries"], serde_json::json!([]));
     assert!(value.get("active_request_count").is_none());
 }
 
@@ -107,13 +109,13 @@ fn image_lane_is_separate_from_text_load_and_caps_each_oauth_account() {
 }
 
 #[test]
-fn oauth_text_leases_serialize_an_account_while_api_sources_remain_parallel() {
+fn oauth_text_leases_allow_parallel_account_requests() {
     let mut scheduler = PoolScheduler::new();
     scheduler.upsert(oauth_candidate("oauth"));
     scheduler.upsert(candidate("api"));
 
     assert!(scheduler.reserve_for("oauth", "gpt-5", 100));
-    assert!(!scheduler.reserve_for("oauth", "gpt-5", 100));
+    assert!(scheduler.reserve_for("oauth", "gpt-5", 100));
     assert!(scheduler.reserve_for("api", "gpt-5", 100));
     assert!(scheduler.reserve_for("api", "gpt-5", 100));
 
@@ -121,18 +123,9 @@ fn oauth_text_leases_serialize_an_account_while_api_sources_remain_parallel() {
         select(&mut scheduler, &HashSet::new())
             .unwrap()
             .candidate_id,
-        "api"
+        "oauth"
     );
-    assert!(scheduler.has_waitable_text_candidate(SelectionRequest {
-        model: "gpt-5",
-        allowed_protocols: &[WireApi::Responses],
-        scope: &CandidateScope::default(),
-        tried: &HashSet::new(),
-        response_affinity_key: None,
-        prompt_affinity_key: None,
-        now_ms: 100,
-    }));
-
+    assert!(scheduler.release_for("oauth", Some("gpt-5")));
     assert!(scheduler.release_for("oauth", Some("gpt-5")));
     assert!(scheduler.release_for("api", Some("gpt-5")));
     assert!(scheduler.release_for("api", Some("gpt-5")));
@@ -577,7 +570,7 @@ fn api_source_roles_remain_strict_around_fair_oauth_routing() {
         select(&mut stabilizer, &HashSet::new())
             .unwrap()
             .candidate_id,
-        "stabilizer-source"
+        "account"
     );
 }
 
@@ -610,7 +603,7 @@ fn active_and_sequential_requests_keep_the_highest_quota() {
 }
 
 #[test]
-fn occupied_oauth_account_is_excluded_from_text_selection() {
+fn occupied_oauth_account_remains_eligible_for_text_selection() {
     let mut scheduler = PoolScheduler::new();
     let mut busy = oauth_candidate("busy");
     busy.quota = CandidateQuota::Available(5_000);
@@ -623,11 +616,11 @@ fn occupied_oauth_account_is_excluded_from_text_selection() {
     let selected = select(&mut scheduler, &HashSet::new()).unwrap();
 
     assert_eq!(selected.candidate_id, "free");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::OnlyEligible);
+    assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
 }
 
 #[test]
-fn one_oauth_account_serializes_text_requests() {
+fn one_oauth_account_accepts_parallel_text_requests() {
     let mut scheduler = PoolScheduler::new();
     let mut account = oauth_candidate("only");
     account.quota = CandidateQuota::Available(5_000);
@@ -640,8 +633,11 @@ fn one_oauth_account_serializes_text_requests() {
         "only"
     );
     assert!(scheduler.reserve("only"));
-    assert!(select(&mut scheduler, &HashSet::new()).is_none());
-    assert!(!scheduler.reserve("only"));
+    let second = select(&mut scheduler, &HashSet::new()).unwrap();
+    assert_eq!(second.candidate_id, "only");
+    assert_eq!(second.diagnostics.in_flight_before, 1);
+    assert!(scheduler.reserve("only"));
+    assert!(scheduler.release("only"));
     assert!(scheduler.release("only"));
 }
 
@@ -708,7 +704,7 @@ fn quota_highest_uses_parallel_load_only_as_an_equal_quota_tie_break() {
     assert!(scheduler.reserve("first"));
     let selected = select(&mut scheduler, &HashSet::new()).unwrap();
     assert_eq!(selected.candidate_id, "second");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::OnlyEligible);
+    assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
     assert!(scheduler.release("first"));
     assert_eq!(
         select(&mut scheduler, &HashSet::new())
@@ -794,22 +790,15 @@ fn concurrent_requests_follow_available_quota_headroom() {
     }
 
     let mut counts = BTreeMap::new();
-    for _ in 0..3 {
+    for _ in 0..7 {
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
         assert!(scheduler.reserve(&selected.candidate_id));
         *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
     }
 
-    assert_eq!(
-        counts,
-        [
-            ("full".to_string(), 1),
-            ("half".to_string(), 1),
-            ("quarter".to_string(), 1),
-        ]
-        .into()
-    );
-    assert!(select(&mut scheduler, &HashSet::new()).is_none());
+    assert_eq!(counts.get("full"), Some(&7));
+    assert_eq!(counts.get("half"), None);
+    assert_eq!(counts.get("quarter"), None);
 }
 
 #[test]
@@ -827,23 +816,13 @@ fn concurrent_requests_fill_each_oauth_account_once() {
     }
 
     let mut counts = BTreeMap::new();
-    for _ in 0..4 {
+    for _ in 0..200 {
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
         assert!(scheduler.reserve(&selected.candidate_id));
         *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
     }
 
-    assert_eq!(
-        counts,
-        [
-            ("fifty-one".to_string(), 1),
-            ("fifty-two".to_string(), 1),
-            ("fifty-four".to_string(), 1),
-            ("sixty-three".to_string(), 1),
-        ]
-        .into()
-    );
-    assert!(select(&mut scheduler, &HashSet::new()).is_none());
+    assert_eq!(counts, [("sixty-three".to_string(), 200)].into());
 }
 
 #[test]
@@ -885,7 +864,7 @@ fn subscription_expiry_routing_is_strict_and_places_unknown_dates_last() {
         select(&mut scheduler, &HashSet::new())
             .unwrap()
             .candidate_id,
-        "later"
+        "nearest"
     );
     assert!(scheduler.release("nearest"));
     assert!(scheduler.update_candidate_availability(
@@ -941,7 +920,7 @@ fn subscription_plan_routing_keeps_group_order_until_the_group_is_unavailable() 
         select(&mut scheduler, &HashSet::new())
             .unwrap()
             .candidate_id,
-        "plus"
+        "business"
     );
     assert!(scheduler.release("business"));
     assert!(scheduler.update_candidate_availability(
@@ -1488,6 +1467,13 @@ fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {
         .unwrap();
     assert!(!second.available);
     assert_eq!(second.next_retry_at_ms, Some(100));
+    assert_eq!(
+        second.model_retries,
+        vec![ModelRetryRuntime {
+            model: "gpt-5".into(),
+            retry_at_ms: 100,
+        }]
+    );
 
     assert!(scheduler.reserve_for("second", "gpt-5", 101));
     let probing = scheduler.runtime_order(101);

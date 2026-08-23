@@ -261,6 +261,7 @@ mod tests {
                 window_minutes: None,
                 observed_at_ms: 1,
                 full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
             }),
             secondary: Some(QuotaWindow {
                 kind: QuotaWindowKind::Secondary,
@@ -272,6 +273,7 @@ mod tests {
                 window_minutes: None,
                 observed_at_ms: 1,
                 full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
             }),
             supplemental: Vec::new(),
             limit_reached: false,

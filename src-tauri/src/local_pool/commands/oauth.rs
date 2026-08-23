@@ -280,6 +280,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         Ok(data) => match apply_quota_success(&mut record, data) {
             Ok(applied) => AccountQuotaOutcome::Updated {
                 transitions: applied.transitions,
+                exhaustion_transitions: applied.exhaustion_transitions,
             },
             Err(_) => {
                 let failure = QuotaRefreshFailure::new("quota_invalid_response", false);
@@ -305,6 +306,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         &AccountQuotaRefreshResponse {
             account: record.clone(),
             quota: quota_outcome,
+            exhaustion_transitions: Vec::new(),
         },
         now_ms,
     );

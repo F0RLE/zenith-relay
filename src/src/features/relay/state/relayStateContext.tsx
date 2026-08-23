@@ -41,7 +41,7 @@ export type RelayContextValue = {
   loading: boolean;
   busy: string | null;
   feedback: Feedback;
-  refresh: () => Promise<void>;
+  refresh: (force?: boolean) => Promise<void>;
   perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean>;
   activateCodexProfile: (id: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
   launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
@@ -53,10 +53,12 @@ export type RelayContextValue = {
   setTheme: (theme: "system" | "light" | "dark") => void;
   profileSwitchBackupPrompt: boolean;
   setProfileSwitchBackupPrompt: (enabled: boolean) => void;
-  profileSnapshotBackupBeforeRestore: boolean;
-  setProfileSnapshotBackupBeforeRestore: (enabled: boolean) => void;
   codexPoolOauthSelection: string;
   setCodexPoolOauthSelection: (selection: string) => void;
+  codexBackgroundTasksEnabled: boolean;
+  setCodexBackgroundTasksEnabled: (enabled: boolean) => Promise<boolean>;
+  codexWebsocketsEnabled: boolean;
+  setCodexWebsocketsEnabled: (enabled: boolean) => Promise<boolean>;
 };
 
 export const RelayContext = createContext<RelayContextValue | null>(null);

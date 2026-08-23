@@ -9,12 +9,12 @@ use super::super::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
     profiles::codex,
-    state::DesktopState,
+    state::{DesktopState, LocalRuntimeInputs},
     store::secret_store,
 };
 use super::{pool, profiles};
 use std::{collections::HashMap, sync::Arc};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use zenith_relay_core::{
     accounts::AccountRecord,
     protocol::{
@@ -30,6 +30,19 @@ use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
 
 pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms;
 
+pub(in crate::local_pool) fn record_catalog_refresh_result(
+    state: &DesktopState,
+    result: &std::result::Result<profiles::CodexCatalogRefreshStatus, LocalPoolError>,
+) {
+    match result {
+        Ok(profiles::CodexCatalogRefreshStatus::Deferred) => {
+            state.record_catalog_refresh_deferred()
+        }
+        Ok(_) => state.record_catalog_refresh_result(None),
+        Err(error) => state.record_catalog_refresh_result(Some(error)),
+    }
+}
+
 pub(in crate::local_pool) async fn runtime_from_store(
     state: &DesktopState,
 ) -> Result<Arc<GatewayRuntime>> {
@@ -42,21 +55,21 @@ pub(in crate::local_pool) async fn runtime_from_store(
     } else {
         None
     };
-    let (source_records, account_records, settings) = {
-        let store = state.store()?;
-        (
-            store.sources().to_vec(),
-            store.accounts().to_vec(),
-            store.gateway().clone(),
-        )
-    };
+    let LocalRuntimeInputs {
+        gateway: settings,
+        sources: source_records,
+        accounts: account_records,
+        source_api_keys,
+        account_credentials,
+        ..
+    } = state.runtime_inputs().await?;
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed ChatGPT/Codex profile has one strict Responses-only pool.
     let (pool_source_ids, pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
     let mut sources = Vec::new();
     for source in source_records {
-        let Some(api_key) = secret_store::load(&source.secret_ref)? else {
+        let Some(api_key) = source_api_keys.get(&source.id).cloned().flatten() else {
             continue;
         };
         sources.push(RuntimeSource {
@@ -86,16 +99,16 @@ pub(in crate::local_pool) async fn runtime_from_store(
     let mut agent_identities = HashMap::new();
     for account in account_records {
         let account_id = account.account.id.clone();
-        let Some(secret) = credentials
-            .load(&account_id)
-            .map_err(account_credential_error)?
+        let Some(secret) = account_credentials
+            .get(&account_id)
+            .and_then(Option::as_ref)
         else {
             continue;
         };
         let Some(chatgpt_account_id) = secret.provider_account_id() else {
             continue;
         };
-        let Ok(proxy) = effective_proxy_config(&settings, &secret) else {
+        let Ok(proxy) = effective_proxy_config(&settings, secret) else {
             continue;
         };
         if let Some(agent) = secret.agent_identity() {
@@ -158,7 +171,11 @@ pub(in crate::local_pool) async fn runtime_from_store(
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
-        wire_apis: Some(vec![ClientWireApi::Responses]),
+        wire_apis: Some(vec![
+            ClientWireApi::Responses,
+            ClientWireApi::Messages,
+            ClientWireApi::ChatCompletions,
+        ]),
     }];
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
@@ -209,6 +226,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
         usage_callback,
     )
     .map_err(core_error)?;
+    runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
+    runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
     runtime.set_protected_candidate(
         protected_account_id.as_deref(),
         settings.chatgpt_interface_quota_reserve_basis_points,
@@ -370,7 +389,9 @@ pub(in crate::local_pool) fn runtime_account_policy(
 pub(in crate::local_pool) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<DesktopState>();
-        let _ = profiles::refresh_active_codex_catalog(&state).await;
+        let result = profiles::refresh_active_codex_catalog(&state).await;
+        record_catalog_refresh_result(&state, &result);
+        let _ = app.emit("zenith-state-changed", ());
     });
 }
 
@@ -492,7 +513,11 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         }
         return Err(error);
     }
-    let _ = profiles::refresh_active_codex_catalog(state).await;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.prefetch_source_model_metadata();
+    }
+    let result = profiles::refresh_active_codex_catalog(state).await;
+    record_catalog_refresh_result(state, &result);
     Ok(())
 }
 

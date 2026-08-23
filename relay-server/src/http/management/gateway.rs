@@ -20,6 +20,11 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/diagnostics", post(diagnose_gateway))
         .route("/gateway/start", post(start_gateway))
         .route("/gateway/stop", post(stop_gateway))
+        .route(
+            "/gateway/codex-background-tasks",
+            post(set_codex_background_tasks),
+        )
+        .route("/gateway/codex-websockets", post(set_codex_websockets))
 }
 
 #[derive(Deserialize)]
@@ -182,5 +187,81 @@ pub async fn stop_gateway(
         .store
         .set_gateway_enabled(false)
         .map_err(store_error)?;
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexBackgroundTasksInput {
+    enabled: bool,
+}
+
+pub async fn set_codex_background_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<CodexBackgroundTasksInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let previous = state
+        .store
+        .codex_background_tasks_enabled()
+        .map_err(store_error)?;
+    state
+        .store
+        .set_codex_background_tasks_enabled(input.enabled)
+        .map_err(store_error)?;
+    let runtime = match state.runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = state.store.set_codex_background_tasks_enabled(previous);
+            return Err(runtime_error(error));
+        }
+    };
+    if let Some(runtime) = runtime {
+        runtime.set_codex_background_tasks_enabled(input.enabled);
+    }
+    if let Err(error) = state.snapshot() {
+        let _ = state.store.set_codex_background_tasks_enabled(previous);
+        if let Some(runtime) = state.runtime().ok().flatten() {
+            runtime.set_codex_background_tasks_enabled(previous);
+        }
+        return Err(runtime_error(error));
+    }
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexWebsocketsInput {
+    enabled: bool,
+}
+
+pub async fn set_codex_websockets(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<CodexWebsocketsInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let previous = state
+        .store
+        .codex_websockets_enabled()
+        .map_err(store_error)?;
+    state
+        .store
+        .set_codex_websockets_enabled(input.enabled)
+        .map_err(store_error)?;
+    let runtime = match state.runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = state.store.set_codex_websockets_enabled(previous);
+            return Err(runtime_error(error));
+        }
+    };
+    if let Some(runtime) = runtime {
+        runtime.set_codex_websockets_enabled(input.enabled);
+    }
+    if let Err(error) = state.snapshot() {
+        let _ = state.store.set_codex_websockets_enabled(previous);
+        if let Some(runtime) = state.runtime().ok().flatten() {
+            runtime.set_codex_websockets_enabled(previous);
+        }
+        return Err(runtime_error(error));
+    }
     Ok(Json(state.snapshot().map_err(store_error)?))
 }

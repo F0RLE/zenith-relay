@@ -4,6 +4,7 @@ use super::{
     WEBSOCKET_PROTOCOLS,
 };
 use crate::gateway::request::apply_default_service_tier_if_missing;
+use crate::gateway::request::codex_background_request_kind;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
@@ -15,9 +16,11 @@ pub(super) struct ClientRequest {
     value: Value,
     pub(super) requested_model: String,
     pub(super) resolved_model: String,
+    pub(super) stream_id: Option<String>,
     pub(super) responses_lite: bool,
     pub(super) response_affinity_key: Option<String>,
     pub(super) prompt_affinity_key: Option<String>,
+    pub(super) background_kind: Option<&'static str>,
 }
 
 impl ClientRequest {
@@ -47,6 +50,26 @@ impl ClientRequest {
                 "only response.create messages are supported",
             ));
         }
+        let stream_id = match object.get("stream_id") {
+            None => None,
+            Some(Value::String(stream_id)) => {
+                let stream_id = stream_id.trim();
+                if stream_id.is_empty()
+                    || stream_id.len() > 256
+                    || stream_id.chars().any(char::is_control)
+                {
+                    return Err(GatewayFailure::invalid_request(
+                        "stream_id must be a valid non-empty string",
+                    ));
+                }
+                Some(stream_id.to_string())
+            }
+            Some(_) => {
+                return Err(GatewayFailure::invalid_request(
+                    "stream_id must be a valid non-empty string",
+                ));
+            }
+        };
         let requested_model = object
             .get("model")
             .and_then(Value::as_str)
@@ -54,6 +77,11 @@ impl ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
+        let background_kind = codex_background_request_kind(headers, &value);
+        let request_id = crate::gateway::request::request_id();
+        if let Some(kind) = background_kind {
+            runtime.mark_request_origin(&request_id, kind);
+        }
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .ok_or_else(GatewayFailure::model_not_found)?;
@@ -76,18 +104,32 @@ impl ClientRequest {
             value.get("prompt_cache_key").and_then(Value::as_str),
         );
         Ok(Self {
-            request_id: crate::gateway::request::request_id(),
+            request_id,
             value,
             requested_model,
             resolved_model,
+            stream_id,
             responses_lite,
             response_affinity_key,
             prompt_affinity_key,
+            background_kind,
         })
     }
 
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
         serde_json::to_string(&self.value_for(route))
+            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn http_payload(&self) -> Result<Vec<u8>, GatewayFailure> {
+        let mut value = self.value.clone();
+        let object = value
+            .as_object_mut()
+            .expect("request object was validated before routing");
+        object.remove("type");
+        object.remove("stream_id");
+        object.insert("stream".to_string(), Value::Bool(true));
+        serde_json::to_vec(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
     }
 
