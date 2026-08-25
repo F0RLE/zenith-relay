@@ -293,7 +293,7 @@ fn policy(account: &ServerAccountRecord) -> WakeAdapterPolicy {
             QuotaWindowKind::Secondary,
         ]),
         models: account
-            .models
+            .effective_models()
             .iter()
             .enumerate()
             .map(|(index, id)| WakeModel {
@@ -329,6 +329,7 @@ mod tests {
             auth_state: AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
             health: AccountHealthState::Unhealthy,
             models: vec!["gpt-test".into()],
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,

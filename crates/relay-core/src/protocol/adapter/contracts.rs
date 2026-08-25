@@ -58,6 +58,7 @@ impl SourceAdapter {
                 WireApi::Responses => UpstreamProtocol::Responses,
                 WireApi::ChatCompletions => UpstreamProtocol::ChatCompletions,
                 WireApi::Messages => UpstreamProtocol::Messages,
+                WireApi::Gemini => UpstreamProtocol::GeminiGenerateContent,
             },
             Self::ResponsesToMessages => UpstreamProtocol::Messages,
             Self::ResponsesToGemini => UpstreamProtocol::GeminiGenerateContent,
@@ -69,7 +70,7 @@ impl SourceAdapter {
     }
 
     pub const fn uses_local_continuation_state(self) -> bool {
-        matches!(self, Self::ResponsesToMessages)
+        matches!(self, Self::ResponsesToMessages | Self::ResponsesToGemini)
     }
 
     pub const fn route_suffix(self, client_wire_api: WireApi) -> &'static str {
@@ -79,6 +80,7 @@ impl SourceAdapter {
             (WireApi::Responses, Self::Native) => "responses",
             (WireApi::ChatCompletions, Self::Native) => "chat_completions",
             (WireApi::Messages, Self::Native) => "messages",
+            (WireApi::Gemini, Self::Native) => "gemini",
             // Validation rejects this combination today. Keeping a stable
             // fallback makes candidate identity forward-compatible with a
             // future adapter that targets another upstream contract.
@@ -95,16 +97,8 @@ impl SourceAdapter {
             Self::Native if reasoning_mode == MessagesReasoningMode::Disabled => Ok(()),
             Self::Native => Err(AdapterError::reasoning_unsupported()),
             Self::ResponsesToMessages if client_wire_api == WireApi::Responses => Ok(()),
-            Self::ResponsesToGemini
-                if client_wire_api == WireApi::Responses
-                    && reasoning_mode == MessagesReasoningMode::Disabled =>
-            {
-                Ok(())
-            }
+            Self::ResponsesToGemini if client_wire_api == WireApi::Responses => Ok(()),
             Self::ResponsesToMessages => Err(AdapterError::unsupported_binding()),
-            Self::ResponsesToGemini if reasoning_mode != MessagesReasoningMode::Disabled => {
-                Err(AdapterError::reasoning_unsupported())
-            }
             Self::ResponsesToGemini => Err(AdapterError::unsupported_binding()),
         }
     }
@@ -137,7 +131,14 @@ impl SourceAdapter {
                 let object = upstream_body
                     .as_object_mut()
                     .ok_or_else(AdapterError::invalid_request)?;
-                object.insert("model".to_string(), Value::String(model.to_string()));
+                if client_wire_api == WireApi::Gemini {
+                    // Gemini places the model in the endpoint path. A model
+                    // field is not part of the generateContent contract and
+                    // some providers reject it as an unknown field.
+                    object.remove("model");
+                } else {
+                    object.insert("model".to_string(), Value::String(model.to_string()));
+                }
                 if client_wire_api == WireApi::Messages {
                     messages::apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
                 }
@@ -157,10 +158,12 @@ impl SourceAdapter {
                     request: Box::new(request),
                 })
             }
-            Self::ResponsesToGemini => gemini::prepare_responses_to_gemini(
+            Self::ResponsesToGemini => gemini::prepare_responses_to_gemini_with_reasoning(
                 request,
                 model,
                 stream,
+                reasoning_mode,
+                previous,
                 response_scope,
                 response_id_seed,
             )
@@ -171,8 +174,9 @@ impl SourceAdapter {
     }
 }
 
-/// The actual upstream thinking contract for a Messages bridge. It is explicit
-/// configuration, not a provider-name heuristic.
+/// The internal upstream thinking contract used by a Messages bridge.
+/// Persisted source bindings normalize to `Adaptive`; the enum remains part of
+/// the adapter contract and focused protocol tests.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessagesReasoningMode {
@@ -698,6 +702,16 @@ impl AdapterResponse {
             Self::Gemini(_) => None,
         }
     }
+
+    /// Returns the local continuation payload for either bridge. The method
+    /// keeps the legacy name above source-compatible while making persistence
+    /// protocol-agnostic.
+    pub fn continuation(&self) -> Option<(&str, &MessagesBridgeState)> {
+        match self {
+            Self::Messages(response) => Some((&response.response_id, &response.continuation)),
+            Self::Gemini(response) => Some((&response.response_id, &response.continuation)),
+        }
+    }
 }
 
 /// A source-agnostic prepared protocol route.
@@ -742,7 +756,10 @@ impl PreparedAdapterRequest {
     }
 
     pub const fn uses_messages_continuation(&self) -> bool {
-        matches!(self, Self::ResponsesToMessages { .. })
+        matches!(
+            self,
+            Self::ResponsesToMessages { .. } | Self::ResponsesToGemini { .. }
+        )
     }
 
     /// Translates a completed upstream response only when the selected route

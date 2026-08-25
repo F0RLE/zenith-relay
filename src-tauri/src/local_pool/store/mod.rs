@@ -336,6 +336,13 @@ impl LocalPoolStore {
                 gateway.model_reasoning_allowed_levels,
             )
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        gateway.model_service_tier_overrides =
+            zenith_relay_core::normalize_model_service_tier_overrides(
+                gateway.model_service_tier_overrides,
+            )
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        gateway.model_display_order =
+            zenith_relay_core::normalize_model_ids(gateway.model_display_order);
         gateway.subscription_plan_order =
             normalize_subscription_plan_order(gateway.subscription_plan_order)
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
@@ -1123,6 +1130,7 @@ mod tests {
             remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,

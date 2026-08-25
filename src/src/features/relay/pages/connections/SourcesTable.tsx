@@ -6,7 +6,7 @@ import type { SourceSummary } from "../../api/types";
 import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolRoutingDisclosure";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
-import { effectiveSourceProtocolBindings, sourceSupportsNativeResponses, sourceSupportsWireApi } from "../../sourceProtocolBindings";
+import { effectiveSourceProtocolBindings, sourceSupportsAnyWireApi, sourceSupportsNativeResponses } from "../../sourceProtocolBindings";
 import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
@@ -56,7 +56,7 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
         <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.route")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
         <tbody>{sources.map((source) => {
           const launchBusy = busy === `launch-source-${source.id}`;
-          const supportsResponses = sourceSupportsWireApi(source, "responses");
+          const supportsAnyRoute = sourceSupportsAnyWireApi(source);
           const supportsNativeResponses = sourceSupportsNativeResponses(source);
           const launchDisabled = !localSource || !supportsNativeResponses || !source.enabled || !source.secretAvailable || launchBusy;
           const launchTitle = !localSource
@@ -67,7 +67,7 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
                 ? t("sources.launchUnavailable")
                 : t("sources.launch");
           const runtimeState = source.inPool
-            ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "responses", source.wireApi)
+             ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi)
             : undefined;
           const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
           const modelRetries = [...(runtimeState?.modelRetries ?? [])].filter((retry) => retry.retryAtMs > nowMs).sort((left, right) => left.retryAtMs - right.retryAtMs);
@@ -100,7 +100,7 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
             <td className="row-actions-cell"><div className="row-actions">
               <ActionMenu>
                 <ActionMenuItem icon={busy === `source-models-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={busy === `source-models-${source.id}`} onClick={() => void refreshModels(source)}>{t("sources.refreshModels")}</ActionMenuItem>
-                {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}` || (!source.inPool && !supportsResponses)} title={!source.inPool && !supportsResponses ? t("sources.poolResponsesOnly") : undefined} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
+                {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}` || (!source.inPool && !supportsAnyRoute)} title={!source.inPool && !supportsAnyRoute ? t("sources.poolResponsesOnly") : undefined} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>

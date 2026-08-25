@@ -89,6 +89,7 @@ fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<Stri
         WireApi::Responses => request.pointer("/reasoning/effort"),
         WireApi::ChatCompletions => request.get("reasoning_effort"),
         WireApi::Messages => None,
+        WireApi::Gemini => None,
     };
     effort
         .and_then(Value::as_str)
@@ -470,7 +471,6 @@ fn relay_error_category(category: &str) -> bool {
     matches!(
         category,
         "invalid_request"
-            | "reasoning_effort_not_allowed"
             | "model_not_found"
             | "no_eligible_source"
             | "all_sources_temporarily_unavailable"

@@ -1296,7 +1296,7 @@ pub(super) async fn import_account_item(
     let identity_is_registered = credentials
         .agent_identity()
         .is_none_or(|agent| agent.task_id().is_some());
-    let models = if discover_models && identity_is_registered {
+    let discovered_models = if discover_models && identity_is_registered {
         let client = CodexModelsClient::new_with_proxy(proxy.as_ref()).map_err(model_item_error)?;
         let models = client
             .discover_authorized(
@@ -1314,11 +1314,16 @@ pub(super) async fn import_account_item(
                 "ChatGPT account did not expose any supported models",
             ));
         }
-        models
+        Some(models)
+    } else {
+        None
+    };
+    let models = if let Some(existing) = &existing_account {
+        existing.models.clone()
     } else if !configured_models.is_empty() {
         configured_models.to_vec()
-    } else if let Some(existing) = &existing_account {
-        existing.models.clone()
+    } else if let Some(discovered_models) = &discovered_models {
+        discovered_models.clone()
     } else {
         Vec::new()
     };
@@ -1342,6 +1347,11 @@ pub(super) async fn import_account_item(
         issued_at_ms,
     )
     .map_err(|_| ImportItemError::new("invalid_account", "imported account record is invalid"))?;
+    account.discovered_models = discovered_models.or_else(|| {
+        existing_account
+            .as_ref()
+            .and_then(|value| value.discovered_models.clone())
+    });
     merge_existing_account(&mut account, existing_account.as_ref());
     account.account.in_pool |= add_to_pool;
     if let Some(active_until_ms) = subscription_active_until_ms {
@@ -1781,10 +1791,15 @@ pub(super) fn apply_quota_outcome_with_transitions(
 pub(super) fn apply_model_discovery(
     account: &mut LocalAccountRecord,
     result: std::result::Result<Vec<String>, ModelDiscoveryFailure>,
-) {
+) -> bool {
+    let previous_models = account.effective_models().to_vec();
     match result {
         Ok(models) if !models.is_empty() => {
-            account.models = models;
+            let models = crate::local_pool::models::normalized_values(models);
+            if account.models.is_empty() {
+                account.models = models.clone();
+            }
+            account.discovered_models = Some(models);
             account.normalize();
             let recovered = account
                 .account
@@ -1797,11 +1812,14 @@ pub(super) fn apply_model_discovery(
                     account.account.auth_state,
                     AccountAuthState::RequiresReauth(_)
                 ) {
+                    if account.account.auth_state == AccountAuthState::Error {
+                        account.account.auth_state = AccountAuthState::Active;
+                    }
                     account.account.health = AccountHealthState::Healthy;
                 }
             }
         }
-        Ok(_) if account.models.is_empty() => {
+        Ok(_) if account.effective_models().is_empty() => {
             apply_model_discovery_failure(account, "models_empty", false)
         }
         Err(error) => {
@@ -1812,6 +1830,7 @@ pub(super) fn apply_model_discovery(
         }
         Ok(_) => {}
     }
+    account.effective_models() != previous_models
 }
 
 pub(super) fn apply_model_discovery_failure(
@@ -1822,7 +1841,15 @@ pub(super) fn apply_model_discovery_failure(
     account.account.last_error_code = Some(code.to_string());
     match code {
         "models_unauthorized" | "models_invalid_access_token" | "models_invalid_account_id" => {
-            account.account.auth_state = AccountAuthState::Error;
+            // Reauthentication is a terminal, user-actionable auth state. A
+            // later model probe must not downgrade it to the generic Error
+            // state while preserving the last good catalog.
+            if !matches!(
+                account.account.auth_state,
+                AccountAuthState::RequiresReauth(_)
+            ) {
+                account.account.auth_state = AccountAuthState::Error;
+            }
             account.account.health = AccountHealthState::Unhealthy;
         }
         "models_forbidden" => account.account.health = AccountHealthState::Blocked,
@@ -1841,7 +1868,7 @@ pub(super) async fn persist_imported_account(
     let (old_accounts, old_keys) = current_account_records(state).map_err(|_| {
         ImportItemError::new("account_store_failed", "account store is unavailable")
     })?;
-    let sync_gateway = !account.models.is_empty();
+    let sync_gateway = !account.effective_models().is_empty();
     credential_store
         .save(credentials)
         .map_err(credential_item_error)?;

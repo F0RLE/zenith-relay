@@ -24,8 +24,9 @@ future feature that cannot prove this boundary is out of scope.
 The product implementation gate is closed for the 1.1.0 release: the local
 desktop surface, provider-neutral routing contracts, profile recovery, quota
 automation, model availability handling, redaction rules, and responsive UI
-are covered by the release verification snapshot documented in
-[CHANGELOG.md](CHANGELOG.md).
+are covered by the implementation checks and review required by the release
+process. The user-visible scope is recorded in [CHANGELOG.md](CHANGELOG.md);
+test counts and CI evidence are deliberately kept out of that document.
 
 This does not turn mocked or local checks into a production claim. Live P0
 acceptance remains deferred until permitted real accounts are available and the
@@ -60,8 +61,7 @@ unstarted work:
 - performance samples for startup, page open, mode switch, and full snapshots;
 - usage and generation-throughput diagnostics, including protocol, cache, and
   reasoning fields;
-- verified reasoning defaults, manual model-group overrides, and the local
-  source probe;
+- declared reasoning defaults and manual model-group overrides;
 - semantic model ordering, provider/launcher presentation grouping, and
   explicit `Responses -> Gemini` route support;
 - configuration preset export, preview, validation, revision CAS, runtime
@@ -74,11 +74,10 @@ remaining release blockers are real-account pool/server runs, real
 Responses/Messages/client compatibility evidence, and the unmeasured warm
 pool-switch and disk-I/O path. The review found four `repair` risks; the
 history-repair follow-up below now closes those consistency cases. The
-follow-up audit found four more open issues: catalog-refresh failures were
+follow-up audit found two more open issues: catalog-refresh failures were
 discarded by startup/restart/background callers, bulk account deletion could
-stop after partially deleting the batch, the reasoning probe treated any HTTP
-2xx as support, and manual reasoning edits could race a probe result. All four
-implementation follow-ups are now closed; live provider and client acceptance
+stop after partially deleting the batch. Both implementation follow-ups are
+now closed; live provider and client acceptance
 remains open.
 
 The profile-recovery follow-up is now closed in the implementation: the first
@@ -188,10 +187,9 @@ rollback contract.
    usage telemetry in one SQLite transaction, and restores reversible side
    effects when preparation or commit fails. Regression coverage covers
    multi-account telemetry cleanup and rollback.
-7. Serialize manual reasoning edits with local probes and merge against the
-   latest policy revision. The dialog locks overlapping mutations and ignores
-   probe results from an older policy revision; unit and browser coverage keep
-   this ordering explicit.
+7. Serialize manual reasoning edits against the latest policy revision. The
+   dialog locks overlapping mutations; unit and browser coverage keep this
+   ordering explicit.
 
 ## P3 - Dynamic model catalogs and client integrations
 
@@ -205,9 +203,10 @@ replace a permitted live provider/client acceptance run.
 The source catalog must remain provider-neutral. A source contributes model
 capabilities, non-authoritative reasoning hints, optional catalog prices, and
 an explicit client/upstream binding; the scheduler does not branch on vendor
-names. Manual reasoning policy is a model-group setting, and the local Pool
-probe is the explicit operator check. Fixture coverage exists for this
-contract. The remaining gates require real endpoint and client evidence.
+names. Manual reasoning policy is a model-group setting; reasoning modes are
+catalog metadata and are never checked with a separate probe. Fixture coverage
+exists for this contract. The remaining gates require real endpoint and client
+evidence.
 
 1. Run source discovery against real Responses and Messages endpoints and prove
    that model availability, protocol bindings, reasoning hints, discovered
@@ -218,10 +217,11 @@ contract. The remaining gates require real endpoint and client evidence.
    every protocol conversion. A confirmed native Messages binding may derive
    the existing Responses-to-Messages runtime route; it must not be treated as
    evidence for an unrelated upstream protocol.
-   `ResponsesToGemini` now covers discovered `generateContent` models and the
-   text/usage/SSE path. Do not expand that binding to tools, vision, thinking,
-   caching, continuation, or WebSocket traffic without a protocol-specific
-   probe and fixture.
+    `ResponsesToGemini` now covers discovered `generateContent` models,
+    multimodal input, function/namespace/custom tools, thinking, usage, local
+    continuation, and JSON/SSE streaming including Vertex partial arguments.
+    Keep provider-managed caching, hosted tools, and WebSocket bridging out of
+    the binding until each has its own exact adapter path and acceptance proof.
 3. Do not claim hosted tools, dynamic discovery, unsupported reasoning, or
    WebSocket bridging until an exact adapter path and regression coverage exist.
 4. Before release, run a real `codex.exe` acceptance matrix for every claimed
@@ -243,11 +243,11 @@ restores the previous profile catalog on recovery. Remaining release gates:
    caller. Startup, restart, and background paths now persist a bounded
    warning in the local snapshot; live profile acceptance must still prove
    that the previous verified catalog remains usable after a failed refresh.
-5. Keep probe acceptance provider- and adapter-specific. HTTP 2xx is treated
-   as reachability only; support requires positive reasoning evidence or an
-   explicit provider contract. Fixtures cover ignored effort, explicit
-   rejection, native Responses, and bridge routes; live provider acceptance
-   remains required.
+5. Keep availability acceptance provider- and adapter-specific. HTTP 2xx is
+   treated as reachability only; model publication still requires semantic
+   availability and price evidence. Reasoning modes remain catalog metadata and
+   never gate publication. Fixtures cover native Responses and bridge routes;
+   live provider acceptance remains required.
 
 ### Additional client applications
 

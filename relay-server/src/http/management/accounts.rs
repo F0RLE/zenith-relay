@@ -21,7 +21,7 @@ use zenith_relay_core::protocol::{
     account_candidate_enabled, account_operational_state, AccountOperationalInput, AccountSummary,
     RevealedAccountIdentity, RuntimeStateSnapshot,
 };
-use zenith_relay_core::{CandidateKind, RuntimeCandidatePolicy, WireApi};
+use zenith_relay_core::{CandidateKind, RuntimeCandidatePolicy};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -369,16 +369,13 @@ pub async fn set_pool_membership(
                 .iter()
                 .find(|record| &record.id == source_id)
                 .expect("source was validated above");
-            if !source
-                .supports_wire_api(WireApi::Responses)
-                .map_err(|message| {
-                    ManagementError::validation("source_protocol_invalid", message)
-                })?
-            {
+            if !source.supports_any_wire_api().map_err(|message| {
+                ManagementError::validation("source_protocol_invalid", message)
+            })? {
                 return Err(ManagementError::new(
                     StatusCode::CONFLICT,
                     "source_pool_protocol_unsupported",
-                    "only sources with a Responses-compatible route can join the pool",
+                    "source must expose at least one verified API route before joining the pool",
                     "pool",
                     false,
                 ));

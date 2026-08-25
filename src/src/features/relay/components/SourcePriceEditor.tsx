@@ -27,9 +27,10 @@ type SourcePriceEditorProps = {
   onChange: (value: SourcePriceDrafts) => void;
   enabledModels?: readonly string[];
   onToggleModel?: (model: string) => void;
+  presentation?: "disclosure" | "tab";
 };
 
-export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onToggleModel }: SourcePriceEditorProps) {
+export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onToggleModel, presentation = "disclosure" }: SourcePriceEditorProps) {
   const { t } = useTranslation();
   const { runtime } = useRelayState();
   const models = [...new Map([
@@ -56,9 +57,13 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     delete next[model];
     onChange(next);
   };
-  return <details className={`source-price-section source-editor-panel${modelSelectionEnabled ? " source-model-configuration" : ""}`}>
-    <summary className="source-editor-panel-summary"><span><strong>{t(modelSelectionEnabled ? "sources.modelsAndCost" : "sources.apiCost")}</strong><small>{t(modelSelectionEnabled ? "sources.modelsAndCostHint" : "sources.apiCostHint")}</small></span><small>{modelSelectionEnabled ? `${t("common.enabled")}: ${enabledCount}/${models.length}` : t("sources.groupModelsCount", { count: models.length })}</small></summary>
-    <div className="source-price-content"><div className="source-price-groups">
+  const title = t(modelSelectionEnabled ? "sources.modelsAndCost" : "sources.editorPricesTab");
+  const hint = t(modelSelectionEnabled ? "sources.modelsAndCostHint" : "sources.apiCostHint");
+  const manualOverrideCount = Object.keys(drafts).length;
+  const count = modelSelectionEnabled
+    ? `${t("common.enabled")}: ${enabledCount}/${models.length}`
+    : t(manualOverrideCount ? "sources.manualPrices" : "sources.apiPricesInUse", { count: manualOverrideCount });
+  const content = <div className="source-price-content"><div className="source-price-groups">
       {groups.map((group) => {
         const cacheWrite = group.id === "anthropic";
         const groupEnabledCount = modelSelectionEnabled
@@ -93,7 +98,12 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
         </details>;
       })}
     </div>
-    <small className="form-note">{t("sources.apiCostUnit")}</small></div>
+    <small className="form-note">{t("sources.apiCostUnit")}</small></div>;
+  const className = `source-price-section source-editor-panel${modelSelectionEnabled ? " source-model-configuration" : ""}`;
+  if (presentation === "tab") return <section className={`${className} source-price-tab`}><header className="source-price-tab-heading"><span><strong>{title}</strong><small>{hint}</small></span><small className={`source-price-tab-status ${manualOverrideCount ? "source-price-tab-status-manual" : "source-price-tab-status-api"}`}>{count}</small></header>{content}</section>;
+  return <details className={className}>
+    <summary className="source-editor-panel-summary"><span><strong>{title}</strong><small>{hint}</small></span><small>{count}</small></summary>
+    {content}
   </details>;
 }
 

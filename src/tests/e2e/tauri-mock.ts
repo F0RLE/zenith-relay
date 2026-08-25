@@ -51,6 +51,7 @@ export type MockOptions = {
   importFailureCode?: string;
   importPreviewDelayMs?: number;
   importConfirmDelayMs?: number;
+  sourceUpdateDelayMs?: number;
   importDescription?: string;
   currentProfileAvailable?: boolean;
   remoteUsageLabelMissing?: boolean;
@@ -68,6 +69,7 @@ export type MockOptions = {
   distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
+  modelSpeed?: Record<string, "standard" | "fast">;
   sourceDetectedModelPrices?: Record<string, {
     inputMicroUsdPerMillion: number;
     cachedInputMicroUsdPerMillion?: number;
@@ -76,13 +78,11 @@ export type MockOptions = {
     outputMicroUsdPerMillion: number;
   }>;
   sourceErrorCode?: string;
+  sourceCreateError?: string;
   catalogRefreshWarning?: "failed" | "deferred";
   modelReasoning?: Record<string, string[]>;
-  modelReasoningProbe?: Record<string, { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null }>;
-  modelReasoningProbeDelayMs?: number;
-  modelReasoningProbeAvailability?: Record<string, Record<string, boolean>>;
   sourceProtocolBindings?: Array<{
-    wireApi: "responses" | "messages" | "chat_completions";
+    wireApi: "responses" | "messages" | "chat_completions" | "gemini";
     adapter: "native" | "responses_to_messages" | "responses_to_gemini";
     reasoningMode: "disabled" | "budget" | "adaptive";
     modelIds: string[];
@@ -111,20 +111,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       localStorage.setItem("relay.profileSwitchBackupPrompt", input.profileSwitchBackupPrompt ? "1" : "0");
     }
 
-    type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
+    type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowStartMs?: number; windowMinutes: number; observedAtMs: number };
     type MockOperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
     type MockAuthState = { state: string; reason?: string };
     const exhaustedQuotaWindow = input.quotaAvailable ? null : input.exhaustedQuotaWindow ?? "primary";
     const quotaNowMs = Date.now();
     const primaryResetAtMs = quotaNowMs + 90 * 60_000;
     const secondaryResetAtMs = quotaNowMs + 3 * 24 * 60 * 60_000;
-    const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
-      primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: primaryResetAtMs, windowMinutes: 300, observedAtMs: quotaNowMs },
-      secondary: { kind: "secondary", availableBasisPoints: exhaustedQuotaWindow === "secondary" ? 0 : 6400, explicitlyFull: false, resetAtMs: secondaryResetAtMs, windowMinutes: 10_080, observedAtMs: quotaNowMs },
+    const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; serviceTier?: "standard" | "fast" | null; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
+      primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: primaryResetAtMs, windowStartMs: primaryResetAtMs - 300 * 60_000, windowMinutes: 300, observedAtMs: quotaNowMs },
+      secondary: { kind: "secondary", availableBasisPoints: exhaustedQuotaWindow === "secondary" ? 0 : 6400, explicitlyFull: false, resetAtMs: secondaryResetAtMs, windowStartMs: secondaryResetAtMs - 10_080 * 60_000, windowMinutes: 10_080, observedAtMs: quotaNowMs },
       supplemental: input.supplementalQuota ? [
         { id: "code_review:primary", label: "Code Review", window: { kind: "primary", availableBasisPoints: 7200, explicitlyFull: false, resetAtMs: Date.now() + 2 * 60 * 60_000, windowMinutes: 300, observedAtMs: Date.now() } },
         { id: "code_review:secondary", label: "Code Review", window: { kind: "secondary", availableBasisPoints: 8600, explicitlyFull: false, resetAtMs: Date.now() + 5 * 24 * 60 * 60_000, windowMinutes: 10_080, observedAtMs: Date.now() } },
-        { id: "additional:0:primary", label: "GPT-5.4 priority", window: { kind: "primary", availableBasisPoints: 4100, explicitlyFull: false, resetAtMs: Date.now() + 12 * 60 * 60_000, windowMinutes: 1_440, observedAtMs: Date.now() } },
+        { id: "additional:0:primary", label: "GPT-5.4 priority", serviceTier: "fast", window: { kind: "primary", availableBasisPoints: 4100, explicitlyFull: false, resetAtMs: Date.now() + 12 * 60 * 60_000, windowMinutes: 1_440, observedAtMs: Date.now() } },
       ] : [],
       limitReached: false,
       resetCreditsAvailable: Math.max(0, input.resetCreditsAvailable ?? 1),
@@ -188,6 +188,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       priority: 20,
       weight: 100,
       apiEquivalent: { microUsd: 14_100_000, pricedTokens: 2_800_000, unpricedTokens: 0 },
+      quotaWindowUsage: { kind: "secondary" as const, windowStartMs: secondaryResetAtMs - 10_080 * 60_000, apiEquivalent: { microUsd: 5_000_000, pricedTokens: 1_000_000, unpricedTokens: 0 } },
       purchaseCostMicroUsd: 18_000_000 as number | null,
       subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
       quota,
@@ -262,7 +263,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       authAvailable: true,
       isOriginal: true,
     }];
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningProbeAvailable: boolean; reasoningProbe?: { status: string; total: number; running: number; success: number; failed: number; confirmed: number; rejected: number; inconclusive: number; pending: number; lastProbeAt: string | null } };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; speedSupported?: boolean; speedTier?: "standard" | "fast"; speedConfigurable?: boolean };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -302,7 +303,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
       gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing"], supportedWireApis: ["responses", "chat_completions", "messages"] as Array<"responses" | "chat_completions" | "messages"> },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
       sources: populated ? sources : [],
       accounts: populated ? accounts : [],
       automations: populated ? [automation] : [],
@@ -346,7 +347,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] };
     const configurationPreset = {
       format: "zenith-relay-configuration",
       schemaVersion: 2,
@@ -392,8 +393,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const protocolBindings = requestedBindings.length
         ? requestedBindings.map((binding) => ({
           wireApi: String(binding.wireApi ?? wireApi),
-          adapter: binding.adapter === "responses_to_messages" && String(binding.wireApi ?? wireApi) === "responses"
-            ? "responses_to_messages"
+          adapter: (binding.adapter === "responses_to_messages" || binding.adapter === "responses_to_gemini")
+            && String(binding.wireApi ?? wireApi) === "responses"
+            ? binding.adapter
             : "native",
           reasoningMode: binding.reasoningMode === "budget" || binding.reasoningMode === "adaptive"
             ? binding.reasoningMode
@@ -536,12 +538,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: sourceUsage ? source.id : "a1b2c3d4e5f6", label: sourceUsage ? source.name : account.label, totals }] : [] };
           }
           case "create_local_source": {
+            if (input.sourceCreateError) throw { code: input.sourceCreateError, message: "Synthetic upstream model discovery failed" };
             const created = sourceFromPayload(args.input as Record<string, unknown>, `source_created_${localRuntime.sources.length + 1}`);
             localRuntime.sources = [...localRuntime.sources, created];
             return structuredClone(created);
           }
           case "update_local_source": {
             const request = args.input as Record<string, unknown> & { sourceId?: string; sourcePriorities?: Record<string, number> };
+            if (input.sourceUpdateDelayMs) await new Promise((resolve) => setTimeout(resolve, input.sourceUpdateDelayMs));
             const target = localRuntime.sources.find((item) => item.id === request.sourceId);
             if (target) Object.assign(target, request);
             for (const [sourceId, priority] of Object.entries(request.sourcePriorities ?? {})) {
@@ -670,32 +674,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             }
             return structuredClone(localRuntime);
           }
-          case "probe_local_model_reasoning": {
-            const request = args.input as { modelId: string; level: string; addSuccessfulToSettings: boolean };
-            if (input.modelReasoningProbeDelayMs) await new Promise((resolve) => setTimeout(resolve, input.modelReasoningProbeDelayMs));
-            const level = request.level.trim().toLowerCase();
+          case "set_local_model_service_tier": {
+            const request = args.input as { modelId: string; serviceTier: "standard" | "fast" };
             const target = localRuntime.gateway.models.find((model) => model.id === request.modelId);
-            const sources = localRuntime.sources
-              .filter((item) => item.enabled && item.inPool && !item.draining && item.secretAvailable && sourceServesResponsesModel(item, request.modelId))
-              .map((item) => ({
-                sourceId: item.id,
-                sourceName: item.name,
-                available: input.modelReasoningProbeAvailability?.[request.modelId.toLowerCase()]?.[item.id] ?? true,
-              }));
-            const availableCount = sources.filter((item) => item.available).length;
-            const appliedToSettings = request.addSuccessfulToSettings && availableCount > 0;
-            if (appliedToSettings && target) {
-              target.reasoningAllowedLevels = [...new Set([...target.reasoningAllowedLevels, level])];
-              target.reasoningLevels = [...target.reasoningAllowedLevels];
-            }
-            return {
-              modelId: request.modelId,
-              level,
-              sourceCount: sources.length,
-              availableCount,
-              appliedToSettings,
-              sources,
-            };
+            if (target) target.speedTier = request.serviceTier;
+            return structuredClone(localRuntime);
+          }
+          case "set_local_model_display_order": {
+            const request = args.input as { modelIds: string[] };
+            const positions = new Map(request.modelIds.map((id, index) => [id.toLowerCase(), index]));
+            localRuntime.gateway.models.sort((left, right) =>
+              (positions.get(left.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
+              - (positions.get(right.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER));
+            localRuntime.gateway.visibleModelIds = localRuntime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
+            return structuredClone(localRuntime);
           }
           case "update_chatgpt_interface_quota_reserve": {
             const request = args.input as { reserveBasisPoints: number };
@@ -1124,8 +1116,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           reasoningSupportedLevels: current?.reasoningSupportedLevels ?? reportedReasoning,
           reasoningAllowedLevels: manualReasoning,
           reasoningConfigurable: current?.reasoningConfigurable ?? hasPoolRoute,
-          reasoningProbeAvailable: current?.reasoningProbeAvailable ?? hasApiSourceRoute,
-          reasoningProbe: current?.reasoningProbe ?? input.modelReasoningProbe?.[id.toLowerCase()],
+          speedSupported: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase()),
+          speedTier: input.modelSpeed?.[id.toLowerCase()] ?? "standard",
+          speedConfigurable: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase()),
         };
       });
       runtime.gateway.models = input.serverModelOrder
@@ -1142,7 +1135,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       return source.wireApi === "responses" && source.models.some((model) => model.toLowerCase() === normalized);
     }
 
-    function remoteAction(args: Record<string, unknown>) {
+    async function remoteAction(args: Record<string, unknown>) {
       const input = args.input as { action?: { type?: string; id?: string }; payload?: Record<string, unknown> };
       const type = input?.action?.type;
       if (type === "create_source") {
@@ -1151,6 +1144,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         return structuredClone(created);
       }
       if (type === "update_source") {
+        if (input.sourceUpdateDelayMs) await new Promise((resolve) => setTimeout(resolve, input.sourceUpdateDelayMs));
         const target = remoteRuntime.sources.find((item) => item.id === input.action?.id);
         if (target) Object.assign(target, input.payload);
         const priorities = input.payload?.sourcePriorities as Record<string, number> | undefined;
@@ -1264,6 +1258,21 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           target.reasoningAllowedLevels = [...(input.payload?.allowedLevels as string[] ?? [])];
           target.reasoningLevels = [...target.reasoningAllowedLevels];
         }
+        return structuredClone(remoteRuntime);
+      }
+      if (type === "set_model_service_tier") {
+        const modelId = String(input.payload?.modelId ?? "");
+        const target = remoteRuntime.gateway.models.find((model) => model.id === modelId);
+        if (target) target.speedTier = input.payload?.serviceTier as "standard" | "fast";
+        return structuredClone(remoteRuntime);
+      }
+      if (type === "set_model_order") {
+        const modelIds = input.payload?.modelIds as string[] ?? [];
+        const positions = new Map(modelIds.map((id, index) => [id.toLowerCase(), index]));
+        remoteRuntime.gateway.models.sort((left, right) =>
+          (positions.get(left.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
+          - (positions.get(right.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER));
+        remoteRuntime.gateway.visibleModelIds = remoteRuntime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
         return structuredClone(remoteRuntime);
       }
       if (type === "set_routing_policy") {

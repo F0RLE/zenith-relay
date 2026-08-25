@@ -1,5 +1,5 @@
 use super::{
-    confirmed_source_reasoning_levels as merge_confirmed_source_reasoning_levels, runtime_now_ms,
+    declared_source_reasoning_levels as merge_declared_source_reasoning_levels, runtime_now_ms,
     source_reasoning_for_route, AuthenticatedKey, CachedModelManifest, CodexSourceModelMetadata,
     GatewayRuntime, SourceModelMetadataPrefetchGuard, CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
     SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS,
@@ -7,8 +7,7 @@ use super::{
 use crate::catalog::{
     normalize_model_reasoning_allowed_levels, reasoning_policy_levels, source_context_windows,
     source_image_input_capabilities, source_reasoning_capabilities,
-    source_reasoning_probe_progress, union_source_reasoning_capabilities,
-    SourceReasoningCapabilities, SourceReasoningProbeProgress,
+    union_source_reasoning_capabilities, SourceReasoningCapabilities,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{
@@ -43,6 +42,78 @@ struct SourceMetadataManifest {
 }
 
 impl GatewayRuntime {
+    /// Fast is an upstream entitlement, not a model-name heuristic. The
+    /// management surface consults the last confirmed manifest for an eligible
+    /// route, so a free or otherwise ineligible account never gets a fabricated
+    /// Fast toggle.
+    pub fn model_supports_fast_service_tier(&self, model: &str) -> bool {
+        let model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+        self.current_candidate_ids_for_model(model)
+            .into_iter()
+            .any(|candidate_id| self.candidate_supports_fast_service_tier(&candidate_id, model))
+    }
+
+    /// Returns Fast capability for one concrete scheduler route. A model can
+    /// be shared by several providers, so a manifest from one route must never
+    /// authorize a priority request on another route.
+    pub(crate) fn candidate_supports_fast_service_tier(
+        &self,
+        candidate_id: &str,
+        model: &str,
+    ) -> bool {
+        let model = model.trim();
+        if candidate_id.trim().is_empty() || model.is_empty() {
+            return false;
+        }
+        let has_model = self
+            .lock_scheduler()
+            .candidate(candidate_id)
+            .is_some_and(|candidate| {
+                candidate
+                    .models
+                    .iter()
+                    .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
+            });
+        if !has_model {
+            return false;
+        }
+        let manifest = if self.source_candidate_bindings.contains_key(candidate_id) {
+            self.model_metadata
+                .source_manifests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(candidate_id)
+                .cloned()
+        } else if self.chatgpt_accounts.contains_key(candidate_id) {
+            self.model_metadata
+                .codex_manifests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(candidate_id)
+                .cloned()
+        } else {
+            None
+        };
+        manifest.is_some_and(|manifest| manifest_supports_fast_service_tier(&manifest.value, model))
+    }
+
+    fn current_candidate_ids_for_model(&self, model: &str) -> Vec<String> {
+        let scheduler = self.lock_scheduler();
+        scheduler
+            .candidates()
+            .filter(|candidate| {
+                candidate
+                    .models
+                    .iter()
+                    .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
+            })
+            .map(|candidate| candidate.id.clone())
+            .collect()
+    }
+
     /// Starts a best-effort metadata refresh for the management UI. The result
     /// arrives on the next state poll and never delays the current one.
     pub fn prefetch_source_model_metadata(self: &Arc<Self>) {
@@ -78,6 +149,7 @@ impl GatewayRuntime {
                         WireApi::Responses,
                         WireApi::ChatCompletions,
                         WireApi::Messages,
+                        WireApi::Gemini,
                     ],
                     runtime_now_ms(),
                 )
@@ -124,8 +196,7 @@ impl GatewayRuntime {
 
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
-        let mut probe_progress_by_model = BTreeMap::new();
-        let mut evaluated_reasoning = Vec::<(String, String, BTreeSet<String>, bool)>::new();
+        let mut declared_reasoning = Vec::<(String, String, BTreeSet<String>, bool)>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
         for SourceMetadataManifest {
             candidate_id,
@@ -144,12 +215,6 @@ impl GatewayRuntime {
                 .map(|manifest| source_image_input_capabilities(manifest, &configured_models))
                 .unwrap_or_default();
             if let Some(manifest) = manifest.as_ref() {
-                probe_progress_by_model.extend(source_reasoning_probe_progress(
-                    manifest,
-                    &configured_models,
-                ));
-            }
-            if let Some(manifest) = manifest.as_ref() {
                 for (model, context_window) in source_context_windows(manifest, &configured_models)
                 {
                     metadata
@@ -161,11 +226,13 @@ impl GatewayRuntime {
             }
             for model in &configured_models {
                 let model_key = model.to_ascii_lowercase();
-                let supports_image = matches!(adapter, SourceAdapter::ResponsesToMessages)
-                    || declared_image_support
-                        .get(&model_key)
-                        .copied()
-                        .unwrap_or(false);
+                let supports_image = matches!(
+                    adapter,
+                    SourceAdapter::ResponsesToMessages | SourceAdapter::ResponsesToGemini
+                ) || declared_image_support
+                    .get(&model_key)
+                    .copied()
+                    .unwrap_or(false);
                 image_support_by_model
                     .entry(model_key.clone())
                     .or_default()
@@ -176,11 +243,11 @@ impl GatewayRuntime {
                     capabilities.apply_model_implied_efforts(&model_key);
                     Some(capabilities)
                 });
-                // Only an explicit Gateway publication is evidence. A normal
-                // provider catalog refresh must not withdraw a previously
-                // confirmed route merely because it omitted reasoning fields.
+                // Keep provider-declared modes as catalog metadata. A refresh
+                // never becomes request admission evidence, and omission of
+                // reasoning fields must not affect ordinary model routing.
                 if reasoning.contains_key(&model_key) {
-                    evaluated_reasoning.push((
+                    declared_reasoning.push((
                         model_key.clone(),
                         candidate_id.clone(),
                         capabilities
@@ -205,7 +272,6 @@ impl GatewayRuntime {
                 }
             }
         }
-        metadata.reasoning_probe_progress = probe_progress_by_model.clone();
         let mut current_reasoning_levels = BTreeMap::new();
         for (model, capabilities) in reasoning_by_model {
             let Some(capabilities) = union_source_reasoning_capabilities(capabilities) else {
@@ -222,11 +288,7 @@ impl GatewayRuntime {
                 .reasoning_catalog_templates
                 .insert(model, capabilities.codex_catalog_template());
         }
-        self.update_confirmed_source_reasoning(
-            evaluated_reasoning,
-            &current_reasoning_levels,
-            probe_progress_by_model,
-        );
+        self.update_declared_source_reasoning(declared_reasoning, &current_reasoning_levels);
         for (model, route_support) in image_support_by_model {
             if route_support.iter().all(|supports_image| *supports_image) {
                 metadata.image_models.insert(model);
@@ -235,59 +297,57 @@ impl GatewayRuntime {
         metadata
     }
 
-    fn update_confirmed_source_reasoning(
+    fn update_declared_source_reasoning(
         &self,
-        evaluated_reasoning: Vec<(String, String, BTreeSet<String>, bool)>,
+        declared_reasoning: Vec<(String, String, BTreeSet<String>, bool)>,
         current_reasoning_levels: &BTreeMap<String, Vec<String>>,
-        probe_progress_by_model: BTreeMap<String, SourceReasoningProbeProgress>,
     ) {
-        let mut confirmed = self
+        let mut declared = self
             .model_metadata
-            .confirmed_reasoning
+            .declared_reasoning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (model, candidate_id, efforts, explicitly_empty) in evaluated_reasoning {
+        for (model, candidate_id, efforts, explicitly_empty) in declared_reasoning {
             if efforts.is_empty() {
-                let remove_model = confirmed.efforts.get_mut(&model).is_some_and(|routes| {
+                let remove_model = declared.efforts.get_mut(&model).is_some_and(|routes| {
                     routes.remove(&candidate_id);
                     routes.is_empty()
                 });
                 if remove_model {
-                    confirmed.efforts.remove(&model);
+                    declared.efforts.remove(&model);
                 }
                 if explicitly_empty {
-                    confirmed
+                    declared
                         .empty_routes
                         .entry(model)
                         .or_default()
                         .insert(candidate_id);
-                } else if let Some(routes) = confirmed.empty_routes.get_mut(&model) {
+                } else if let Some(routes) = declared.empty_routes.get_mut(&model) {
                     routes.remove(&candidate_id);
                     if routes.is_empty() {
-                        confirmed.empty_routes.remove(&model);
+                        declared.empty_routes.remove(&model);
                     }
                 }
             } else {
-                if let Some(routes) = confirmed.empty_routes.get_mut(&model) {
+                if let Some(routes) = declared.empty_routes.get_mut(&model) {
                     routes.remove(&candidate_id);
                     if routes.is_empty() {
-                        confirmed.empty_routes.remove(&model);
+                        declared.empty_routes.remove(&model);
                     }
                 }
-                confirmed
+                declared
                     .efforts
                     .entry(model)
                     .or_default()
                     .insert(candidate_id, efforts);
             }
         }
-        let previous_levels = confirmed.levels.clone();
-        confirmed.levels = merge_confirmed_source_reasoning_levels(
-            &confirmed.efforts,
+        let previous_levels = declared.levels.clone();
+        declared.levels = merge_declared_source_reasoning_levels(
+            &declared.efforts,
             &previous_levels,
             current_reasoning_levels,
         );
-        confirmed.probe_progress.extend(probe_progress_by_model);
     }
 
     fn source_metadata_routes(
@@ -427,7 +487,7 @@ impl GatewayRuntime {
                 Some(value)
             } else {
                 // A transient discovery failure must not make a model appear to
-                // lose its previously confirmed capabilities. Candidate removal
+                // lose its previously declared capabilities. Candidate removal
                 // and configured model filters still take effect before this
                 // cache is considered.
                 cached_manifest.map(|manifest| manifest.value)
@@ -442,23 +502,32 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn set_codex_model_uses_responses_lite(&self, model: &str, enabled: bool) {
+    pub(crate) fn set_codex_model_uses_responses_lite(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        enabled: bool,
+    ) {
         let mut models = self
             .codex_responses_lite_models
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if enabled {
-            models.insert(model.to_ascii_lowercase());
+            models.insert((candidate_id.to_string(), model.to_ascii_lowercase()));
         } else {
-            models.remove(&model.to_ascii_lowercase());
+            models.remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
         }
     }
 
-    pub(crate) fn codex_model_uses_responses_lite(&self, model: &str) -> bool {
+    pub(crate) fn codex_model_responses_lite_candidates(&self, model: &str) -> Vec<String> {
+        let model = model.to_ascii_lowercase();
         self.codex_responses_lite_models
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&model.to_ascii_lowercase())
+            .iter()
+            .filter(|(_, candidate_model)| candidate_model == &model)
+            .map(|(candidate_id, _)| candidate_id.clone())
+            .collect()
     }
 
     pub(crate) fn remember_codex_model_manifest(
@@ -519,7 +588,7 @@ impl GatewayRuntime {
     pub(crate) fn stale_codex_model_manifests<'a>(
         &self,
         candidate_ids: impl IntoIterator<Item = &'a str>,
-    ) -> Vec<Value> {
+    ) -> Vec<(String, Value)> {
         let manifests = self
             .model_metadata
             .codex_manifests
@@ -527,8 +596,11 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         candidate_ids
             .into_iter()
-            .filter_map(|candidate_id| manifests.get(candidate_id))
-            .map(|manifest| manifest.value.clone())
+            .filter_map(|candidate_id| {
+                manifests
+                    .get(candidate_id)
+                    .map(|manifest| (candidate_id.to_string(), manifest.value.clone()))
+            })
             .collect()
     }
 
@@ -567,29 +639,41 @@ impl GatewayRuntime {
         key: &AuthenticatedKey,
         model: &str,
     ) -> bool {
+        !self.codex_model_chatgpt_account_ids(key, model).is_empty()
+    }
+
+    pub(crate) fn codex_model_chatgpt_account_ids(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Vec<String> {
         let Some(model) = self.resolve_model(key, model) else {
-            return false;
+            return Vec::new();
         };
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
-        self.chatgpt_accounts.values().any(|account| {
-            account
-                .configured_models
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(&model))
-                && scheduler.candidate(&account.id).is_some_and(|candidate| {
-                    candidate.is_configured(&model, &[WireApi::Responses], &scope)
-                })
-        })
+        self.chatgpt_accounts
+            .values()
+            .filter(|account| {
+                account
+                    .configured_models
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(&model))
+                    && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                        candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                    })
+            })
+            .map(|account| account.id.clone())
+            .collect()
     }
 
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
         self.source_candidate_bindings.keys().cloned().collect()
     }
 
-    pub fn confirmed_source_reasoning_levels(&self, model: &str) -> Vec<String> {
+    pub fn declared_source_reasoning_levels(&self, model: &str) -> Vec<String> {
         self.model_metadata
-            .confirmed_reasoning
+            .declared_reasoning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .levels
@@ -598,50 +682,20 @@ impl GatewayRuntime {
             .unwrap_or_default()
     }
 
-    pub fn confirmed_source_reasoning_declared_levels(&self, model: &str) -> Option<Vec<String>> {
+    pub fn source_declared_reasoning_levels(&self, model: &str) -> Option<Vec<String>> {
         let model = model.trim().to_ascii_lowercase();
-        let confirmed = self
+        let declared = self
             .model_metadata
-            .confirmed_reasoning
+            .declared_reasoning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        confirmed.levels.get(&model).cloned().or_else(|| {
-            confirmed
+        declared.levels.get(&model).cloned().or_else(|| {
+            declared
                 .empty_routes
                 .get(&model)
                 .filter(|routes| !routes.is_empty())
                 .map(|_| Vec::new())
         })
-    }
-
-    pub fn reasoning_probe_progress(&self, model: &str) -> Option<SourceReasoningProbeProgress> {
-        self.model_metadata
-            .confirmed_reasoning
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .probe_progress
-            .get(&model.trim().to_ascii_lowercase())
-            .cloned()
-    }
-
-    /// Returns a model's effective reasoning levels. A present empty policy
-    /// is an explicit user choice to disable every reported mode; without a
-    /// policy, provider-reported levels are enabled by default.
-    pub fn model_reasoning_allowed_levels(&self, model: &str) -> Vec<String> {
-        let configured = self
-            .model_reasoning_allowed_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(levels) = reasoning_policy_levels(&configured, model) {
-            return levels.to_vec();
-        }
-        drop(configured);
-        if let Some(confirmed) = self.confirmed_source_reasoning_declared_levels(model) {
-            return confirmed;
-        }
-        crate::known_model_reasoning_levels(model)
-            .map(|levels| levels.iter().copied().map(str::to_string).collect())
-            .unwrap_or_default()
     }
 
     pub(crate) fn model_reasoning_policy_levels(&self, model: &str) -> Option<Vec<String>> {
@@ -650,79 +704,6 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
-    }
-
-    pub fn model_reasoning_effort_is_allowed(&self, model: &str, effort: &str) -> bool {
-        let effort = effort.trim().to_ascii_lowercase();
-        self.model_reasoning_allowed_levels(model)
-            .iter()
-            .any(|level| level == &effort)
-    }
-
-    /// API-source reasoning is an operator-controlled experiment.  A selected
-    /// manual effort may reach every compatible route; a provider rejection is
-    /// handled by the ordinary safe pre-byte fallback path.
-    pub(crate) fn candidate_reasoning_effort_is_allowed(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        effort: &str,
-    ) -> bool {
-        if self.chatgpt_accounts.contains_key(candidate_id) {
-            return true;
-        }
-        let Some(binding) = self.source_candidate_bindings.get(candidate_id) else {
-            return false;
-        };
-        let effort = effort.trim().to_ascii_lowercase();
-        let configured = self
-            .model_reasoning_allowed_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(levels) = reasoning_policy_levels(&configured, model) {
-            let manual_effort_enabled = levels.iter().any(|level| level == &effort);
-            return manual_effort_enabled
-                && (binding.adapter.is_passthrough()
-                    || binding.reasoning_mode.supports_effort(&effort));
-        }
-        drop(configured);
-
-        // A confirmed route-specific declaration wins over the model fallback.
-        // This keeps provider-added efforts routable before an operator edits
-        // the manual company policy.
-        if binding.wire_api == WireApi::Responses {
-            let model = model.trim().to_ascii_lowercase();
-            let confirmed = self
-                .model_metadata
-                .confirmed_reasoning
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if confirmed
-                .efforts
-                .get(&model)
-                .and_then(|routes| routes.get(candidate_id))
-                .is_some_and(|levels| levels.contains(&effort))
-            {
-                return binding.adapter.is_passthrough()
-                    || binding.reasoning_mode.supports_effort(&effort);
-            }
-            if confirmed
-                .empty_routes
-                .get(&model)
-                .is_some_and(|routes| routes.contains(candidate_id))
-            {
-                return false;
-            }
-        }
-
-        if crate::known_model_reasoning_levels(model)
-            .is_some_and(|levels| levels.contains(&effort.as_str()))
-        {
-            return binding.adapter.is_passthrough()
-                || binding.reasoning_mode.supports_effort(&effort);
-        }
-
-        false
     }
 
     pub fn set_model_reasoning_allowed_levels(
@@ -737,4 +718,57 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = allowed_levels;
         Ok(())
     }
+}
+
+fn manifest_supports_fast_service_tier(manifest: &Value, model: &str) -> bool {
+    let Some(models) = manifest
+        .get("models")
+        .or_else(|| manifest.get("data"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    models.iter().any(|entry| {
+        let Some(object) = entry.as_object() else {
+            return false;
+        };
+        let id = object
+            .get("slug")
+            .or_else(|| object.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim);
+        if !id.is_some_and(|id| id.eq_ignore_ascii_case(model)) {
+            return false;
+        }
+        object
+            .get("service_tiers")
+            .and_then(Value::as_array)
+            .is_some_and(|tiers| {
+                tiers.iter().any(|tier| {
+                    tier.get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(is_fast_service_tier)
+                })
+            })
+            || object
+                .get("additional_speed_tiers")
+                .and_then(Value::as_array)
+                .is_some_and(|tiers| {
+                    tiers
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(is_fast_service_tier)
+                })
+            || object
+                .get("default_service_tier")
+                .and_then(Value::as_str)
+                .is_some_and(is_fast_service_tier)
+    })
+}
+
+fn is_fast_service_tier(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "fast" | "priority"
+    )
 }

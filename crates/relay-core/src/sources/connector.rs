@@ -58,6 +58,28 @@ impl SourceConnector {
         })
     }
 
+    /// Build the same connector below the conventional OpenAI `/v1` root.
+    /// This is used only after an explicit root `/models` request returned
+    /// 404; it is never a general URL guess for native non-OpenAI protocols.
+    pub(crate) fn with_appended_v1(&self, bindings: &[SourceProtocolBinding]) -> Option<Self> {
+        if self.base_url.path() != "/" {
+            return None;
+        }
+        let mut base_url = self.base_url.clone();
+        base_url.set_path("/v1/");
+        Some(Self {
+            id: self.id.clone(),
+            responses_url: base_url.join("responses").ok()?,
+            chat_completions_url: base_url.join("chat/completions").ok()?,
+            messages_url: base_url.join("messages").ok()?,
+            models_url: base_url.join("models").ok()?,
+            base_url,
+            bearer_authorization: self.bearer_authorization.clone(),
+            messages_api_key: self.messages_api_key.clone(),
+            protocol_bindings: bindings.to_vec(),
+        })
+    }
+
     pub fn authorization(&self, wire_api: WireApi) -> (HeaderName, HeaderValue) {
         match wire_api {
             WireApi::Messages => (
@@ -67,6 +89,10 @@ impl SourceConnector {
             WireApi::Responses | WireApi::ChatCompletions => {
                 (AUTHORIZATION, self.bearer_authorization.clone())
             }
+            WireApi::Gemini => (
+                HeaderName::from_static("x-goog-api-key"),
+                self.messages_api_key.clone(),
+            ),
         }
     }
 
@@ -286,5 +312,38 @@ mod tests {
         assert!(connector
             .endpoint(bindings[0].key(), "../not-a-model", false)
             .is_none());
+    }
+
+    #[test]
+    fn native_gemini_uses_the_same_upstream_contract_without_bridge_state() {
+        let bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Gemini,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["gemini-test".to_string()],
+        }];
+        let connector = SourceConnector::new(&source(), &bindings).unwrap();
+        let (name, value) = connector.authorization_for_binding(&bindings[0]);
+        assert_eq!(name, HeaderName::from_static("x-goog-api-key"));
+        assert_eq!(value, "source-secret");
+        assert_eq!(
+            bindings[0].adapter.upstream_protocol(bindings[0].wire_api),
+            UpstreamProtocol::GeminiGenerateContent
+        );
+        assert_eq!(
+            connector
+                .endpoint(bindings[0].key(), "gemini-test", false)
+                .unwrap()
+                .as_str(),
+            "https://api.example.test/v1/models/gemini-test:generateContent"
+        );
+        assert_eq!(
+            connector
+                .endpoint(bindings[0].key(), "gemini-test", true)
+                .unwrap()
+                .as_str(),
+            "https://api.example.test/v1/models/gemini-test:streamGenerateContent?alt=sse"
+        );
     }
 }

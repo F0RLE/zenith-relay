@@ -1,10 +1,7 @@
 use crate::accounts::{
     AccountAuthState, TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter,
 };
-use crate::catalog::{
-    normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities,
-    SourceReasoningProbeProgress,
-};
+use crate::catalog::{normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities};
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     AgentIdentityCredential, CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
@@ -14,10 +11,11 @@ use crate::scheduler::CooldownRequest;
 use crate::sources::{discover_models_with_client, is_loopback_url};
 use crate::ProxyConfig;
 use crate::{
-    decode_codex_model_alias, CacheWriteTtl, CandidateScope, Error, LocalGatewayKey,
-    MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore, PoolScheduler,
-    ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, SourceAdapter,
-    SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback, WireApi,
+    decode_codex_model_alias, is_valid_model_id, CacheWriteTtl, CandidateScope, Error,
+    LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore,
+    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
+    SourceAdapter, SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback,
+    WireApi,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 #[cfg(test)]
@@ -70,7 +68,6 @@ pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 pub(crate) struct CodexSourceModelMetadata {
     pub context_windows: BTreeMap<String, u64>,
     pub reasoning_catalog_templates: BTreeMap<String, Map<String, Value>>,
-    pub reasoning_probe_progress: BTreeMap<String, SourceReasoningProbeProgress>,
     pub image_models: BTreeSet<String>,
 }
 
@@ -84,6 +81,20 @@ fn source_candidate_id(
     }
     let suffix = binding.adapter.route_suffix(binding.wire_api);
     format!("{source_id}::{suffix}")
+}
+
+fn apply_model_display_order(models: &mut [String], saved_order: &[String]) {
+    let positions = saved_order
+        .iter()
+        .enumerate()
+        .map(|(position, model)| (model.to_ascii_lowercase(), position))
+        .collect::<BTreeMap<_, _>>();
+    models.sort_by_key(|model| {
+        positions
+            .get(&model.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 }
 
 fn source_reasoning_for_route(
@@ -104,7 +115,7 @@ fn source_reasoning_for_route(
     Some(capabilities)
 }
 
-fn confirmed_source_reasoning_levels(
+fn declared_source_reasoning_levels(
     efforts_by_model: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     previous_levels: &BTreeMap<String, Vec<String>>,
     preferred_levels: &BTreeMap<String, Vec<String>>,
@@ -255,6 +266,22 @@ pub enum DefaultServiceTier {
     Fast,
 }
 
+/// Normalizes the explicit per-model policy. Older configurations may omit a
+/// model, in which case the legacy pool default remains the fallback.
+pub fn normalize_model_service_tier_overrides(
+    overrides: BTreeMap<String, DefaultServiceTier>,
+) -> std::result::Result<BTreeMap<String, DefaultServiceTier>, &'static str> {
+    let mut normalized = BTreeMap::new();
+    for (model, tier) in overrides {
+        let model = model.trim();
+        if !is_valid_model_id(model) {
+            return Err("model service tier override has an invalid model id");
+        }
+        normalized.insert(model.to_ascii_lowercase(), tier);
+    }
+    Ok(normalized)
+}
+
 impl DefaultServiceTier {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -366,17 +393,18 @@ pub struct GatewayRuntime {
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
-    source_endpoint_domains: BTreeMap<String, String>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_availability: Arc<tokio::sync::Notify>,
     registry: ModelRegistry,
-    codex_responses_lite_models: Mutex<BTreeSet<String>>,
+    codex_responses_lite_models: Mutex<BTreeSet<(String, String)>>,
     websocket_http_only: Mutex<BTreeMap<(String, String), u64>>,
     model_metadata: SourceModelMetadataState,
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
+    model_display_order: Mutex<Vec<String>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
@@ -404,11 +432,10 @@ struct CachedModelManifest {
 }
 
 #[derive(Default)]
-struct ConfirmedSourceReasoning {
+struct DeclaredSourceReasoning {
     efforts: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     empty_routes: BTreeMap<String, BTreeSet<String>>,
     levels: BTreeMap<String, Vec<String>>,
-    probe_progress: BTreeMap<String, SourceReasoningProbeProgress>,
 }
 
 struct SourceModelMetadataState {
@@ -422,9 +449,11 @@ struct SourceModelMetadataState {
     refresh_lock: tokio::sync::Mutex<()>,
     prefetch_pending: AtomicBool,
     prefetch_not_before_ms: AtomicU64,
-    /// Confirmed source route -> effort support and its derived model-level
-    /// catalog. Native account metadata is intentionally kept out of this state.
-    confirmed_reasoning: Mutex<ConfirmedSourceReasoning>,
+    /// Source-declared effort metadata and its derived model-level catalog.
+    /// Native account metadata is intentionally kept out of this state. This
+    /// state is presentation metadata only; it is never request admission
+    /// evidence.
+    declared_reasoning: Mutex<DeclaredSourceReasoning>,
 }
 
 impl Default for SourceModelMetadataState {
@@ -435,7 +464,7 @@ impl Default for SourceModelMetadataState {
             refresh_lock: tokio::sync::Mutex::new(()),
             prefetch_pending: AtomicBool::new(false),
             prefetch_not_before_ms: AtomicU64::new(0),
-            confirmed_reasoning: Mutex::new(ConfirmedSourceReasoning::default()),
+            declared_reasoning: Mutex::new(DeclaredSourceReasoning::default()),
         }
     }
 }
@@ -787,7 +816,6 @@ impl GatewayRuntime {
             discovery_client,
             sources: source_parts.executors,
             source_candidate_bindings: source_parts.candidate_bindings,
-            source_endpoint_domains: source_parts.endpoint_domains,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
             keys: key_parts.runtime_keys,
@@ -798,6 +826,8 @@ impl GatewayRuntime {
             websocket_http_only: Mutex::new(BTreeMap::new()),
             model_metadata: SourceModelMetadataState::default(),
             model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
+            model_service_tier_overrides: Mutex::new(BTreeMap::new()),
+            model_display_order: Mutex::new(Vec::new()),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
@@ -961,13 +991,18 @@ impl GatewayRuntime {
     ) -> Vec<String> {
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
-        let models = self
+        let mut models = self
             .registry
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| key.model_rules.allows(model))
             .collect::<Vec<_>>();
-        crate::canonicalize_model_ids(models)
+        let order = self
+            .model_display_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        apply_model_display_order(&mut models, &order);
+        models
             .into_iter()
             .map(|model| match key.model_prefix.as_deref() {
                 Some(prefix) => format!("{prefix}/{model}"),
@@ -1048,9 +1083,9 @@ impl GatewayRuntime {
     ///
     /// Metadata is evaluated per eligible candidate route. A public model may
     /// have several source candidates behind it, so the catalog exposes the
-    /// union of efforts confirmed by at least one source. Discovery metadata
-    /// only informs the picker: source routing stays model-based because a
-    /// provider may support an effort without advertising it.
+    /// union of efforts declared by at least one source. Discovery metadata
+    /// only informs the picker: source routing stays model-based and request
+    /// admission never depends on reasoning metadata.
     pub(crate) async fn codex_source_model_metadata(
         &self,
         key: &AuthenticatedKey,
@@ -1244,26 +1279,6 @@ impl GatewayRuntime {
             .copied()
     }
 
-    /// Keeps a retry from fanning an endpoint-wide failure out to every
-    /// credential configured for that same source endpoint. Only the failed
-    /// candidate receives a cooldown; another credential remains eligible for
-    /// later requests in case the failure was credential-specific.
-    pub(crate) fn exclude_same_source_endpoint(
-        &self,
-        candidate_id: &str,
-        tried: &mut HashSet<String>,
-    ) {
-        let Some(endpoint) = self.source_endpoint_domains.get(candidate_id) else {
-            return;
-        };
-        tried.extend(
-            self.source_endpoint_domains
-                .iter()
-                .filter(|(_, candidate_endpoint)| *candidate_endpoint == endpoint)
-                .map(|(candidate_id, _)| candidate_id.clone()),
-        );
-    }
-
     pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
         self.default_service_tier_fast
             .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
@@ -1275,6 +1290,50 @@ impl GatewayRuntime {
         } else {
             DefaultServiceTier::Standard
         }
+    }
+
+    /// Applies only operator-selected Fast overrides. A client-supplied tier
+    /// still wins at the request boundary, and an unconfirmed upstream model
+    /// never receives a synthetic priority request.
+    pub fn set_model_service_tier_overrides(
+        &self,
+        overrides: BTreeMap<String, DefaultServiceTier>,
+    ) -> Result<()> {
+        let overrides = normalize_model_service_tier_overrides(overrides)
+            .map_err(|message| Error::Validation(message.to_string()))?;
+        *self
+            .model_service_tier_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = overrides;
+        Ok(())
+    }
+
+    pub(crate) fn model_service_tier_for_candidate(
+        &self,
+        candidate_id: &str,
+        model: &str,
+    ) -> DefaultServiceTier {
+        let requested_tier = self
+            .model_service_tier_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model.trim().to_ascii_lowercase())
+            .copied()
+            .unwrap_or_else(|| self.default_service_tier());
+        let requested_fast = requested_tier == DefaultServiceTier::Fast;
+        if requested_fast && self.candidate_supports_fast_service_tier(candidate_id, model) {
+            DefaultServiceTier::Fast
+        } else {
+            DefaultServiceTier::Standard
+        }
+    }
+
+    pub fn set_model_display_order(&self, models: Vec<String>) {
+        *self
+            .model_display_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::normalize_model_ids(models);
     }
 
     pub(crate) fn record_success_with_metrics(
@@ -1332,6 +1391,7 @@ fn all_native_wire_apis() -> Vec<WireApi> {
         WireApi::Responses,
         WireApi::ChatCompletions,
         WireApi::Messages,
+        WireApi::Gemini,
     ]
 }
 
@@ -1342,6 +1402,7 @@ fn client_wire_apis_to_native(client_wire_apis: &[ClientWireApi]) -> Vec<WireApi
             ClientWireApi::Responses => WireApi::Responses,
             ClientWireApi::ChatCompletions | ClientWireApi::Images => WireApi::ChatCompletions,
             ClientWireApi::Messages => WireApi::Messages,
+            ClientWireApi::Gemini => WireApi::Gemini,
         })
         .collect::<BTreeSet<_>>()
         .into_iter()

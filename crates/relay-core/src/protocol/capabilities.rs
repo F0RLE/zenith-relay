@@ -137,6 +137,7 @@ impl Capabilities {
                 WireApi::Responses,
                 WireApi::ChatCompletions,
                 WireApi::Messages,
+                WireApi::Gemini,
             ],
             supports_accounts: true,
             supports_sources: true,

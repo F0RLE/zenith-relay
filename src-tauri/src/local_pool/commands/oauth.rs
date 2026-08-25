@@ -35,7 +35,7 @@ use zenith_relay_core::{
         AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
         ModelDiscoveryFailureCode,
     },
-    quota::QuotaRefreshFailure,
+    quota::{QuotaRefreshFailure, SubscriptionStatus},
     ProxyConfig,
 };
 
@@ -58,15 +58,20 @@ struct InitialModelIssue {
 pub async fn start_codex_oauth(
     app: AppHandle,
     open_browser: Option<bool>,
+    account_id: Option<String>,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
+    let target_account_id = validate_oauth_target(&state, account_id.as_deref())?;
     let settings = state.store()?.gateway().clone();
     let proxy = common_proxy_config(&settings)?;
     ensure_account_proxy(&settings, proxy.as_ref())?;
     let oauth = CodexOAuthClient::new_with_proxy(proxy.as_ref()).map_err(oauth_error)?;
     let flow = state.oauth_flow();
-    let start = flow.start(&oauth).await.map_err(flow_error)?;
+    let start = flow
+        .start_for_account(&oauth, target_account_id.as_deref())
+        .await
+        .map_err(flow_error)?;
     let authorization_url = validated_authorization_url(&start)?;
     if open_browser.unwrap_or(true) && start.status == OAuthFlowStatus::Pending {
         // Browser launch is best effort; the returned URL is the manual fallback.
@@ -146,15 +151,44 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     let settings = state.store()?.gateway().clone();
     let common_proxy = common_proxy_config(&settings)?;
     ensure_account_proxy(&settings, common_proxy.as_ref())?;
-    let (checkpoint, encoded_checkpoint) =
+    let (checkpoint, encoded_checkpoint, target_account_id) =
         completion_checkpoint(&flow, login_id, now_ms, common_proxy.as_ref()).await?;
     let (old_accounts, old_keys) = current_accounts(state)?;
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = find_existing_account(
-        &old_accounts,
-        &credential_store,
-        &checkpoint.identity_hash(),
-    )?;
+    let existing = if let Some(target_account_id) = target_account_id.as_deref() {
+        let target = old_accounts
+            .iter()
+            .find(|account| account.account.id == target_account_id)
+            .ok_or_else(|| {
+                LocalPoolError::new(ErrorCode::NotFound, "OAuth target account was not found")
+            })?;
+        if target.remote_location.is_some() {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "OAuth target account is managed by a remote server",
+            ));
+        }
+        let stored_provider_id = credential_store
+            .load(target_account_id)
+            .map_err(credential_error)?
+            .and_then(|credentials| credentials.provider_account_id().map(str::to_string));
+        if stored_provider_id
+            .as_deref()
+            .is_some_and(|provider_id| provider_id != checkpoint.provider_account_id)
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "OAuth account does not match the selected local account",
+            ));
+        }
+        Some(target)
+    } else {
+        find_existing_account(
+            &old_accounts,
+            &credential_store,
+            &checkpoint.identity_hash(),
+        )?
+    };
     let local_account_id = existing
         .map(|account| account.account.id.clone())
         .unwrap_or_else(|| format!("account_{}", Uuid::new_v4().simple()));
@@ -213,7 +247,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         }
     }
     let previous_models = existing
-        .map(|account| account.models.clone())
+        .map(|account| account.effective_models().to_vec())
         .unwrap_or_default();
     let (models, model_issue) = match CodexModelsClient::new_with_proxy(proxy.as_ref()) {
         Ok(client) => match client
@@ -506,6 +540,32 @@ fn current_accounts(
     Ok((store.accounts().to_vec(), store.keys().to_vec()))
 }
 
+fn validate_oauth_target(
+    state: &DesktopState,
+    account_id: Option<&str>,
+) -> LocalResult<Option<String>> {
+    let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let store = state.store()?;
+    let account = store.account(account_id).ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::NotFound, "OAuth target account was not found")
+    })?;
+    if account.remote_location.is_some() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth target account is managed by a remote server",
+        ));
+    }
+    if account.account.source_id != CODEX_SOURCE_ID {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "OAuth target account is not a ChatGPT account",
+        ));
+    }
+    Ok(Some(account_id.to_string()))
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OAuthCompletionCheckpoint {
@@ -644,7 +704,7 @@ async fn completion_checkpoint<E>(
     login_id: &str,
     now_ms: u64,
     proxy: Option<&ProxyConfig>,
-) -> LocalResult<(OAuthCompletionCheckpoint, String)>
+) -> LocalResult<(OAuthCompletionCheckpoint, String, Option<String>)>
 where
     E: OAuthFlowEventSink,
 {
@@ -661,7 +721,7 @@ where
         .map_err(|_| completion_secret_error())?
         .ok_or_else(completion_secret_error)?;
     if let Some(checkpoint) = decode_completion_checkpoint(&stored, &start.login_id)? {
-        return Ok((checkpoint, stored));
+        return Ok((checkpoint, stored, start.target_account_id));
     }
     drop(stored);
 
@@ -677,7 +737,7 @@ where
     let checkpoint = OAuthCompletionCheckpoint::from_tokens(&start.login_id, tokens, now_ms)?;
     let encoded = encode_completion_checkpoint(&checkpoint)?;
     store_completion_checkpoint(&start.login_id, &encoded)?;
-    Ok((checkpoint, encoded))
+    Ok((checkpoint, encoded, start.target_account_id))
 }
 
 fn decode_completion_checkpoint(
@@ -809,10 +869,19 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.account.quota = current.account.quota.clone();
     next.purchase_cost_micro_usd = current.purchase_cost_micro_usd;
     next.remote_location = current.remote_location.clone();
+    let fresh_models = std::mem::take(&mut next.models);
+    next.models = current.models.clone();
+    next.discovered_models = if fresh_models.is_empty() {
+        current.discovered_models.clone()
+    } else {
+        Some(fresh_models)
+    };
     if next.account.subscription.plan_type.is_none() {
         next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
     }
-    if next.account.subscription.active_until_ms.is_none() {
+    if next.account.subscription.active_until_ms.is_none()
+        && current.account.subscription.status != SubscriptionStatus::Expired
+    {
         next.account.subscription.active_until_ms = current.account.subscription.active_until_ms;
     }
     next.allowed_models = current.allowed_models.clone();
@@ -982,6 +1051,7 @@ mod tests {
             redirect_uri: oauth.pending().redirect_uri().to_string(),
             expires_at_ms: oauth.pending().expires_at_ms(),
             status: OAuthFlowStatus::Pending,
+            target_account_id: None,
         };
         assert!(validated_authorization_url(&valid).is_ok());
 
@@ -1134,7 +1204,30 @@ mod tests {
         assert_eq!(next.purchase_cost_micro_usd, Some(42_000_000));
         assert!(next.cooldowns.is_empty());
         assert_eq!(next.consecutive_failures, 0);
-        assert_eq!(next.models, vec!["new-model"]);
+        assert_eq!(next.models, vec!["gpt-test"]);
+        assert_eq!(next.discovered_models, Some(vec!["new-model".into()]));
+        assert_eq!(next.effective_models(), ["new-model"]);
+    }
+
+    #[test]
+    fn reauth_does_not_restore_an_expired_subscription_date_without_new_metadata() {
+        let mut current = account("account_expired", "provider-account", "old-refresh");
+        current.account.subscription = zenith_relay_core::quota::Subscription::normalize(
+            zenith_relay_core::quota::SubscriptionInput {
+                plan_type: Some("plus".into()),
+                active_until_ms: Some(1_000),
+                forbidden: false,
+                observed_at_ms: 2_000,
+            },
+        );
+        let mut next = account("account_expired", "provider-account", "new-refresh");
+        preserve_existing_settings(&mut next, &current);
+
+        assert_eq!(next.account.subscription.active_until_ms, None);
+        assert_eq!(
+            next.account.subscription.status,
+            zenith_relay_core::quota::SubscriptionStatus::Active
+        );
     }
 
     #[test]

@@ -113,15 +113,15 @@ test("current profile import keeps setup on the connection step when an item fai
 });
 
 test("leaving the local connection step cancels a delayed current-profile preview before confirmation", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, importPreviewDelayMs: 250 });
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true, importPreviewDelayMs: 1_000 });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: /Import current profile/ }).click();
-  await expect(page.locator(".setup-current-profile-status")).toContainText("Importing current profile");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "preview_current_codex_account_import"))).toBe(true);
   await page.getByRole("button", { name: "Back" }).click();
   await expect(page.getByRole("heading", { name: "Where should Zenith Relay run?" })).toBeVisible();
-  await page.waitForTimeout(350);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "cancel_local_account_import"))).toBe(true);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
   expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["preview_current_codex_account_import", "cancel_local_account_import"]));
   expect(calls.map((call) => call.command)).not.toContain("confirm_local_account_import");

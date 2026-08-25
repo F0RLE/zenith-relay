@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, CreditCard, Gauge } from "lucide-react";
+import { Activity, CreditCard, Database, Gauge, Timer } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UsageBucket, UsageTotals } from "../../api/types";
 import { Tabs } from "../../components/Ui";
@@ -15,33 +15,38 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const hasAnalytics = analytics !== null;
   const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals);
+  const requestValues = buckets.map((totals) => totals.requests || null);
   const tokenValues = buckets.map((totals) => totals.totalTokens || null);
   const apiValues = buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null);
-  const speedValues = buckets.map((totals) => totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null);
+  const generationSpeedValues = buckets.map((totals) => totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null);
+  const e2eSpeedValues = buckets.map((totals) => totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null);
   const totals = analytics?.totals ?? emptyUsageTotals();
-  const averageSpeed = totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
+  const averageGenerationSpeed = totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
+  const averageE2eSpeed = totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
   const apiTotal = totals.apiEquivalent;
   const rangeTabs = [{ id: "today", label: t("overview.ranges.today") }, { id: "week", label: t("overview.ranges.week") }, { id: "month", label: t("overview.ranges.month") }];
 
   return <section className={`overview-analytics ${loading ? "loading" : ""} ${hasAnalytics ? "has-data" : ""}`} aria-busy={loading}>
-    <header className="overview-analytics-header"><div><h2>{t("overview.analytics")}</h2><p>{t("overview.analyticsHint")}</p></div><Tabs value={range} onChange={(value) => setRange(value as Range)} label={t("overview.period")} items={rangeTabs} /></header>
+    <header className="overview-analytics-header"><h2>{t("overview.analytics")}</h2><Tabs value={range} onChange={(value) => setRange(value as Range)} label={t("overview.period")} items={rangeTabs} /></header>
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
     <div className="overview-chart-stack">
-      <OverviewChart icon={<Activity aria-hidden />} title={t("overview.tokenUsage")} hint={t("overview.tokenUsageHint")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint", { count: new Intl.NumberFormat(locale).format(apiTotal.unpricedTokens) })} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.streamSpeed")} hint={t("overview.streamSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Activity aria-hidden />} title={t("usage.requests")} summary={formatCompactNumber(totals.requests, locale)} values={requestValues} windows={windows} variant="bars" tone="requests" formatValue={(value) => formatFullNumber(value, locale)} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Database aria-hidden />} title={t("overview.tokenUsage")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Gauge aria-hidden />} title={t("usage.generationSpeed")} summary={formatTokenSpeed(averageGenerationSpeed, locale, t("usage.tokensPerSecondUnit"))} values={generationSpeedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Timer aria-hidden />} title={t("usage.summaryMetrics.e2eSpeed")} summary={formatTokenSpeed(averageE2eSpeed, locale, t("usage.tokensPerSecondUnit"))} values={e2eSpeedValues} windows={windows} variant="line" tone="e2e-speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
     </div>
   </section>;
 }
 
-function OverviewChart({ icon, title, hint, summary, values, windows, variant, tone, formatValue, formatAxis, loading }: { icon: ReactNode; title: string; hint: string; summary: string; values: Array<number | null>; windows: WindowBucket[]; variant: "bars" | "line"; tone: string; formatValue: (value: number) => string; formatAxis: (value: number) => string; loading: boolean }) {
+function OverviewChart({ icon, title, summary, values, windows, variant, tone, formatValue, formatAxis, loading }: { icon: ReactNode; title: string; summary: string; values: Array<number | null>; windows: WindowBucket[]; variant: "bars" | "line"; tone: string; formatValue: (value: number) => string; formatAxis: (value: number) => string; loading: boolean }) {
   const { t } = useTranslation();
   const measured = values.filter((value): value is number => value != null);
   const max = Math.max(0, ...measured) || 1;
   const hasData = measured.some((value) => value > 0);
   const segments = lineSegments(values, max);
   return <article className={`overview-chart ${tone}`}>
-    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong><small>{hint}</small></span></div><strong className="overview-chart-summary">{loading ? "—" : summary}</strong></header>
+    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div><strong className="overview-chart-summary">{loading ? "—" : summary}</strong></header>
     <div className="overview-chart-body">
       <div className="overview-chart-y-axis" aria-hidden><span>{formatAxis(max)}</span><span>{formatAxis(max / 2)}</span><span>0</span></div>
       <div className="overview-chart-plot">

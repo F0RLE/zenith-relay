@@ -9,15 +9,10 @@ import type {
 
 export const sourceWireApis = [
   "responses",
-  "messages",
   "chat_completions",
+  "messages",
+  "gemini",
 ] as const satisfies readonly SourceWireApi[];
-
-const supportedMessagesReasoningModes: readonly MessagesReasoningMode[] = [
-  "disabled",
-  "budget",
-  "adaptive",
-];
 
 function isSourceWireApi(value: string): value is SourceWireApi {
   return sourceWireApis.includes(value as SourceWireApi);
@@ -37,13 +32,15 @@ export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter
 }
 
 export function normalizedReasoningMode(
-  binding: SourceProtocolBinding,
-  adapter = normalizedAdapter(binding),
+  _binding: SourceProtocolBinding,
+  adapter = normalizedAdapter(_binding),
 ): MessagesReasoningMode {
-  return adapter === "responses_to_messages"
-    && supportedMessagesReasoningModes.includes(binding.reasoningMode ?? "disabled")
-    ? binding.reasoningMode ?? "disabled"
-    : "disabled";
+  // Reasoning is selected by the client and constrained in Pool -> Model
+  // Rules. The source editor only chooses the wire adapter; a Messages bridge
+  // always uses the current upstream translation path for the requested
+  // effort. Keep accepting the legacy field on read, but do not expose it as
+  // a source-level policy.
+  return adapter === "responses_to_messages" ? "adaptive" : "disabled";
 }
 
 export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
@@ -148,7 +145,7 @@ export function runtimeSourceProtocolBindings(
   return [...bindings, {
     wireApi: "responses",
     adapter: "responses_to_messages",
-    reasoningMode: "disabled",
+    reasoningMode: "adaptive",
     cacheWriteTtl: "provider",
     modelIds: linkedModels,
   }];
@@ -181,6 +178,10 @@ export function sourceSupportsWireApi(
   wireApi: SourceWireApi,
 ) {
   return sourceModelsForWireApi(source, wireApi).length > 0;
+}
+
+export function sourceSupportsAnyWireApi(source: ProtocolBindingSource) {
+  return sourceWireApis.some((wireApi) => sourceSupportsWireApi(source, wireApi));
 }
 
 /**

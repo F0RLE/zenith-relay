@@ -1,14 +1,14 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
+import type { QuotaSnapshot, QuotaWindow } from "../api/types";
 import { accountErrorTranslationKey } from "../accountStatus";
-import { buildAccountValueProjection } from "../accountEconomics";
-import { formatAccountValueMicroUsd } from "../poolFormatting";
-import { formatDetailedRemainingTime, quotaWindowLabel } from "../quotaFormatting";
+import { formatDetailedRemainingTime, formatSupplementalQuotaLabel, isFastSupplementalQuota, quotaWindowLabel } from "../quotaFormatting";
 import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
+import type { FeedbackError } from "../state/feedback";
 
 export { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../quotaFormatting";
 
@@ -30,23 +30,6 @@ export function accountErrorLabel(code: string, t: TFunction) {
 export function AccountPlanBadge({ planType, unknown }: { planType: string | null; unknown: string }) {
   const plan = accountPlanOption(planType, unknown);
   return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
-}
-
-export function AccountValueStrip({ account }: { account: AccountSummary }) {
-  const { t, i18n } = useTranslation();
-  const locale = i18n.resolvedLanguage ?? i18n.language;
-  const { purchaseCostMicroUsd: purchaseCost, potential, payback, approximate } = buildAccountValueProjection(account.apiEquivalent, account.quota, account.purchaseCostMicroUsd);
-  const paybackTitle = purchaseCost == null
-    ? t("accounts.accountValue.purchaseMissing")
-    : t("accounts.accountValue.paybackHint", {
-      used: formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale),
-      purchase: formatAccountValueMicroUsd(purchaseCost, locale),
-    });
-  return <dl className="account-value-strip">
-    <div title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.accountValue.used")}</dt><dd>{formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale, approximate)}</dd></div>
-    <div title={t("accounts.accountValue.potentialHint")}><dt>{t("accounts.accountValue.potential")}</dt><dd>{potential == null ? "—" : formatAccountValueMicroUsd(potential.microUsd, locale, potential.approximate)}</dd></div>
-    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.accountValue.payback")}</dt><dd>{payback == null ? "—" : `${approximate ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
-  </dl>;
 }
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
@@ -106,7 +89,7 @@ function useTooltip<T extends HTMLElement>(label: string) {
   const pointerDown = useRef(false);
   const tooltipId = useId();
   const [visible, setVisible] = useState(false);
-  const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom" } | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom"; arrowLeft: number } | null>(null);
 
   const show = () => {
     setPosition(null);
@@ -132,9 +115,17 @@ function useTooltip<T extends HTMLElement>(label: string) {
       placement = "top";
       top = anchor.top - tooltip.offsetHeight - gap;
     }
-    const centered = anchor.left + anchor.width / 2 - tooltip.offsetWidth / 2;
+    const anchorCenter = anchor.left + anchor.width / 2;
+    const centered = anchorCenter - tooltip.offsetWidth / 2;
     const left = Math.max(margin, Math.min(centered, window.innerWidth - tooltip.offsetWidth - margin));
-    setPosition({ left, top, placement });
+    // Keep the arrow on the trigger even when the tooltip itself must be
+    // clamped inside the viewport.
+    const arrowInset = 8;
+    const arrowLeft = Math.max(
+      arrowInset,
+      Math.min(anchorCenter - left, tooltip.offsetWidth - arrowInset),
+    );
+    setPosition({ left, top, placement, arrowLeft });
   }, [label, visible]);
 
   useEffect(() => {
@@ -158,7 +149,11 @@ function useTooltip<T extends HTMLElement>(label: string) {
       role="tooltip"
       data-placement={position?.placement}
       data-positioned={Boolean(position)}
-      style={position ? { left: position.left, top: position.top } : undefined}
+      style={position ? {
+        left: position.left,
+        top: position.top,
+        "--relay-tooltip-arrow-left": `${position.arrowLeft}px`,
+      } as CSSProperties : undefined}
     >
       {label}
     </div>,
@@ -383,7 +378,7 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
 }
 
-export function Dialog({ title, children, onClose, footer, wide = false, className = "", closeOnBackdrop = false }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; closeOnBackdrop?: boolean }) {
+export function Dialog({ title, children, onClose, footer, wide = false, className = "", closeOnBackdrop = false, layer = "default" }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; closeOnBackdrop?: boolean; layer?: "default" | "top" }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
@@ -467,7 +462,32 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
       }
     };
   }, []);
-  return <div className="relay-modal-backdrop" role="presentation" onPointerDown={closeOnBackdrop ? (event) => { if (event.target === event.currentTarget) onClose(); } : undefined}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
+  return <div className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}`} role="presentation" onPointerDown={closeOnBackdrop ? (event) => { if (event.target === event.currentTarget) onClose(); } : undefined}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
+}
+
+export function ErrorDetailsDialog({ error, message, onClose }: { error: FeedbackError; message: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const details = JSON.stringify(error, null, 2);
+  const copyError = async () => {
+    try {
+      await copyText(details);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return <Dialog
+    title={t("feedback.errorDetails")}
+    onClose={onClose}
+    layer="top"
+    className="global-feedback-error-dialog"
+    footer={<div className="global-feedback-dialog-actions"><span className="global-feedback-dialog-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span><Button variant="secondary" icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</Button><Button variant="primary" onClick={onClose}>{t("common.close")}</Button></div>}
+  >
+    <div className="global-feedback-dialog-summary"><CircleAlert aria-hidden /><div><strong>{message}</strong><code>{error.code}</code></div></div>
+    <div className="config-preview global-feedback-error-json"><pre><code>{details}</code></pre></div>
+    <p className="form-note">{t("feedback.detailsHint")}</p>
+  </Dialog>;
 }
 
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
@@ -511,16 +531,20 @@ export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { wi
 
 export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: QuotaSnapshot; nowMs?: number; concise?: boolean }) {
   const { t } = useTranslation();
+  // Fast/priority is a request-speed mode, not a second user-facing quota.
+  // Keep the provider signal in the snapshot for diagnostics, but do not show
+  // it beside the primary and feature-specific quota windows.
+  const supplemental = (snapshot.supplemental ?? []).filter((item) => !isFastSupplementalQuota(item));
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => {
       const window = snapshot[kind];
       if (!window) return [];
-      return [{ id: kind, label: "", window }];
+      return [{ id: kind, label: "", serviceTier: undefined, window }];
     }),
-    ...(snapshot.supplemental ?? []),
+    ...supplemental,
   ];
   if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} concise={concise} /></div>;
-  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} concise={concise} />)}</div>;
+  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${formatSupplementalQuotaLabel(item.label, item.serviceTier, t)} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} concise={concise} />)}</div>;
 }
 
 export function SecretField({

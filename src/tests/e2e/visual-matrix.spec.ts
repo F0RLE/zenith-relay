@@ -202,7 +202,10 @@ for (const scenario of [
     await page.screenshot({ path: `output/playwright/api-picker-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
     await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-    await expect(dialog.locator(".source-route-format-heading.selected input")).toBeChecked();
+    await expect(dialog.locator(".source-add-adapters")).toBeVisible();
+    await expect(dialog.locator(".source-add-adapters")).not.toHaveAttribute("open", "");
+    await dialog.locator(".source-add-adapters > summary").click();
+    await expect(dialog.locator(".source-route-simple-options")).toBeVisible();
     const getKey = dialog.getByRole("button", { name: "Получить API-ключ" });
     await expect(getKey).toBeVisible();
     expect(await getKey.evaluate((button) => {
@@ -222,7 +225,7 @@ for (const scenario of [
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/api-openrouter-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
-    await dialog.getByRole("button", { name: "Изменить", exact: true }).click();
+    await dialog.getByRole("button", { name: "Назад", exact: true }).click();
     await dialog.getByRole("radio", { name: /Свой API/ }).click();
     const key = dialog.getByLabel("Ключ внешнего API");
     await key.focus();
@@ -333,7 +336,7 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await page.getByRole("tab", { name: "Месяц" }).click();
 
   const charts = page.locator(".overview-chart");
-  await expect(charts).toHaveCount(3);
+  await expect(charts).toHaveCount(5);
   expect(await charts.evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   const tokenPoint = charts.first().locator(".overview-chart-bar");
   await tokenPoint.hover();
@@ -342,7 +345,8 @@ test("overview analytics remain readable through the full scroll", async ({ page
 
   await charts.last().scrollIntoViewIfNeeded();
   await expect(charts.last().getByText("Скорость E2E", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Последние события" })).toBeVisible();
+  await expect(charts.last().locator(".overview-chart-title small")).toHaveCount(0);
+  await expect(page.locator(".activity-section")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/overview-analytics-lower-ru-dark-840x560.png" });
 });
 
@@ -429,8 +433,8 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await page.getByRole("button", { name: "Пул", exact: true }).click();
   await page.getByRole("tab", { name: "Правила моделей" }).click();
   const table = page.locator(".model-rules-table");
-  await expect(table.getByRole("columnheader")).toHaveCount(5);
-  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center", "center"]);
+  await expect(table.getByRole("columnheader")).toHaveCount(6);
+  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center", "center", "center"]);
   await expect(table.locator(".model-group-row").first()).toContainText("ChatGPT");
   await expect(table.locator(".model-group-row").nth(1)).toContainText("Anthropic");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
@@ -499,13 +503,59 @@ test("source prices are grouped by provider and Anthropic exposes cache TTLs", a
   await page.getByRole("tab", { name: "Источники API" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
-  await dialog.locator(".source-price-section > summary").click();
+  await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "Anthropic" }).click();
   await expect(dialog.getByText("Кэш запись 5 мин", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Кэш запись 1 ч", { exact: true })).toBeVisible();
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/source-pricing-groups-ru-dark-1280x900.png" });
+});
+
+test("source editor keeps each tab focused", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, mixedModels: true });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit source" });
+  await expect(dialog.getByRole("tab")).toHaveText(["General", "Models and formats", "Pricing"]);
+  await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("API address", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("New API key (optional)", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".source-price-section")).toHaveCount(0);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await dialog.locator(".relay-dialog-body").evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-editor-general-en-light-1160x760.png" });
+
+  await dialog.getByRole("tab", { name: "Models and formats" }).click();
+  await expect(dialog.locator(".source-route-matrix")).toBeVisible();
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(4);
+  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(2);
+  expect(await dialog.locator(".source-route-matrix").evaluate((element) => ({
+    fitsDialog: element.getBoundingClientRect().bottom <= element.closest("[data-relay-dialog]")!.getBoundingClientRect().bottom,
+  }))).toEqual({ fitsDialog: true });
+  await page.screenshot({ path: "output/playwright/source-editor-routes-en-light-1160x760.png" });
+  await page.setViewportSize({ width: 840, height: 560 });
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-editor-routes-en-light-840x560.png" });
+
+  await dialog.getByRole("tab", { name: "Pricing" }).click();
+  await expect(dialog.locator(".source-price-tab-status")).toHaveText("API prices in use");
+  await page.screenshot({ path: "output/playwright/source-editor-pricing-en-light-1160x760.png" });
+
+  await dialog.getByRole("tab", { name: "General" }).click();
+  await page.setViewportSize({ width: 840, height: 560 });
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+  })).toBe(true);
+  await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
+  await page.screenshot({ path: "output/playwright/source-editor-general-en-light-840x560.png" });
 });
 
 test("Claude model price uses the compact cache editor", async ({ page }) => {
@@ -937,6 +987,10 @@ for (const viewport of viewports) {
     await expect(accounts.locator(".account-card")).toHaveCount(4);
 
     await expect(accounts).toContainText("Pro account");
+    expect(await page.locator(".account-filter-menu .relay-option-trigger").evaluateAll((items) => items.every((item) => {
+      const label = item.querySelector<HTMLElement>("span");
+      return Boolean(label && item.getBoundingClientRect().width <= label.scrollWidth + 52);
+    }))).toBe(true);
     await page.mouse.move(1, 1);
     await page.screenshot({ path: `output/playwright/account-cards-en-light-${viewport.width}x${viewport.height}.png` });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -951,16 +1005,19 @@ for (const viewport of viewports) {
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     const meters = page.locator(".account-list .quota-meter");
-    await expect(meters).toHaveCount(5);
+    await expect(meters).toHaveCount(4);
     await expect(page.locator(".account-list")).toContainText("5 hours");
     await expect(page.locator(".account-list")).toContainText("Weekly");
     await expect(page.locator(".account-list")).toContainText("Code Review");
-    await expect(page.locator(".account-list")).toContainText("GPT-5.4 priority");
+    await expect(page.locator(".account-list")).not.toContainText("GPT-5.4 priority");
+    await expect(page.locator(".account-list")).not.toContainText("GPT-5.4 · Fast tier");
     expect(await meters.evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
-    expect(await meters.last().evaluate((item) => {
-      const current = item.getBoundingClientRect();
-      const first = item.parentElement?.firstElementChild?.getBoundingClientRect();
-      return Boolean(first && Math.abs(current.left - first.left) <= 1 && Math.abs(current.width - item.parentElement!.getBoundingClientRect().width) <= 1);
+    expect(await meters.evaluateAll((items) => {
+      const parent = items[0]?.parentElement?.getBoundingClientRect();
+      return Boolean(parent && items.every((item) => {
+        const current = item.getBoundingClientRect();
+        return current.left >= parent.left - 1 && current.right <= parent.right + 1;
+      }));
     })).toBe(true);
     await expect(page.locator(".quota-display-menu")).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/quota-windows-${viewport.width}x${viewport.height}.png` });
@@ -1687,9 +1744,9 @@ for (const scenario of [
       });
     }
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 5);
+    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 3);
     if (scenario.width === 1160) {
-      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(1);
+      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(2);
     }
     expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
     expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
@@ -1732,7 +1789,7 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Модели" }).click();
     const aggregate = page.locator(".usage-aggregate-table");
-    await expect(aggregate.getByRole("columnheader")).toHaveText(["Модель", "Запросы", "Входные токены", "Выходные токены", "Прочитано из кэша", "Оценка"]);
+    await expect(aggregate.getByRole("columnheader")).toHaveText(["Модель", "Запросы", "Входные токены", "Выходные токены", "Прочитано из кэша", "API-экв."]);
     expect(await aggregate.locator("th, td").evaluateAll((cells) => cells.every((cell) => cell.scrollWidth <= cell.clientWidth && cell.scrollHeight <= cell.clientHeight + 1))).toBe(true);
     expect(await aggregate.locator("xpath=..").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.screenshot({ path: `output/playwright/usage-models-ru-dark-${viewport.width}x${viewport.height}.png` });

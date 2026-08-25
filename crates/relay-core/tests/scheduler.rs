@@ -116,7 +116,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 }
 
 #[tokio::test]
-async fn public_models_follow_the_canonical_model_family_order() {
+async fn public_models_preserve_the_provider_model_order() {
     let (upstream, _) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway(
         vec![source(
@@ -145,22 +145,22 @@ async fn public_models_follow_the_canonical_model_family_order() {
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
         [
-            "gpt-5.6-sol",
-            "gpt-5.4-mini",
-            "gpt-image-2",
-            "vendor/claude-haiku-4-5",
-            "vendor/gemini-3.6-flash-low",
-            "vendor/grok-4.5",
-            "vendor/glm-5.2",
-            "vendor/glm-4.7",
             "private-second",
+            "vendor/grok-4.5",
+            "vendor/glm-4.7",
+            "vendor/gemini-3.6-flash-low",
+            "vendor/claude-haiku-4-5",
+            "gpt-image-2",
+            "gpt-5.4-mini",
+            "gpt-5.6-sol",
+            "vendor/glm-5.2",
             "private-first",
         ]
     );
 }
 
 #[tokio::test]
-async fn pool_injects_fast_default_without_overriding_client_service_tier() {
+async fn pool_does_not_inject_unconfirmed_fast_without_overriding_client_service_tier() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![source("source", &upstream, "source-key", &[MODEL], 0)],
@@ -203,7 +203,7 @@ async fn pool_injects_fast_default_without_overriding_client_service_tier() {
     assert_eq!(
         tiers,
         [
-            Some("priority"),
+            None,
             Some("fast"),
             Some("standard"),
             Some("flex"),
@@ -294,19 +294,18 @@ async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_sourc
 }
 
 #[tokio::test]
-async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_cooling_them() {
+async fn shared_endpoint_stabilizers_are_retried_before_last_reserve() {
     let (shared_endpoint, shared_state) = spawn_upstream(
         "shared-key",
-        vec![status_reply(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "shared-endpoint-down",
-            None,
-        )],
+        vec![
+            status_reply(StatusCode::SERVICE_UNAVAILABLE, "stabilizer-down", None),
+            response_reply("stabilizer-response", "stabilizer"),
+        ],
     )
     .await;
     let (independent_endpoint, independent_state) = spawn_upstream(
         "independent-key",
-        vec![response_reply("independent-response", "independent")],
+        vec![response_reply("must-not-run", "last-reserve")],
     )
     .await;
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -314,14 +313,14 @@ async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_coolin
     let runtime = Arc::new(
         GatewayRuntime::from_pool(
             vec![
-                source("source-a", &shared_endpoint, "shared-key", &[MODEL], 0),
-                source("source-a-copy", &shared_endpoint, "shared-key", &[MODEL], 0),
+                source("stabilizer-a", &shared_endpoint, "shared-key", &[MODEL], 20),
+                source("stabilizer-b", &shared_endpoint, "shared-key", &[MODEL], 10),
                 source(
-                    "source-independent",
+                    "last-reserve",
                     &independent_endpoint,
                     "independent-key",
                     &[MODEL],
-                    0,
+                    -1_000_000,
                 ),
             ],
             vec![local_key("key", LOCAL_KEY, None)],
@@ -338,17 +337,17 @@ async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_coolin
 
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[CACHE_CONTROL], "independent");
+    assert_eq!(response.headers()[CACHE_CONTROL], "stabilizer");
     assert_eq!(
         response.json::<Value>().await.unwrap()["id"],
-        "independent-response"
+        "stabilizer-response"
     );
-    assert_eq!(shared_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(independent_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(shared_state.requests.lock().unwrap().len(), 2);
+    assert!(independent_state.requests.lock().unwrap().is_empty());
     assert_eq!(events.lock().unwrap().len(), 2);
 
     let runtime_order = runtime.candidate_runtime_order();
-    let shared = ["source-a", "source-a-copy"]
+    let shared = ["stabilizer-a", "stabilizer-b"]
         .into_iter()
         .map(|candidate_id| {
             runtime_order
@@ -374,44 +373,40 @@ async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_coolin
     assert!(
         runtime_order
             .iter()
-            .find(|candidate| candidate.candidate_id == "source-independent")
+            .find(|candidate| candidate.candidate_id == "last-reserve")
             .unwrap()
             .available
     );
 }
 
 #[tokio::test]
-async fn oversized_five_xx_body_skips_duplicate_source_credentials_and_uses_an_independent_endpoint(
-) {
+async fn oversized_failure_retries_shared_endpoint_stabilizer_before_last_reserve() {
     let (shared_endpoint, shared_state) = spawn_upstream(
-        "shared-key-a",
-        vec![Reply::Oversized {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            cache_control: "shared-endpoint-down",
-        }],
+        "shared-key",
+        vec![
+            Reply::Oversized {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                cache_control: "stabilizer-down",
+            },
+            response_reply("stabilizer-response", "stabilizer"),
+        ],
     )
     .await;
     let (independent_endpoint, independent_state) = spawn_upstream(
         "independent-key",
-        vec![response_reply("independent-response", "independent")],
+        vec![response_reply("must-not-run", "last-reserve")],
     )
     .await;
     let (gateway, events) = spawn_gateway(
         vec![
-            source("source-a", &shared_endpoint, "shared-key-a", &[MODEL], 10),
+            source("stabilizer-a", &shared_endpoint, "shared-key", &[MODEL], 20),
+            source("stabilizer-b", &shared_endpoint, "shared-key", &[MODEL], 0),
             source(
-                "source-a-copy",
-                &shared_endpoint,
-                "shared-key-b",
-                &[MODEL],
-                0,
-            ),
-            source(
-                "source-independent",
+                "last-reserve",
                 &independent_endpoint,
                 "independent-key",
                 &[MODEL],
-                -10,
+                -1_000_000,
             ),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
@@ -421,23 +416,27 @@ async fn oversized_five_xx_body_skips_duplicate_source_credentials_and_uses_an_i
 
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[CACHE_CONTROL], "independent");
+    assert_eq!(response.headers()[CACHE_CONTROL], "stabilizer");
     assert_eq!(
         response.json::<Value>().await.unwrap()["id"],
-        "independent-response"
+        "stabilizer-response"
     );
 
     let shared_requests = shared_state.requests.lock().unwrap();
     assert_eq!(
         shared_requests.len(),
-        1,
-        "a retry must not spend another credential at the failed endpoint"
+        2,
+        "a failed stabilizer must leave the next stabilizer eligible"
     );
     assert_eq!(
         shared_requests[0].authorization.as_deref(),
-        Some("Bearer shared-key-a")
+        Some("Bearer shared-key")
     );
-    assert_eq!(independent_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        shared_requests[1].authorization.as_deref(),
+        Some("Bearer shared-key")
+    );
+    assert!(independent_state.requests.lock().unwrap().is_empty());
     assert_eq!(events.lock().unwrap().len(), 2);
 }
 
@@ -1336,7 +1335,7 @@ async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use()
 }
 
 #[tokio::test]
-async fn chat_completions_does_not_invent_manual_reasoning_levels() {
+async fn chat_completions_forwards_reasoning_without_admission_gate() {
     let (chat_server, state) = spawn_upstream("chat-key", Vec::new()).await;
     let mut chat_source = source("chat", &chat_server, "chat-key", &["chat-model"], 0);
     chat_source.source.wire_api = WireApi::ChatCompletions;
@@ -1352,7 +1351,7 @@ async fn chat_completions_does_not_invent_manual_reasoning_levels() {
     .await;
     let client = reqwest::Client::new();
 
-    let rejected = client
+    let low = client
         .post(format!("{}/v1/chat/completions", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -1363,14 +1362,9 @@ async fn chat_completions_does_not_invent_manual_reasoning_levels() {
         .send()
         .await
         .unwrap();
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        rejected.json::<Value>().await.unwrap()["error"]["code"],
-        "reasoning_effort_not_allowed"
-    );
-    assert!(state.requests.lock().unwrap().is_empty());
+    assert_eq!(low.status(), StatusCode::OK);
 
-    let also_rejected = client
+    let high = client
         .post(format!("{}/v1/chat/completions", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -1381,12 +1375,12 @@ async fn chat_completions_does_not_invent_manual_reasoning_levels() {
         .send()
         .await
         .unwrap();
-    assert_eq!(also_rejected.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        also_rejected.json::<Value>().await.unwrap()["error"]["code"],
-        "reasoning_effort_not_allowed"
-    );
-    assert!(state.requests.lock().unwrap().is_empty());
+    assert_eq!(high.status(), StatusCode::OK);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["reasoning_effort"], "low");
+    assert_eq!(requests[1].body["reasoning_effort"], "high");
 }
 
 #[tokio::test]
@@ -1585,7 +1579,7 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
 
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
-        ["gpt-5.4", "gpt-5.4-mini", "shared-model"]
+        ["gpt-5.4", "shared-model", "gpt-5.4-mini"]
     );
 
     let catalog: Value = reqwest::Client::new()
@@ -1610,8 +1604,8 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
         catalog_models,
         [
             zenith_relay_core::codex_model_alias("gpt-5.4"),
-            zenith_relay_core::codex_model_alias("gpt-5.4-mini"),
             zenith_relay_core::codex_model_alias("shared-model"),
+            zenith_relay_core::codex_model_alias("gpt-5.4-mini"),
         ]
     );
 

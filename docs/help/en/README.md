@@ -1,117 +1,129 @@
 <div align="center">
   <img src="../../../src-tauri/icons/128x128.png" width="96" alt="Zenith Relay">
-  <h1>Zenith Relay Documentation</h1>
+  <h1>Zenith Relay Help</h1>
   <p>English · <a href="../ru/README.md">Русский</a> · <a href="../../../README.md">Repository home</a></p>
 </div>
 
-Zenith Relay is a local-first desktop application for managing personal
-ChatGPT accounts and compatible API sources. It can expose an allowed live
-model set through one private OpenAI-compatible endpoint and attach that
-endpoint to ChatGPT/Codex through a reversible profile change.
+Zenith Relay is a desktop app for your own ChatGPT accounts and compatible API
+connections. It can place selected connections behind one private
+OpenAI-compatible endpoint and connect that endpoint to ChatGPT or Codex with
+a reversible profile change.
 
-## Start Here
+## Start here
 
-Each operating mode has its own complete guide:
-
-| Mode | Runtime | Guide |
+| Mode | Choose it when | Guide |
 | --- | --- | --- |
-| **This computer** | Personal pool and `/v1` endpoint run inside the desktop app. | [Open guide](this-computer.md) |
-| **Choose API** | ChatGPT connects directly to a selected compatible hosted API. | [Open guide](choose-api.md) |
-| **My server** | Personal pool runs on a Relay Server you operate. | [Open guide](my-server.md) |
+| **This computer** | The pool should run on this PC. | [Open guide](this-computer.md) |
+| **Choose API** | You already have a hosted API key. | [Open guide](choose-api.md) |
+| **My server** | You operate a Relay Server for continuous access. | [Open guide](my-server.md) |
 
-Use **This computer** first when testing personal accounts. Use **My server**
-only when the endpoint must continue after the desktop app closes. Use
-**Choose API** when an existing hosted API key is enough and no personal pool
-is required.
+Use **This computer** for the first personal-pool test. Use **My server** only
+when the server is yours and the local flow is understood. **Choose API** is a
+direct provider connection; it does not create a pool.
 
-## Install
+## Install and start
 
-Download the current platform package from
+Download the current package from
 [GitHub Releases](https://github.com/F0RLE/zenith-relay/releases/latest).
-Windows users should normally choose **Setup**; the portable EXE does not need
-installation. Linux releases include AppImage, DEB, and RPM packages. macOS
-releases include Intel and Apple Silicon DMG files.
+Windows normally uses **Setup**; the portable EXE needs a writable folder for
+in-place updates. Linux packages are AppImage, DEB, and RPM. macOS packages
+are DMGs for Intel and Apple Silicon.
 
-After the first launch, Quick Setup asks for the operating mode, connection,
-and client profile. When it finds an eligible existing ChatGPT sign-in,
-**Import current profile** adds it to the local pool and continues to client
-selection after a short confirmation. The same wizard can be restarted from
-**Help**.
+Quick Setup asks for a mode, a connection, and a client. **Import current
+profile** reuses an existing ChatGPT sign-in on this computer. You can run the
+wizard again from **Help**.
 
-## Application Sections
+## Sections
 
-- **Overview** shows runtime state, active capacity, balance/statistics where
-  available, and recent activity.
-- **Connections** stores ChatGPT sign-ins or imported sessions, compatible API
-  sources, proxies, and server management connection.
-- **Pool** controls enabled members, drain state, model rules, order, weight,
-  and routing strategy.
-- **API & ChatGPT** starts the personal endpoint and attaches the selected
-  endpoint to ChatGPT/Codex.
-- **Usage** shows request status, selected member, model, tokens, timing,
-  generation speed, and API-equivalent estimate without storing ordinary
-  prompt/response bodies. The full-request E2E speed is shown in **Overview**.
-- **Recovery** restores profile snapshots or removes Relay-managed settings
-  without overwriting unrelated user configuration.
-- **Help** renders the same localized mode guides stored in this repository.
+- **Overview**: current runtime, healthy capacity, provider statistics when
+  available, usage charts, and recent activity.
+- **Connections**: ChatGPT sign-ins, imported sessions, API sources, proxies,
+  quota automations, and the server management connection.
+- **Pool**: which connections may receive requests, model visibility, order,
+  weights, and routing policy.
+- **API & ChatGPT**: start or stop the private endpoint and attach ChatGPT or
+  Codex to it.
+- **Usage**: request status, model, selected connection, timing, token totals,
+  output speed, and the source of an error. Prompt and response text are not
+  stored.
+- **Recovery**: create and restore local ChatGPT profile snapshots.
+- **Settings**: language, theme, update check, data folder, backup reminder,
+  and local data reset.
 
-## Routing And Quota
+## Availability and quota
 
-Monitoring and routing are separate. An enabled account may still be checked
-outside the pool, while a routed account must be enabled, in the pool, healthy,
-not draining, credential-ready, proxy-ready, allowed for the requested model,
-and have usable quota.
+Relay only treats an automatically discovered model as provider/account
+availability. A manual source catalog is an explicit local assertion for a
+provider that does not expose `/models`; it is not independent proof that the
+provider accepts the model. A failed model check remains visible in the
+source/account status and, when there is no valid account catalog fallback, in
+Model Rules. It does not silently publish a guessed automatic model list.
+Quota windows and reset times also come from the provider; there is no
+universal five-hour or weekly formula.
 
-Quota windows come from provider evidence. Relay does not invent one fixed
-five-hour or weekly limit. A retry may use another eligible participant only
-before response bytes reach the client. Response and prompt affinity never
-force traffic onto an unavailable account.
+During an active local session, model catalogs are checked at startup and every
+eight hours. Quota refreshes are scheduled from provider reset times. Relay
+does not send separate requests to probe reasoning modes: the modes in Model
+Rules are catalog metadata or a manual allow-list.
 
-## Privacy And Recovery
+If a provider exposes a weekly reset credit, the account card shows
+**Reset weekly quota** and asks for Yes/No confirmation. Local
+**Connections → Automations** can run that reset automatically when the weekly
+window reaches zero. The provider must still report the credit as available.
 
-Desktop secrets use the operating-system credential store. A self-hosted
-server stores account secrets and its managed profile credential in the
-encrypted vault, while operational state lives in SQLite. The server
-management token and profile credential are separate and must never be
-exchanged.
+Account cards show **API equiv. used** for priced Relay usage and optional
+purchase cost payback. If Relay has complete priced usage from the start of the
+current provider quota window, the card also shows **API equiv. left**: an
+approximate remaining amount based on that window's Relay usage and the
+provider-reported percentage. It excludes activity outside Relay and is hidden
+when the window, pricing, or usage record is incomplete. Provider quota itself
+is still a percentage and reset time, not money or a billing value.
 
-Keep the server behind HTTPS, keep its vault key outside the data-directory
-backup, and test a restore before depending on it. Relay redacts credentials,
-cookies, authorization headers, prompts, and account identities from normal
-diagnostics and usage records; the same rule applies to snapshots, telemetry,
-exports, screenshots, and ordinary server management API responses.
+**Pool → Request speed** controls the provider service tier. **Standard** keeps
+the client/provider choice. **Fast** is shown only when the current upstream
+catalog explicitly confirms `fast` or `priority` for that model. It requests
+the `priority` tier on that concrete route; a dash means that the tier is not
+confirmed, not that the model is unavailable. Fast does not select a different
+model or change pool order. The provider may still apply the standard tier.
+Fast is a request-speed mode, not a second user-facing quota, so account cards
+show the primary windows and feature-specific limits rather than a separate
+Fast meter.
 
-Zenith Relay is separate from the production Zenith Gateway and Control API. It
+### Protocols and adapters
+
+`Native` keeps the selected client and provider wire contracts unchanged.
+Responses clients can use the explicit `Responses → Messages` or
+`Responses → Gemini` bridges when the source is configured for those routes.
+Messages uses the provider's `/v1/messages` contract; Gemini uses its native
+`generateContent`/`streamGenerateContent` contract. A bridge converts the
+request and response, while a native route passes them through. The source's
+model-to-format assignments decide which route can receive a model; a
+`/models` response alone does not prove every protocol.
+
+## Privacy
+
+This is a personal product, separate from Zenith Gateway and Control API. Relay
 does not receive production credentials, customer keys, backend tokens,
-account-pool inventory, or internal production routing/business logic. A
-user-owned provider/session secret may leave this computer only after an
-explicit confirmation that targets a server operated by that same user. It is
-never an implicit upload to Zenith, and documentation examples use placeholders.
+production account inventory, or internal billing/routing logic.
 
-## Screenshots
+Desktop secrets stay in the operating system credential store. A secret moves
+to a server only after you explicitly select and confirm a server you operate.
+Operational diagnostics, snapshots, screenshots, support bundles, and usage
+records are redacted: they do not contain raw credentials, cookies,
+authorization headers, prompts, or provider response bodies.
 
-<p align="center">
-  <img src="../../screenshots/overview.png" width="49%" alt="Overview">
-  <img src="../../screenshots/connections.png" width="49%" alt="Connections">
-</p>
-<p align="center">
-  <img src="../../screenshots/pool.png" width="49%" alt="Pool">
-  <img src="../../screenshots/usage.png" width="49%" alt="Usage">
-</p>
+**Account export is intentionally different.** It is a credential-bearing file
+for an explicit account transfer and may contain OAuth access, refresh, and
+identity tokens. Treat it as a secret, use it only for the intended import, and
+delete it afterwards.
 
-## Current Limits
+## Before asking for help
 
-- ChatGPT is the only shipped subscription-account connector.
-- **This computer** stops when the desktop process stops.
-- **My server** still requires the live production acceptance listed in the
-  roadmap before it should be called production-ready.
-- Multi-server distributed leases and cross-server prompt affinity are not
-  implemented.
-- Additional account systems and client integrations require a permitted,
-  reversible, tested authentication/configuration path.
+Open the affected card or request and read the status and **Error source**.
+**Provider** means the upstream service rejected the request; **Account** means
+the sign-in or route needs attention; **Relay** means local configuration or
+protocol handling needs attention. Copy only the sanitized error details from
+the error dialog.
 
-For implementation boundaries read [PLANNING.md](../../../PLANNING.md). For
-unfinished work read [ROADMAP.md](../../../ROADMAP.md). Development and release
-checks are in [CONTRIBUTING.md](../../../CONTRIBUTING.md).
-
-License: [GNU AGPL v3.0 only](../../../LICENSE).
+The complete product boundary and unfinished acceptance work are in
+[PLANNING.md](../../../PLANNING.md) and [ROADMAP.md](../../../ROADMAP.md).

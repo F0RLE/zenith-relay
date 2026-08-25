@@ -16,7 +16,7 @@ import {
   writeRelayPreference,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
-import { RelayContext, type Feedback, type RelayContextValue } from "./relayStateContext";
+import { RelayContext, type Feedback, type PerformOptions, type RelayContextValue } from "./relayStateContext";
 import {
   ERROR_FEEDBACK_TIMEOUT_MS,
   ROUTING_REFRESH_INTERVAL_MS,
@@ -362,7 +362,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     };
   }, [page]);
 
-  const perform = useCallback(async (id: string, work: () => Promise<unknown>, successKey?: string) => {
+  const perform = useCallback(async (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => {
     const revision = ++operationRevision.current;
     setBusy(id);
     setFeedback(null);
@@ -377,7 +377,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       if (revision !== operationRevision.current) return false;
       const code = typeof error === "object" && error && "code" in error ? String(error.code) : "general";
       const key = i18n.exists(`errors.${code}`) ? `errors.${code}` : "errors.general";
-      setFeedback({ kind: "error", key, error: sanitizeFeedbackError(error, code, t(key)) });
+      const diagnostic = sanitizeFeedbackError(error, code, t(key));
+      options?.onError?.(diagnostic, key);
+      if (options?.reportError !== false) {
+        setFeedback({ kind: "error", key, error: diagnostic });
+      }
       return false;
     } finally {
       if (revision === operationRevision.current) setBusy(null);

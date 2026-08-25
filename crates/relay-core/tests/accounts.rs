@@ -822,6 +822,113 @@ async fn pool_catalog_combines_native_metadata_from_each_available_account() {
 }
 
 #[tokio::test]
+async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
+    let mut first_catalog = default_upstream_model_catalog();
+    first_catalog["models"][0]["display_name"] = Value::String("GPT First Account".into());
+    first_catalog["models"][0]["default_reasoning_level"] = Value::String("low".into());
+    first_catalog["models"][0]["supported_reasoning_levels"] = json!([
+        {"effort": "low", "description": "First low"}
+    ]);
+    first_catalog["models"][0]["use_responses_lite"] = false.into();
+    first_catalog["models"][0]["supports_parallel_tool_calls"] = false.into();
+
+    let mut second_catalog = default_upstream_model_catalog();
+    second_catalog["models"][0]["display_name"] = Value::String("GPT Second Account".into());
+    second_catalog["models"][0]["default_reasoning_level"] = Value::String("high".into());
+    second_catalog["models"][0]["supported_reasoning_levels"] = json!([
+        {"effort": "high", "description": "Second high"},
+        {"effort": "xhigh", "description": "Second extra high"}
+    ]);
+    second_catalog["models"][0]["use_responses_lite"] = true.into();
+    second_catalog["models"][0]["supports_parallel_tool_calls"] = true.into();
+
+    let (first_upstream, first_state) =
+        spawn_upstream_with_catalog(Vec::new(), first_catalog).await;
+    let (second_upstream, second_state) =
+        spawn_upstream_with_catalog(Vec::new(), second_catalog).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let url = format!(
+        "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+        gateway.base_url
+    );
+    let client = reqwest::Client::new();
+
+    let first: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let first_model = first["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(first_model["display_name"], "GPT First Account");
+    assert_eq!(first_model["default_reasoning_level"], "low");
+    assert_eq!(
+        first_model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(first_model["use_responses_lite"], false);
+    assert_eq!(first_model["supports_parallel_tool_calls"], false);
+
+    // If the first account is temporarily unreachable, the stale manifest is
+    // retained only for that account and cannot overwrite the live second
+    // account's native metadata.
+    drop(first_upstream);
+    let second: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_model = second["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(second_model["display_name"], "GPT Second Account");
+    assert_eq!(second_model["default_reasoning_level"], "high");
+    assert_eq!(
+        second_model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(second_model["use_responses_lite"], true);
+    assert_eq!(second_model["supports_parallel_tool_calls"], true);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_catalogs() {
     let (first_upstream, first_state) =
         spawn_upstream_with_catalog(Vec::new(), json!({"models": []})).await;
@@ -1789,7 +1896,10 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
     assert_eq!(requests[0]["parallel_tool_calls"], true);
-    assert_eq!(requests[0]["service_tier"], "priority");
+    // Fast is only synthesized after a route's catalog confirms priority.
+    // This WebSocket-only fixture has no model discovery request, so the
+    // standard tier remains implicit.
+    assert!(requests[0]["service_tier"].is_null());
     assert_eq!(requests[1]["service_tier"], "flex");
     assert_eq!(requests[1]["reasoning"]["effort"], "high");
     assert_eq!(requests[1]["reasoning"]["summary"], "detailed");

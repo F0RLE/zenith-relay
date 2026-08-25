@@ -1,14 +1,11 @@
 import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useState } from "react";
-import { Activity, Bot, CreditCard, SlidersHorizontal, TrendingUp, X } from "lucide-react";
+import { Bot, SlidersHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
-import { buildAccountValueProjection } from "../../accountEconomics";
+import type { ErrorOrigin, ReasoningEffort, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
-import { formatAccountValueMicroUsd } from "../../poolFormatting";
-import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
-import { formatTokenSpeed, measureTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
-import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
+import { formatTokenSpeed, tokenSpeed } from "../../usageSpeed";
+import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
   CONNECTION_COLUMN_IDS,
   ERROR_COLUMN_IDS,
@@ -27,49 +24,8 @@ import {
   type RequestColumnId,
   type RequestTableLayout,
 } from "./useColumnLayout";
-
-export type UsageRow = {
-  id: string | number;
-  time: string;
-  success: boolean;
-  model: string | null;
-  requestedReasoningEffort: ReasoningEffort | null;
-  effectiveReasoningEffort: ReasoningEffort | null;
-  connection: string;
-  wireApi: string | null;
-  serviceTier: DefaultServiceTier | null;
-  appliedServiceTier: DefaultServiceTier | null;
-  ttft: number | null;
-  generationMs: number | null;
-  duration: number;
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  cacheWriteInputTokens: number | null;
-  cacheWriteTtl: Exclude<CacheWriteTtl, "provider"> | null;
-  reasoningTokens: number | null;
-  outputTokens: number | null;
-  tokens: number | null;
-  requestId: string | null;
-  httpStatus: number | null;
-  errorCategory: string | null;
-  errorOrigin: ErrorOrigin | null;
-  toolUse: ToolUseDiagnostics | null;
-  routing: RoutingDiagnostics | null;
-  accountId: string | null;
-  candidateKind: "account" | "source";
-  apiEquivalent: UsageTotals["apiEquivalent"] | null;
-  requestOrigin: CodexRequestOrigin;
-};
-
-export type CodexRequestOrigin = "activity_summary" | "task_title" | "blocked_activity_summary" | "blocked_task_title" | null;
-
-export function codexRequestOriginFromErrorCategory(category: string | null): CodexRequestOrigin {
-  if (category === "codex_activity_summary") return "activity_summary";
-  if (category === "codex_task_title") return "task_title";
-  if (category === "codex_background_blocked_activity_summary") return "blocked_activity_summary";
-  if (category === "codex_background_blocked_task_title") return "blocked_task_title";
-  return null;
-}
+import { totalsFromRows, usageSpeedSample, type CodexRequestOrigin, type UsageRow } from "./usageData";
+import { formatUsageApiEquivalent } from "./usageFormatting";
 
 export function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setModelQuery, connectionQuery, poolMemberOptions, setConnectionQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; modelOptions: Array<{ value: string; label: string }>; setModelQuery: (value: string) => void; connectionQuery: string; poolMemberOptions: Array<{ value: string; label: string }>; setConnectionQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t } = useTranslation();
@@ -85,7 +41,7 @@ export function RequestsView({ rows, status, setStatus, modelQuery, modelOptions
     </div>
     <div className="usage-filter-controls">{hasFilters ? <IconButton label={t("usage.clearFilters")} icon={<X aria-hidden />} onClick={clearFilters} /> : null}<span className="usage-filter-toggle-wrap"><IconButton className="usage-filter-toggle" label={t("usage.moreFilters")} icon={<SlidersHorizontal aria-hidden />} aria-expanded={showMoreFilters} onClick={() => setShowMoreFilters((current) => !current)} />{secondaryCount ? <small>{secondaryCount}</small> : null}</span></div>
     {showMoreFilters ? <div className="usage-filters usage-filter-secondary">
-      <OptionMenu className="filter-option-menu" label={t("usage.protocol")} value={wireApi} onChange={setWireApi} options={[{ value: "", label: t("usage.anyProtocol") }, { value: "responses", label: "Responses" }, { value: "messages", label: "Messages" }, { value: "chat_completions", label: "Chat Completions" }]} />
+      <OptionMenu className="filter-option-menu" label={t("usage.protocol")} value={wireApi} onChange={setWireApi} options={[{ value: "", label: t("usage.anyProtocol") }, { value: "responses", label: "Responses" }, { value: "messages", label: "Messages" }, { value: "chat_completions", label: "Chat Completions" }, { value: "gemini", label: "Gemini" }]} />
       <OptionMenu className="filter-option-menu" label={t("usage.errorCategory")} value={errorQuery} onChange={setErrorQuery} options={errorOptions} />
       <input value={requestQuery} onChange={(event) => setRequestQuery(event.target.value)} aria-label={t("usage.requestId")} placeholder={t("usage.requestId")} />
     </div> : null}
@@ -108,9 +64,9 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
-    speed: { label: t("usage.generationSpeedShort"), cell: (row) => <SpeedValue value={tokenSpeed(rowSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
+    speed: { label: t("usage.generationSpeedShort"), cell: (row) => <SpeedValue value={tokenSpeed(usageSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
-    equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
+    equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
   };
   const resized = REQUEST_COLUMN_IDS.every((id) => layout.widths[id] != null);
@@ -161,10 +117,6 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
   </table></div>;
 }
 
-export function UsageMetric({ icon, label, value, detail, title, className }: { icon?: ReactNode; label: string; value: ReactNode; detail?: ReactNode; title?: string; className?: string }) {
-  return <div className={className} title={title}>{icon}<div className="usage-metric-copy"><span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div></div>;
-}
-
 function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
   return `${formatDurationMs(ttft, locale, t)} / ${formatDurationMs(duration, locale, t)}`;
 }
@@ -207,7 +159,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
     input: { label: t("usage.inputTokens"), cell: (group) => <CompactNumber value={group.inputTokens} locale={i18n.language} /> },
     output: { label: t("usage.outputTokens"), cell: (group) => <CompactNumber value={group.outputTokens} locale={i18n.language} /> },
     cache: { label: t("usage.cachedInputTokens"), cell: (group) => group.cachedInputSamples ? <CompactNumber value={group.cachedInputTokens} locale={i18n.language} /> : "—" },
-    equivalent: { label: t("usage.value"), cell: (group) => formatApiEquivalent(group.apiEquivalent, i18n.language) },
+    equivalent: { label: t("usage.value"), cell: (group) => formatUsageApiEquivalent(group.apiEquivalent, i18n.language) },
   };
   if (!aggregateRows.length) return <EmptyState title={t("usage.emptyTitle")} description={empty} />;
   return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table usage-sortable-table">
@@ -244,7 +196,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   const [section, setSection] = useState<"overview" | "tokens" | "tools" | "route">("overview");
   const routing = row.routing;
   const toolUse = row.toolUse;
-  const speed = rowSpeedSample(row);
+  const speed = usageSpeedSample(row);
   const generationSpeed = tokenSpeed(speed);
   const visibleOutputTokens = row.outputTokens == null ? null : Math.max(0, row.outputTokens - (row.reasoningTokens ?? 0));
   const toolWarning = Boolean(
@@ -298,7 +250,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       {row.cacheWriteInputTokens != null ? <div><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{row.cacheWriteInputTokens}{row.cacheWriteTtl ? ` (${t(`usage.cacheWriteTtls.${row.cacheWriteTtl}`)})` : ""}</dd></div> : null}
       <div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>
+      <div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>
     </dl> : null}
     {section === "tools" && toolUse ? <section className="request-details-section">
       <dl className="request-details-list">
@@ -375,13 +327,17 @@ function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTi
   if (!row.serviceTier) return fallback;
   const requested = t(`pool.serviceTiers.${row.serviceTier}`);
   if (!row.appliedServiceTier || row.appliedServiceTier === row.serviceTier) return requested;
-  return `${requested} → ${t(`pool.serviceTiers.${row.appliedServiceTier}`)}`;
+  return t("usage.serviceTierChanged", {
+    requested,
+    applied: t(`pool.serviceTiers.${row.appliedServiceTier}`),
+  });
 }
 
 function formatWireApi(value: string | null, t: TFunction): string {
   if (value === "responses") return t("usage.protocols.responses");
   if (value === "messages") return t("usage.protocols.messages");
   if (value === "chat_completions") return t("usage.protocols.chatCompletions");
+  if (value === "gemini") return t("usage.protocols.gemini");
   return value ?? "—";
 }
 
@@ -400,53 +356,6 @@ function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction
 
 function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
   return t(`usage.terminalOutputs.${output}`);
-}
-
-function rowSpeedSample(row: UsageRow): TokenSpeedSample {
-  return { success: row.success, outputTokens: row.outputTokens, reasoningTokens: row.reasoningTokens, durationMs: row.generationMs };
-}
-
-export function totalsFromRows(rows: UsageRow[]): UsageTotals {
-  return rows.reduce<UsageTotals>((totals, row) => {
-    const outputTokens = row.success ? Math.max(0, row.outputTokens ?? 0) : 0;
-    totals.requests += 1;
-    totals.successfulRequests += Number(row.success);
-    totals.latencyMs += row.duration;
-    if (row.ttft != null) {
-      totals.ttftMs += row.ttft;
-      totals.ttftSamples += 1;
-    }
-    const generation = measureTokenSpeed(rowSpeedSample(row));
-    if (generation) {
-      totals.generationMs += generation.durationMs;
-      totals.generationSamples += 1;
-      totals.generationOutputTokens += generation.outputTokens;
-    }
-    totals.inputTokens += row.inputTokens ?? 0;
-    if (row.cachedInputTokens != null) {
-      totals.cachedInputTokens += row.cachedInputTokens;
-      totals.cachedInputSamples += 1;
-    }
-    if (row.cacheWriteInputTokens != null) {
-      totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + row.cacheWriteInputTokens;
-      totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1;
-    }
-    totals.reasoningTokens += row.reasoningTokens ?? 0;
-    totals.outputTokens += row.outputTokens ?? 0;
-    totals.totalTokens += row.tokens ?? 0;
-    if (outputTokens > 0 && row.duration > 0) {
-      totals.speedOutputTokens += outputTokens;
-      totals.speedDurationMs += row.duration;
-    }
-    if (row.apiEquivalent) {
-      totals.apiEquivalent.microUsd += row.apiEquivalent.microUsd;
-      totals.apiEquivalent.pricedTokens += row.apiEquivalent.pricedTokens;
-      totals.apiEquivalent.unpricedTokens += row.apiEquivalent.unpricedTokens;
-    } else {
-      totals.apiEquivalent.unpricedTokens += row.tokens ?? 0;
-    }
-    return totals;
-  }, emptyUsageTotals());
 }
 
 function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
@@ -481,41 +390,4 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
 
 export function CompactNumber({ value, locale }: { value: number; locale: string }) {
   return <span title={formatFullNumber(value, locale)}>{formatCompactNumber(value, locale)}</span>;
-}
-
-export function formatApiEquivalent(value: UsageTotals["apiEquivalent"], locale: string) {
-  if (!value.pricedTokens && value.unpricedTokens) return "-";
-  const amount = new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  }).format(value.microUsd / 1_000_000);
-  return `≈${amount}`;
-}
-
-export function AccountUsageSummary({ account, totals }: { account: AccountSummary; totals: UsageTotals }) {
-  const { t, i18n } = useTranslation();
-  const locale = i18n.resolvedLanguage ?? i18n.language;
-  const nowMs = Date.now();
-  const { purchaseCostMicroUsd: purchaseCost, potential, payback, approximate } = buildAccountValueProjection(totals.apiEquivalent, account.quota, account.purchaseCostMicroUsd);
-  const paybackTitle = purchaseCost == null
-    ? t("accounts.accountValue.purchaseMissing")
-    : t("accounts.accountValue.paybackHint", {
-      used: formatAccountValueMicroUsd(totals.apiEquivalent.microUsd, locale),
-      purchase: formatAccountValueMicroUsd(purchaseCost, locale),
-    });
-  const windows = (["primary", "secondary"] as const)
-    .map((kind) => ({ kind, quota: account.quota[kind] }))
-    .filter(({ quota }) => Boolean(quota));
-  return <section className="usage-account-value" aria-label={t("usage.accountUsage", { account: account.label })}>
-    <header><div><span>{t("usage.selectedAccount")}</span><strong>{account.label}</strong></div><details><summary>{t("usage.howCalculated")}</summary><p>{t("usage.calculationHint")}</p></details></header>
-    <div className="usage-account-metrics">
-      <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.used")} value={formatApiEquivalent(totals.apiEquivalent, locale)} title={t("accounts.accountValue.usedHint", { count: totals.apiEquivalent.unpricedTokens })} />
-      <UsageMetric icon={<TrendingUp aria-hidden />} label={t("accounts.accountValue.potential")} value={potential == null ? "—" : formatAccountValueMicroUsd(potential.microUsd, locale, potential.approximate)} title={t("accounts.accountValue.potentialHint")} />
-      <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.purchaseCost")} value={purchaseCost == null ? "—" : formatAccountValueMicroUsd(purchaseCost, locale)} detail={purchaseCost == null ? t("accounts.accountValue.purchaseMissing") : undefined} />
-      <UsageMetric icon={<Activity aria-hidden />} label={t("accounts.accountValue.payback")} value={payback == null ? "—" : `${approximate ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`} title={paybackTitle} />
-    </div>
-    {windows.length ? <div className="relay-table-wrap"><table className="relay-table usage-window-table"><thead><tr><th>{t("usage.window")}</th><th>{t("usage.remaining")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{windows.map(({ kind, quota }) => <tr key={kind}><th scope="row">{formatWindowDuration(quota?.windowMinutes ?? null, locale, t("usage.window"))}</th><td>{formatQuotaRemaining(quota?.availableBasisPoints ?? null, locale)}</td><td>{quota?.resetAtMs == null ? "—" : formatDetailedRemainingTime(quota.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div> : null}
-  </section>;
 }

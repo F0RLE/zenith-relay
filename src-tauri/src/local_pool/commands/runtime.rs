@@ -64,7 +64,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
         ..
     } = state.runtime_inputs().await?;
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
-    // The managed ChatGPT/Codex profile has one strict Responses-only pool.
+    // The managed profile can expose every verified source protocol. Requests
+    // still select only the protocol they actually use at the gateway edge.
     let (pool_source_ids, pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
     let mut sources = Vec::new();
@@ -125,6 +126,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
                 .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
         }
         let operational = runtime_account_operational_state(&account.account, current_time_ms());
+        let models = account.effective_models().to_vec();
         // Candidate `enabled` represents base configuration availability.
         // Quota remains a separate scheduler decision for every request and
         // model-list response. Do not fold a temporary exhausted quota into
@@ -137,7 +139,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
-            models: account.models,
+            models,
             enabled: candidate_enabled,
             draining: account.account.draining,
             priority: account.priority,
@@ -175,6 +177,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
             ClientWireApi::Responses,
             ClientWireApi::Messages,
             ClientWireApi::ChatCompletions,
+            ClientWireApi::Gemini,
         ]),
     }];
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
@@ -228,6 +231,10 @@ pub(in crate::local_pool) async fn runtime_from_store(
     .map_err(core_error)?;
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
+    runtime
+        .set_model_service_tier_overrides(settings.model_service_tier_overrides)
+        .map_err(core_error)?;
+    runtime.set_model_display_order(settings.model_display_order);
     runtime.set_protected_candidate(
         protected_account_id.as_deref(),
         settings.chatgpt_interface_quota_reserve_basis_points,
@@ -551,7 +558,17 @@ pub(in crate::local_pool) async fn fail_closed(
 }
 
 pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
+    let message = error.to_string();
+    let code = match &error {
+        zenith_relay_core::Error::Upstream(_)
+        | zenith_relay_core::Error::UpstreamBodyTooLarge
+        | zenith_relay_core::Error::UpstreamStatus(_)
+        | zenith_relay_core::Error::InvalidUpstreamResponse(_) => ErrorCode::SourceTestFailed,
+        zenith_relay_core::Error::Validation(_) | zenith_relay_core::Error::UnsupportedWireApi => {
+            ErrorCode::InvalidState
+        }
+    };
+    LocalPoolError::new(code, message)
 }
 
 #[cfg(test)]

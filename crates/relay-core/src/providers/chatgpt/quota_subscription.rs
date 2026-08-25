@@ -166,16 +166,36 @@ pub fn merge_subscription_metadata(
     active_until_ms: &mut Option<u64>,
     metadata: CodexSubscriptionMetadata,
 ) {
-    if crate::quota::subscription_plan_changed(plan_type.as_deref(), metadata.plan_type.as_deref())
-        && metadata.active_until_ms.is_none()
-    {
+    merge_subscription_metadata_at(plan_type, active_until_ms, metadata, None);
+}
+
+pub fn merge_subscription_metadata_at(
+    plan_type: &mut Option<String>,
+    active_until_ms: &mut Option<u64>,
+    metadata: CodexSubscriptionMetadata,
+    observed_at_ms: Option<u64>,
+) {
+    let plan_changed = crate::quota::subscription_plan_changed(
+        plan_type.as_deref(),
+        metadata.plan_type.as_deref(),
+    );
+    if plan_changed && metadata.active_until_ms.is_none() {
         *active_until_ms = None;
     }
     if metadata.plan_type.is_some() {
-        *plan_type = metadata.plan_type;
+        *plan_type = metadata.plan_type.clone();
     }
     if metadata.active_until_ms.is_some() {
         *active_until_ms = metadata.active_until_ms;
+    } else if metadata.plan_type.is_some()
+        && !plan_changed
+        && observed_at_ms.is_some_and(|now_ms| {
+            active_until_ms.is_some_and(|active_until_ms| active_until_ms <= now_ms)
+        })
+    {
+        // A successful probe that confirms the same plan but no longer
+        // returns the old expiry must not leave a stale Expired state.
+        *active_until_ms = None;
     }
 }
 
@@ -519,6 +539,26 @@ mod tests {
             assert_eq!(plan_type.as_deref(), Some(observed));
             assert_eq!(active_until_ms, None);
         }
+    }
+
+    #[test]
+    fn refreshed_same_plan_without_expiry_drops_a_past_expiry() {
+        let mut plan_type = Some("plus".to_string());
+        let mut active_until_ms = Some(1_000);
+
+        merge_subscription_metadata_at(
+            &mut plan_type,
+            &mut active_until_ms,
+            CodexSubscriptionMetadata {
+                account_id: None,
+                plan_type: Some("plus".into()),
+                active_until_ms: None,
+            },
+            Some(2_000),
+        );
+
+        assert_eq!(plan_type.as_deref(), Some("plus"));
+        assert_eq!(active_until_ms, None);
     }
 
     #[tokio::test]

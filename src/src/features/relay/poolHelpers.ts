@@ -11,7 +11,7 @@ import {
   compareSubscriptionPlanPriority,
   type ApiSourceRole,
 } from "./routingOrder";
-import { groupModels } from "./modelGroups";
+import { groupModels, modelProviderGroup, modelProviderGroupLabel } from "./modelGroups";
 
 export type PoolMember =
   | (AccountSummary & { kind: "account" })
@@ -121,8 +121,9 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
       reasoningSupportedLevels: model.reasoningSupportedLevels ?? [],
       reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
       reasoningConfigurable: model.reasoningConfigurable ?? false,
-      reasoningProbeAvailable: model.reasoningProbeAvailable ?? false,
-      reasoningProbe: model.reasoningProbe,
+      speedSupported: model.speedSupported ?? false,
+      speedTier: model.speedTier ?? "standard",
+      speedConfigurable: model.speedConfigurable ?? false,
     }));
   }
 
@@ -146,8 +147,9 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
     reasoningSupportedLevels: [],
     reasoningAllowedLevels: [],
     reasoningConfigurable: false,
-    reasoningProbeAvailable: false,
-    reasoningProbe: undefined,
+    speedSupported: false,
+    speedTier: "standard",
+    speedConfigurable: false,
   }));
 }
 
@@ -163,6 +165,38 @@ export function groupModelSummariesForLauncher(
     (model) => model.id,
     (model) => chatGptModelIds.has(model.id.toLowerCase()),
   );
+}
+
+/** Rules editor ordering is operator-owned. Keep the catalog order supplied by
+ * the backend instead of applying launcher presentation sorting. */
+export function groupModelSummariesForRules(
+  models: ModelSummary[],
+  accounts: AccountSummary[],
+) {
+  const nativeIds = new Set(
+    accounts.flatMap((account) => account.models.map((model) => model.toLowerCase())),
+  );
+  const groups = new Map<string, ModelSummary[]>();
+  for (const model of models) {
+    const id = modelProviderGroup(model.id, nativeIds.has(model.id.toLowerCase()));
+    const items = groups.get(id);
+    if (items) items.push(model);
+    else groups.set(id, [model]);
+  }
+  const groupOrder = (id: string) => {
+    if (id === "chatgpt") return 0;
+    if (id === "openai") return 1;
+    if (id === "anthropic") return 2;
+    if (id.startsWith("provider-")) return 3;
+    return 4;
+  };
+  return [...groups.entries()]
+    .sort(([left], [right]) => groupOrder(left) - groupOrder(right))
+    .map(([id, items]) => ({
+      id,
+      label: modelProviderGroupLabel(id as Parameters<typeof modelProviderGroupLabel>[0]),
+      items,
+    }));
 }
 
 export function comparePoolMembers(

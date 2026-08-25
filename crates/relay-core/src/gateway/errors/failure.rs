@@ -164,20 +164,6 @@ pub(crate) fn retryable_failure(
         )
 }
 
-/// A shared endpoint is unlikely to recover by retrying an equivalent API
-/// credential in the same request. Keep that retry budget for an independent
-/// endpoint and avoid cooling credentials that were never attempted.
-pub(crate) fn failure_requires_independent_source_endpoint(
-    status: StatusCode,
-    category: &str,
-) -> bool {
-    status.is_server_error()
-        || matches!(
-            category,
-            "upstream_request_timeout" | "upstream_transport_timeout"
-        )
-}
-
 pub(crate) fn failure_category_requires_cooldown(category: &str) -> bool {
     !matches!(
         category,

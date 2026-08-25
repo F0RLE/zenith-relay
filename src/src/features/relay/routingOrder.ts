@@ -16,9 +16,10 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
     const separator = candidate.candidateId.indexOf("::");
     if (separator > 0) {
       const sourceId = candidate.candidateId.slice(0, separator);
-      // Pool requests use the Responses contract. A Messages-only route must
-      // not move an API card ahead of its actual Responses route.
-      if (isResponsesCandidate(candidate.candidateId) && !positions.has(sourceId)) positions.set(sourceId, index);
+      // A source card represents all of its protocol candidates. Use the
+      // first live route as its stable position; request admission still
+      // filters the selected candidate by the caller's wire API.
+      if (!positions.has(sourceId)) positions.set(sourceId, index);
     }
   }
   return positions;
@@ -32,7 +33,7 @@ export function runtimeCandidateForMember(
   kind: "api_source" | "oauth_account",
   order: CandidateRuntimeSnapshot[],
   protocol: "responses" | "all" = "all",
-  legacyWireApi?: "responses" | "chat_completions" | "messages",
+  legacyWireApi?: "responses" | "chat_completions" | "messages" | "gemini",
 ): CandidateRuntimeSnapshot | undefined {
   const candidates = order.filter((candidate) => candidate.kind === kind && (
     kind === "oauth_account"
@@ -59,7 +60,7 @@ export function runtimeCandidateForMember(
   };
 }
 
-function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" | "chat_completions" | "messages") {
+function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" | "chat_completions" | "messages" | "gemini") {
   const separator = candidateId.indexOf("::");
   if (separator < 0) return legacyWireApi == null || legacyWireApi === "responses";
   const suffix = candidateId.slice(separator + 2);

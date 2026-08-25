@@ -364,6 +364,7 @@ pub(super) fn parse_wire_api(value: &str) -> WireApi {
     match value {
         "chat_completions" => WireApi::ChatCompletions,
         "messages" => WireApi::Messages,
+        "gemini" => WireApi::Gemini,
         _ => WireApi::Responses,
     }
 }

@@ -25,7 +25,6 @@ pub(super) enum ReachabilityRequirement {
 pub(super) struct SourceRuntimeParts {
     pub(super) executors: BTreeMap<String, SourceConnector>,
     pub(super) candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
-    pub(super) endpoint_domains: BTreeMap<String, String>,
     pub(super) recovery_delays_ms: BTreeMap<String, u64>,
 }
 
@@ -83,7 +82,6 @@ pub(super) fn build_sources(
 ) -> Result<SourceRuntimeParts> {
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
-    let mut endpoint_domains = BTreeMap::new();
     let mut recovery_delays_ms = BTreeMap::new();
     for source in sources {
         source.source.validate()?;
@@ -105,8 +103,6 @@ pub(super) fn build_sources(
             source.source.wire_api,
             &source.source.models,
         )?;
-        let source_endpoint_domain =
-            crate::sources::normalized_base_url(&source.source.base_url)?.to_string();
         let source_id = source.source.id.clone();
         let connector = SourceConnector::new(&source.source, &bindings)?;
         let rules = model_rules(&source.allowed_models, &source.excluded_models);
@@ -121,7 +117,6 @@ pub(super) fn build_sources(
                     "source protocol candidate ids must be unique".to_string(),
                 ));
             }
-            endpoint_domains.insert(candidate_id.clone(), source_endpoint_domain.clone());
             let candidate = RuntimeCandidate {
                 id: candidate_id.clone(),
                 kind: CandidateKind::ApiSource,
@@ -168,7 +163,6 @@ pub(super) fn build_sources(
     Ok(SourceRuntimeParts {
         executors,
         candidate_bindings,
-        endpoint_domains,
         recovery_delays_ms,
     })
 }

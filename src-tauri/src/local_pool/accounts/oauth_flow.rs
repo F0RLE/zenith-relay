@@ -65,6 +65,8 @@ pub struct OAuthFlowStart {
     pub redirect_uri: String,
     pub expires_at_ms: u64,
     pub status: OAuthFlowStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_account_id: Option<String>,
 }
 
 impl fmt::Debug for OAuthFlowStart {
@@ -189,9 +191,21 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub async fn start(&self, oauth: &CodexOAuthClient) -> Result<OAuthFlowStart, OAuthFlowError> {
+        self.start_for_account(oauth, None).await
+    }
+
+    pub async fn start_for_account(
+        &self,
+        oauth: &CodexOAuthClient,
+        target_account_id: Option<&str>,
+    ) -> Result<OAuthFlowStart, OAuthFlowError> {
         let now_ms = now_ms();
         for snapshot in load_snapshots(&self.inner.root)? {
+            if snapshot.target_account_id.as_deref() != target_account_id {
+                continue;
+            }
             if snapshot.pending.expires_at_ms() <= now_ms {
                 self.inner.cleanup(&snapshot.login_id)?;
                 continue;
@@ -238,6 +252,7 @@ where
             authorization_url: start.authorization_url().to_string(),
             callback_secret_ref: callback_secret_ref(&login_id),
             status: OAuthFlowStatus::Pending,
+            target_account_id: target_account_id.map(str::to_string),
             pending: start.into_pending(),
         };
         write_snapshot(&self.inner.root, &snapshot)?;
@@ -516,6 +531,8 @@ struct PendingSnapshot {
     authorization_url: String,
     callback_secret_ref: String,
     status: OAuthFlowStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_account_id: Option<String>,
     pending: OAuthPendingSession,
 }
 
@@ -527,6 +544,7 @@ impl PendingSnapshot {
             redirect_uri: self.pending.redirect_uri().to_string(),
             expires_at_ms: self.pending.expires_at_ms(),
             status: self.status,
+            target_account_id: self.target_account_id.clone(),
         }
     }
 }
@@ -1131,6 +1149,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn targeted_reauth_survives_oauth_flow_resume() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
+        let root = test_root("targeted-reauth");
+        let manager =
+            OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
+        let start = manager
+            .start_for_account(&CodexOAuthClient::new().unwrap(), Some("account_local"))
+            .await
+            .unwrap();
+        assert_eq!(start.target_account_id.as_deref(), Some("account_local"));
+        manager.shutdown().await;
+
+        let resumed = manager.resume(&start.login_id).await.unwrap();
+        assert_eq!(resumed.target_account_id.as_deref(), Some("account_local"));
+        manager.cancel(&start.login_id).await.unwrap();
+        remove_root(&root);
+    }
+
+    #[tokio::test]
     async fn cancel_removes_snapshot_and_releases_callback_port() {
         let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("cancel");
@@ -1204,6 +1241,7 @@ mod tests {
             authorization_url,
             callback_secret_ref: callback_secret_ref(&login_id),
             status: OAuthFlowStatus::Pending,
+            target_account_id: None,
             pending,
         };
         validate_snapshot(&snapshot, &login_id).unwrap();

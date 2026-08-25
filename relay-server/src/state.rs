@@ -80,6 +80,15 @@ impl SourceRecord {
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
         Ok(!self.models_for_wire_api(wire_api)?.is_empty())
     }
+
+    pub fn supports_any_wire_api(&self) -> Result<bool, String> {
+        for wire_api in WireApi::ALL {
+            if self.supports_wire_api(wire_api)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -97,6 +106,10 @@ pub struct ServerAccountRecord {
     pub auth_state: AccountAuthState,
     pub health: AccountHealthState,
     pub models: Vec<String>,
+    /// Last successful upstream discovery. The imported/configured `models`
+    /// list is the stable baseline and is never replaced by a refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_models: Option<Vec<String>>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub priority: i32,
@@ -115,6 +128,15 @@ pub struct ServerAccountRecord {
     pub proxy_id: Option<String>,
     #[serde(default)]
     pub bypass_common_proxy: bool,
+}
+
+impl ServerAccountRecord {
+    pub fn effective_models(&self) -> &[String] {
+        self.discovered_models
+            .as_deref()
+            .filter(|models| !models.is_empty())
+            .unwrap_or(&self.models)
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]

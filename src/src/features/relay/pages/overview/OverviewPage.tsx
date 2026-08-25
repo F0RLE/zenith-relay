@@ -3,7 +3,7 @@ import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, RefreshCw, 
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { LocalUsage, RemoteUsage, SourceStats, SourceSummary, UsageBucket, UsageTotals } from "../../api/types";
-import { Button, EmptyState, OptionMenu, PageHeader, StatusIcon } from "../../components/Ui";
+import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
@@ -13,8 +13,7 @@ const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
 type Range = "today" | "week" | "month";
 type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
 type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
-type ActivityItem = { id: number; success: boolean; model: string | null; latencyMs: number };
-type OverviewData = { analytics: Analytics; activity: ActivityItem[] };
+type OverviewData = { analytics: Analytics };
 type UsageSample = {
   createdAtMs: number;
   success: boolean;
@@ -54,7 +53,6 @@ export function OverviewPage() {
   const windowEndMs = windows[windows.length - 1].endMs;
   const usageScope = `${mode}:${range}:${windowStartMs}:${windowEndMs}`;
   const analytics = overviewData?.analytics ?? null;
-  const activity = overviewData?.activity ?? [];
   const running = Boolean(runtime?.gateway.running);
 
   useEffect(() => {
@@ -103,8 +101,8 @@ export function OverviewPage() {
     setAnalyticsLoading(true);
     const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS };
     const request = mode === "local"
-      ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows), activity: page.events.map(activityFromUsage) }))
-      : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows), activity: page.events.map(activityFromUsage) } : null);
+      ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows) }))
+      : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) } : null);
     request
       .then((result) => {
         if (!active) return;
@@ -138,7 +136,7 @@ export function OverviewPage() {
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
     {!running && !runtime ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
-      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}<section className="activity-section"><header><h2>{t("overview.activity")}</h2><Button variant="ghost" onClick={() => setPage("usage")}>{t("overview.viewUsage")}</Button></header>{activity.length ? <ul>{activity.map((item) => <li key={item.id}><StatusIcon status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /><code>{item.model ?? "-"}</code><span>{item.latencyMs} ms</span></li>)}</ul> : <p className="muted">{t("usage.empty")}</p>}</section>
+      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}
     </>}
   </section>;
 }
@@ -255,10 +253,6 @@ function localSamples(events: LocalUsage[]): UsageSample[] {
 
 function remoteSamples(events: RemoteUsage[]): UsageSample[] {
   return events.map((item) => ({ ...item, ttftMs: item.ttftMs ?? null, generationMs: item.generationMs ?? null }));
-}
-
-function activityFromUsage(item: LocalUsage | RemoteUsage): ActivityItem {
-  return { id: item.id, success: item.success, model: item.resolvedModel ?? item.requestedModel, latencyMs: item.latencyMs };
 }
 
 function sourceHost(value: string) {

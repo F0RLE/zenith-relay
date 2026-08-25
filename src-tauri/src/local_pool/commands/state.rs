@@ -4,7 +4,7 @@ use crate::local_pool::{
         proxy::{common_proxy_available, effective_proxy_config, proxy_status},
     },
     error::CommandError,
-    models::{LocalAccountRecord, LocalPoolSnapshot, ProviderSourceRecord},
+    models::{GatewaySettings, LocalAccountRecord, LocalPoolSnapshot, ProviderSourceRecord},
     state::DesktopState,
 };
 use crate::platform;
@@ -12,14 +12,16 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    account_operational_state, apply_model_reasoning_summary, model_has_api_source_route,
-    model_has_native_account_route, operational_status, pool_model_summaries,
-    pooled_source_runtime_available, source_runtime_available, AccountOperationalInput,
-    AccountSummary, Capabilities, GatewaySummary, OperationalStatus, RuntimeStateSnapshot,
-    RuntimeTargetSummary, SourceSummary,
+    account_operational_state, apply_model_display_order, apply_model_reasoning_summary,
+    apply_model_speed_summary, model_has_api_source_route, model_has_native_account_route,
+    operational_status, pool_model_summaries, pooled_source_runtime_available,
+    source_runtime_available, AccountOperationalInput, AccountSummary, Capabilities,
+    GatewaySummary, OperationalStatus, QuotaWindowUsage, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourceSummary, UsageQuery,
 };
 use zenith_relay_core::{
-    unix_time_ms, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, WireApi,
+    quota::{QuotaSnapshot, QuotaWindowKind},
+    unix_time_ms, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
     QUOTA_STALE_AFTER_MS,
 };
 
@@ -44,29 +46,55 @@ pub async fn get_local_runtime_state(
         .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
+    let source_price_overrides = inputs
+        .sources
+        .iter()
+        .map(|source| {
+            let mut prices = BTreeMap::new();
+            for model in source
+                .model_price_overrides
+                .keys()
+                .chain(source.detected_model_prices.keys())
+            {
+                prices.entry(model.clone()).or_insert_with(|| {
+                    zenith_relay_core::ApiModelPriceSources {
+                        provider: source.detected_model_prices.get(model).copied(),
+                        manual: source.model_price_overrides.get(model).copied(),
+                    }
+                });
+            }
+            (source.id.clone(), prices)
+        })
+        .collect::<BTreeMap<_, _>>();
     let equivalents = state.telemetry.api_equivalents_with_price_overrides(
         &inputs.gateway.model_price_overrides,
-        &inputs
-            .sources
-            .iter()
-            .map(|source| {
-                let mut prices = BTreeMap::new();
-                for model in source
-                    .model_price_overrides
-                    .keys()
-                    .chain(source.detected_model_prices.keys())
-                {
-                    prices.entry(model.clone()).or_insert_with(|| {
-                        zenith_relay_core::ApiModelPriceSources {
-                            provider: source.detected_model_prices.get(model).copied(),
-                            manual: source.model_price_overrides.get(model).copied(),
-                        }
-                    });
-                }
-                (source.id.clone(), prices)
-            })
-            .collect::<BTreeMap<_, _>>(),
+        &source_price_overrides,
     )?;
+    let mut quota_window_usages = BTreeMap::new();
+    for record in &inputs.accounts {
+        let Some((kind, window_start_ms)) = quota_window_usage_window(&record.account.quota) else {
+            continue;
+        };
+        let usage = state.telemetry.usage_page_with_price_overrides(
+            &UsageQuery {
+                page: 1,
+                page_size: 1,
+                from_ms: Some(window_start_ms),
+                source_or_account_query: Some(record.account.id.clone()),
+                ..UsageQuery::default()
+            },
+            &inputs.gateway.model_price_overrides,
+            &source_price_overrides,
+        )?;
+        quota_window_usages.insert(
+            record.account.id.clone(),
+            QuotaWindowUsage {
+                kind,
+                window_start_ms,
+                api_equivalent: usage.totals.api_equivalent,
+            },
+        );
+    }
     let source_summaries = inputs
         .sources
         .iter()
@@ -99,19 +127,22 @@ pub async fn get_local_runtime_state(
         .map(|record| {
             local_account_summary(
                 record,
-                &inputs.gateway,
-                inputs
-                    .account_credentials
-                    .get(&record.account.id)
-                    .and_then(Option::as_ref),
-                common_proxy_available,
-                equivalents
-                    .accounts
-                    .get(&record.account.id)
-                    .copied()
-                    .unwrap_or_default(),
-                snapshot_at_ms,
-                state.quota_refresh_in_flight(&record.account.id)?,
+                LocalAccountSummaryContext {
+                    settings: &inputs.gateway,
+                    credentials: inputs
+                        .account_credentials
+                        .get(&record.account.id)
+                        .and_then(Option::as_ref),
+                    common_proxy_available,
+                    api_equivalent: equivalents
+                        .accounts
+                        .get(&record.account.id)
+                        .copied()
+                        .unwrap_or_default(),
+                    quota_window_usage: quota_window_usages.get(&record.account.id).cloned(),
+                    now_ms: snapshot_at_ms,
+                    refreshing: state.quota_refresh_in_flight(&record.account.id)?,
+                },
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -165,18 +196,26 @@ pub async fn get_local_runtime_state(
             model,
             runtime
                 .as_ref()
-                .and_then(|runtime| runtime.confirmed_source_reasoning_declared_levels(&model_id)),
+                .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
             zenith_relay_core::reasoning_policy_levels(
                 &inputs.gateway.model_reasoning_allowed_levels,
                 &model_id,
             ),
             has_pool_route,
         );
-        model.reasoning_probe_available = has_api_source_route;
-        model.reasoning_probe = runtime
-            .as_ref()
-            .and_then(|runtime| runtime.reasoning_probe_progress(&model_id));
+        apply_model_speed_summary(
+            model,
+            runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model_id)),
+            inputs
+                .gateway
+                .model_service_tier_overrides
+                .get(&model_id.to_ascii_lowercase())
+                .copied(),
+        );
     }
+    apply_model_display_order(&mut models, &inputs.gateway.model_display_order);
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
@@ -186,7 +225,7 @@ pub async fn get_local_runtime_state(
         .iter()
         .filter(|record| {
             record.in_pool
-                && record.supports_wire_api(WireApi::Responses)
+                && record.supports_any_wire_api()
                 && record.operational_status == OperationalStatus::Rotation
         })
         .count()
@@ -313,15 +352,29 @@ fn local_source_summary(
     })
 }
 
-fn local_account_summary(
-    record: &LocalAccountRecord,
-    settings: &crate::local_pool::models::GatewaySettings,
-    credentials: Option<&StoredCodexCredentials>,
+struct LocalAccountSummaryContext<'a> {
+    settings: &'a GatewaySettings,
+    credentials: Option<&'a StoredCodexCredentials>,
     common_proxy_available: bool,
     api_equivalent: ApiEquivalentSummary,
+    quota_window_usage: Option<QuotaWindowUsage>,
     now_ms: u64,
     refreshing: bool,
+}
+
+fn local_account_summary(
+    record: &LocalAccountRecord,
+    context: LocalAccountSummaryContext<'_>,
 ) -> crate::local_pool::error::Result<AccountSummary> {
+    let LocalAccountSummaryContext {
+        settings,
+        credentials,
+        common_proxy_available,
+        api_equivalent,
+        quota_window_usage,
+        now_ms,
+        refreshing,
+    } = context;
     let secret_available = credentials.is_some();
     let (proxy_mode, proxy_available) = credentials
         .map(|credentials| proxy_status(settings, credentials, common_proxy_available))
@@ -357,12 +410,13 @@ fn local_account_summary(
         operational_status: operational.status,
         auth_state: record.account.auth_state,
         health: format!("{:?}", record.account.health).to_ascii_lowercase(),
-        models: record.models.clone(),
+        models: record.effective_models().to_vec(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
         api_equivalent,
+        quota_window_usage,
         purchase_cost_micro_usd: record.purchase_cost_micro_usd,
         subscription: record.account.subscription.clone(),
         quota: record.account.quota.clone(),
@@ -379,6 +433,11 @@ fn local_account_summary(
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
     })
+}
+
+fn quota_window_usage_window(quota: &QuotaSnapshot) -> Option<(QuotaWindowKind, u64)> {
+    let window = quota.secondary.as_ref().or(quota.primary.as_ref())?;
+    Some((window.kind, window.window_start_ms?))
 }
 
 fn oauth_account_runtime_available(

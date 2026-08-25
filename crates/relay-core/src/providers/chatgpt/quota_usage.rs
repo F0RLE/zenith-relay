@@ -1,7 +1,7 @@
 use super::{
     agent_identity::is_agent_identity_task_invalid_response,
     collect_response_body,
-    quota_subscription::{merge_subscription_metadata, CodexSubscriptionClient},
+    quota_subscription::{merge_subscription_metadata_at, CodexSubscriptionClient},
     valid_access_token, ResponseBodyError,
 };
 use crate::quota::{
@@ -9,7 +9,7 @@ use crate::quota::{
     QuotaRefreshFailure, QuotaRefreshResult, QuotaWindowInput, QuotaWindowKind, ResetTime,
     Subscription, SubscriptionInput, SupplementalQuotaWindowInput,
 };
-use crate::{providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
+use crate::{providers::chatgpt::CodexIdentityEnvelope, DefaultServiceTier, ProxyConfig};
 use futures_util::future::BoxFuture;
 use reqwest::{
     header::{HeaderValue, ACCEPT, AUTHORIZATION},
@@ -285,10 +285,11 @@ impl CodexQuotaClient {
                 });
             match metadata {
                 Some(Ok(metadata)) => {
-                    merge_subscription_metadata(
+                    merge_subscription_metadata_at(
                         &mut input.plan_type,
                         &mut input.active_until_ms,
                         metadata,
+                        Some(now_ms),
                     );
                     input.observed_at_ms = now_ms;
                 }
@@ -555,6 +556,7 @@ fn append_supplemental_windows(
     rate_limit: &SupplementalRateLimitStatus,
     observed_at_ms: u64,
 ) {
+    let service_tier = supplemental_service_tier(label);
     for (kind, window) in [
         (QuotaWindowKind::Primary, rate_limit.primary_window.as_ref()),
         (
@@ -573,9 +575,17 @@ fn append_supplemental_windows(
         output.push(SupplementalQuotaWindowInput {
             id: format!("{id_prefix}:{kind_label}"),
             label: label.to_string(),
+            service_tier,
             window,
         });
     }
+}
+
+fn supplemental_service_tier(label: &str) -> Option<DefaultServiceTier> {
+    label
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case("priority") || word.eq_ignore_ascii_case("fast"))
+        .then_some(DefaultServiceTier::Fast)
 }
 
 fn map_window(
@@ -700,7 +710,12 @@ mod tests {
             Some(10_000)
         );
         assert_eq!(quota.supplemental.len(), 2);
+        assert_eq!(quota.supplemental[0].service_tier, None);
         assert_eq!(quota.supplemental[1].label, "GPT-5 Priority");
+        assert_eq!(
+            quota.supplemental[1].service_tier,
+            Some(DefaultServiceTier::Fast)
+        );
         assert_eq!(quota.reset_credits_available, Some(2));
         assert_eq!(subscription.unwrap().plan_type.as_deref(), Some("plus"));
     }

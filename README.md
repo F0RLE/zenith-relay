@@ -1,7 +1,7 @@
 <div align="center">
   <img src="src-tauri/icons/128x128.png" width="112" alt="Zenith Relay">
   <h1>Zenith Relay</h1>
-  <p>Local-first desktop relay for personal ChatGPT accounts, compatible APIs, and an optional user-managed server.</p>
+  <p>Personal desktop relay for ChatGPT accounts and compatible APIs.</p>
   <p>
     <a href="docs/help/en/README.md">English documentation</a> ·
     <a href="docs/help/ru/README.md">Русская документация</a>
@@ -13,98 +13,123 @@
   </p>
 </div>
 
-## Documentation
+Zenith Relay lets you keep user-owned ChatGPT accounts and compatible API
+sources in one place, choose which connections may receive requests, and use
+one private OpenAI-compatible endpoint. ChatGPT/Codex profile changes are
+reversible and protected by a recovery point.
 
-Choose a language first. Each overview links directly to a separate guide, so
-the Help Center and GitHub navigation do not depend on one long page.
+## Download
 
-| Mode | English | Русский |
+Download the package for your platform from
+[GitHub Releases](https://github.com/F0RLE/zenith-relay/releases/latest).
+
+- **Windows:** use the Setup installer. The portable EXE runs without
+  installation, but its folder must be writable for in-place updates.
+- **Linux:** choose AppImage, DEB, or RPM.
+- **macOS:** choose the DMG for Intel or Apple Silicon.
+
+The first launch opens Quick Setup. It asks where Relay should run, what
+connection to add, and which client should use the endpoint. You can restart
+Quick Setup from **Help** at any time.
+
+## Choose a mode
+
+| Mode | Use it when | What remains running |
 | --- | --- | --- |
-| Overview | [Read](docs/help/en/README.md) | [Открыть](docs/help/ru/README.md) |
-| This computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
-| Choose API | [Guide](docs/help/en/choose-api.md) | [Инструкция](docs/help/ru/choose-api.md) |
-| My server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
+| **This computer** | You want to combine personal accounts without deploying a server. | Relay and the local endpoint must stay open. |
+| **Choose API** | You already have a compatible hosted API and its key. | The provider runs the requests; Relay may be closed after profile setup. |
+| **My server** | You operate a Relay Server for continuous or remote access. | The server runs the pool; the desktop app is only the manager. |
 
-Project references: [planning](PLANNING.md) · [roadmap](ROADMAP.md) ·
-[release history](CHANGELOG.md) · [contributing](CONTRIBUTING.md).
+Start with **This computer** if you are testing a personal pool. Choose
+**My server** only after the local flow works and you have a server you
+control. **Choose API** does not create a pool and does not keep Relay request
+history.
 
-## Release 1.1.0
+## Everyday workflow
 
-Zenith Relay 1.1.0 is the first full release of the Relay product after the
-Zenith Codex 1.0.5 line. It is no longer a thin Zenith API-key client: it is a
-local-first Tauri desktop application that can manage a user's own ChatGPT
-accounts and compatible API sources behind one private OpenAI-compatible
-endpoint, with an optional server operated by that same user.
+1. Open **Connections** and add a ChatGPT account, an API source, or a proxy.
+2. In **Pool**, include only connections that may receive traffic. Use
+   **Model Rules** to enable or disable the models visible to clients.
+3. Start the endpoint in **API & ChatGPT** and connect the selected ChatGPT or
+   Codex profile. Relay creates a protected return point before changing it.
+4. Use **Overview** for health and speed, **Usage** for request details, and
+   **Recovery** for profile snapshots.
 
-The release adds the complete local pool surface, three explicit operating
-modes, provider-neutral protocol adapters, quota and model monitoring, routing
-and usage diagnostics, reversible Codex profile integration, snapshots and
-recovery, and the user-managed Relay Server contract. The full user-visible
-change list is in [CHANGELOG.md](CHANGELOG.md), including the migration scope
-from 1.0.5.
+Account and automatically discovered model status comes from the selected
+provider or server. A manual source catalog is an explicit local assertion for
+providers that do not expose `/models`; it is not independent proof that the
+provider accepts the model. Relay does not replace a provider's quota rules
+with a fixed five-hour or weekly formula. A failed check stays visible in the
+source/account status, and in **Pool → Model Rules** when there is no valid
+account catalog fallback; a failed check is never presented as confirmed
+automatic availability.
 
-This product remains separate from Zenith production Gateway and Control API.
-Production credentials, customer keys, account-pool inventory, backend tokens,
-and internal production business or routing logic never enter this repository.
+## Checks, quota, and background work
 
-## What Is Shipped
+While the local session is active, model catalogs are checked after startup and
+again every eight hours. Quota refreshes follow the reset times reported by
+the provider. The visible Overview, Pool, and Connections state may refresh
+while those pages are open.
 
-- Local-first Tauri desktop app with a React/Vite UI.
-- Three explicit modes: This computer, Choose API, and My server.
-- ChatGPT OAuth, existing-profile import, and compatible API sources.
-- Local personal pool with quota/health checks, model rules, proxies, routing,
-  response affinity, and redacted usage history.
-- Provider-neutral source discovery with explicit protocol bindings, confirmed
-  reasoning capabilities, API-reported model prices, and optional per-source
-  price overrides.
-- Responses, Messages, Chat Completions, and explicitly validated Gemini
-  adapter routes with bounded continuation behavior.
-- Active-session background policy: model catalogs refresh at startup and every
-  eight hours; reasoning probes remain manual; weekly quota reset automation is
-  explicit and confirmation-safe.
-- Usage diagnostics that distinguish Relay, account, and provider failures
-  without recording prompts, response bodies, or secrets.
-- Runtime snapshots, telemetry, exports, diagnostics, and screenshots are
-  redacted; they are not a transport for credentials or provider payloads.
-- Account views keep provider-reported quota windows separate from direct
-  token-based API-equivalent and optional purchase-cost payback; Relay does
-  not turn a quota percentage into a monetary entitlement.
-- Optional user-managed Relay Server with encrypted vault, SQLite state,
-  management API, managed ChatGPT/Codex profile attachment, backup/restore, and
-  append-only migrations.
-- Live model catalogs and reversible ChatGPT/Codex profile attachment with
-  automatic snapshots.
-- Signed in-app updates, including in-place replacement and rollback for the
-  Windows portable EXE.
+Relay does not send separate probe requests to test reasoning modes. Reasoning
+levels shown in **Model Rules** are catalog metadata or a manual rule. Codex
+background activity summaries and task titles are a separate setting in
+**API & ChatGPT** and can be blocked without disabling ordinary requests.
 
-Relay is a personal deployment. It is not Zenith customer billing, a public
-account marketplace, or the production Zenith account pool. It is also separate
-from the production Zenith Gateway and Control API: production credentials,
-customer keys, backend tokens, account-pool inventory, and internal business
-or routing logic do not enter or leave this repository.
+When a provider reports a weekly reset credit, an account card shows
+**Reset weekly quota** and opens a simple Yes/No confirmation. In local mode,
+**Connections → Automations** can run a weekly reset automatically when the
+weekly window reaches zero. The provider must still report the reset as
+available.
 
-## Privacy Boundary
+Account cards show **API equiv. used** for priced Relay usage and optional
+purchase cost payback. When Relay has complete priced usage recorded from the
+start of the current provider quota window, it also shows **API equiv. left**:
+an approximate remaining amount derived from that window's Relay usage and the
+provider-reported percentage. It excludes activity outside Relay and is hidden
+when the window, pricing, or usage record is incomplete. Provider quota itself
+remains a percentage and reset time, not a monetary balance or billing value.
 
-Desktop secrets stay in the operating-system credential store. A server that
-the user owns can keep transferred user-owned secrets in its encrypted vault.
-The transfer is possible only after the user explicitly selects that server and
-confirms the management operation; it is never an implicit upload to Zenith
-systems.
+In **Pool**, **Request speed** selects the service tier for routed requests.
+**Standard** leaves the client/provider choice unchanged. **Fast** is shown
+only when the selected upstream catalog explicitly confirms `fast` or
+`priority` for that model; it then asks that concrete route for the
+provider's `priority` tier. A dash means that no current route has confirmed
+the tier, not that the model is unavailable. Fast does not change model
+selection, reasoning, account order, or routing priority, and the provider may
+still apply the standard tier. Fast is a request-speed mode, not a second
+user-facing quota: account cards show the primary provider windows and
+feature-specific limits such as Code Review, but do not display a separate
+Fast-tier meter.
 
-Raw secrets, cookies, authorization headers, prompts, response bodies, and
-provider session material must not appear in UI snapshots, SQLite telemetry,
-logs, exports, diagnostics, screenshots, or ordinary server API snapshots.
-Management tokens and `/v1` profile credentials are separate credentials and
-are never interchangeable. Documentation and examples use placeholders only.
+## Privacy boundary
 
-## Current Direction
+Relay is a personal deployment, separate from the production Zenith Gateway
+and Control API. It does not receive Zenith production credentials, customer
+keys, backend tokens, account inventory, or internal billing and routing logic.
 
-The next work prioritizes reliable, provider-neutral operation over adding
-vendor-specific shortcuts: prove the existing personal-pool and server paths
-with real permitted accounts, measure user-visible latency, and keep model,
-price, and error behavior covered by regression tests. New account connectors,
-client integrations, and multi-server scale remain demand-gated. The exact
-acceptance gates and their order are in [ROADMAP.md](ROADMAP.md).
+Desktop credentials stay in the operating system's protected credential store.
+When you explicitly move your own connection to a server you operate, that
+server keeps it in its encrypted vault. Nothing is uploaded to Zenith
+implicitly. Operational diagnostics, snapshots, screenshots, support bundles,
+and usage records contain redacted data, not raw credentials, cookies,
+authorization headers, prompts, or provider response bodies.
+
+**Account export is different.** It is an explicit credential-bearing transfer
+file and may contain OAuth access, refresh, and identity tokens. Use it only
+for an intended import, keep it private, and delete it after the transfer.
+
+## Current limits
+
+- ChatGPT is the only shipped subscription-account connector.
+- **This computer** stops serving requests when Relay or the computer stops.
+- **My server** is a user-managed path and is not production-certified until
+  the live acceptance gates in [ROADMAP.md](ROADMAP.md) are complete.
+- There is no multi-server pool or distributed scheduling.
+- A provider may reject an account, model, region, tool, image, or quota
+  window even when the connection itself is saved. The error source in
+  **Usage** identifies whether the failure came from the provider, account, or
+  Relay.
 
 ## Screenshots
 
@@ -117,37 +142,32 @@ acceptance gates and their order are in [ROADMAP.md](ROADMAP.md).
   <img src="docs/screenshots/usage.png" width="49%" alt="Usage">
 </p>
 
-## Development
+## Help
+
+The complete mode guides are available in the repository and inside the
+application:
+
+| Mode | English | Русский |
+| --- | --- | --- |
+| Overview | [Read](docs/help/en/README.md) | [Открыть](docs/help/ru/README.md) |
+| This computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
+| Choose API | [Guide](docs/help/en/choose-api.md) | [Инструкция](docs/help/ru/choose-api.md) |
+| My server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
+
+## For contributors
+
+The product boundary and unfinished acceptance work live in
+[PLANNING.md](PLANNING.md) and [ROADMAP.md](ROADMAP.md). Development and
+release checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```powershell
 cd src
 bun install
 bun run verify
 bun run test:e2e
-```
-
-### Playwright QA
-
-The default Playwright suite uses the mocked desktop shell and covers the
-interactive product without provider credentials. Use the focused suites when
-iterating on a release surface:
-
-```powershell
-cd src
-bun run test:e2e
-bunx playwright test tests/e2e/visual-matrix.spec.ts
-bunx playwright test tests/e2e/operations.spec.ts
 bun run screenshots
 ```
 
-The 1.1.0 release cut was verified with 120 visual-matrix scenarios, 177
-operational browser scenarios, 79 frontend unit tests, and 354 desktop Rust
-tests. `bun run screenshots` regenerates only the committed documentation
-screenshots; it does not replace the full visual matrix.
-
-For the desktop bundle use `bun run app:build`. Shared runtime and server
-checks are listed in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-Current implementation boundaries are in [PLANNING.md](PLANNING.md); unfinished
-acceptance work is in [ROADMAP.md](ROADMAP.md). Release history and the full
-1.0.5 → 1.1.0 scope are in [CHANGELOG.md](CHANGELOG.md).
+The screenshot command regenerates only the committed documentation images.
+See [CHANGELOG.md](CHANGELOG.md) for the user-facing changes from 1.0.5 to
+1.1.0.

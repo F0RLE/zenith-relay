@@ -1,90 +1,66 @@
-import type { ApiEquivalentSummary, QuotaSnapshot } from "./api/types";
+import type { ApiEquivalentSummary, QuotaSnapshot, QuotaWindowUsage } from "./api/types";
 
-export type PotentialEstimate = {
+export type RemainingApiEquivalentEstimate = {
   microUsd: number;
   approximate: boolean;
+  windowKind: "primary" | "secondary" | null;
 };
 
 export type AccountValueProjection = {
   purchaseCostMicroUsd: number | null;
-  potential: PotentialEstimate | null;
+  remainingApiEquivalent: RemainingApiEquivalentEstimate | null;
   payback: number | null;
   approximate: boolean;
 };
 
 /**
- * Estimates remaining API-equivalent capacity from observed usage and the
- * limiting provider-reported quota window.
- *
- * This is a display estimate only. It does not change quota state, routing,
- * provider cost, or customer billing.
- */
-export function estimateAccountPotential(
-  usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
-  quota: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
-): PotentialEstimate | null {
-  if (usage.microUsd <= 0 || !Number.isFinite(usage.microUsd)) return null;
-
-  if (quota.directBalanceMicroUsd != null && Number.isFinite(quota.directBalanceMicroUsd) && quota.directBalanceMicroUsd >= 0) {
-    return { microUsd: Math.round(quota.directBalanceMicroUsd), approximate: false };
-  }
-  if (usage.unpricedTokens > 0) return null;
-
-  const windows = [quota.primary, quota.secondary].filter((window): window is NonNullable<typeof window> => {
-    return window != null
-      && window.availableBasisPoints != null
-      && Number.isFinite(window.availableBasisPoints)
-      && window.availableBasisPoints >= 0
-      && window.availableBasisPoints <= 10_000
-      && window.providerCycleId != null
-      && window.providerCycleId.trim().length > 0
-      && window.windowStartMs != null
-      && window.resetAtMs != null
-      && window.windowMinutes != null;
-  });
-
-  const matchingWindows = windows.filter((window, index) => {
-    if (index === 0) return true;
-    const first = windows[0];
-    return window.providerCycleId === first.providerCycleId
-      && window.windowStartMs === first.windowStartMs
-      && window.resetAtMs === first.resetAtMs
-      && window.windowMinutes === first.windowMinutes;
-  });
-
-  const estimates = matchingWindows
-    .map((window) => {
-      const available = window?.availableBasisPoints;
-      if (available == null) return null;
-      const consumed = 10_000 - available;
-      if (consumed <= 0) return null;
-      return Math.round((usage.microUsd * available) / consumed);
-    })
-    .filter((value): value is number => value != null);
-
-  if (!estimates.length) return null;
-  return {
-    microUsd: Math.min(...estimates),
-    approximate: usage.unpricedTokens > 0,
-  };
-}
-
-/**
  * Builds the shared display projection for account usage cards.
  *
- * These values are estimates only. The projection deliberately has no effect
- * on quota state, routing, provider cost, or customer billing.
+ * These values do not affect quota state, routing, provider cost, or customer
+ * billing. Remaining API equivalent is available only when the local or
+ * user-managed server ledger can isolate usage inside the active quota window.
  */
 export function buildAccountValueProjection(
   usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
-  quota: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
+  quota?: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
+  quotaWindowUsage?: QuotaWindowUsage | null,
   purchaseCostMicroUsd?: number | null,
 ): AccountValueProjection {
   const purchaseCost = purchaseCostMicroUsd ?? null;
   return {
     purchaseCostMicroUsd: purchaseCost,
-    potential: estimateAccountPotential(usage, quota),
+    remainingApiEquivalent: estimateRemainingApiEquivalent(quota, quotaWindowUsage),
     payback: purchaseCost && purchaseCost > 0 ? usage.microUsd / purchaseCost : null,
     approximate: usage.unpricedTokens > 0,
+  };
+}
+
+export function estimateRemainingApiEquivalent(
+  quota?: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
+  quotaWindowUsage?: QuotaWindowUsage | null,
+): RemainingApiEquivalentEstimate | null {
+  if (!quota) return null;
+  const directBalance = quota.directBalanceMicroUsd;
+  if (directBalance != null && Number.isFinite(directBalance) && directBalance >= 0) {
+    return { microUsd: Math.round(directBalance), approximate: false, windowKind: null };
+  }
+  if (!quotaWindowUsage) return null;
+  const window = quota[quotaWindowUsage.kind];
+  const available = window?.availableBasisPoints;
+  if (
+    window?.windowStartMs !== quotaWindowUsage.windowStartMs
+    || available == null
+    || !Number.isFinite(available)
+    || available < 0
+    || available > 10_000
+    || quotaWindowUsage.apiEquivalent.microUsd <= 0
+    || quotaWindowUsage.apiEquivalent.unpricedTokens > 0
+  ) return null;
+  const consumed = 10_000 - available;
+  if (consumed <= 0) return null;
+  return {
+    microUsd: Math.round(quotaWindowUsage.apiEquivalent.microUsd * available / consumed),
+    approximate: true,
+    windowKind: quotaWindowUsage.kind,
   };
 }

@@ -39,7 +39,6 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  AccountValueStrip,
   QuotaStack,
   StatusIcon,
   accountErrorLabel,
@@ -48,14 +47,15 @@ import {
   copyText,
   useConfirm,
 } from "../../components/Ui";
+import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { formatDetailedRemainingTime } from "../../quotaFormatting";
+import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
 import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
 
 type ParticipationFilter = "all" | "included" | "excluded";
-export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
+export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onReauthenticate, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onReauthenticate: (account: AccountSummary) => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible } = useRelayState();
   const confirm = useConfirm();
@@ -301,10 +301,10 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
       </div>
     </div>
     <div className="connections-account-summary" aria-label={t("accounts.summary.label")}>
-      <div><span>{t("accounts.summary.total")}</span><strong>{allAccounts.length}</strong></div>
-      <div><span>{t("accounts.summary.inPool")}</span><strong>{inPoolCount}</strong></div>
-      <div><span>{t("accounts.summary.errors")}</span><strong>{errorCount}</strong></div>
-      <div><span>{t("accounts.summary.disabled")}</span><strong>{disabledCount}</strong></div>
+      <div><span>{t("accounts.summary.total")}</span><i aria-hidden="true">—</i><strong>{allAccounts.length}</strong></div>
+      <div><span>{t("accounts.summary.inPool")}</span><i aria-hidden="true">—</i><strong>{inPoolCount}</strong></div>
+      <div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{errorCount}</strong></div>
+      <div><span>{t("accounts.summary.disabled")}</span><i aria-hidden="true">—</i><strong>{disabledCount}</strong></div>
     </div>
     </div>
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><Check aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
@@ -382,6 +382,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
             <div className="account-card-header-actions">
               <ActionMenu className="account-row-menu">
                 {errorCode ? <ActionMenuItem icon={<CircleAlert aria-hidden />} onClick={() => setErrorDetails(account)}>{t("accounts.errorDetailsTitle")}</ActionMenuItem> : null}
+                {mode === "local" && (account.authState.state === "requires_reauth" || account.subscription.status === "expired") ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
@@ -437,7 +438,7 @@ function AccountQuotaRefreshState({ account }: { account: AccountSummary }) {
 }
 
 function accountHasQuotaWindows(account: AccountSummary) {
-  return Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.length);
+  return Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
 }
 
 export function AccountErrorDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {

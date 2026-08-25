@@ -361,8 +361,16 @@
 
 .account-filter-menu,
 .account-filter-menu .relay-option-trigger {
-  width: clamp(130px, 14vw, 210px);
-  min-width: 130px;
+  min-width: 0;
+  max-width: min(240px, 24vw);
+}
+
+.account-filter-menu {
+  width: fit-content;
+}
+
+.account-filter-menu .relay-option-trigger {
+  width: max-content;
 }
 
 .account-group-toggle.relay-button {
@@ -380,15 +388,44 @@
 }
 
 @media (max-width: 760px) {
+  .connections-account-controls .account-command-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "context context"
+      "filters actions";
+    align-items: center;
+    gap: 8px;
+    min-height: 0;
+  }
+
+  .connections-account-controls .account-command-context {
+    min-width: 0;
+    gap: 8px;
+    grid-area: context;
+  }
+
   .connections-account-controls .account-command-context .account-search {
-    width: 110px;
-    min-width: 110px;
+    width: auto;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .connections-account-controls .account-filter-stack {
+    grid-area: filters;
+    align-self: center;
+    width: 100%;
+    min-width: 0;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 1px;
   }
 
   .connections-account-controls .account-filter-menu,
   .connections-account-controls .account-filter-menu .relay-option-trigger {
-    width: 110px;
-    min-width: 110px;
+    width: fit-content;
+    min-width: 0;
+    max-width: min(154px, 42vw);
   }
 
   .connections-account-controls .account-group-toggle.relay-button {
@@ -398,6 +435,79 @@
 
   .connections-account-controls .account-group-toggle span {
     display: none;
+  }
+
+  .connections-account-controls .account-command-actions {
+    grid-area: actions;
+    min-width: 0;
+    margin-left: auto;
+    gap: 6px;
+  }
+
+  .connections-account-controls .account-command-actions .relay-icon-button {
+    width: 34px;
+    height: 34px;
+  }
+
+  .connections-account-controls .account-filter-stack {
+    align-items: center;
+  }
+}
+
+.connections-account-summary i,
+.pool-summary i {
+  flex: 0 0 auto;
+  color: var(--relay-muted);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (min-width: 761px) and (max-width: 900px) {
+  .connections-account-controls .account-command-bar {
+    display: grid;
+    grid-template-columns: 202px minmax(0, 1fr) 160px;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .connections-account-controls .account-command-context,
+  .connections-account-controls .account-filter-stack,
+  .connections-account-controls .account-command-actions {
+    min-width: 0;
+    margin: 0;
+  }
+
+  .connections-account-controls .account-command-context {
+    gap: 8px;
+  }
+
+  .connections-account-controls .account-command-context .account-search {
+    width: 170px;
+    min-width: 0;
+  }
+
+  .connections-account-controls .account-filter-stack {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 6px;
+    overflow: visible;
+  }
+
+  .connections-account-controls .account-filter-menu,
+  .connections-account-controls .account-filter-menu .relay-option-trigger {
+    width: fit-content;
+    min-width: 0;
+    max-width: min(154px, 20vw);
+  }
+
+  .connections-account-controls .account-group-toggle.relay-button {
+    min-width: 126px;
+    padding-inline: 8px;
+  }
+
+  .connections-account-controls .account-command-actions {
+    justify-content: flex-end;
+    gap: 6px;
   }
 }
 
@@ -1034,10 +1144,14 @@
   min-width: 0;
   min-height: 46px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
   border-top: 1px solid var(--relay-border);
   background: color-mix(in srgb, var(--relay-subtle) 55%, transparent);
+}
+
+.account-value-strip[data-columns="3"] {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .account-value-strip > div {

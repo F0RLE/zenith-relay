@@ -58,16 +58,33 @@ pub async fn refresh_account_metadata(
     if !refresh_models {
         return refresh_one(state, account, force_subscription_refresh).await;
     }
+    let previous_account = account.clone();
     let (mut account, transitions) =
-        refresh_one(state, account, force_subscription_refresh).await?;
-    let mut model_result = discover_account_models(state, &account).await;
+        match refresh_one(state, account, force_subscription_refresh).await {
+            Ok(result) => result,
+            Err(error) => {
+                // Model discovery has its own eight-hour lifecycle. Preserve its
+                // result even when the quota endpoint is temporarily unavailable.
+                let mut model_account = previous_account;
+                refresh_models_best_effort(state, &mut model_account).await;
+                state.store.save_account(&model_account)?;
+                return Err(error);
+            }
+        };
+    refresh_models_best_effort(state, &mut account).await;
+    state.store.save_account(&account)?;
+    Ok((account, transitions))
+}
+
+async fn refresh_models_best_effort(state: &Arc<AppState>, account: &mut ServerAccountRecord) {
+    let mut model_result = discover_account_models(state, account).await;
     let reauth_state = if model_discovery_was_unauthorized(&model_result) {
         match state
             .recover_account_tokens_after_unauthorized(&account.id)
             .await
         {
             Ok(_) => {
-                model_result = discover_account_models(state, &account).await;
+                model_result = discover_account_models(state, account).await;
                 None
             }
             Err(_) => state
@@ -79,12 +96,10 @@ pub async fn refresh_account_metadata(
     } else {
         None
     };
-    apply_discovered_models(&mut account, model_result);
+    apply_discovered_models(account, model_result);
     if let Some(auth_state) = reauth_state {
         account.auth_state = auth_state;
     }
-    state.store.save_account(&account)?;
-    Ok((account, transitions))
 }
 
 pub async fn refresh_one(
@@ -221,7 +236,11 @@ fn apply_discovered_models(
 ) {
     match result {
         Ok(models) if !models.is_empty() => {
-            account.models = models;
+            let models = zenith_relay_core::normalize_model_ids(models);
+            if account.models.is_empty() {
+                account.models = models.clone();
+            }
+            account.discovered_models = Some(models);
             let recovered = account
                 .last_error_code
                 .as_deref()
@@ -229,11 +248,16 @@ fn apply_discovered_models(
             if recovered {
                 account.last_error_code = None;
                 if !matches!(account.auth_state, AccountAuthState::RequiresReauth(_)) {
+                    if account.auth_state == AccountAuthState::Error {
+                        account.auth_state = AccountAuthState::Active;
+                    }
                     account.health = AccountHealthState::Healthy;
                 }
             }
         }
-        Ok(_) if account.models.is_empty() => apply_model_failure(account, "models_empty", false),
+        Ok(_) if account.effective_models().is_empty() => {
+            apply_model_failure(account, "models_empty", false)
+        }
         Err((code, retryable)) => {
             // Cached model slugs remain routable, but the failed refresh must
             // remain visible to management clients as stale availability.
@@ -338,7 +362,11 @@ fn apply_model_failure(account: &mut ServerAccountRecord, code: &str, retryable:
     account.last_error_code = Some(code.to_string());
     match code {
         "models_unauthorized" | "models_invalid_access_token" | "models_invalid_account_id" => {
-            account.auth_state = AccountAuthState::Error;
+            // Reauthentication is a terminal, user-actionable state. A
+            // later failed model probe must not downgrade it to generic Error.
+            if !matches!(account.auth_state, AccountAuthState::RequiresReauth(_)) {
+                account.auth_state = AccountAuthState::Error;
+            }
             account.health = AccountHealthState::Unhealthy;
         }
         "models_forbidden" => account.health = AccountHealthState::Blocked,
@@ -366,6 +394,7 @@ mod tests {
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: models.iter().map(|model| (*model).to_string()).collect(),
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,
@@ -384,13 +413,19 @@ mod tests {
     }
 
     #[test]
-    fn model_refresh_replaces_live_slugs_but_keeps_last_good_list_on_failure() {
+    fn model_refresh_keeps_baseline_and_last_good_effective_list() {
         let mut record = account(&["gpt-old"]);
         apply_discovered_models(&mut record, Ok(vec!["gpt-future-codex".into()]));
-        assert_eq!(record.models, ["gpt-future-codex"]);
+        assert_eq!(record.models, ["gpt-old"]);
+        assert!(record
+            .discovered_models
+            .as_ref()
+            .is_some_and(|models| models.len() == 1 && models[0] == "gpt-future-codex"));
+        assert_eq!(record.effective_models(), ["gpt-future-codex"]);
 
         apply_discovered_models(&mut record, Err(("models_transport".into(), true)));
-        assert_eq!(record.models, ["gpt-future-codex"]);
+        assert_eq!(record.models, ["gpt-old"]);
+        assert_eq!(record.effective_models(), ["gpt-future-codex"]);
         assert_eq!(record.last_error_code.as_deref(), Some("models_transport"));
 
         let mut empty = account(&[]);
@@ -400,8 +435,26 @@ mod tests {
 
         apply_discovered_models(&mut empty, Ok(vec!["gpt-recovered".into()]));
         assert_eq!(empty.models, ["gpt-recovered"]);
+        assert!(empty
+            .discovered_models
+            .as_ref()
+            .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered"));
         assert_eq!(empty.health, AccountHealthState::Healthy);
         assert!(empty.last_error_code.is_none());
+    }
+
+    #[test]
+    fn successful_model_refresh_recovers_a_transient_auth_error() {
+        let mut record = account(&["gpt-live"]);
+        record.auth_state = AccountAuthState::Error;
+        record.health = AccountHealthState::Unhealthy;
+        record.last_error_code = Some("models_unauthorized".into());
+
+        apply_discovered_models(&mut record, Ok(vec!["gpt-recovered".into()]));
+
+        assert_eq!(record.auth_state, AccountAuthState::Active);
+        assert_eq!(record.health, AccountHealthState::Healthy);
+        assert_eq!(record.last_error_code, None);
     }
 
     #[test]
@@ -419,6 +472,21 @@ mod tests {
             record.last_error_code.as_deref(),
             Some("models_unauthorized")
         );
+    }
+
+    #[test]
+    fn model_unauthorized_does_not_downgrade_server_reauthentication() {
+        let mut record = account(&["gpt-live"]);
+        record.auth_state = AccountAuthState::RequiresReauth(
+            zenith_relay_core::accounts::ReauthReason::InvalidGrant,
+        );
+        apply_discovered_models(&mut record, Err(("models_unauthorized".to_string(), false)));
+
+        assert!(matches!(
+            record.auth_state,
+            AccountAuthState::RequiresReauth(_)
+        ));
+        assert_eq!(record.health, AccountHealthState::Unhealthy);
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use super::super::request::requested_reasoning_effort;
 use super::{
     now_ms, AuthenticatedKey, ExecutorRoute, GatewayFailure, RESPONSES_LITE_METADATA_KEY,
     WEBSOCKET_PROTOCOLS,
@@ -6,7 +5,7 @@ use super::{
 use crate::gateway::request::apply_default_service_tier_if_missing;
 use crate::gateway::request::codex_background_request_kind;
 use crate::usage::ReasoningEffortDiagnostics;
-use crate::{GatewayRuntime, ToolUseDiagnostics, WireApi};
+use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
 use serde_json::Value;
 
@@ -18,6 +17,8 @@ pub(super) struct ClientRequest {
     pub(super) resolved_model: String,
     pub(super) stream_id: Option<String>,
     pub(super) responses_lite: bool,
+    client_supplied_service_tier: bool,
+    responses_lite_candidates: Vec<String>,
     pub(super) response_affinity_key: Option<String>,
     pub(super) prompt_affinity_key: Option<String>,
     pub(super) background_kind: Option<&'static str>,
@@ -37,7 +38,6 @@ impl ClientRequest {
         }
         let mut value: Value = serde_json::from_slice(payload)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
-        apply_default_service_tier_if_missing(&mut value, runtime.default_service_tier());
         let object = value
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
@@ -77,6 +77,7 @@ impl ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
+        let client_supplied_service_tier = object.contains_key("service_tier");
         let background_kind = codex_background_request_kind(headers, &value);
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
@@ -85,17 +86,11 @@ impl ClientRequest {
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .ok_or_else(GatewayFailure::model_not_found)?;
-        if let Some(effort) = requested_reasoning_effort(&value, WireApi::Responses) {
-            if !runtime.model_reasoning_effort_is_allowed(&resolved_model, &effort)
-                && !runtime.codex_model_has_chatgpt_account(key, &resolved_model)
-            {
-                return Err(GatewayFailure::reasoning_effort_not_allowed());
-            }
-        }
         let responses_lite = headers
             .contains_key(crate::gateway::request::CODEX_RESPONSES_LITE_HEADER)
-            || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
-            || runtime.codex_model_uses_responses_lite(&resolved_model);
+            || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY);
+        let responses_lite_candidates =
+            runtime.codex_model_responses_lite_candidates(&resolved_model);
         let response_affinity_key = runtime
             .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
         let prompt_affinity_key = runtime.prompt_affinity_key(
@@ -110,10 +105,33 @@ impl ClientRequest {
             resolved_model,
             stream_id,
             responses_lite,
+            client_supplied_service_tier,
+            responses_lite_candidates,
             response_affinity_key,
             prompt_affinity_key,
             background_kind,
         })
+    }
+
+    pub(super) fn apply_service_tier_for_route(
+        &mut self,
+        runtime: &GatewayRuntime,
+        route: &ExecutorRoute,
+    ) {
+        if !self.client_supplied_service_tier {
+            self.value
+                .as_object_mut()
+                .expect("request object was validated before routing")
+                .remove("service_tier");
+        }
+        apply_default_service_tier_if_missing(
+            &mut self.value,
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+        );
+    }
+
+    pub(super) fn service_tier(&self) -> DefaultServiceTier {
+        crate::gateway::request::request_service_tier(&self.value)
     }
 
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
@@ -141,10 +159,6 @@ impl ClientRequest {
         )
     }
 
-    pub(super) fn requested_reasoning_effort(&self) -> Option<String> {
-        requested_reasoning_effort(&self.value, WireApi::Responses)
-    }
-
     fn value_for(&self, route: &ExecutorRoute) -> Value {
         let mut value = self.value.clone();
         let object = value
@@ -159,9 +173,21 @@ impl ClientRequest {
             Value::String(route.source_model.clone()),
         );
         if route.account_id.is_some() {
-            crate::gateway::request::normalize_account_request(object, self.responses_lite);
+            crate::gateway::request::normalize_account_request(
+                object,
+                self.responses_lite_for(route),
+            );
         }
         value
+    }
+
+    pub(super) fn responses_lite_for(&self, route: &ExecutorRoute) -> bool {
+        self.responses_lite
+            || route.account_id.as_deref().is_some_and(|candidate_id| {
+                self.responses_lite_candidates
+                    .iter()
+                    .any(|id| id == candidate_id)
+            })
     }
 
     pub(super) fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {

@@ -21,21 +21,22 @@ use std::collections::BTreeSet;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
+#[cfg(test)]
+use zenith_relay_core::WireApi;
 use zenith_relay_core::{
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetSettings, PresetQuotaPolicy,
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
 };
 
 mod model_policy;
 mod reasoning;
 
 pub(super) use model_policy::{canonical_pool_model, local_pool_member_ids};
-pub use reasoning::ModelReasoningProbeResult;
-use reasoning::{ProbeModelReasoningInput, SetModelReasoningInput};
+use reasoning::SetModelReasoningInput;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
@@ -47,14 +48,6 @@ pub async fn set_local_model_reasoning(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     reasoning::set_local_model_reasoning(input, state).await
-}
-
-#[tauri::command]
-pub async fn probe_local_model_reasoning(
-    input: ProbeModelReasoningInput,
-    state: State<'_, DesktopState>,
-) -> CommandResult<ModelReasoningProbeResult> {
-    reasoning::probe_local_model_reasoning(input, state).await
 }
 
 #[tauri::command]
@@ -152,6 +145,10 @@ pub fn export_local_configuration_preset(
             model_price_overrides: gateway.model_price_overrides,
             model_reasoning_allowed_levels: gateway.model_reasoning_allowed_levels,
             model_reasoning_allowed_levels_present: true,
+            model_service_tier_overrides: gateway.model_service_tier_overrides,
+            model_display_order: gateway.model_display_order,
+            model_service_tier_overrides_present: true,
+            model_display_order_present: true,
         },
     };
     write_configuration_preset(&preset, &app)
@@ -363,7 +360,7 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
             && source.enabled
             && !source.draining
             && source
-                .supports_wire_api(WireApi::Responses)
+                .supports_any_wire_api()
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
             && secret_store::load(&source.secret_ref)?.is_some()
         {
@@ -430,6 +427,19 @@ pub struct SetModelPriceInput {
     output_micro_usd_per_million: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelServiceTierInput {
+    model_id: String,
+    service_tier: DefaultServiceTier,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelDisplayOrderInput {
+    model_ids: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn set_local_model_enabled(
     input: SetModelEnabledInput,
@@ -484,6 +494,117 @@ pub async fn set_local_model_price(
 }
 
 #[tauri::command]
+pub async fn set_local_model_service_tier(
+    input: SetModelServiceTierInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let canonical = canonical_pool_model(&state, &input.model_id)?;
+    let snapshot = state.snapshot().await?;
+    let supported = state
+        .gateway
+        .runtime()
+        .await
+        .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical));
+    if input.service_tier == DefaultServiceTier::Fast && !supported {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "Fast is not confirmed for this model by the current upstream catalog",
+        )
+        .into());
+    }
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    let key = canonical.to_ascii_lowercase();
+    gateway
+        .model_service_tier_overrides
+        .insert(key, input.service_tier);
+    if gateway == old_gateway {
+        return Ok(snapshot);
+    }
+    state.store()?.replace_gateway(gateway.clone())?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        if let Err(error) =
+            runtime.set_model_service_tier_overrides(gateway.model_service_tier_overrides)
+        {
+            state.store()?.replace_gateway(old_gateway)?;
+            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
+        }
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_model_display_order(
+    input: SetModelDisplayOrderInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let snapshot = state.snapshot().await?;
+    let inputs = state.runtime_inputs().await?;
+    let mut current = std::collections::BTreeMap::new();
+    for source in inputs.sources.iter().filter(|source| source.in_pool) {
+        for model in &source.models {
+            current
+                .entry(model.to_ascii_lowercase())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    for account in inputs
+        .accounts
+        .iter()
+        .filter(|account| account.account.in_pool)
+    {
+        for model in account.effective_models() {
+            current
+                .entry(model.to_ascii_lowercase())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    if input.model_ids.len() != current.len() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "model order must contain every current pool model exactly once",
+        )
+        .into());
+    }
+    let mut requested = std::collections::BTreeSet::new();
+    let mut order = Vec::with_capacity(input.model_ids.len());
+    for model in input.model_ids {
+        let key = model.trim().to_ascii_lowercase();
+        let Some(canonical) = current.get(&key) else {
+            return Err(LocalPoolError::new(ErrorCode::NotFound, "pool model not found").into());
+        };
+        if !requested.insert(key) {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "model order contains duplicates",
+            )
+            .into());
+        }
+        order.push(canonical.clone());
+    }
+    if requested.len() != current.len() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "model order must contain every current pool model exactly once",
+        )
+        .into());
+    }
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    gateway.model_display_order = order;
+    if gateway == old_gateway {
+        return Ok(snapshot);
+    }
+    state.store()?.replace_gateway(gateway.clone())?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_model_display_order(gateway.model_display_order);
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn set_local_pool_membership(
     input: PoolMembershipInput,
     app: AppHandle,
@@ -533,13 +654,13 @@ pub async fn set_local_pool_membership(
             .iter()
             .filter(|source| source_ids.contains(&source.id))
         {
-            let supports_responses = source
-                .supports_wire_api(WireApi::Responses)
+            let supports_any_protocol = source
+                .supports_any_wire_api()
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-            if !supports_responses {
+            if !supports_any_protocol {
                 return Err(LocalPoolError::new(
                     ErrorCode::Conflict,
-                    "only sources with a Responses-compatible route can join the local pool",
+                    "source must expose at least one verified API route before joining the local pool",
                 )
                 .into());
             }
@@ -711,48 +832,5 @@ mod tests {
             BTreeSet::from(["messages".to_string(), "responses".to_string()])
         );
         assert!(account_ids.is_empty());
-    }
-
-    #[test]
-    fn reasoning_probe_requires_reasoning_evidence_in_a_success_response() {
-        assert!(!reasoning::reasoning_probe_response_confirms(
-            &serde_json::json!({"id": "resp", "status": "completed", "output": [{"type": "output_text"}]}),
-            "high"
-        ));
-        assert!(reasoning::reasoning_probe_response_confirms(
-            &serde_json::json!({
-                "id": "resp",
-                "status": "completed",
-                "output": [{"type": "output_text"}],
-                "output_config": {"effort": "high"}
-            }),
-            "high"
-        ));
-        assert!(!reasoning::reasoning_probe_response_confirms(
-            &serde_json::json!({"id": "resp", "status": "completed", "error": {"message": "rejected"}}),
-            "high"
-        ));
-    }
-
-    #[test]
-    fn reasoning_probe_accepts_positive_reasoning_token_evidence_without_echoed_effort() {
-        assert!(reasoning::reasoning_probe_response_confirms(
-            &serde_json::json!({
-                "id": "resp",
-                "status": "completed",
-                "output": [{"type": "output_text"}],
-                "usage": {"output_tokens_details": {"reasoning_tokens": 4}}
-            }),
-            "high"
-        ));
-        assert!(!reasoning::reasoning_probe_response_confirms(
-            &serde_json::json!({
-                "id": "resp",
-                "status": "completed",
-                "output": [{"type": "output_text"}],
-                "usage": {"output_tokens_details": {"reasoning_tokens": 0}}
-            }),
-            "high"
-        ));
     }
 }

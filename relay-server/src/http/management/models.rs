@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zenith_relay_core::{
     is_valid_model_id, normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot,
-    reasoning_policy_key, ApiModelPriceOverride,
+    reasoning_policy_key, ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -16,6 +16,8 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/models/rules", post(set_model_enabled))
         .route("/models/prices", post(set_model_price))
         .route("/models/reasoning", post(set_model_reasoning))
+        .route("/models/service-tier", post(set_model_service_tier))
+        .route("/models/order", post(set_model_order))
 }
 
 #[derive(Serialize)]
@@ -125,6 +127,111 @@ pub struct SetModelReasoningInput {
     model_id: String,
     #[serde(default)]
     allowed_levels: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelServiceTierInput {
+    model_id: String,
+    service_tier: DefaultServiceTier,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelOrderInput {
+    model_ids: Vec<String>,
+}
+
+pub async fn set_model_service_tier(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelServiceTierInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?;
+    if input.service_tier == DefaultServiceTier::Fast
+        && !state
+            .runtime()
+            .map_err(runtime_error)?
+            .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical))
+    {
+        return Err(ManagementError::conflict(
+            "model_service_tier_unavailable",
+            "Fast is not confirmed for this model by the current upstream catalog",
+        ));
+    }
+    let previous = state
+        .store
+        .model_service_tier_overrides()
+        .map_err(store_error)?;
+    let mut next = previous.clone();
+    let key = canonical.to_ascii_lowercase();
+    next.insert(key, input.service_tier);
+    if next == previous {
+        return Ok(Json(snapshot));
+    }
+    state
+        .store
+        .set_model_service_tier_overrides(next.clone())
+        .map_err(store_error)?;
+    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+        if let Err(error) = runtime.set_model_service_tier_overrides(next) {
+            state
+                .store
+                .set_model_service_tier_overrides(previous)
+                .map_err(store_error)?;
+            return Err(runtime_error(error.to_string()));
+        }
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
+pub async fn set_model_order(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelOrderInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let current = snapshot
+        .gateway
+        .models
+        .iter()
+        .map(|model| (model.id.to_ascii_lowercase(), model.id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if input.model_ids.len() != current.len() {
+        return Err(ManagementError::validation(
+            "model_order_invalid",
+            "model order must contain every current pool model exactly once",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut order = Vec::with_capacity(input.model_ids.len());
+    for requested in input.model_ids {
+        let key = requested.trim().to_ascii_lowercase();
+        let Some(canonical) = current.get(&key) else {
+            return Err(ManagementError::not_found(
+                "model_not_found",
+                "pool model not found",
+            ));
+        };
+        if !seen.insert(key) {
+            return Err(ManagementError::validation(
+                "model_order_invalid",
+                "model order contains duplicates",
+            ));
+        }
+        order.push(canonical.clone());
+    }
+    let previous = state.store.model_display_order().map_err(store_error)?;
+    if previous == order {
+        return Ok(Json(snapshot));
+    }
+    state
+        .store
+        .set_model_display_order(order.clone())
+        .map_err(store_error)?;
+    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+        runtime.set_model_display_order(order);
+    }
+    state.snapshot().map(Json).map_err(store_error)
 }
 
 pub async fn set_model_reasoning(

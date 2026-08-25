@@ -10,7 +10,7 @@ pub(super) fn codex_wake_policy(
     capabilities: &QuotaAdapterCapabilities,
 ) -> WakeAdapterPolicy {
     let models = account
-        .models
+        .effective_models()
         .iter()
         .filter(|model| model_allowed(account, model))
         .enumerate()

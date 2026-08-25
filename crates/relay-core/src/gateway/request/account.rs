@@ -60,14 +60,7 @@ pub(in crate::gateway) async fn responses_compact(
             "model_not_found",
         );
     };
-    let responses_lite = headers
-        .get(CODEX_RESPONSES_LITE_HEADER)
-        .cloned()
-        .or_else(|| {
-            runtime
-                .codex_model_uses_responses_lite(&resolved_model)
-                .then(|| HeaderValue::from_static("true"))
-        });
+    let responses_lite = headers.get(CODEX_RESPONSES_LITE_HEADER).cloned();
     let response_affinity_key =
         runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
     normalize_account_request(&mut request, responses_lite.is_some());

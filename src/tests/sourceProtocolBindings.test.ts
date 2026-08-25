@@ -73,6 +73,21 @@ describe("source protocol bindings", () => {
     expect(sourceSupportsNativeResponses(source)).toBe(false);
   });
 
+  test("normalizes legacy bridge reasoning to the internal adaptive translator", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["claude-bridge"],
+      protocolBindings: [{
+        wireApi: "responses",
+        adapter: "responses_to_messages",
+        reasoningMode: "disabled",
+        modelIds: ["claude-bridge"],
+      }],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(effectiveSourceProtocolBindings(source)[0]?.reasoningMode).toBe("adaptive");
+  });
+
   test("keeps an explicit Gemini bridge available only through Responses", () => {
     const source = {
       wireApi: "responses",
@@ -134,7 +149,7 @@ describe("source protocol bindings", () => {
     expect(runtimeSourceProtocolBindings(source).at(-1)).toEqual({
       wireApi: "responses",
       adapter: "responses_to_messages",
-      reasoningMode: "disabled",
+      reasoningMode: "adaptive",
       cacheWriteTtl: "provider",
       modelIds: ["claude-messages"],
     });
@@ -216,6 +231,104 @@ describe("source protocol bindings", () => {
         modelIds: [],
       },
     ]);
+  });
+
+  test("simple source route choices preserve native Messages and Gemini adapters", () => {
+    const anthropic = {
+      kind: "custom",
+      name: "Anthropic endpoint",
+      baseUrl: "https://api.anthropic.com/v1",
+      wireApi: "messages" as const,
+      apiKey: "sk-anthropic",
+      protocolBindings: [{ wireApi: "messages" as const, adapter: "native" as const, reasoningMode: "disabled" as const, modelIds: [] }],
+    } satisfies ApiProviderValue;
+    const google = {
+      ...anthropic,
+      name: "Google endpoint",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      wireApi: "gemini" as const,
+      protocolBindings: [{ wireApi: "gemini" as const, adapter: "native" as const, reasoningMode: "disabled" as const, modelIds: [] }],
+    } satisfies ApiProviderValue;
+
+    expect(apiProviderSourceInput(anthropic).protocolBindings[0]).toMatchObject({ wireApi: "messages", adapter: "native" });
+    expect(apiProviderSourceInput(google).protocolBindings[0]).toMatchObject({ wireApi: "gemini", adapter: "native" });
+  });
+
+  test("manual model catalogs are assigned to the selected adapter route", () => {
+    const value = {
+      kind: "custom",
+      name: "No catalog endpoint",
+      baseUrl: "https://api.example.test/v1",
+      wireApi: "responses" as const,
+      apiKey: "sk-synthetic",
+      models: ["gpt-5.6", "gpt-5.5"],
+      protocolBindings: [{
+        wireApi: "responses" as const,
+        adapter: "responses_to_gemini" as const,
+        reasoningMode: "disabled" as const,
+        modelIds: [],
+      }],
+    } satisfies ApiProviderValue;
+
+    expect(apiProviderSourceInput(value)).toMatchObject({
+      models: ["gpt-5.6", "gpt-5.5"],
+      protocolBindings: [{
+        wireApi: "responses",
+        adapter: "responses_to_gemini",
+        modelIds: ["gpt-5.6", "gpt-5.5"],
+      }],
+    });
+  });
+
+  test("manual mode keeps entered models unassigned until the operator chooses a route", () => {
+    const value = {
+      kind: "custom",
+      name: "Manual route selection",
+      baseUrl: "https://api.example.test/v1beta",
+      wireApi: "responses" as const,
+      apiKey: "sk-synthetic",
+      modelCatalogMode: "manual" as const,
+      models: ["gemini-2.5-pro"],
+      autoAssignModels: false,
+      protocolBindings: [{
+        wireApi: "responses" as const,
+        adapter: "responses_to_gemini" as const,
+        reasoningMode: "disabled" as const,
+        modelIds: [],
+      }],
+    } satisfies ApiProviderValue;
+
+    expect(apiProviderSourceInput(value)).toMatchObject({
+      models: ["gemini-2.5-pro"],
+      protocolBindings: [{
+        wireApi: "responses",
+        adapter: "responses_to_gemini",
+        modelIds: [],
+      }],
+    });
+  });
+
+  test("explicit automatic mode ignores stale manual models and triggers discovery", () => {
+    const value = {
+      kind: "custom",
+      name: "Provider with discovery",
+      baseUrl: "https://api.example.test/v1",
+      wireApi: "responses" as const,
+      apiKey: "sk-synthetic",
+      modelCatalogMode: "automatic" as const,
+      models: ["stale-model"],
+      protocolBindings: [{
+        wireApi: "responses" as const,
+        adapter: "native" as const,
+        reasoningMode: "disabled" as const,
+        modelIds: [],
+      }],
+    } satisfies ApiProviderValue;
+
+    expect(apiProviderSourceInput(value)).toMatchObject({
+      models: [],
+      protocolBindings: [{ modelIds: [] }],
+    });
   });
 
   test("keeps cache-write TTL separate for each Messages upstream binding", () => {

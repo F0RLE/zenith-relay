@@ -2,19 +2,21 @@ use super::super::errors::{
     api_error, api_error_with_origin, api_error_with_origin_and_category,
     apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
     apply_failure_state, cooldown_error, failure_category_is_request_terminal,
-    failure_category_requires_cooldown, failure_requires_independent_source_endpoint,
-    preserved_upstream_error, previous_response_not_found, previous_response_requires_websocket,
-    recoverable_response_affinity_miss, responses_function_call_output_has_invalid_call_id,
+    failure_category_requires_cooldown, preserved_upstream_error, previous_response_not_found,
+    previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,
     AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
+#[cfg(test)]
+use super::super::request::requested_reasoning_effort;
 use super::super::request::{
     apply_default_service_tier_if_missing, candidate_protocols, contains_tool_call_output,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
-    request_service_tier, requested_reasoning_effort, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
+    request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_error_response,
@@ -57,30 +59,13 @@ pub(in crate::gateway::execution) async fn execute_request(
     allow_previous_response_reset: bool,
     attempt_offset: u16,
 ) -> Response<Body> {
-    if wire_api != WireApi::Messages {
-        apply_default_service_tier_if_missing(&mut request, runtime.default_service_tier());
-    }
+    let client_supplied_service_tier = request.get("service_tier").is_some();
     let service_tier = if wire_api != WireApi::Messages {
         request_service_tier(&request)
     } else {
         DefaultServiceTier::Standard
     };
     let client_tool_use = tool_use_diagnostics(&request);
-    let requested_reasoning = requested_reasoning_effort(&request, wire_api);
-    if let Some(effort) = requested_reasoning.as_deref() {
-        let chat_completions_reasoning_is_unsupported = wire_api == WireApi::ChatCompletions
-            && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model);
-        if chat_completions_reasoning_is_unsupported
-            || (!runtime.model_reasoning_effort_is_allowed(&resolved_model, effort)
-                && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model))
-        {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "reasoning effort is not allowed for this model",
-                "reasoning_effort_not_allowed",
-            );
-        }
-    }
     let mut tried = Default::default();
     let mut attempt = attempt_offset;
     let mut attempts_this_run = 0_usize;
@@ -163,20 +148,22 @@ pub(in crate::gateway::execution) async fn execute_request(
         ) else {
             continue;
         };
+        if !client_supplied_service_tier {
+            request
+                .as_object_mut()
+                .expect("request object was validated before routing")
+                .remove("service_tier");
+        }
+        if wire_api != WireApi::Messages {
+            apply_default_service_tier_if_missing(
+                &mut request,
+                runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+            );
+        }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_id.clone();
         route.service_tier = service_tier;
-        if let Some(effort) = requested_reasoning.as_deref() {
-            if !runtime.candidate_reasoning_effort_is_allowed(
-                &route.candidate_id,
-                &resolved_model,
-                effort,
-            ) {
-                drop(lease);
-                continue;
-            }
-        }
         let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
@@ -185,6 +172,22 @@ pub(in crate::gateway::execution) async fn execute_request(
         let source_model = route.source_model.clone();
         debug_assert_eq!(wire_api, route.wire_api);
         let account_route = route.account_id.is_some();
+        let route_responses_lite = (wire_api == WireApi::Responses)
+            .then(|| {
+                responses_lite.clone().or_else(|| {
+                    route
+                        .account_id
+                        .as_deref()
+                        .is_some_and(|candidate_id| {
+                            runtime
+                                .codex_model_responses_lite_candidates(&resolved_model)
+                                .iter()
+                                .any(|id| id == candidate_id)
+                        })
+                        .then(|| HeaderValue::from_static("true"))
+                })
+            })
+            .flatten();
         let previous = if route.adapter.uses_local_continuation_state() {
             match request
                 .get("previous_response_id")
@@ -231,7 +234,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             let Value::Object(object) = upstream_body else {
                 unreachable!("request object was validated before execution")
             };
-            normalize_account_request(object, responses_lite.is_some());
+            normalize_account_request(object, route_responses_lite.is_some());
         }
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
             &request,
@@ -288,7 +291,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
         }
         if account_route {
-            if let Some(value) = responses_lite.as_ref() {
+            if let Some(value) = route_responses_lite.as_ref() {
                 upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value);
             }
         }
@@ -312,9 +315,6 @@ pub(in crate::gateway::execution) async fn execute_request(
                     &cooldown_context,
                     route.half_open_probe,
                 );
-                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
-                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                }
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -374,12 +374,6 @@ pub(in crate::gateway::execution) async fn execute_request(
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
-                    if failure_requires_independent_source_endpoint(
-                        failure.status,
-                        failure.category,
-                    ) {
-                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                    }
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
                     last_failure_origin = selected_error_origin;
@@ -483,12 +477,6 @@ pub(in crate::gateway::execution) async fn execute_request(
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
-                    if failure_requires_independent_source_endpoint(
-                        failure.status,
-                        failure.category,
-                    ) {
-                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                    }
                 }
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -565,12 +553,6 @@ pub(in crate::gateway::execution) async fn execute_request(
                         &cooldown_context,
                         route.half_open_probe,
                     );
-                    if failure_requires_independent_source_endpoint(
-                        failure.status,
-                        failure.category,
-                    ) {
-                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                    }
                     let mut event = usage_event(
                         &request_id,
                         attempt,
@@ -750,14 +732,22 @@ pub(in crate::gateway::execution) async fn execute_request(
                 now_ms(),
             );
             emit_usage(&runtime, event);
-            if let Some(bridge_response) = bridge_response
+            if let Some((response_id, continuation)) = bridge_response
                 .as_ref()
-                .and_then(|response| response.messages_continuation())
+                .and_then(|response| response.continuation())
             {
                 runtime.save_messages_bridge_response(
                     &key.id,
                     &route.candidate_id,
-                    bridge_response,
+                    &crate::MessagesBridgeResponse {
+                        response_body: bridge_response
+                            .as_ref()
+                            .expect("continuation response is present")
+                            .response_body()
+                            .clone(),
+                        response_id: response_id.to_string(),
+                        continuation: continuation.clone(),
+                    },
                     now_ms(),
                 );
             }

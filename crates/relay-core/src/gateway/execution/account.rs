@@ -42,7 +42,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     response_affinity_key: Option<String>,
     rewrite_model: bool,
 ) -> Response<Body> {
-    apply_default_service_tier_if_missing(&mut request, runtime.default_service_tier());
+    let client_supplied_service_tier = request.get("service_tier").is_some();
     let request_id = request_id();
     let service_tier = request_service_tier(&request);
     let client_tool_use = tool_use_diagnostics(&request);
@@ -101,10 +101,32 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         if route.account_id.is_none() {
             continue;
         }
+        if !client_supplied_service_tier {
+            request
+                .as_object_mut()
+                .expect("request object was validated before routing")
+                .remove("service_tier");
+        }
+        apply_default_service_tier_if_missing(
+            &mut request,
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+        );
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_id.clone();
         route.service_tier = service_tier;
+        let route_responses_lite = responses_lite.clone().or_else(|| {
+            route
+                .account_id
+                .as_deref()
+                .is_some_and(|candidate_id| {
+                    runtime
+                        .codex_model_responses_lite_candidates(&resolved_model)
+                        .iter()
+                        .any(|id| id == candidate_id)
+                })
+                .then(|| HeaderValue::from_static("true"))
+        });
         let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
@@ -120,6 +142,18 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 "model".to_string(),
                 Value::String(route.source_model.clone()),
             );
+        }
+        if route_responses_lite.is_some() {
+            if let Some(object) = upstream_body.as_object_mut() {
+                crate::gateway::request::normalize_account_request(object, true);
+                // Responses Lite is also used by the compact endpoint, but
+                // compact remains a non-streaming contract. The shared
+                // account normalizer sets the native streaming defaults, so
+                // remove that field again for this endpoint only.
+                if endpoint == AccountEndpoint::Compact {
+                    object.remove("stream");
+                }
+            }
         }
         let reasoning_effort =
             ReasoningEffortDiagnostics::from_bodies(&request, &upstream_body, WireApi::Responses);
@@ -149,7 +183,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             .header(ACCEPT, "application/json")
             .headers(request_headers);
         if endpoint == AccountEndpoint::Compact {
-            if let Some(value) = responses_lite.as_ref() {
+            if let Some(value) = route_responses_lite.as_ref() {
                 upstream_request =
                     upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
             }

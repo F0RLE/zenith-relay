@@ -35,6 +35,7 @@
 .model-rules-table col[data-column="codex"] { width: 18%; }
 .model-rules-table col[data-column="price"] { width: 38%; }
 .model-rules-table col[data-column="members"] { width: 10%; }
+.model-rules-table col[data-column="speed"] { width: 12%; }
 .model-rules-table col[data-column="actions"] { width: 12%; }
 
 .model-rules-table th,
@@ -58,6 +59,28 @@
   background: color-mix(in srgb, var(--relay-subtle) 58%, transparent);
   color: var(--relay-secondary);
   text-align: left;
+}
+
+.model-rules-table .model-group-row[draggable],
+.model-rules-table tr[data-model-id][draggable] {
+  cursor: grab;
+}
+
+.model-rules-table .model-group-row[draggable]:active,
+.model-rules-table tr[data-model-id][draggable]:active {
+  cursor: grabbing;
+}
+
+.model-rules-table .model-dragging {
+  opacity: 0.58;
+}
+
+.model-group-row th > svg {
+  width: 14px;
+  height: 14px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  color: var(--relay-muted);
 }
 
 .model-rules-table tbody:first-of-type .model-group-row th {
@@ -311,43 +334,21 @@
 
 .model-reasoning-form {
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 
-.model-reasoning-form .model-price-context {
-  padding-bottom: 10px;
-}
-
-.model-reasoning-company {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 11px;
-  border: 1px solid var(--relay-border);
-  border-radius: 8px;
-  background: var(--relay-surface-subtle);
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.model-reasoning-company strong {
-  color: var(--relay-secondary);
-}
-
-.model-reasoning-detected {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 4px 8px;
-  color: var(--relay-muted);
-  font-size: 11px;
+.model-reasoning-model {
+  min-width: 0;
+  display: block;
+  overflow: hidden;
+  padding: 2px 8px 14px;
+  border-bottom: 1px solid var(--relay-border);
+  color: var(--relay-text);
+  font-size: 15px;
+  font-weight: 650;
   text-align: center;
-}
-
-.model-reasoning-detected strong {
-  color: var(--relay-secondary);
-  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-reasoning-options {
@@ -390,162 +391,6 @@
   border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
   background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-surface));
   color: var(--relay-accent-hover);
-}
-
-.model-reasoning-section-heading {
-  display: flex !important;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.model-reasoning-section-heading .model-reasoning-clear {
-  min-height: 28px;
-  padding: 4px 8px;
-  font-size: 11px;
-}
-
-.model-reasoning-manual,
-.model-reasoning-probe {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--relay-subtle) 45%, transparent);
-}
-
-.model-reasoning-manual > header,
-.model-reasoning-probe > header {
-  display: grid;
-  gap: 3px;
-}
-
-.model-reasoning-manual header strong,
-.model-reasoning-probe header strong {
-  color: var(--relay-text);
-  font-size: 12px;
-}
-
-.model-reasoning-add,
-.model-reasoning-probe-controls {
-  display: flex;
-  align-items: end;
-  gap: 8px;
-}
-
-.model-reasoning-add .relay-field,
-.model-reasoning-probe-controls .relay-field {
-  min-width: 0;
-  flex: 1 1 180px;
-}
-
-.model-reasoning-add .relay-button,
-.model-reasoning-probe-controls .relay-button {
-  flex: 0 0 auto;
-  min-height: 38px;
-}
-
-.model-reasoning-probe-toggle {
-  display: flex;
-  align-items: start;
-  gap: 9px;
-  cursor: pointer;
-}
-
-.model-reasoning-probe-toggle input {
-  width: 15px;
-  height: 15px;
-  margin: 2px 0 0;
-  accent-color: var(--relay-accent);
-}
-
-.model-reasoning-probe-toggle span {
-  display: grid;
-  gap: 2px;
-}
-
-.model-reasoning-probe-toggle strong {
-  color: var(--relay-secondary);
-  font-size: 12px;
-}
-
-.model-reasoning-probe-progress {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 34px;
-  color: var(--relay-accent-hover);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.model-reasoning-probe-progress svg {
-  width: 16px;
-  height: 16px;
-}
-
-.model-reasoning-probe-result {
-  display: grid;
-  gap: 8px;
-  padding-top: 2px;
-}
-
-.model-reasoning-probe-result > strong {
-  color: var(--relay-secondary);
-  font-size: 12px;
-}
-
-.model-reasoning-probe-result > small {
-  color: var(--relay-accent-hover);
-  font-size: 11px;
-}
-
-.model-reasoning-probe-result ul {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.model-reasoning-probe-result li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--relay-surface);
-  color: var(--relay-secondary);
-  font-size: 12px;
-}
-
-.model-reasoning-probe-result li small {
-  color: var(--relay-muted);
-  font-size: 11px;
-}
-
-.model-reasoning-probe-result li[data-available="true"] small {
-  color: var(--relay-accent-hover);
-}
-
-.model-reasoning-probe-result li[data-available="false"] small {
-  color: var(--relay-danger);
-}
-
-@media (max-width: 520px) {
-  .model-reasoning-add,
-  .model-reasoning-probe-controls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .model-reasoning-add .relay-button,
-  .model-reasoning-probe-controls .relay-button {
-    width: 100%;
-  }
 }
 
 .model-price-context {
@@ -683,6 +528,32 @@
   color: var(--relay-muted);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.model-speed-menu,
+.model-speed-menu .relay-option-trigger {
+  width: 100%;
+  min-width: 0;
+}
+
+.model-speed-menu .relay-option-trigger {
+  min-height: 30px;
+  padding: 0 7px;
+  border-color: var(--relay-border-strong);
+  font-size: 11px;
+}
+
+.model-speed-unavailable {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--relay-muted);
+}
+
+.model-speed-unavailable svg {
+  width: 14px;
+  height: 14px;
 }
 
 .model-toggle[aria-pressed="true"] {

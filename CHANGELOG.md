@@ -6,7 +6,36 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
-No changes are currently queued for the next release.
+- Updated the bundled official OpenAI API reference prices for GPT-5.6 Sol,
+  Terra, and Luna, including cached-input and cache-write rates.
+- The API-source editor now separates connection settings, manual model and
+  format routing, and per-source pricing into clear tabs. Model refresh stays
+  beside the saved connection summary and checks only the saved source.
+- Source-policy editing now uses pointer-based dragging in the desktop WebView:
+  sources can be reordered within a role or dropped directly onto API first,
+  stabilizer, or last-resort roles. Saving closes the policy window immediately
+  while Relay persists and refreshes the updated rules in the background.
+- Replaced the lifetime-based monetary "Potential" estimate with **API equiv.
+  left**. It appears only when Relay has complete priced usage recorded since
+  the current provider quota window began; the estimate excludes activity
+  outside Relay and is omitted when the input is incomplete.
+- Added request-count and end-to-end output-speed charts to the Overview for
+  every selected period.
+- Reworked the README and localized Help guides around the three user-facing
+  modes, setup, quota/reset behavior, recovery, privacy, and troubleshooting.
+- Regenerated the Overview, Connections, Pool, and Usage screenshots from the
+  current desktop UI.
+- Clarified that request speed (`Standard`/`Fast`) is not a second user-facing
+  quota; Fast/priority provider metadata is no longer rendered as another quota
+  meter.
+- Reauthentication can now target the exact expired ChatGPT account. A fresh
+  OAuth login keeps the account's local routing and settings, does not restore
+  an expired subscription date without new provider metadata, and preserves a
+  usable model catalog when quota or discovery checks temporarily fail.
+- Completed the Responses bridges for function, namespace, and direct custom
+  tools across Anthropic Messages and Gemini, including tool-choice filtering,
+  JSON/SSE continuations, multimodal input, thinking metadata, and normalized
+  usage.
 
 ## [1.1.0] - 2026-08-23
 
@@ -20,7 +49,7 @@ account pool.
 
 | Area | 1.0.5 | 1.1.0 |
 | --- | --- | --- |
-| Product | Desktop client focused on a single API-key workflow | Local-first Tauri relay with a private OpenAI-compatible endpoint |
+| Product | Desktop client focused on a single API-key workflow | Local-first desktop relay with a private OpenAI-compatible endpoint |
 | Operating modes | One desktop experience | This computer, Choose API, and My server |
 | Accounts | Profile recovery and basic local state | ChatGPT OAuth, profile import, account health, quotas, pool membership, and routing |
 | API sources | Limited source configuration | Responses, Messages, Chat Completions, and explicitly assigned Gemini routes |
@@ -37,32 +66,31 @@ account pool.
   user.
 - Added ChatGPT OAuth sign-in, existing-profile import, account identity and
   availability state, pool membership, configured routing order, proxies, and
-  response-owner affinity.
+  reliable response continuity.
 - Added provider quota windows in Connections and Pool. Provider quota,
   direct API-equivalent usage, and optional purchase-cost payback remain
   separate values; a quota percentage is never treated as money.
-- Added redacted account export, diagnostics, snapshots, telemetry, and usage
-  history. Prompts, response bodies, cookies, authorization headers, and keys
-  are not recorded.
+- Added explicit account export in several transfer formats. Account exports
+  contain the OAuth credentials required for the selected import and must be
+  handled as secrets. Diagnostics, snapshots, support bundles, telemetry, and
+  usage history remain redacted: prompts, response bodies, cookies,
+  authorization headers, and raw keys are not recorded there.
 
 ### Sources, models, and routing
 
-- Added provider-neutral Responses, Messages, Chat Completions, and validated
-  `Responses -> Gemini` route contracts, including bounded continuation state
-  for Responses-to-Messages tool flows.
-- Added source model discovery with provider/manual price provenance, image
-  generation/edit prices, semantic model ordering, and confirmed reasoning
-  capabilities.
+- Added support for Responses, Messages, Chat Completions, and validated
+  Responses-to-Gemini compatibility, including tool-call continuations.
+- Added source model discovery, clear price provenance, image generation/edit
+  prices, semantic model ordering, and declared reasoning catalog modes.
 - Catalog refresh runs at startup and every eight hours during an active app
-  session. Catalog failures stay visible after restart; reasoning probes remain
-  manual and changing a reasoning setting does not start a background probe.
-- Reasoning policies apply only to pooled API sources. Native OAuth catalogs and
-  native request capabilities remain unchanged.
-- Added native upstream WebSocket support with an HTTP/SSE bridge for providers
-  that do not expose WebSockets. A single WebSocket lane keeps one `stream_id`
-  and rejects an unknown session or second concurrent lane.
-- Source order now wins over prompt-cache affinity for initial routing, while
-  response-owner affinity remains available for protocol continuations.
+  session. Catalog failures stay visible after restart; reasoning modes remain
+  catalog metadata and changing a reasoning setting does not probe a provider.
+- Reasoning policies apply only to pooled API sources. Native OAuth models keep
+  their provider capabilities unchanged.
+- Added native WebSocket support and an HTTP/SSE compatibility path for
+  providers that do not expose WebSockets.
+- Routing follows the configured source order while keeping protocol
+  continuations on the correct account.
 
 ### Quotas, resets, and usage
 
@@ -71,11 +99,10 @@ account pool.
   does not confuse a five-hour window with the weekly reset.
 - Background quota, model, and wake workers run only while an active Relay
   session is open. Tray-only startup does not perform provider checks.
-- Added prompt-cache lifetime reporting, protocol and cache-write token fields,
-  requested versus normalized reasoning effort, provider generation speed, and
-  full-request E2E speed.
-- API-equivalent totals update incrementally in SQLite while raw request logs
-  keep their bounded retention policy.
+- Added cache and reasoning token details, requested versus applied reasoning
+  effort, provider generation speed, and full-request response speed.
+- Usage totals remain available even after detailed request history is cleaned
+  up according to its retention policy.
 - Pool service tiers now use Standard/Fast terminology and synchronize Codex's
   official priority setting with the selected tier.
 
@@ -85,9 +112,9 @@ account pool.
   snapshot, named snapshots, full restore verification, and a visible Yes/No
   confirmation. Hidden pre-restore copies are not created.
 - OAuth rotation recovery adopts a newer token for the same account before
-  restoring the profile, avoiding false `profile_restore_blocked` failures.
-- History repair updates only threads linked to processed rollouts, rewrites
-  relevant session markers, and keeps recovery paths portable on Windows.
+  restoring the profile, avoiding false restore failures.
+- History repair updates only affected conversations and keeps recovery paths
+  portable on Windows.
 - Snapshot deletion and history-repair backups use bounded cleanup and explicit
   confirmation safeguards.
 
@@ -107,9 +134,9 @@ account pool.
 
 ### Optional Relay Server
 
-- Added a standalone user-managed server with encrypted vault storage, SQLite
-  state, append-only migrations, management API, protocol negotiation,
-  backup/restore, and strict redaction.
+- Added a standalone user-managed server with encrypted vault storage, durable
+  state, management API, protocol negotiation, backup/restore, and strict
+  redaction.
 - The server is an optional personal deployment. It is not a connection to
   Zenith production systems, and live server acceptance remains a separate
   deferred gate.
@@ -122,14 +149,6 @@ account pool.
 - User-owned credentials can move only after an explicit confirmed transfer to
   that user's own server. Desktop secrets stay in the operating-system
   credential store; server secrets stay in the encrypted user-managed vault.
-
-### Release verification
-
-- 79 frontend unit tests, 120 visual Playwright scenarios, 177 operational
-  Playwright scenarios, and 354 serialized desktop Rust tests passed.
-- Rust formatting, Clippy, dependency audits, Linux Secret Service checks,
-  cross-platform packaging, updater-manifest generation, and release asset
-  validation passed for the 1.1.0 release.
 
 ## [1.1.0-beta.1] - 2026-07-29
 

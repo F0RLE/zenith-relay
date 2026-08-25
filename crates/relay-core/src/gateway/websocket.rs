@@ -1,8 +1,7 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
-    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
-    failure_requires_independent_source_endpoint, rate_limit_body_hint, CooldownContext,
-    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, rate_limit_body_hint,
+    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::execution::execute_client_request;
 use super::now_ms;
@@ -178,7 +177,7 @@ async fn bridge_http_fallback(
     headers: HeaderMap,
     mut request: ClientRequest,
 ) {
-    let stream_id = request.stream_id.clone();
+    let mut stream_id = request.stream_id.clone();
     loop {
         if let Err(failure) =
             serve_http_fallback_request(&mut downstream, runtime.clone(), &key, &headers, &request)
@@ -222,13 +221,18 @@ async fn bridge_http_fallback(
                 return;
             }
         };
-        if let Some(expected) = stream_id.as_deref() {
-            if next_request.stream_id.as_deref() != Some(expected) {
-                let failure = GatewayFailure::invalid_request(
-                    "only one WebSocket stream_id is supported per connection",
-                );
-                send_gateway_error(&mut downstream, &failure, Some(&next_request.request_id)).await;
-                return;
+        if let Some(next_stream_id) = next_request.stream_id.as_deref() {
+            if let Some(expected) = stream_id.as_deref() {
+                if expected != next_stream_id {
+                    let failure = GatewayFailure::invalid_request(
+                        "only one WebSocket stream_id is supported per connection",
+                    );
+                    send_gateway_error(&mut downstream, &failure, Some(&next_request.request_id))
+                        .await;
+                    return;
+                }
+            } else {
+                stream_id = Some(next_stream_id.to_string());
             }
         }
         request = next_request;
@@ -379,16 +383,8 @@ async fn connect_upstream(
         ) else {
             continue;
         };
-        if let Some(effort) = request.requested_reasoning_effort() {
-            if !runtime.candidate_reasoning_effort_is_allowed(
-                &route.candidate_id,
-                &request.resolved_model,
-                &effort,
-            ) {
-                drop(lease);
-                continue 'candidates;
-            }
-        }
+        request.apply_service_tier_for_route(runtime, &route);
+        route.service_tier = request.service_tier();
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(client_headers);
@@ -435,7 +431,7 @@ async fn connect_upstream(
             let mut headers = upstream_headers(
                 client_headers,
                 &prepared,
-                request.responses_lite,
+                request.responses_lite_for(&route),
                 &request.request_id,
             );
             if let Some(account_id) = route.account_id.as_deref() {
@@ -453,7 +449,6 @@ async fn connect_upstream(
                 record_connect_failure(
                     runtime, key, &route, &request, attempt, started, &failure, None,
                 );
-                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue 'candidates;
             };
@@ -577,7 +572,6 @@ async fn connect_upstream(
                         .map(rate_limit_body_hint)
                         .unwrap_or_default(),
                 );
-                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -591,7 +585,6 @@ async fn connect_upstream(
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
-            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
             last_failure = Some(failure);
             continue;
         };
@@ -604,7 +597,6 @@ async fn connect_upstream(
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
-            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
             last_failure = Some(failure);
             continue;
         }
@@ -623,7 +615,6 @@ async fn connect_upstream(
                         &failure,
                         Some(&response_headers),
                     );
-                    exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     last_failure = Some(failure);
                     continue;
                 }
@@ -688,7 +679,6 @@ async fn connect_upstream(
                             Some(&terminal.headers),
                             terminal.body_hint,
                         );
-                        exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     }
                     last_failure = Some(failure);
                     if affinity_miss
@@ -825,17 +815,6 @@ fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTermin
     let value = serde_json::from_slice::<Value>(payload).ok()?;
     let event_type = value.get("type").and_then(Value::as_str);
     Some((has_output_delta(&value, event_type), event_terminal(&value)))
-}
-
-fn exclude_correlated_source_endpoint(
-    runtime: &GatewayRuntime,
-    route: &ExecutorRoute,
-    failure: &GatewayFailure,
-    tried: &mut HashSet<String>,
-) {
-    if failure_requires_independent_source_endpoint(failure.status, failure.category) {
-        runtime.exclude_same_source_endpoint(&route.candidate_id, tried);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1401,7 +1380,7 @@ async fn start_next_request(
             "a response is already in progress",
         ));
     }
-    let request = ClientRequest::parse(runtime, key, headers, payload)?;
+    let mut request = ClientRequest::parse(runtime, key, headers, payload)?;
     if let Some(stream_id) = request.stream_id.as_deref() {
         if let Some(active_stream_id) = state.stream_id.as_deref() {
             if active_stream_id != stream_id {
@@ -1456,19 +1435,11 @@ async fn start_next_request(
                 false,
             )
             .ok_or_else(GatewayFailure::unavailable)?;
-        if let Some(effort) = request.requested_reasoning_effort() {
-            if !runtime.candidate_reasoning_effort_is_allowed(
-                &route.candidate_id,
-                &request.resolved_model,
-                &effort,
-            ) {
-                drop(lease);
-                return Err(GatewayFailure::unavailable());
-            }
-        }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(headers);
+        request.apply_service_tier_for_route(runtime, &route);
+        route.service_tier = request.service_tier();
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
         if let Err(failure) =

@@ -575,6 +575,33 @@ fn api_source_roles_remain_strict_around_fair_oauth_routing() {
 }
 
 #[test]
+fn stabilizer_sources_are_exhausted_by_priority_before_last_reserve() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, priority) in [
+        ("stabilizer-first", 300),
+        ("stabilizer-second", 200),
+        ("stabilizer-third", 100),
+        ("last-reserve", API_SOURCE_RESERVE_PRIORITY),
+    ] {
+        let mut source = candidate(id);
+        source.priority = priority;
+        scheduler.upsert(source);
+    }
+
+    let mut tried = HashSet::new();
+    for expected in [
+        "stabilizer-first",
+        "stabilizer-second",
+        "stabilizer-third",
+        "last-reserve",
+    ] {
+        let selected = select(&mut scheduler, &tried).unwrap();
+        assert_eq!(selected.candidate_id, expected);
+        tried.insert(selected.candidate_id);
+    }
+}
+
+#[test]
 fn active_and_sequential_requests_keep_the_highest_quota() {
     let mut scheduler = PoolScheduler::new();
     let mut full = candidate("full");

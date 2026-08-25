@@ -1,5 +1,5 @@
 use super::{
-    apply_candidate_policy, confirmed_source_reasoning_levels, model_rules, runtime_now_ms,
+    apply_candidate_policy, declared_source_reasoning_levels, model_rules, runtime_now_ms,
     ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
 };
 use crate::quota::QuotaSnapshot;
@@ -350,9 +350,10 @@ impl GatewayRuntime {
         true
     }
 
-    /// Builds a Responses-only scope from the current scheduler state without
-    /// reopening secrets or replacing a runtime that owns active streams.
-    pub fn active_responses_scope(
+    /// Builds a scope from all healthy pool protocols without reopening secrets
+    /// or replacing a runtime that owns active streams. Request admission still
+    /// filters candidates by the caller's selected wire API.
+    pub fn active_pool_scope(
         &self,
         allowed_source_ids: &BTreeSet<String>,
         allowed_account_ids: &BTreeSet<String>,
@@ -360,11 +361,7 @@ impl GatewayRuntime {
         let mut source_ids = BTreeSet::new();
         let mut account_ids = BTreeSet::new();
         for candidate in self.lock_scheduler().candidates() {
-            if candidate.protocol != crate::WireApi::Responses
-                || !candidate.enabled
-                || candidate.draining
-                || !candidate.secret_available
-            {
+            if !candidate.enabled || candidate.draining || !candidate.secret_available {
                 continue;
             }
             match candidate.kind {
@@ -390,6 +387,16 @@ impl GatewayRuntime {
         }
     }
 
+    /// Backward-compatible name for callers that historically built a pool
+    /// scope for the Responses-only desktop profile.
+    pub fn active_responses_scope(
+        &self,
+        allowed_source_ids: &BTreeSet<String>,
+        allowed_account_ids: &BTreeSet<String>,
+    ) -> CandidateScope {
+        self.active_pool_scope(allowed_source_ids, allowed_account_ids)
+    }
+
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
         self.lock_scheduler()
             .set_candidate_health(candidate_id, health)
@@ -408,24 +415,22 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
         {
-            let mut confirmed = self
+            let mut declared = self
                 .model_metadata
-                .confirmed_reasoning
+                .declared_reasoning
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for routes in confirmed.efforts.values_mut() {
+            for routes in declared.efforts.values_mut() {
                 routes.remove(candidate_id);
             }
-            confirmed.efforts.retain(|_, routes| !routes.is_empty());
-            for routes in confirmed.empty_routes.values_mut() {
+            declared.efforts.retain(|_, routes| !routes.is_empty());
+            for routes in declared.empty_routes.values_mut() {
                 routes.remove(candidate_id);
             }
-            confirmed
-                .empty_routes
-                .retain(|_, routes| !routes.is_empty());
-            let previous_levels = confirmed.levels.clone();
-            confirmed.levels = confirmed_source_reasoning_levels(
-                &confirmed.efforts,
+            declared.empty_routes.retain(|_, routes| !routes.is_empty());
+            let previous_levels = declared.levels.clone();
+            declared.levels = declared_source_reasoning_levels(
+                &declared.efforts,
                 &previous_levels,
                 &BTreeMap::new(),
             );
