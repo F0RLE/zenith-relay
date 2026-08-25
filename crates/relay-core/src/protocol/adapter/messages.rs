@@ -1,6 +1,7 @@
 use super::contracts::{
-    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest, MessagesBridgeResponse,
-    MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
+    custom_tool_item_id, AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest,
+    MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
+    TranslatedTools,
 };
 use crate::CacheWriteTtl;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -1356,7 +1357,7 @@ pub(super) fn responses_output_from_messages_content(
                         "arguments": serde_json::to_string(input).map_err(|_| AdapterError::upstream_response_invalid())?,
                     }),
                     ResponsesToolKind::Custom => json!({
-                        "id": call_id,
+                        "id": custom_tool_item_id(call_id),
                         "type": kind.response_item_type(),
                         "status": "completed",
                         "call_id": call_id,

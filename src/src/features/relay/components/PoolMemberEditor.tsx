@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState, type PointerEvent } from "react";
-import { ArrowDown, ArrowUp, GripVertical, Power } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { ArrowDown, ArrowRight, ArrowUp, GripVertical, Power } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
@@ -21,6 +21,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [dropAfter, setDropAfter] = useState(false);
   const [dropRole, setDropRole] = useState<ApiSourceRole | null>(null);
+  const sourceDragRef = useRef<{ pointerId: number; sourceId: string; clientX: number; clientY: number } | null>(null);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
   const pricedModels = member.kind === "source"
     ? [...Object.keys(member.modelPriceOverrides ?? {}), ...Object.keys(member.detectedModelPrices ?? {})]
@@ -42,18 +43,19 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
   const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole) : [];
   const orderedSources = sourceOrder.map((sourceId) => runtime?.sources.find((source) => source.id === sourceId)).filter((source): source is SourceSummary => Boolean(source));
-  const clearSourceDrag = () => {
+  const clearSourceDrag = useCallback(() => {
+    sourceDragRef.current = null;
     setDraggedSource(null);
     setDropTarget(null);
     setDropAfter(false);
     setDropRole(null);
-  };
-  const chooseSourceRole = (role: ApiSourceRole) => {
+  }, []);
+  const chooseSourceRole = useCallback((role: ApiSourceRole) => {
     setSourceRole(role);
     setSourceOrder(sourceOrderForRole(runtime?.sources ?? [], role, member.id));
     clearSourceDrag();
-  };
-  const moveSource = (sourceId: string, targetId: string, after = false) => {
+  }, [clearSourceDrag, member.id, runtime?.sources]);
+  const moveSource = useCallback((sourceId: string, targetId: string, after = false) => {
     if (sourceId === targetId) return;
     setSourceOrder((current) => {
       const next = current.filter((id) => id !== sourceId);
@@ -62,17 +64,16 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
       next.splice(targetIndex + (after ? 1 : 0), 0, sourceId);
       return next;
     });
-  };
+  }, []);
   const moveSourceBy = (sourceId: string, offset: number) => {
     const index = sourceOrder.indexOf(sourceId);
     const target = sourceOrder[index + offset];
     if (target) moveSource(sourceId, target, offset > 0);
   };
-  const updateSourceDrag = (event: PointerEvent<HTMLButtonElement>) => {
-    const sourceId = draggedSource;
+  const updateSourceDragAt = useCallback((clientX: number, clientY: number) => {
+    const sourceId = sourceDragRef.current?.sourceId;
     if (!sourceId) return;
-    event.preventDefault();
-    const target = document.elementFromPoint(event.clientX, event.clientY);
+    const target = document.elementFromPoint(clientX, clientY);
     const role = sourceId === member.id ? sourceRoleAt(target) : null;
     if (role) {
       setDropRole(role);
@@ -86,16 +87,15 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
     setDropTarget(targetId && targetId !== sourceId ? targetId : null);
     if (targetId && targetId !== sourceId && row) {
       const bounds = row.getBoundingClientRect();
-      setDropAfter(event.clientY >= bounds.top + bounds.height / 2);
+      setDropAfter(clientY >= bounds.top + bounds.height / 2);
     } else {
-      setDropAfter(false);
+    setDropAfter(false);
     }
-  };
-  const finishSourceDrag = (event: PointerEvent<HTMLButtonElement>) => {
-    const sourceId = draggedSource;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }, [member.id]);
+  const finishSourceDragAt = useCallback((clientX: number, clientY: number) => {
+    const sourceId = sourceDragRef.current?.sourceId;
     if (!sourceId) return;
-    const target = document.elementFromPoint(event.clientX, event.clientY);
+    const target = document.elementFromPoint(clientX, clientY);
     const role = sourceId === member.id ? sourceRoleAt(target) : null;
     if (role) {
       chooseSourceRole(role);
@@ -105,9 +105,53 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
     const targetId = row?.dataset.sourceId;
     if (targetId && targetId !== sourceId && row) {
       const bounds = row.getBoundingClientRect();
-      moveSource(sourceId, targetId, event.clientY >= bounds.top + bounds.height / 2);
+      moveSource(sourceId, targetId, clientY >= bounds.top + bounds.height / 2);
     }
     clearSourceDrag();
+  }, [clearSourceDrag, member.id, moveSource, chooseSourceRole]);
+  useEffect(() => {
+    const drag = sourceDragRef.current;
+    if (!drag || draggedSource !== drag.sourceId) return;
+    const onPointerMove = (event: globalThis.PointerEvent) => {
+      if (event.pointerId !== drag.pointerId) return;
+      drag.clientX = event.clientX;
+      drag.clientY = event.clientY;
+      updateSourceDragAt(event.clientX, event.clientY);
+    };
+    const onPointerUp = (event: globalThis.PointerEvent) => {
+      if (event.pointerId !== drag.pointerId) return;
+      finishSourceDragAt(event.clientX, event.clientY);
+    };
+    const onPointerCancel = (event: globalThis.PointerEvent) => {
+      if (event.pointerId === drag.pointerId) clearSourceDrag();
+    };
+    const onWheel = () => {
+      // Let the dialog's scroll container handle the wheel normally. Re-check
+      // the target after scrolling so the drop indicator follows the row.
+      requestAnimationFrame(() => {
+        if (sourceDragRef.current !== drag) return;
+        updateSourceDragAt(drag.clientX, drag.clientY);
+      });
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
+    window.addEventListener("wheel", onWheel, { passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
+      window.removeEventListener("wheel", onWheel);
+    };
+  }, [clearSourceDrag, draggedSource, finishSourceDragAt, updateSourceDragAt]);
+  const startSourceDrag = (event: PointerEvent<HTMLButtonElement>, sourceId: string) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    sourceDragRef.current = { pointerId: event.pointerId, sourceId, clientX: event.clientX, clientY: event.clientY };
+    setDraggedSource(sourceId);
+    setDropTarget(null);
+    setDropAfter(false);
+    setDropRole(null);
   };
   const save = () => {
     if (member.kind === "source" && !sourcePriceOverrides) return;
@@ -137,14 +181,15 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
         <header className="source-routing-heading"><div><h3>{t("sources.poolRole")}</h3><p className="sr-only">{t("sources.routingHint")}</p></div></header>
         <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
           <span>{t("sources.fallbackOrder")}</span>
-          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")}>
+          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")} data-dragging={draggedSource ? "true" : undefined}>
             {sourceStages.map((stage, index) => {
               const label = stage.role === "accounts" ? t("connections.accounts") : t(`sources.roles.${stage.role}`);
+              const arrow = index > 0 ? <ArrowRight className="source-route-arrow" aria-hidden /> : null;
               if (stage.role === "accounts") {
-                return <div className="source-route-stage accounts" key={stage.role} aria-label={`${label}: ${stage.count}`}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></div>;
+                return <Fragment key={stage.role}>{arrow}<div className="source-route-stage accounts" data-stage-index={index} aria-label={`${label}: ${stage.count}`}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></div></Fragment>;
               }
               const role: ApiSourceRole = stage.role;
-              return <button className="source-route-stage" data-current={role === sourceRole ? "true" : undefined} data-source-role={role} data-drop-target={dropRole === role ? "true" : undefined} key={role} type="button" role="radio" aria-checked={role === sourceRole} aria-label={`${label}: ${t(`sources.roleHints.${role}`)}`} onClick={() => chooseSourceRole(role)}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></button>;
+              return <Fragment key={role}>{arrow}<button className="source-route-stage" data-stage-index={index} data-current={role === sourceRole ? "true" : undefined} data-source-role={role} data-drop-available={draggedSource === member.id ? "true" : undefined} data-drop-target={dropRole === role ? "true" : undefined} type="button" role="radio" aria-checked={role === sourceRole} aria-label={`${label}: ${t(`sources.roleHints.${role}`)}`} onClick={() => chooseSourceRole(role)}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></button></Fragment>;
             })}
           </div>
         </div>
@@ -153,7 +198,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           <header title={t("sources.sourceOrderHint")}><strong>{t("sources.sourceOrder")}</strong><small className="sr-only">{t("sources.sourceOrderHint")}</small></header>
           <div className="subscription-plan-order source-priority-order" role="list" aria-label={t("sources.sourceOrder")}>{orderedSources.map((source, index) => {
             return <div key={source.id} className="subscription-plan-order-row source-priority-row" role="listitem" data-source-id={source.id} data-current={source.id === member.id ? "true" : undefined} data-dragging={draggedSource === source.id ? "true" : undefined} data-drop-target={dropTarget === source.id ? "true" : undefined} data-drop-after={dropTarget === source.id && dropAfter ? "true" : undefined}>
-              <button className="source-priority-drag-handle" data-source-drag-handle type="button" aria-label={t("sources.reorderSource", { source: source.name })} title={t("sources.reorderSource", { source: source.name })} onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setDraggedSource(source.id); setDropTarget(null); setDropAfter(false); setDropRole(null); }} onPointerMove={updateSourceDrag} onPointerUp={finishSourceDrag} onPointerCancel={clearSourceDrag}><GripVertical aria-hidden /></button>
+              <button className="source-priority-drag-handle" data-source-drag-handle type="button" aria-label={t("sources.reorderSource", { source: source.name })} title={t("sources.reorderSource", { source: source.name })} onPointerDown={(event) => startSourceDrag(event, source.id)}><GripVertical aria-hidden /></button>
               <span className="subscription-plan-rank">{index + 1}</span>
               <span className="source-priority-name"><strong>{source.name}</strong>{source.id === member.id ? <small>{t("sources.currentSource")}</small> : null}</span>
               <div className="inline-actions"><IconButton label={t("sources.moveSourceUp", { source: source.name })} icon={<ArrowUp aria-hidden />} disabled={index === 0} onClick={() => moveSourceBy(source.id, -1)} /><IconButton label={t("sources.moveSourceDown", { source: source.name })} icon={<ArrowDown aria-hidden />} disabled={index === orderedSources.length - 1} onClick={() => moveSourceBy(source.id, 1)} /></div>

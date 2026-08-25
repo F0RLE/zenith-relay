@@ -15,6 +15,9 @@ release entries are kept concise and link to the corresponding tag.
   sources can be reordered within a role or dropped directly onto API first,
   stabilizer, or last-resort roles. Saving closes the policy window immediately
   while Relay persists and refreshes the updated rules in the background.
+- Pool model rules now use WebView-safe pointer dragging with normal wheel
+  scrolling during a move, visible drop targets, and collapsible provider
+  groups. Native drag events keep a text payload as a compatibility fallback.
 - Replaced the lifetime-based monetary "Potential" estimate with **API equiv.
   left**. It appears only when Relay has complete priced usage recorded since
   the current provider quota window began; the estimate excludes activity

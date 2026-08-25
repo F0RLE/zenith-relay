@@ -1,5 +1,6 @@
 use super::contracts::{
-    AdapterError, AdapterResult, MessagesBridgeRequest, MessagesBridgeResponse, ResponsesToolKind,
+    custom_tool_item_id, AdapterError, AdapterResult, MessagesBridgeRequest,
+    MessagesBridgeResponse, ResponsesToolKind,
 };
 use super::gemini::{apply_partial_args, function_call_args, GeminiBridgeRequest};
 use super::messages::{
@@ -44,6 +45,7 @@ enum StreamBlock {
     },
     Tool {
         id: String,
+        item_id: String,
         upstream_name: String,
         name: String,
         namespace: Option<String>,
@@ -332,7 +334,7 @@ impl MessagesStreamBridge {
                         "arguments": "",
                     }),
                     ResponsesToolKind::Custom => json!({
-                        "id": id,
+                        "id": custom_tool_item_id(id),
                         "type": tool_kind.response_item_type(),
                         "status": "in_progress",
                         "call_id": id,
@@ -357,6 +359,11 @@ impl MessagesStreamBridge {
                     index,
                     StreamBlock::Tool {
                         id: id.to_string(),
+                        item_id: if tool_kind == ResponsesToolKind::Custom {
+                            custom_tool_item_id(id)
+                        } else {
+                            id.to_string()
+                        },
                         upstream_name: name.to_string(),
                         name: client_name,
                         namespace: client_namespace,
@@ -629,6 +636,7 @@ impl MessagesStreamBridge {
             }
             StreamBlock::Tool {
                 id,
+                item_id,
                 name,
                 namespace,
                 kind,
@@ -698,13 +706,13 @@ impl MessagesStreamBridge {
                             json!({
                                 "type": "response.custom_tool_call_input.done",
                                 "response_id": response_id,
-                                "item_id": id,
+                                "item_id": item_id,
                                 "output_index": output_index,
                                 "input": raw_input,
                             }),
                         );
                         let mut item = json!({
-                            "id": id,
+                            "id": item_id,
                             "type": kind.response_item_type(),
                             "status": "completed",
                             "call_id": id,
@@ -1051,6 +1059,7 @@ pub struct GeminiStreamBridge {
 #[derive(Clone, Debug)]
 struct GeminiStreamCall {
     id: String,
+    item_id: String,
     name: String,
     kind: ResponsesToolKind,
     args: Value,
@@ -1410,10 +1419,16 @@ impl GeminiStreamBridge {
                 .filter(|v| !v.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("call_{}_{}", self.request.response_id(), key));
+            let item_id = if target_kind == ResponsesToolKind::Custom {
+                custom_tool_item_id(&id)
+            } else {
+                id.clone()
+            };
             self.calls.insert(
                 key,
                 GeminiStreamCall {
                     id,
+                    item_id,
                     name,
                     kind: target_kind,
                     args,
@@ -1462,7 +1477,7 @@ impl GeminiStreamBridge {
         if is_new {
             let call_state = self.calls.get(&key).expect("inserted Gemini call").clone();
             let mut item = if call_state.kind == ResponsesToolKind::Custom {
-                json!({"id":call_state.id,"type":"custom_tool_call","status":"in_progress","call_id":call_state.id,"name":target_name,"input":""})
+                json!({"id":call_state.item_id,"type":"custom_tool_call","status":"in_progress","call_id":call_state.id,"name":target_name,"input":""})
             } else {
                 json!({"id":call_state.id,"type":"function_call","status":"in_progress","call_id":call_state.id,"name":target_name,"arguments":""})
             };
@@ -1504,7 +1519,7 @@ impl GeminiStreamBridge {
             return;
         }
         call_state.emitted_arguments = arguments;
-        let item_id = call_state.id.clone();
+        let item_id = call_state.item_id.clone();
         let output_index = call_state.output_index;
         let response_id = self.request.response_id().to_string();
         self.frame(

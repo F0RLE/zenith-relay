@@ -1703,12 +1703,27 @@
 
 .source-route-map {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  align-items: stretch;
   gap: 0;
   overflow: hidden;
   border: 1px solid var(--relay-border);
   border-radius: 7px;
   background: var(--relay-subtle);
+}
+
+.source-route-arrow {
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  margin-inline: -7px;
+  z-index: 2;
+  color: var(--relay-muted);
+  pointer-events: none;
+}
+
+.source-route-map[data-dragging="true"] .source-route-arrow {
+  color: var(--relay-accent);
 }
 
 .source-route-stage {
@@ -1758,6 +1773,15 @@
   position: relative;
   background: color-mix(in srgb, var(--relay-accent) 16%, var(--relay-subtle));
   box-shadow: inset 0 0 0 2px var(--relay-accent);
+}
+
+.source-route-stage[data-drop-available="true"] {
+  border: 1px dashed color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
+  cursor: copy;
+}
+
+.source-route-stage[data-drop-available="true"][data-drop-target="true"] {
+  border-style: solid;
 }
 
 .source-route-stage > small {

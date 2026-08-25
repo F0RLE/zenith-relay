@@ -61,6 +61,59 @@
   text-align: left;
 }
 
+.model-rules-table .model-group-row[data-drop-target="true"] th {
+  box-shadow: inset 0 0 0 2px var(--relay-accent);
+  background: color-mix(in srgb, var(--relay-accent) 10%, var(--relay-subtle));
+}
+
+.model-group-toggle,
+.model-rule-drag-handle {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--relay-muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.model-group-toggle:hover,
+.model-group-toggle:focus-visible,
+.model-rule-drag-handle:hover,
+.model-rule-drag-handle:focus-visible {
+  background: var(--relay-surface);
+  color: var(--relay-text);
+}
+
+.model-group-toggle:focus-visible,
+.model-rule-drag-handle:focus-visible {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: 1px;
+}
+
+.model-group-toggle svg,
+.model-rule-drag-handle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.model-group-drag-handle {
+  display: inline-grid;
+  margin-right: 7px;
+  color: var(--relay-muted);
+  vertical-align: middle;
+  cursor: grab;
+}
+
+.model-group-drag-handle:active {
+  cursor: grabbing;
+}
+
 .model-rules-table .model-group-row[draggable],
 .model-rules-table tr[data-model-id][draggable] {
   cursor: grab;
@@ -75,12 +128,22 @@
   opacity: 0.58;
 }
 
+.model-rules-table tr[data-model-id][data-drop-target="true"] td {
+  box-shadow: inset 0 2px 0 var(--relay-accent), inset 0 -2px 0 var(--relay-accent);
+}
+
 .model-group-row th > svg {
   width: 14px;
   height: 14px;
   margin-right: 7px;
   vertical-align: -2px;
   color: var(--relay-muted);
+}
+
+.model-rule-drag-handle + .model-rule-identity {
+  display: inline-grid;
+  width: calc(100% - 34px);
+  vertical-align: middle;
 }
 
 .model-rules-table tbody:first-of-type .model-group-row th {

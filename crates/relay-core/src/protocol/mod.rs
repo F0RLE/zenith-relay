@@ -14,6 +14,7 @@ pub use adapter::{
 };
 pub(crate) use adapter::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    repair_custom_tool_item_ids,
 };
 pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};

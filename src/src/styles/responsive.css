@@ -89,11 +89,17 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .source-route-stage:nth-child(n + 3) {
+  .source-route-arrow {
+    display: none;
+  }
+
+  .source-route-stage[data-stage-index="2"],
+  .source-route-stage[data-stage-index="3"] {
     border-top: 1px solid var(--relay-border);
   }
 
-  .source-route-stage:nth-child(odd) {
+  .source-route-stage[data-stage-index="0"],
+  .source-route-stage[data-stage-index="2"] {
     border-left: 0;
   }
 

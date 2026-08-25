@@ -182,6 +182,19 @@ fn strict_responses_function_item_id_error_is_detected_without_matching_call_id_
 }
 
 #[test]
+fn strict_responses_custom_tool_item_id_error_is_detected_without_matching_function_errors() {
+    assert!(responses_custom_tool_item_id_requires_ctc_prefix(
+        br#"{"error":{"message":"Invalid 'input[433].id': 'fc_abc'. Expected an ID that begins with 'ctc'."}}"#,
+    ));
+    assert!(!responses_custom_tool_item_id_requires_ctc_prefix(
+        br#"{"error":{"message":"Invalid 'input[7].id': 'call_abc'. Expected an ID that begins with 'fc'."}}"#,
+    ));
+    assert!(!responses_custom_tool_item_id_requires_ctc_prefix(
+        br#"{"error":{"message":"Expected an ID that begins with 'ctc'."}}"#,
+    ));
+}
+
+#[test]
 fn strict_responses_message_item_id_error_is_detected_without_matching_other_item_errors() {
     assert!(responses_message_item_id_requires_msg_prefix(
             br#"{"error":{"message":"Invalid 'input[151].id': 'item_abc'. Expected an ID that begins with 'msg'."}}"#,

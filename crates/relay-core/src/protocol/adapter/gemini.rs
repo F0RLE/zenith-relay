@@ -1,6 +1,6 @@
 use super::contracts::{
-    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, MessagesReasoningMode,
-    ResponsesToolKind,
+    custom_tool_item_id, AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState,
+    MessagesReasoningMode, ResponsesToolKind,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
@@ -1011,7 +1011,7 @@ fn responses_output_from_gemini_parts(
                 .get("input")
                 .and_then(Value::as_str)
                 .ok_or_else(AdapterError::upstream_response_invalid)?;
-            json!({"id":call_id,"type":"custom_tool_call","status":"completed","call_id":call_id,"name":target.name,"input":input})
+            json!({"id":custom_tool_item_id(&call_id),"type":"custom_tool_call","status":"completed","call_id":call_id,"name":target.name,"input":input})
         } else {
             json!({"id":call_id,"type":"function_call","status":"completed","call_id":call_id,"name":target.name,"arguments":serde_json::to_string(&args).map_err(|_| AdapterError::upstream_response_invalid())?})
         };

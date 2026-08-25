@@ -24,6 +24,7 @@ pub(super) use failure::{
     failure_category_is_request_terminal, failure_category_requires_cooldown,
     previous_response_not_found, previous_response_not_found_value,
     previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,

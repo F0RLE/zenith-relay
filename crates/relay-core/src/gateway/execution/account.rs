@@ -2,9 +2,10 @@ use super::super::errors::{
     api_error, api_error_with_origin, api_error_with_origin_and_category,
     apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
     apply_failure_state, cooldown_error, preserved_upstream_error, previous_response_not_found,
-    recoverable_response_affinity_miss, responses_function_item_id_requires_fc_prefix,
-    responses_message_item_id_requires_msg_prefix, retry_candidate_limit, retryable_failure,
-    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    recoverable_response_affinity_miss, responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+    retry_candidate_limit, retryable_failure, AttemptFailure, CooldownContext,
+    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 use super::super::request::{
@@ -18,7 +19,10 @@ use super::super::response::{
     usage_event,
 };
 use super::super::turn_state::{guard_account_request, relay_account_response_header};
-use crate::protocol::{remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids};
+use crate::protocol::{
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    repair_custom_tool_item_ids,
+};
 use crate::runtime::AuthenticatedKey;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, WireApi};
@@ -62,6 +66,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut owner_recovery_confirmed = false;
     let mut encrypted_content_recovered = false;
     let mut function_item_id_repair_attempted = false;
+    let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -268,6 +273,15 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 && repair_call_prefixed_function_item_ids(&mut request)
             {
                 function_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
+            if !custom_tool_item_id_repair_attempted
+                && responses_custom_tool_item_id_requires_ctc_prefix(&bytes)
+                && repair_custom_tool_item_ids(&mut request)
+            {
+                custom_tool_item_id_repair_attempted = true;
                 attempt = attempt.saturating_sub(1);
                 tried.remove(&route.candidate_id);
                 continue;

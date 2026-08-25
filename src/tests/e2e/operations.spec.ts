@@ -2831,6 +2831,15 @@ for (const mode of ["local", "remote"] as const) {
     // Rules keep the order delivered by the runtime catalog. Relay does not
     // apply the launcher's semantic model sorting here.
     expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4", "gpt-5.4-mini", "o3"]);
+    const firstGroup = page.locator(".model-rules tbody").first();
+    const groupModels = firstGroup.locator("tr[data-model-id]");
+    const groupModelCount = await groupModels.count();
+    await firstGroup.locator(".model-group-toggle").click();
+    await expect(firstGroup.locator(".model-group-toggle")).toHaveAttribute("aria-expanded", "false");
+    await expect(groupModels).toHaveCount(0);
+    await firstGroup.locator(".model-group-toggle").click();
+    await expect(firstGroup.locator(".model-group-toggle")).toHaveAttribute("aria-expanded", "true");
+    await expect(groupModels).toHaveCount(groupModelCount);
     await expect(rows.first().locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
     await expect(rows.first().locator(".model-price-value strong")).toHaveText(["$2.5", "$15", "$0.25"]);
     await expect(rows.first().locator(".model-codex-state")).toContainText("Shown in model list");

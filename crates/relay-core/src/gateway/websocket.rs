@@ -348,6 +348,7 @@ async fn connect_upstream(
     let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
     let mut encrypted_content_recovered = false;
+    let mut custom_tool_item_id_repair_attempted = false;
     let mut last_failure = None;
 
     'candidates: while attempts_this_run
@@ -621,6 +622,22 @@ async fn connect_upstream(
             };
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(EventTerminalOutcome::Failure) {
+                let terminal_body = initial_messages.last().and_then(|message| match message {
+                    UpstreamMessage::Text(text) => Some(text.as_bytes()),
+                    UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
+                    _ => None,
+                });
+                if !custom_tool_item_id_repair_attempted
+                    && terminal_body.is_some_and(
+                        super::errors::responses_custom_tool_item_id_requires_ctc_prefix,
+                    )
+                    && request.repair_custom_tool_item_ids()
+                {
+                    custom_tool_item_id_repair_attempted = true;
+                    tried.remove(&route.candidate_id);
+                    last_failure = None;
+                    continue;
+                }
                 let category = terminal.error_category.unwrap_or_else(|| {
                     super::errors::classify_upstream_error(
                         terminal_failure_status(terminal.status),

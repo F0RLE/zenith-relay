@@ -293,6 +293,16 @@ pub(crate) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> b
     text.contains("input") && text.contains("expected an id that begins with 'fc'")
 }
 
+/// Strict Responses endpoints use `ctc_` for `custom_tool_call.id`.
+pub(crate) fn responses_custom_tool_item_id_requires_ctc_prefix(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("input")
+        && text.contains(".id")
+        && (text.contains("expected an id that begins with 'ctc'")
+            || text.contains("expected an id that begins with 'ctc_'")
+            || text.contains("expected an id that starts with 'ctc'"))
+}
+
 /// Strict Responses endpoints require server-owned `msg_` item identifiers on
 /// message inputs. This only identifies the precise upstream validation error;
 /// the repair still verifies the foreign `item_` identifier before retrying.

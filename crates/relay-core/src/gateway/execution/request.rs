@@ -4,6 +4,7 @@ use super::super::errors::{
     apply_failure_state, cooldown_error, failure_category_is_request_terminal,
     failure_category_requires_cooldown, preserved_upstream_error, previous_response_not_found,
     previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,
@@ -28,8 +29,8 @@ use super::super::turn_state::{
     guard_account_request, relay_account_response_header, CODEX_TURN_STATE_HEADER,
 };
 use crate::protocol::{
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids, AdapterError,
-    AdapterRequestContext,
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    repair_custom_tool_item_ids, AdapterError, AdapterRequestContext,
 };
 use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
 use crate::usage::ReasoningEffortDiagnostics;
@@ -74,6 +75,7 @@ pub(in crate::gateway::execution) async fn execute_request(
     let mut encrypted_content_recovered = false;
     let mut native_replay_attempted = false;
     let mut function_item_id_repair_attempted = false;
+    let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
     let mut last_adapter_error: Option<AdapterError> = None;
@@ -388,6 +390,18 @@ pub(in crate::gateway::execution) async fn execute_request(
                 && repair_call_prefixed_function_item_ids(&mut request)
             {
                 function_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
+            if wire_api == WireApi::Responses
+                && adapter_is_passthrough
+                && !custom_tool_item_id_repair_attempted
+                && responses_custom_tool_item_id_requires_ctc_prefix(&bytes)
+                && repair_custom_tool_item_ids(&mut request)
+            {
+                custom_tool_item_id_repair_attempted = true;
                 attempt = attempt.saturating_sub(1);
                 attempts_this_run = attempts_this_run.saturating_sub(1);
                 tried.remove(&route.candidate_id);

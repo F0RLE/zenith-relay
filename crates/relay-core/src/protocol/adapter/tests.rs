@@ -277,6 +277,14 @@ fn messages_bridge_preserves_custom_tool_call_and_output_shapes() {
         response.response_body["output"][0]["input"],
         "Get-ChildItem -Force"
     );
+    assert_eq!(
+        response.response_body["output"][0]["id"],
+        "ctc_toolu_custom"
+    );
+    assert_eq!(
+        response.response_body["output"][0]["call_id"],
+        "toolu_custom"
+    );
 
     let second = prepare_responses_to_messages(
         &json!({
@@ -826,6 +834,14 @@ data: {"type":"message_stop"}
         bridge.completed().unwrap().response_body["output"][0]["input"],
         "Get-ChildItem"
     );
+    assert_eq!(
+        bridge.completed().unwrap().response_body["output"][0]["id"],
+        "ctc_toolu_custom_stream"
+    );
+    assert_eq!(
+        bridge.completed().unwrap().response_body["output"][0]["call_id"],
+        "toolu_custom_stream"
+    );
 }
 
 #[test]
@@ -1175,6 +1191,30 @@ fn call_prefixed_function_item_id_repair_keeps_the_tool_result_link() {
     assert_eq!(input[3]["id"], "call_custom_01");
     assert_eq!(input[4]["call_id"], "call_function_01");
     assert!(!repair_call_prefixed_function_item_ids(&mut request));
+}
+
+#[test]
+fn custom_tool_item_id_repair_keeps_the_tool_result_link() {
+    let mut request = json!({
+        "input": [{
+            "type": "custom_tool_call",
+            "id": "fc_custom_01",
+            "call_id": "toolu_custom_01",
+            "name": "PowerShell",
+            "input": "Get-ChildItem"
+        }, {
+            "type": "custom_tool_call_output",
+            "call_id": "toolu_custom_01",
+            "output": "Cargo.toml"
+        }]
+    });
+
+    assert!(repair_custom_tool_item_ids(&mut request));
+    let input = request["input"].as_array().expect("input is an array");
+    assert_eq!(input[0]["id"], "ctc_fc_custom_01");
+    assert_eq!(input[0]["call_id"], "toolu_custom_01");
+    assert_eq!(input[1]["call_id"], "toolu_custom_01");
+    assert!(!repair_custom_tool_item_ids(&mut request));
 }
 
 #[test]

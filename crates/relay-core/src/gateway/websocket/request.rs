@@ -234,6 +234,10 @@ impl ClientRequest {
         let mut attempted = false;
         crate::gateway::request::try_recover_encrypted_content(&mut self.value, &mut attempted)
     }
+
+    pub(super) fn repair_custom_tool_item_ids(&mut self) -> bool {
+        crate::protocol::repair_custom_tool_item_ids(&mut self.value)
+    }
 }
 
 fn metadata_flag(value: &Value, key: &str) -> bool {
