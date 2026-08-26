@@ -285,10 +285,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.usage-aggregate-table td[data-column="name"] {
-  text-align: left;
-}
-
 .usage-aggregate-name {
   display: block;
   overflow: hidden;

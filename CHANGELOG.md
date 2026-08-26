@@ -4,6 +4,41 @@ All notable Zenith Relay changes are recorded here. The `Unreleased` section
 tracks merged or review-ready work that has not been published as a release;
 release entries are kept concise and link to the corresponding tag.
 
+## [1.1.1] - 2026-08-27
+
+Zenith Relay 1.1.1 is a reliability and diagnostics release focused on
+parallel Codex sessions, native Responses WebSockets, and clearer local usage
+information.
+
+### Reliability and routing
+
+- Native Responses WebSocket requests now have the same safe recovery as HTTP
+  for provider-owned message identifiers. When a strict account endpoint
+  rejects a foreign `item_*` message ID, Relay removes only that ID and retries
+  the request; native `msg_*` identifiers and non-message items are preserved.
+- Parallel account-backed WebSocket sessions keep their leases and response
+  affinity independent. A failed stream no longer cools an unrelated direct
+  API source and causes false continuation failures.
+- Relay-owned WebSocket timeouts and stream-size failures are reported as Relay
+  errors with the correct status instead of being attributed to the provider.
+
+### Usage and diagnostics
+
+- Usage details now show the attempt number and the endpoint route used for a
+  request, including failed attempts.
+- Error details retain the exact HTTP status, safe error origin, category, and
+  route metadata without recording prompts, credentials, cookies, headers, or
+  provider response bodies.
+
+### Adapters and interface
+
+- Responses function-call identifiers from older providers are normalized to
+  the strict `fc_*` namespace only when a provider explicitly rejects the
+  original format.
+- Reasoning-mode dialogs now remain readable across desktop and compact
+  layouts, with the complete backend-provided mode set visible without
+  horizontal overflow.
+
 ## [Unreleased]
 
 - Tool-call continuations from Messages and Gemini API sources now stay on the

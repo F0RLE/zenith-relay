@@ -605,6 +605,38 @@ test("source editor keeps each tab focused", async ({ page }) => {
   await page.screenshot({ path: "output/playwright/source-editor-general-en-light-840x560.png" });
 });
 
+test("reasoning modes stay balanced with the full backend level set", async ({ page }) => {
+  await installTauriMock(page, {
+    locale: "en",
+    mode: "local",
+    theme: "dark",
+    populated: true,
+    mixedModels: true,
+    modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+  });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+  const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+  await model.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  const options = dialog.locator(".model-reasoning-options button");
+  await expect(options).toHaveCount(6);
+  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(1);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-1160x760.png" });
+
+  await page.setViewportSize({ width: 520, height: 620 });
+  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-520x620.png" });
+});
+
 test("prompt cache policy fits the Russian dark source editor", async ({ page }) => {
   await installTauriMock(page, {
     locale: "ru",
