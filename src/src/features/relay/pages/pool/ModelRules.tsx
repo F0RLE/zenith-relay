@@ -320,7 +320,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
     void saveLevels(next);
   };
   const manualBusy = mutationInFlight || busy === operation;
-  return <Dialog title={t("models.reasoningTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
+  return <Dialog className="model-reasoning-dialog" title={t("models.reasoningTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
     <div className="model-reasoning-form">
       <code className="model-reasoning-model" title={model.id}>{model.id}</code>
       <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
