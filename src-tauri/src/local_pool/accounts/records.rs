@@ -97,6 +97,7 @@ pub fn new_account_record(
         remote_location: None,
         wire_api: WireApi::Responses,
         models,
+        discovered_models: None,
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         priority,

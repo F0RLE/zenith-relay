@@ -50,6 +50,7 @@ describe("account status policy", () => {
     expect(currentAccountErrorCode(account({ operationalStatus: "quotaWait", routingBlockReason: "quota_exhausted" }))).toBeNull();
     expect(currentAccountErrorCode(account({ quotaRefreshStatus: "failed", quota: { error: { code: "quota_timeout" } } }))).toBe("quota_timeout");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
+    expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" }, lastErrorCode: "models_prepare" }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("provider_timeout");
   });
 

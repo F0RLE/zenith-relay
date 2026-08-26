@@ -360,43 +360,95 @@ fn large_import_preview_defers_quota_network_calls() {
 #[test]
 fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
     let mut account = account_record("account_models");
-    apply_model_discovery(&mut account, Ok(vec!["gpt-future-codex".into()]));
-    assert_eq!(account.models, ["gpt-future-codex"]);
+    assert!(apply_model_discovery(
+        &mut account,
+        Ok(vec!["gpt-future-codex".into()])
+    ));
+    assert_eq!(account.models, ["gpt-test"]);
+    assert!(account
+        .discovered_models
+        .as_ref()
+        .is_some_and(|models| models.len() == 1 && models[0] == "gpt-future-codex"));
+    assert_eq!(account.effective_models(), ["gpt-future-codex"]);
 
-    apply_model_discovery(
+    assert!(!apply_model_discovery(
         &mut account,
         Err(ModelDiscoveryFailure {
             code: ModelDiscoveryFailureCode::Transport,
             retryable: true,
             http_status: None,
         }),
-    );
-    assert_eq!(account.models, ["gpt-future-codex"]);
+    ));
+    assert_eq!(account.models, ["gpt-test"]);
+    assert_eq!(account.effective_models(), ["gpt-future-codex"]);
     assert_eq!(
         account.account.last_error_code.as_deref(),
         Some("models_transport")
     );
 
     account.models.clear();
-    apply_model_discovery(
+    account.discovered_models = None;
+    assert!(!apply_model_discovery(
         &mut account,
         Err(ModelDiscoveryFailure {
             code: ModelDiscoveryFailureCode::Transport,
             retryable: true,
             http_status: None,
         }),
-    );
+    ));
     assert_eq!(
         account.account.last_error_code.as_deref(),
         Some("models_transport")
     );
     assert_eq!(account.account.health, AccountHealthState::Degraded);
 
-    apply_model_discovery(&mut account, Ok(vec!["gpt-recovered".into()]));
+    assert!(apply_model_discovery(
+        &mut account,
+        Ok(vec!["gpt-recovered".into()])
+    ));
     assert_eq!(account.models, ["gpt-recovered"]);
+    assert!(account
+        .discovered_models
+        .as_ref()
+        .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered"));
+    assert_eq!(account.effective_models(), ["gpt-recovered"]);
     assert_eq!(account.account.health, AccountHealthState::Healthy);
     assert!(account.account.last_error_code.is_none());
 }
+
+#[test]
+fn successful_model_refresh_recovers_a_transient_auth_error() {
+    let mut account = account_record("account_models_recovered_auth");
+    account.account.auth_state = AccountAuthState::Error;
+    account.account.health = AccountHealthState::Unhealthy;
+    account.account.last_error_code = Some("models_unauthorized".into());
+
+    assert!(apply_model_discovery(
+        &mut account,
+        Ok(vec!["gpt-recovered".into()])
+    ));
+
+    assert_eq!(account.account.auth_state, AccountAuthState::Active);
+    assert_eq!(account.account.health, AccountHealthState::Healthy);
+    assert_eq!(account.account.last_error_code, None);
+}
+
+#[test]
+fn model_refresh_detects_provider_order_changes() {
+    let mut account = account_record("account_model_order");
+    assert!(apply_model_discovery(
+        &mut account,
+        Ok(vec!["gpt-first".into(), "gpt-second".into()])
+    ));
+    assert_eq!(account.effective_models(), ["gpt-first", "gpt-second"]);
+
+    assert!(apply_model_discovery(
+        &mut account,
+        Ok(vec!["gpt-second".into(), "gpt-first".into()])
+    ));
+    assert_eq!(account.effective_models(), ["gpt-second", "gpt-first"]);
+}
+
 #[test]
 fn model_unauthorized_removes_an_account_with_cached_models_from_routing() {
     let mut account = account_record("account_models_unauthorized");
@@ -409,7 +461,7 @@ fn model_unauthorized_removes_an_account_with_cached_models_from_routing() {
         Err(failure.clone())
     )));
 
-    apply_model_discovery(&mut account, Err(failure));
+    assert!(!apply_model_discovery(&mut account, Err(failure)));
 
     assert!(!account.models.is_empty());
     assert_eq!(account.account.auth_state, AccountAuthState::Error);
@@ -419,6 +471,33 @@ fn model_unauthorized_removes_an_account_with_cached_models_from_routing() {
         Some("models_unauthorized")
     );
 }
+
+#[test]
+fn model_unauthorized_does_not_downgrade_reauthentication() {
+    let mut account = account_record("account_models_reauth");
+    account.account.auth_state = AccountAuthState::RequiresReauth(
+        zenith_relay_core::accounts::ReauthReason::AccessTokenExpired,
+    );
+    let failure = ModelDiscoveryFailure {
+        code: ModelDiscoveryFailureCode::Unauthorized,
+        retryable: false,
+        http_status: Some(401),
+    };
+
+    assert!(!apply_model_discovery(&mut account, Err(failure)));
+    assert_eq!(
+        account.account.auth_state,
+        AccountAuthState::RequiresReauth(
+            zenith_relay_core::accounts::ReauthReason::AccessTokenExpired,
+        )
+    );
+    assert_eq!(account.account.health, AccountHealthState::Unhealthy);
+    assert_eq!(
+        account.account.last_error_code.as_deref(),
+        Some("models_unauthorized")
+    );
+}
+
 #[test]
 fn selected_import_files_are_read_and_combined_only_in_rust() {
     let root = std::env::temp_dir().join(format!(

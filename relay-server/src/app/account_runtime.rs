@@ -9,7 +9,7 @@ use zenith_relay_core::{
     accounts::TokenPersistenceAdapter,
     protocol::{
         account_candidate_enabled, account_operational_state, operational_status,
-        AccountOperationalInput, AccountSummary, ProxyMode, SourceSummary,
+        AccountOperationalInput, AccountSummary, ProxyMode, QuotaWindowUsage, SourceSummary,
     },
     ApiEquivalentSummary, LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount,
     RuntimeMixedLocalKey, RuntimeSource,
@@ -217,12 +217,13 @@ pub(super) fn runtime_account(
         now_ms: now_ms(),
         quota_stale_after_ms,
     });
+    let models = record.effective_models().to_vec();
     RuntimeChatGptAccount {
         id: record.id,
         source_id: record.source_id,
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
         responses_url: credential.responses_url.clone(),
-        models: record.models,
+        models,
         enabled: account_candidate_enabled(record.enabled, operational.routing_block_reason),
         draining: record.draining,
         priority: record.priority,
@@ -263,6 +264,7 @@ pub(super) fn runtime_key(
             zenith_relay_core::protocol::ClientWireApi::Responses,
             zenith_relay_core::protocol::ClientWireApi::Messages,
             zenith_relay_core::protocol::ClientWireApi::ChatCompletions,
+            zenith_relay_core::protocol::ClientWireApi::Gemini,
         ]),
     }
 }
@@ -308,6 +310,7 @@ pub(super) fn account_summary(
     proxy_mode: ProxyMode,
     proxy_available: bool,
     api_equivalent: ApiEquivalentSummary,
+    quota_window_usage: Option<QuotaWindowUsage>,
     quota_stale_after_ms: u64,
 ) -> AccountSummary {
     let operational = account_operational_state(AccountOperationalInput {
@@ -334,12 +337,13 @@ pub(super) fn account_summary(
         operational_status: operational.status,
         auth_state: record.auth_state,
         health: format!("{:?}", record.health).to_ascii_lowercase(),
-        models: record.models.clone(),
+        models: record.effective_models().to_vec(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
         api_equivalent,
+        quota_window_usage,
         purchase_cost_micro_usd: record.purchase_cost_micro_usd,
         subscription: record.subscription.clone(),
         quota: record.quota.clone(),

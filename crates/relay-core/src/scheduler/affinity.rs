@@ -45,6 +45,28 @@ impl AffinityCache {
         self.bind_for(key, candidate_id, now_ms, self.ttl_ms);
     }
 
+    /// Refresh an existing owner, or create a binding when none exists.
+    ///
+    /// A temporary scheduler spillover must not silently replace a durable
+    /// prompt-cache owner.  The owner is replaced only after the normal
+    /// invalidation path removes it (for example after an auth/quota failure).
+    pub fn bind_if_unbound_or_same(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> bool {
+        let key = key.into();
+        match self.get(&key, now_ms) {
+            Some(current) if current == candidate_id => self.refresh(&key, now_ms),
+            Some(_) => false,
+            None => {
+                self.bind(key, candidate_id.to_string(), now_ms);
+                true
+            }
+        }
+    }
+
     pub fn bind_for(
         &mut self,
         key: impl Into<String>,

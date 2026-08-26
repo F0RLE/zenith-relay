@@ -1,4 +1,4 @@
-import type { CandidateRuntimeSnapshot } from "./api/types";
+import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/types";
 
 const subscriptionPlanPriority = ["enterprise", "business", "pro-20x", "pro-5x", "pro", "plus", "go", "edu", "free", "unknown"];
 const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
@@ -16,9 +16,10 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
     const separator = candidate.candidateId.indexOf("::");
     if (separator > 0) {
       const sourceId = candidate.candidateId.slice(0, separator);
-      // Pool requests use the Responses contract. A Messages-only route must
-      // not move an API card ahead of its actual Responses route.
-      if (isResponsesCandidate(candidate.candidateId) && !positions.has(sourceId)) positions.set(sourceId, index);
+      // A source card represents all of its protocol candidates. Use the
+      // first live route as its stable position; request admission still
+      // filters the selected candidate by the caller's wire API.
+      if (!positions.has(sourceId)) positions.set(sourceId, index);
     }
   }
   return positions;
@@ -32,7 +33,7 @@ export function runtimeCandidateForMember(
   kind: "api_source" | "oauth_account",
   order: CandidateRuntimeSnapshot[],
   protocol: "responses" | "all" = "all",
-  legacyWireApi?: "responses" | "chat_completions" | "messages",
+  legacyWireApi?: "responses" | "chat_completions" | "messages" | "gemini",
 ): CandidateRuntimeSnapshot | undefined {
   const candidates = order.filter((candidate) => candidate.kind === kind && (
     kind === "oauth_account"
@@ -59,7 +60,7 @@ export function runtimeCandidateForMember(
   };
 }
 
-function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" | "chat_completions" | "messages") {
+function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" | "chat_completions" | "messages" | "gemini") {
   const separator = candidateId.indexOf("::");
   if (separator < 0) return legacyWireApi == null || legacyWireApi === "responses";
   const suffix = candidateId.slice(separator + 2);
@@ -90,6 +91,34 @@ export function compareRoutingOrder(leftId: string, rightId: string, order: Map<
 
 export function activeRequestCount(candidate: CandidateRuntimeSnapshot | undefined) {
   return candidate?.activeRequestCount ?? candidate?.inFlight ?? 0;
+}
+
+/** Apply a host activity event without waiting for the next full snapshot. */
+export function applyRuntimeActivity(
+  order: CandidateRuntimeSnapshot[],
+  activity: RuntimeActivitySnapshot,
+) {
+  let changed = false;
+  const next = order.map((candidate) => {
+    if (candidate.candidateId !== activity.candidateId) return candidate;
+    changed = true;
+    return {
+      ...candidate,
+      inFlight: activity.inFlight,
+      activeRequestCount: activity.activeRequestCount,
+      activeModels: activity.activeModels,
+    };
+  });
+  return changed ? next : order;
+}
+
+export function applyRuntimeActivities(
+  order: CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  let next = order;
+  for (const activity of activities) next = applyRuntimeActivity(next, activity);
+  return next;
 }
 
 export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {

@@ -1,5 +1,5 @@
 use self::request::{
-    alpha_search, chat_completions, messages, models, responses, responses_compact,
+    alpha_search, chat_completions, gemini, messages, models, responses, responses_compact,
 };
 use crate::GatewayRuntime;
 use axum::routing::{get, post};
@@ -33,6 +33,8 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/v1beta/models/{*model_action}", post(gemini))
+        .route("/v1/models/{*model_action}", post(gemini))
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .with_state(runtime)

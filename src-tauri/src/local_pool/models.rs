@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
-    deserialize_model_reasoning_allowed_levels, normalize_model_price_overrides,
-    normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
+    deserialize_model_reasoning_allowed_levels, normalize_model_ids,
+    normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
     runtime_source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
@@ -79,6 +80,10 @@ pub struct GatewaySettings {
         deserialize_with = "deserialize_model_reasoning_allowed_levels"
     )]
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub model_service_tier_overrides: BTreeMap<String, DefaultServiceTier>,
+    #[serde(default)]
+    pub model_display_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -272,6 +277,11 @@ pub struct LocalAccountRecord {
     pub remote_location: Option<RemoteAccountLocation>,
     pub wire_api: WireApi,
     pub models: Vec<String>,
+    /// The last successful upstream discovery snapshot. `models` remains the
+    /// imported/configured baseline and must not be replaced by background
+    /// refreshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_models: Option<Vec<String>>,
     #[serde(default)]
     pub allowed_models: Vec<String>,
     #[serde(default)]
@@ -294,9 +304,24 @@ impl LocalAccountRecord {
             location.remote_account_id = location.remote_account_id.trim().to_string();
         }
         self.models = normalized_values(std::mem::take(&mut self.models));
+        self.discovered_models = self
+            .discovered_models
+            .take()
+            .map(normalized_values)
+            .filter(|models| !models.is_empty());
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
         self.weight = self.weight.max(1);
+    }
+
+    /// Returns the catalog used by runtime and management views. A successful
+    /// discovery snapshot wins, while legacy/imported `models` remains the
+    /// safe fallback when discovery has not completed yet.
+    pub fn effective_models(&self) -> &[String] {
+        self.discovered_models
+            .as_deref()
+            .filter(|models| !models.is_empty())
+            .unwrap_or(&self.models)
     }
 }
 
@@ -346,6 +371,8 @@ impl Default for GatewaySettings {
             hidden_models: Vec::new(),
             model_price_overrides: BTreeMap::new(),
             model_reasoning_allowed_levels: BTreeMap::new(),
+            model_service_tier_overrides: BTreeMap::new(),
+            model_display_order: Vec::new(),
         }
     }
 }
@@ -386,6 +413,10 @@ impl GatewaySettings {
         }
         validate_model_price_overrides(&self.model_price_overrides)?;
         normalize_model_reasoning_allowed_levels(self.model_reasoning_allowed_levels.clone())?;
+        normalize_model_service_tier_overrides(self.model_service_tier_overrides.clone())?;
+        if normalize_model_ids(self.model_display_order.iter()) != self.model_display_order {
+            return Err("model display order is invalid");
+        }
         Ok(())
     }
 }
@@ -486,6 +517,15 @@ impl ProviderSourceRecord {
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
         Ok(!self.models_for_wire_api(wire_api)?.is_empty())
+    }
+
+    pub fn supports_any_wire_api(&self) -> Result<bool, String> {
+        for wire_api in WireApi::ALL {
+            if self.supports_wire_api(wire_api)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 

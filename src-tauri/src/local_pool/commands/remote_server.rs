@@ -106,6 +106,8 @@ pub enum RemoteServerAction {
     SetModelEnabled,
     SetModelPrice,
     SetModelReasoning,
+    SetModelServiceTier,
+    SetModelOrder,
     StartGateway,
     StopGateway,
     SetCodexBackgroundTasks,
@@ -669,6 +671,10 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::SetModelReasoning => {
             (Method::POST, "/models/reasoning".to_string(), true)
         }
+        RemoteServerAction::SetModelServiceTier => {
+            (Method::POST, "/models/service-tier".to_string(), true)
+        }
+        RemoteServerAction::SetModelOrder => (Method::POST, "/models/order".to_string(), true),
         RemoteServerAction::StartGateway => (Method::POST, "/gateway/start".to_string(), false),
         RemoteServerAction::StopGateway => (Method::POST, "/gateway/stop".to_string(), false),
         RemoteServerAction::SetCodexBackgroundTasks => (

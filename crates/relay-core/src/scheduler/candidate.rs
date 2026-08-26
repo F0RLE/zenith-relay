@@ -54,10 +54,12 @@ pub fn account_candidate_health(
         Some("captcha") => return CandidateHealth::Captcha,
         _ => {}
     }
-    match subscription_status {
-        SubscriptionStatus::Forbidden => return CandidateHealth::Blocked,
-        SubscriptionStatus::Expired => return CandidateHealth::Expired,
-        _ => {}
+    // An expired entitlement is informational until the Codex path confirms
+    // that access is actually denied. ChatGPT Team/Business can keep serving
+    // Codex after the UI entitlement date becomes stale, while a forbidden
+    // subscription is an explicit upstream block and remains terminal.
+    if matches!(subscription_status, SubscriptionStatus::Forbidden) {
+        return CandidateHealth::Blocked;
     }
     match health {
         AccountHealthState::Unknown => CandidateHealth::Unknown,
@@ -216,7 +218,16 @@ mod tests {
                 SubscriptionStatus::Expired,
                 None,
             ),
-            CandidateHealth::Expired
+            CandidateHealth::Healthy
+        );
+        assert_eq!(
+            account_candidate_health(
+                AccountAuthState::Active,
+                AccountHealthState::Healthy,
+                SubscriptionStatus::Forbidden,
+                None,
+            ),
+            CandidateHealth::Blocked
         );
     }
 }

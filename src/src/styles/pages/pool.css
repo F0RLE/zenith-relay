@@ -204,7 +204,7 @@
 
 .pool-member-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: stretch;
   gap: 10px;
 }
@@ -231,6 +231,18 @@
 @media (max-width: 900px) {
   .pool-member-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1600px) {
+  .pool-member-list {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1250px) {
+  .pool-member-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

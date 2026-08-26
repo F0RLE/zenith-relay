@@ -89,6 +89,7 @@ fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<Stri
         WireApi::Responses => request.pointer("/reasoning/effort"),
         WireApi::ChatCompletions => request.get("reasoning_effort"),
         WireApi::Messages => None,
+        WireApi::Gemini => None,
     };
     effort
         .and_then(Value::as_str)
@@ -470,7 +471,6 @@ fn relay_error_category(category: &str) -> bool {
     matches!(
         category,
         "invalid_request"
-            | "reasoning_effort_not_allowed"
             | "model_not_found"
             | "no_eligible_source"
             | "all_sources_temporarily_unavailable"
@@ -479,6 +479,9 @@ fn relay_error_category(category: &str) -> bool {
             | "client_cancelled"
             | "client_websocket"
             | "response_affinity_miss"
+            | "stream_event_too_large"
+            | "stream_semantic_timeout"
+            | "websocket_idle_timeout"
     )
 }
 

@@ -25,13 +25,13 @@ pub(super) enum ReachabilityRequirement {
 pub(super) struct SourceRuntimeParts {
     pub(super) executors: BTreeMap<String, SourceConnector>,
     pub(super) candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
-    pub(super) endpoint_domains: BTreeMap<String, String>,
     pub(super) recovery_delays_ms: BTreeMap<String, u64>,
 }
 
 pub(super) struct AccountRuntimeParts {
     pub(super) executors: BTreeMap<String, ChatGptAccountExecutor>,
     pub(super) passive_quotas: BTreeMap<String, PassiveQuotaState>,
+    pub(super) team_members: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct ConfiguredKeyRule {
@@ -83,7 +83,6 @@ pub(super) fn build_sources(
 ) -> Result<SourceRuntimeParts> {
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
-    let mut endpoint_domains = BTreeMap::new();
     let mut recovery_delays_ms = BTreeMap::new();
     for source in sources {
         source.source.validate()?;
@@ -105,8 +104,6 @@ pub(super) fn build_sources(
             source.source.wire_api,
             &source.source.models,
         )?;
-        let source_endpoint_domain =
-            crate::sources::normalized_base_url(&source.source.base_url)?.to_string();
         let source_id = source.source.id.clone();
         let connector = SourceConnector::new(&source.source, &bindings)?;
         let rules = model_rules(&source.allowed_models, &source.excluded_models);
@@ -121,7 +118,6 @@ pub(super) fn build_sources(
                     "source protocol candidate ids must be unique".to_string(),
                 ));
             }
-            endpoint_domains.insert(candidate_id.clone(), source_endpoint_domain.clone());
             let candidate = RuntimeCandidate {
                 id: candidate_id.clone(),
                 kind: CandidateKind::ApiSource,
@@ -168,7 +164,6 @@ pub(super) fn build_sources(
     Ok(SourceRuntimeParts {
         executors,
         candidate_bindings,
-        endpoint_domains,
         recovery_delays_ms,
     })
 }
@@ -188,6 +183,7 @@ pub(super) fn build_accounts(
     }
     let mut executors = BTreeMap::new();
     let mut passive_quotas = BTreeMap::new();
+    let mut team_members = BTreeMap::<String, BTreeSet<String>>::new();
     for account in accounts {
         require_runtime_value("account candidate id", &account.id)?;
         require_runtime_value("account source id", &account.source_id)?;
@@ -255,6 +251,10 @@ pub(super) fn build_accounts(
         registry.replace(candidate.id.clone(), published_models.iter());
         let candidate_id = candidate.id.clone();
         scheduler.upsert(candidate);
+        team_members
+            .entry(account.chatgpt_account_id.trim().to_ascii_lowercase())
+            .or_default()
+            .insert(candidate_id.clone());
         scheduler
             .set_candidate_subscription_expiry(&candidate_id, account.subscription_expires_at_ms);
         scheduler.set_candidate_subscription_plan(
@@ -284,6 +284,7 @@ pub(super) fn build_accounts(
     Ok(AccountRuntimeParts {
         executors,
         passive_quotas,
+        team_members,
     })
 }
 

@@ -14,11 +14,11 @@ modes; a personal account/API pool; provider-neutral protocol adapters; quota,
 model, reasoning, pricing, and usage contracts; reversible Codex profile
 attachment and recovery; and a user-managed server with an encrypted vault.
 
-The release verification snapshot on 2026-08-23 passed 120 visual Playwright
-scenarios, 177 operational Playwright scenarios, 79 frontend unit tests, and
-354 desktop Rust tests. These are implementation and fixture checks. They do
-not claim that a live provider, real account, proxy, or user-managed server is
-production-ready until the matching gate in [ROADMAP.md](ROADMAP.md) is run.
+Automated checks and live acceptance are maintainer evidence, not product
+behavior. Their commands and results belong to CI and the release process, not
+the user-facing changelog. A passing local or mocked check does not claim that
+a live provider, real account, proxy, or user-managed server is
+production-ready; that requires the matching gate in [ROADMAP.md](ROADMAP.md).
 
 The optional server path is intentionally the last acceptance priority. It is
 shipped as a separate user-owned deployment contract, not as a connection to
@@ -56,10 +56,13 @@ own provider/session secret to that user's server. It is never an implicit
 upload to Zenith, and the management token is never reused as a profile
 credential.
 
-Typed snapshots, SQLite state, telemetry, logs, exports, diagnostics, and
-screenshots contain redacted operational data only. They may include model
+Typed snapshots, SQLite state, telemetry, logs, diagnostics, support bundles,
+and screenshots contain redacted operational data only. They may include model
 names, status, timing, and aggregates, but not credentials, cookies,
 authorization headers, prompts, response bodies, or provider session material.
+The explicit account-export document is a separate credential-bearing transfer
+artifact and may contain the selected account's OAuth tokens; it is never an
+ordinary diagnostic or telemetry export.
 
 ### Provider-policy boundary
 
@@ -159,7 +162,10 @@ health and clear a model-level transient restriction.
 The account view always keeps the provider-reported quota window visible. When
 the user enables the account calculation, Relay shows the direct
 API-equivalent of recorded token usage and, when the user enters a purchase
-cost, the resulting payback ratio. It never turns a reported available
+cost, the resulting payback ratio. If Relay has complete priced usage from the
+start of the active provider window, it may also extrapolate an approximate
+remaining API-equivalent for that window; activity outside Relay is excluded
+and an incomplete record renders no estimate. This never turns a reported
 percentage into a monetary entitlement. None of this changes routing
 eligibility, provider quota, or stored request usage.
 
@@ -247,19 +253,26 @@ returns to the client as `custom_tool_call` and accepts only its direct string
 executor. It stores the native assistant turn only in a bounded volatile local
 continuation store keyed by bridge response id and candidate.
 A missing or mismatched continuation is rejected instead of sending a
-context-free tool result. Provider-hosted, namespace, and dynamic-discovery
-tools are rejected rather than converted into text. Budget and adaptive
-reasoning are opt-in binding capabilities; `Native` bindings cannot declare a
-bridge reasoning mode.
+context-free tool result. Namespace tools are flattened to stable
+provider-safe function aliases and restored on the Responses continuation.
+Provider-hosted and dynamic-discovery tools are omitted rather than converted
+into text. Budget and adaptive reasoning are opt-in binding capabilities;
+`Native` bindings cannot declare a bridge reasoning mode.
 
-A `ResponsesToGemini` binding sends the supported text subset to Gemini's
+A `ResponsesToGemini` binding sends a translated Responses request to Gemini's
 native `generateContent` endpoint (or `streamGenerateContent` for SSE), with
 the model encoded in the route and the source credential sent only as
-`x-goog-api-key`. It is not a provider-name rule. The binding rejects tools,
-images, reasoning, and `previous_response_id` until each conversion has its
-own confirmed capability and regression coverage; it returns native Gemini
-usage as normalized Responses usage without turning account entitlement into
-API billing.
+`x-goog-api-key`. It is not a provider-name rule. The adapter covers text,
+system instructions, validated images/files, JSON output schemas, function,
+namespace, and direct custom tools, tool choice/allow-lists, budget/adaptive
+thinking, native usage, and `previous_response_id` through the bounded local
+continuation store. Namespace tools are flattened to stable provider-safe
+function aliases and restored on the Responses continuation.
+Gemini thought signatures and Vertex partial function arguments are preserved
+through JSON and SSE tool-call turns. Provider-managed caching, hosted tools,
+and WebSocket bridging remain intentionally outside this adapter. Native
+Gemini usage is normalized as Responses usage without turning account
+entitlement into API billing.
 
 Relay exposes three client contracts: <code>/v1/responses</code> for
 Codex/OpenAI Responses clients, <code>/v1/messages</code> for native Messages
@@ -296,21 +309,19 @@ Completions rejects tool definitions and tool-call history instead of
 pretending to translate them. Responses WebSocket remains native-only until a
 separate bidirectional bridge is designed and tested.
 
-For routed API-source rows, verified model defaults are enabled by default and
+For routed API-source rows, declared model defaults are enabled by default and
 only their exact whitelist is shown. Source-declared modes are used for models
-without a verified default. Model Rules exposes a manual, experimental
+without a declared default. Model Rules exposes a manual
 allow-list at the
 model-group level: a saved empty list explicitly hides the API-source selector,
 while a non-empty list publishes exactly the selected values, including
 provider-specific values not present in the hint. This control is present for
 every current pool model, including a native-account-only model with no parsed
-declaration. Changes apply immediately. The optional local Pool probe sends one
-short request for the selected value to every active API source and reports
-each source separately; the user may add a successful value to the allow-list
-from that result. A selected value is a policy experiment, not proof that every
-source supports it; normal pre-byte fallback remains responsible for provider
-rejection. A manual policy replaces only the picker modes; native account
-requests still use their native upstream contract.
+declaration. Changes apply immediately. Relay does not send a reasoning-mode
+probe: a selected value is forwarded as transport metadata and normal
+pre-byte fallback remains responsible for provider rejection. A manual policy
+replaces only the picker modes; native account requests still use their native
+upstream contract.
 
 ## Usage and account value
 
@@ -329,12 +340,21 @@ API-equivalent is an informational estimate, never a routing input:
 - unknown or incomplete token splits remain explicitly unpriced;
 - Fast and Standard request modes are recorded as observed service tiers, not
   multiplied by a universal hard-coded factor.
+- Fast is Relay's user-facing name for the upstream `priority` service tier.
+  It stays separate from scheduler/source priority. Fast is a request-speed
+  mode, not a second user-facing quota; provider Fast/priority metadata remains
+  diagnostic and is not rendered as another account quota meter. A provider
+  may report that the requested Fast tier was served as Standard.
 
-Provider quota remains a provider-reported operational signal. Relay does not
-learn, calibrate, or extrapolate a monetary subscription quota from available
-percentages. The optional account purchase cost is user-entered presentation
-metadata used only to calculate payback against direct API-equivalent usage;
-it never decides whether a request may use an account.
+Provider quota remains a provider-reported operational signal. It is rendered
+as a percentage and reset boundary, never as money, an entitlement, a routing
+input, or a billing value. Relay does not learn, calibrate, or claim a monetary
+subscription quota from that percentage. It may render an approximate remaining
+API-equivalent only from complete priced Relay usage recorded since the active
+window began; it excludes activity outside Relay and is omitted for any
+unpriced or incomplete interval. The optional account purchase cost is
+user-entered presentation metadata used only to calculate payback against direct
+API-equivalent usage; it never decides whether a request may use an account.
 
 ## Profiles and recovery
 
@@ -416,10 +436,11 @@ profile credential, usage, and scheduler remain shared.
   contract. Confirmed native Messages source models are exposed through the
   managed profile by the linked Responses-to-Messages runtime route. A native
   Messages client still uses the original passthrough route.
-- The bridge does not claim hosted, namespace, dynamic-discovery, structured
-  custom result, native encrypted reasoning, or Responses WebSocket
-  capabilities. Image support is limited to the validated data-URI formats
-  described above.
+- The Responses-to-Messages and Responses-to-Gemini bridges support namespace
+  tools through stable aliases, but neither claims hosted or dynamic-discovery
+  tools, structured custom results, native encrypted reasoning, or Responses
+  WebSocket capabilities. Image support is limited to the validated data-URI
+  formats described above.
 - Bridge continuation state is volatile and bounded. Restarting Relay or
   evicting an entry requires the client to start a fresh turn.
 - No live acceptance claim has been made for Claude, GLM, Grok, or any other

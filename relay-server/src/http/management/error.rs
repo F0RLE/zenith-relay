@@ -20,6 +20,10 @@ impl ManagementError {
         Self::new(StatusCode::NOT_FOUND, code, message, "lookup", false)
     }
 
+    pub(super) fn conflict(code: &str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, code, message, "policy", false)
+    }
+
     pub(super) fn internal(code: &str, message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,

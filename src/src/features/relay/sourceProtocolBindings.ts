@@ -9,15 +9,10 @@ import type {
 
 export const sourceWireApis = [
   "responses",
-  "messages",
   "chat_completions",
+  "messages",
+  "gemini",
 ] as const satisfies readonly SourceWireApi[];
-
-const supportedMessagesReasoningModes: readonly MessagesReasoningMode[] = [
-  "disabled",
-  "budget",
-  "adaptive",
-];
 
 function isSourceWireApi(value: string): value is SourceWireApi {
   return sourceWireApis.includes(value as SourceWireApi);
@@ -37,13 +32,15 @@ export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter
 }
 
 export function normalizedReasoningMode(
-  binding: SourceProtocolBinding,
-  adapter = normalizedAdapter(binding),
+  _binding: SourceProtocolBinding,
+  adapter = normalizedAdapter(_binding),
 ): MessagesReasoningMode {
-  return adapter === "responses_to_messages"
-    && supportedMessagesReasoningModes.includes(binding.reasoningMode ?? "disabled")
-    ? binding.reasoningMode ?? "disabled"
-    : "disabled";
+  // Reasoning is selected by the client and constrained in Pool -> Model
+  // Rules. The source editor only chooses the wire adapter; a Messages bridge
+  // always uses the current upstream translation path for the requested
+  // effort. Keep accepting the legacy field on read, but do not expose it as
+  // a source-level policy.
+  return adapter === "responses_to_messages" ? "adaptive" : "disabled";
 }
 
 export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
@@ -111,47 +108,12 @@ function sourceBindingModels(
     : source.models;
 }
 
-/** Mirrors the runtime-only link from a confirmed native Messages route to
- * the Responses client. Explicit native Responses and Gemini assignments keep
- * ownership of overlapping models; an existing Messages bridge retains its
- * configured reasoning/cache policy while gaining unclaimed native models. */
+/** Returns only explicitly configured routes. A bridge changes the request
+ * contract and must therefore be assigned explicitly by the operator. */
 export function runtimeSourceProtocolBindings(
   source: ProtocolBindingSource,
 ): SourceProtocolBinding[] {
-  const bindings = effectiveSourceProtocolBindings(source);
-  const claimedByOtherResponsesRoutes = new Set(
-    bindings.flatMap((binding) => (
-      binding.wireApi === "responses" && normalizedAdapter(binding) !== "responses_to_messages"
-        ? sourceBindingModels(source, bindings, binding).map((model) => model.toLowerCase())
-        : []
-    )),
-  );
-  const linkedModels = normalizedModelIds(
-    bindings.flatMap((binding) => (
-      binding.wireApi === "messages" && normalizedAdapter(binding) === "native"
-        ? sourceBindingModels(source, bindings, binding)
-        : []
-    )).filter((model) => !claimedByOtherResponsesRoutes.has(model.toLowerCase())),
-    source.models,
-  );
-  if (!linkedModels.length) return bindings;
-
-  const bridge = bindings.find((binding) => (
-    binding.wireApi === "responses" && normalizedAdapter(binding) === "responses_to_messages"
-  ));
-  if (bridge) {
-    return bindings.map((binding) => binding === bridge ? {
-      ...binding,
-      modelIds: normalizedModelIds([...binding.modelIds, ...linkedModels], source.models),
-    } : binding);
-  }
-  return [...bindings, {
-    wireApi: "responses",
-    adapter: "responses_to_messages",
-    reasoningMode: "disabled",
-    cacheWriteTtl: "provider",
-    modelIds: linkedModels,
-  }];
+  return effectiveSourceProtocolBindings(source);
 }
 
 /**
@@ -181,6 +143,10 @@ export function sourceSupportsWireApi(
   wireApi: SourceWireApi,
 ) {
   return sourceModelsForWireApi(source, wireApi).length > 0;
+}
+
+export function sourceSupportsAnyWireApi(source: ProtocolBindingSource) {
+  return sourceWireApis.some((wireApi) => sourceSupportsWireApi(source, wireApi));
 }
 
 /**

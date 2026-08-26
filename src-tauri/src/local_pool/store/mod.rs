@@ -229,6 +229,27 @@ impl LocalPoolStore {
         self.replace_all_records(self.sources.clone(), accounts, keys, automations)
     }
 
+    /// Persists a Team breaker fan-out without synthesizing a usage event.
+    /// This updates only the listed local accounts and keeps telemetry intact.
+    pub fn block_accounts_for_team(&mut self, account_ids: &[String]) -> Result<bool> {
+        let mut changed = false;
+        let mut accounts = self.accounts.clone();
+        for account in &mut accounts {
+            if account_ids.iter().any(|id| id == &account.account.id)
+                && (account.account.health != zenith_relay_core::accounts::AccountHealthState::Blocked
+                    || account.account.last_error_code.as_deref() != Some("deactivated_workspace"))
+            {
+                account.account.health = zenith_relay_core::accounts::AccountHealthState::Blocked;
+                account.account.last_error_code = Some("deactivated_workspace".to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            self.replace_all_records(self.sources.clone(), accounts, self.keys.clone(), self.automations.clone())?;
+        }
+        Ok(changed)
+    }
+
     pub fn delete_account_state(
         &mut self,
         account_id: &str,
@@ -336,6 +357,13 @@ impl LocalPoolStore {
                 gateway.model_reasoning_allowed_levels,
             )
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        gateway.model_service_tier_overrides =
+            zenith_relay_core::normalize_model_service_tier_overrides(
+                gateway.model_service_tier_overrides,
+            )
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        gateway.model_display_order =
+            zenith_relay_core::normalize_model_ids(gateway.model_display_order);
         gateway.subscription_plan_order =
             normalize_subscription_plan_order(gateway.subscription_plan_order)
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
@@ -1123,6 +1151,7 @@ mod tests {
             remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,

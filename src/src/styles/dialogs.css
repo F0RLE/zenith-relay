@@ -10,6 +10,11 @@
   backdrop-filter: blur(2px);
 }
 
+/* Error details can be opened from a toast while another modal is active. */
+.relay-modal-backdrop-top {
+  z-index: 400;
+}
+
 .relay-dialog {
   width: min(520px, 100%);
   max-height: calc(100vh - 84px);

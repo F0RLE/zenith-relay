@@ -73,6 +73,21 @@ impl GatewayRuntime {
                 }
             }
         }
+        if let (Some(key), Some(store)) =
+            (prompt_affinity_key, self.response_affinity_store.as_ref())
+        {
+            let cached = self.lock_scheduler().has_prompt_affinity(key, now_ms);
+            if !cached {
+                if let Ok(Some(binding)) = store.find(key, now_ms) {
+                    self.lock_scheduler().restore_prompt_affinity(
+                        binding.key,
+                        &binding.candidate_id,
+                        binding.expires_at_ms,
+                        now_ms,
+                    );
+                }
+            }
+        }
         // Keep authorization live through selection and reservation. A pool
         // mutation waits for this read lock, so it cannot race a stale scope
         // into a newly reserved lease.
@@ -114,13 +129,29 @@ impl GatewayRuntime {
                     candidate_id: selection.candidate_id.clone(),
                     model: model.to_string(),
                     lane,
+                    activity_callback: self.activity_callback.clone(),
+                    activity_revision: self.activity_revision.clone(),
                     released: AtomicBool::new(false),
                 };
                 (selection, lease)
             })
         });
+        let activity = reserved.as_ref().map(|(selection, _)| {
+            let (in_flight, active_request_count, active_models) =
+                scheduler.runtime_activity_for(&selection.candidate_id);
+            RuntimeActivitySnapshot {
+                revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
+                candidate_id: selection.candidate_id.clone(),
+                in_flight,
+                active_request_count,
+                active_models,
+            }
+        });
         drop(scheduler);
         drop(scope);
+        if let Some(activity) = activity {
+            self.emit_activity_changed(activity);
+        }
         if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
             if selection.response_affinity_hit {
                 self.persist_response_affinity(key, &selection.candidate_id, now_ms);

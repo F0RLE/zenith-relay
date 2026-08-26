@@ -82,7 +82,12 @@ pub(crate) fn apply_status_cooldown_with_hint(
                 hint.retry_after_ms,
                 consecutive_failures,
             );
-            (if hint.global { "*" } else { model }, duration_ms)
+            // An explicit quota-exhausted classification is account-wide even
+            // when the upstream body omits a machine-readable global marker.
+            // OpenAI OAuth 429 responses can carry only a reset signal (or a
+            // quota phrase in the message), so keeping this model-scoped would
+            // let the same exhausted account be selected for another model.
+            (rate_limit_scope(category, hint.global, model), duration_ms)
         }
         _ => ("*", TRANSIENT_COOLDOWN_MS),
     };
@@ -110,6 +115,14 @@ pub(crate) fn apply_status_cooldown_with_hint(
         cooldown_scope: applied.then(|| scope.to_string()),
         retry_at_ms: applied.then_some(retry_at_ms),
         consecutive_failures,
+    }
+}
+
+pub(super) fn rate_limit_scope<'a>(category: &str, global_hint: bool, model: &'a str) -> &'a str {
+    if global_hint || category == "upstream_quota_exhausted" {
+        "*"
+    } else {
+        model
     }
 }
 

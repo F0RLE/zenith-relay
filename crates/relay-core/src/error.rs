@@ -6,6 +6,7 @@ pub enum Error {
     UnsupportedWireApi,
     UpstreamBodyTooLarge,
     Upstream(reqwest::Error),
+    UpstreamStatus(u16),
     InvalidUpstreamResponse(&'static str),
 }
 
@@ -20,6 +21,9 @@ impl fmt::Display for Error {
                 formatter.write_str("upstream response body is too large")
             }
             Self::Upstream(_) => formatter.write_str("upstream request failed"),
+            Self::UpstreamStatus(status) => {
+                write!(formatter, "upstream model discovery failed (HTTP {status})")
+            }
             Self::InvalidUpstreamResponse(message) => formatter.write_str(message),
         }
     }
@@ -29,6 +33,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Upstream(error) => Some(error),
+            Self::UpstreamStatus(_) => None,
             _ => None,
         }
     }
@@ -66,7 +71,15 @@ fn valid_error_code(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_error_code, safe_error_code};
+    use super::{normalize_error_code, safe_error_code, Error};
+
+    #[test]
+    fn upstream_discovery_status_is_actionable_without_exposing_response_body() {
+        assert_eq!(
+            Error::UpstreamStatus(401).to_string(),
+            "upstream model discovery failed (HTTP 401)"
+        );
+    }
 
     #[test]
     fn error_codes_are_bounded_and_redacted() {

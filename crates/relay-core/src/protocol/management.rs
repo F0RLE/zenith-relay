@@ -1,17 +1,34 @@
 use super::Capabilities;
-use crate::catalog::SourceReasoningProbeProgress;
 use crate::{
-    account_candidate_health,
-    accounts::{AccountAuthState, AccountHealthState},
     api_model_price,
     automations::{WakeHistory, WakeTask},
     codex_model_display_name, codex_model_is_picker_eligible, official_image_request_prices,
-    quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
-    runtime_source_models_for_wire_api, ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl,
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, DefaultServiceTier,
-    ImageRequestPrice, ModelRules, RoutingDiagnostics, RoutingStrategy, SourceProtocolBinding,
+    ApiModelPriceOverride, DefaultServiceTier, ModelRules, RoutingStrategy, SourceProtocolBinding,
     WireApi,
 };
+mod account;
+mod model;
+mod routing;
+mod usage;
+
+pub use account::{
+    api_equivalent_projection_window, model_has_native_account_route, AccountSummary,
+    QuotaWindowUsage, RemoteAccountLocation, RevealedAccountIdentity, SourceSummary,
+};
+pub use model::{
+    apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
+    model_has_api_source_route, pooled_source_runtime_available, source_runtime_available,
+    GatewaySummary, ModelSummary,
+};
+pub use routing::{
+    account_candidate_enabled, account_operational_state, operational_status, quota_refresh_status,
+    AccountOperationalInput, AccountOperationalState, AccountRoutingBlockReason, OperationalStatus,
+    ProxyMode, QuotaRefreshStatus,
+};
+pub use usage::{
+    UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTotals,
+};
+
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::{
@@ -38,532 +55,12 @@ pub struct RuntimeTargetSummary {
     pub version: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GatewaySummary {
-    pub running: bool,
-    pub base_url: String,
-    pub candidate_count: usize,
-    pub visible_model_ids: Vec<String>,
-    pub max_retry_candidates: u8,
-    #[serde(default = "default_cooldown_after_failures")]
-    pub cooldown_after_failures: u8,
-    #[serde(default = "default_keep_last_candidate_available")]
-    pub keep_last_candidate_available: bool,
-    pub routing_strategy: RoutingStrategy,
-    #[serde(default)]
-    pub subscription_plan_order: Vec<String>,
-    pub default_service_tier: DefaultServiceTier,
-    #[serde(default)]
-    pub image_base_model: Option<String>,
-    #[serde(default)]
-    pub models: Vec<ModelSummary>,
-    #[serde(default)]
-    pub common_proxy_configured: bool,
-    #[serde(default)]
-    pub common_proxy_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub common_proxy_id: Option<String>,
-    #[serde(default)]
-    pub account_proxy_required: bool,
-    #[serde(default)]
-    pub quota_request_timeout_seconds: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chatgpt_interface_quota_reserve_basis_points: Option<u64>,
-    #[serde(default = "default_codex_background_tasks_enabled")]
-    pub codex_background_tasks_enabled: bool,
-    #[serde(default = "default_codex_websockets_enabled")]
-    pub codex_websockets_enabled: bool,
-    #[serde(default)]
-    pub routing_order: Vec<CandidateRuntimeSnapshot>,
-}
-
-fn default_codex_websockets_enabled() -> bool {
-    true
-}
-
-fn default_codex_background_tasks_enabled() -> bool {
-    true
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelSummary {
-    pub id: String,
-    pub enabled: bool,
-    pub member_count: usize,
-    #[serde(default)]
-    pub codex_visible: bool,
-    #[serde(default)]
-    pub codex_display_name: String,
-    pub catalog_rank: Option<u32>,
-    pub input_micro_usd_per_million: Option<u64>,
-    pub cached_input_micro_usd_per_million: Option<u64>,
-    #[serde(default)]
-    pub cache_write_5m_micro_usd_per_million: Option<u64>,
-    #[serde(default)]
-    pub cache_write_1h_micro_usd_per_million: Option<u64>,
-    pub output_micro_usd_per_million: Option<u64>,
-    #[serde(default)]
-    pub image_request_prices: Vec<ImageRequestPrice>,
-    #[serde(default)]
-    pub custom_price: bool,
-    #[serde(default)]
-    pub reasoning_levels: Vec<String>,
-    #[serde(default)]
-    pub reasoning_supported_levels: Vec<String>,
-    #[serde(default)]
-    pub reasoning_allowed_levels: Vec<String>,
-    #[serde(default)]
-    pub reasoning_configurable: bool,
-    #[serde(default)]
-    pub reasoning_probe_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_probe: Option<SourceReasoningProbeProgress>,
-}
-
-/// Adds provider-reported defaults and the operator's manual override to a
-/// pooled management model. Provider-reported modes are enabled until the
-/// operator edits the list; a present empty override disables them all. The
-/// route flag covers both native OAuth accounts and API sources; API probing is
-/// exposed separately by each runtime snapshot.
-pub fn apply_model_reasoning_summary(
-    model: &mut ModelSummary,
-    reported_levels: Option<Vec<String>>,
-    saved_manual_levels: Option<&[String]>,
-    has_pool_route: bool,
-) {
-    model.reasoning_levels.clear();
-    model.reasoning_supported_levels.clear();
-    model.reasoning_allowed_levels.clear();
-    model.reasoning_configurable = false;
-
-    // Provider metadata is the current route contract. Known model defaults
-    // are only a fallback for providers that omit the field entirely; using
-    // them first hides newly introduced/provider-specific efforts.
-    let mut declared_levels = match reported_levels {
-        Some(levels) => levels,
-        None => crate::known_model_reasoning_levels(&model.id)
-            .map(|levels| levels.iter().copied().map(str::to_string).collect())
-            .unwrap_or_default(),
-    };
-    if crate::anthropic_max_implies_ultra(&model.id)
-        && declared_levels
-            .iter()
-            .any(|level| level.eq_ignore_ascii_case("max"))
-        && !declared_levels
-            .iter()
-            .any(|level| level.eq_ignore_ascii_case("ultra"))
-    {
-        declared_levels.push("ultra".to_string());
-    }
-    model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);
-    if has_pool_route {
-        let effective_levels = saved_manual_levels.unwrap_or(&model.reasoning_supported_levels);
-        model.reasoning_allowed_levels = crate::canonicalize_reasoning_levels(effective_levels);
-        model.reasoning_levels = model.reasoning_allowed_levels.clone();
-        model.reasoning_allowed_levels.retain(|level| {
-            model
-                .reasoning_supported_levels
-                .iter()
-                .any(|supported| supported.eq_ignore_ascii_case(level))
-                || saved_manual_levels.is_some()
-        });
-        model.reasoning_levels = model.reasoning_allowed_levels.clone();
-    }
-    model.reasoning_configurable = has_pool_route;
-}
-
-/// Returns whether an eligible pooled API source can serve this model through
-/// the Responses client contract.  Native account capabilities stay owned by
-/// their upstream catalog and are deliberately excluded from manual settings.
-pub fn model_has_api_source_route(sources: &[SourceSummary], model: &str) -> bool {
-    sources.iter().any(|source| {
-        source.enabled
-            && source.in_pool
-            && !source.draining
-            && source.secret_available
-            && source
-                .models_for_wire_api(WireApi::Responses)
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    })
-}
-
-pub fn source_runtime_available(
-    routing_order: &[CandidateRuntimeSnapshot],
-    source_id: &str,
-) -> bool {
-    routing_order.iter().any(|candidate| {
-        candidate.kind == CandidateKind::ApiSource
-            && candidate.available
-            && (candidate.candidate_id == source_id
-                || candidate
-                    .candidate_id
-                    .strip_prefix(source_id)
-                    .is_some_and(|suffix| suffix.starts_with("::")))
-    })
-}
-
-/// Returns whether an API source can serve the Responses contract used by the
-/// pool. A source can expose several protocol candidates, so a healthy
-/// Messages-only candidate must not make a pooled source look available.
-/// Legacy single-protocol candidates keep their source id without a suffix;
-/// their configured wire API disambiguates that form.
-pub fn pooled_source_runtime_available(
-    routing_order: &[CandidateRuntimeSnapshot],
-    source_id: &str,
-    legacy_wire_api: WireApi,
-) -> bool {
-    routing_order.iter().any(|candidate| {
-        if candidate.kind != CandidateKind::ApiSource || !candidate.available {
-            return false;
-        }
-        if candidate.candidate_id == source_id {
-            return legacy_wire_api == WireApi::Responses;
-        }
-        candidate
-            .candidate_id
-            .strip_prefix(source_id)
-            .is_some_and(|suffix| suffix == "::responses" || suffix.starts_with("::responses_"))
-    })
-}
-
 /// Validates a server-generated identifier formatted as a fixed prefix plus
 /// the 32 hexadecimal characters emitted by `Uuid::simple()`.
 pub fn valid_generated_id(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|suffix| {
         suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyMode {
-    #[default]
-    Direct,
-    Common,
-    Account,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountRoutingBlockReason {
-    Disabled,
-    NotInPool,
-    Draining,
-    SecretUnavailable,
-    ProxyUnavailable,
-    ReauthRequired,
-    AuthError,
-    Checkpoint,
-    Captcha,
-    SubscriptionForbidden,
-    SubscriptionExpired,
-    AccountUnhealthy,
-    QuotaExhausted,
-}
-
-pub struct AccountOperationalInput<'a> {
-    pub enabled: bool,
-    pub in_pool: bool,
-    pub draining: bool,
-    pub secret_available: bool,
-    pub proxy_available: bool,
-    pub auth_state: AccountAuthState,
-    pub health: AccountHealthState,
-    pub subscription: &'a Subscription,
-    pub quota: &'a QuotaSnapshot,
-    pub last_error_code: Option<&'a str>,
-    pub now_ms: u64,
-    pub quota_stale_after_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AccountOperationalState {
-    pub status: OperationalStatus,
-    pub health: CandidateHealth,
-    pub quota: CandidateQuota,
-    pub routing_eligible: bool,
-    pub routing_block_reason: Option<AccountRoutingBlockReason>,
-}
-
-/// Whether an account should remain instantiated as a runtime candidate.
-///
-/// An exhausted quota is a temporary scheduler condition rather than a broken
-/// configuration. Keeping that candidate lets a quota refresh restore it in
-/// place without rebuilding the gateway or dropping active work.
-pub fn account_candidate_enabled(
-    account_enabled: bool,
-    routing_block_reason: Option<AccountRoutingBlockReason>,
-) -> bool {
-    account_enabled
-        && matches!(
-            routing_block_reason,
-            None | Some(AccountRoutingBlockReason::QuotaExhausted)
-        )
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuotaRefreshStatus {
-    #[default]
-    Pending,
-    Refreshing,
-    Updated,
-    Failed,
-    RequiresReauth,
-}
-
-pub fn quota_refresh_status(
-    auth_state: AccountAuthState,
-    quota: &QuotaSnapshot,
-    refreshing: bool,
-) -> QuotaRefreshStatus {
-    if matches!(auth_state, AccountAuthState::RequiresReauth(_)) {
-        QuotaRefreshStatus::RequiresReauth
-    } else if refreshing {
-        QuotaRefreshStatus::Refreshing
-    } else if quota.error.is_some() {
-        QuotaRefreshStatus::Failed
-    } else if quota.updated_at_ms.is_some() {
-        QuotaRefreshStatus::Updated
-    } else {
-        QuotaRefreshStatus::Pending
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum OperationalStatus {
-    Rotation,
-    QuotaWait,
-    Unavailable,
-    Disabled,
-}
-
-pub fn operational_status(
-    enabled: bool,
-    quota_wait: bool,
-    configured_available: bool,
-    runtime_available: Option<bool>,
-) -> OperationalStatus {
-    if !enabled {
-        return OperationalStatus::Disabled;
-    }
-    if !configured_available {
-        return OperationalStatus::Unavailable;
-    }
-    if quota_wait {
-        return OperationalStatus::QuotaWait;
-    }
-    if runtime_available.unwrap_or(configured_available) {
-        OperationalStatus::Rotation
-    } else {
-        OperationalStatus::Unavailable
-    }
-}
-
-pub fn account_operational_state(input: AccountOperationalInput<'_>) -> AccountOperationalState {
-    let health = account_candidate_health(
-        input.auth_state,
-        input.health,
-        input.subscription.status,
-        input.last_error_code,
-    );
-    let quota =
-        CandidateQuota::from_snapshot(input.quota, input.now_ms, input.quota_stale_after_ms);
-    let configured_available =
-        !input.draining && input.secret_available && input.proxy_available && health.is_eligible();
-    let status = operational_status(
-        input.enabled,
-        quota == CandidateQuota::Exhausted,
-        configured_available,
-        None,
-    );
-    let routing_block_reason = account_routing_block_reason(&input, health, quota);
-    AccountOperationalState {
-        status,
-        health,
-        quota,
-        routing_eligible: routing_block_reason.is_none(),
-        routing_block_reason,
-    }
-}
-
-fn account_routing_block_reason(
-    input: &AccountOperationalInput<'_>,
-    health: CandidateHealth,
-    quota: CandidateQuota,
-) -> Option<AccountRoutingBlockReason> {
-    if !input.enabled {
-        return Some(AccountRoutingBlockReason::Disabled);
-    }
-    if !input.in_pool {
-        return Some(AccountRoutingBlockReason::NotInPool);
-    }
-    if input.draining {
-        return Some(AccountRoutingBlockReason::Draining);
-    }
-    if !input.secret_available {
-        return Some(AccountRoutingBlockReason::SecretUnavailable);
-    }
-    if !input.proxy_available {
-        return Some(AccountRoutingBlockReason::ProxyUnavailable);
-    }
-    match input.auth_state {
-        AccountAuthState::RequiresReauth(_) => {
-            return Some(AccountRoutingBlockReason::ReauthRequired)
-        }
-        AccountAuthState::Error => return Some(AccountRoutingBlockReason::AuthError),
-        _ => {}
-    }
-    match input.last_error_code {
-        Some("checkpoint" | "upstream_account_verification_required") => {
-            return Some(AccountRoutingBlockReason::Checkpoint)
-        }
-        Some("captcha") => return Some(AccountRoutingBlockReason::Captcha),
-        _ => {}
-    }
-    match input.subscription.status {
-        SubscriptionStatus::Forbidden => {
-            return Some(AccountRoutingBlockReason::SubscriptionForbidden)
-        }
-        SubscriptionStatus::Expired => return Some(AccountRoutingBlockReason::SubscriptionExpired),
-        _ => {}
-    }
-    if !health.is_eligible() {
-        return Some(AccountRoutingBlockReason::AccountUnhealthy);
-    }
-    (quota == CandidateQuota::Exhausted).then_some(AccountRoutingBlockReason::QuotaExhausted)
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceSummary {
-    pub id: String,
-    pub name: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub in_pool: bool,
-    pub draining: bool,
-    pub operational_status: OperationalStatus,
-    pub base_url: String,
-    pub wire_api: WireApi,
-    #[serde(default)]
-    pub protocol_bindings: Vec<SourceProtocolBinding>,
-    pub models: Vec<String>,
-    pub allowed_models: Vec<String>,
-    pub excluded_models: Vec<String>,
-    pub priority: i32,
-    pub weight: u32,
-    #[serde(default)]
-    pub recovery_delay_seconds: u64,
-    #[serde(default)]
-    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
-    /// Complete token prices discovered from this source's model catalog.
-    /// Manual source overrides always take precedence.
-    #[serde(default)]
-    pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
-    #[serde(default)]
-    pub api_equivalent: ApiEquivalentSummary,
-    pub secret_available: bool,
-    pub last_error_code: Option<String>,
-}
-
-impl SourceSummary {
-    /// Returns all models available through a client protocol. A source may
-    /// expose more than one connector route for the same client protocol,
-    /// such as native Responses and a Responses-to-Messages bridge.
-    ///
-    /// Legacy records without bindings retain their single `wire_api` surface.
-    pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
-        runtime_source_models_for_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .unwrap_or_default()
-    }
-
-    pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
-        !self.models_for_wire_api(wire_api).is_empty()
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteAccountLocation {
-    pub server_id: String,
-    pub remote_account_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountSummary {
-    pub id: String,
-    pub label: String,
-    pub identity_hint: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub in_pool: bool,
-    pub draining: bool,
-    pub operational_status: OperationalStatus,
-    pub auth_state: AccountAuthState,
-    pub health: String,
-    pub models: Vec<String>,
-    pub allowed_models: Vec<String>,
-    pub excluded_models: Vec<String>,
-    pub priority: i32,
-    pub weight: u32,
-    #[serde(default)]
-    pub api_equivalent: ApiEquivalentSummary,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub purchase_cost_micro_usd: Option<u64>,
-    pub subscription: Subscription,
-    pub quota: QuotaSnapshot,
-    #[serde(default)]
-    pub quota_refresh_status: QuotaRefreshStatus,
-    pub secret_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_location: Option<RemoteAccountLocation>,
-    #[serde(default)]
-    pub proxy_mode: ProxyMode,
-    #[serde(default)]
-    pub proxy_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_block_reason: Option<AccountRoutingBlockReason>,
-    pub last_error_code: Option<String>,
-}
-
-pub fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
-    accounts.iter().any(|account| {
-        account.in_pool
-            && account
-                .models
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    })
-}
-
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevealedAccountIdentity {
-    pub account_id: String,
-    pub identity: String,
-}
-
-impl fmt::Debug for RevealedAccountIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RevealedAccountIdentity")
-            .field("account_id", &self.account_id)
-            .field("identity", &"[redacted]")
-            .finish()
-    }
 }
 
 pub const PROFILE_KEY_ROTATION_SCHEMA_VERSION: u16 = 1;
@@ -574,6 +71,7 @@ pub enum ClientWireApi {
     Responses,
     ChatCompletions,
     Messages,
+    Gemini,
     Images,
 }
 
@@ -620,11 +118,15 @@ pub struct ConfigurationPresetSettings {
     pub hidden_models: Vec<String>,
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+    pub model_service_tier_overrides: BTreeMap<String, DefaultServiceTier>,
+    pub model_display_order: Vec<String>,
     /// Whether the preset explicitly supplied `modelReasoningAllowedLevels`.
     ///
     /// Resolved configuration settings always set this to `true`; it is false
     /// only while importing a backward-compatible sparse preset.
     pub model_reasoning_allowed_levels_present: bool,
+    pub model_service_tier_overrides_present: bool,
+    pub model_display_order_present: bool,
 }
 
 #[derive(Deserialize)]
@@ -636,6 +138,10 @@ struct ConfigurationPresetSettingsWire {
     quota: PresetQuotaPolicy,
     hidden_models: Vec<String>,
     model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(default)]
+    model_service_tier_overrides: Option<BTreeMap<String, DefaultServiceTier>>,
+    #[serde(default)]
+    model_display_order: Option<Vec<String>>,
     #[serde(
         default,
         alias = "modelReasoningOverrides",
@@ -660,6 +166,8 @@ impl<'de> Deserialize<'de> for ConfigurationPresetSettings {
     {
         let wire = ConfigurationPresetSettingsWire::deserialize(deserializer)?;
         let model_reasoning_allowed_levels_present = wire.model_reasoning_allowed_levels.is_some();
+        let model_service_tier_overrides_present = wire.model_service_tier_overrides.is_some();
+        let model_display_order_present = wire.model_display_order.is_some();
         Ok(Self {
             sources: wire.sources,
             accounts: wire.accounts,
@@ -667,8 +175,12 @@ impl<'de> Deserialize<'de> for ConfigurationPresetSettings {
             quota: wire.quota,
             hidden_models: wire.hidden_models,
             model_price_overrides: wire.model_price_overrides,
+            model_service_tier_overrides: wire.model_service_tier_overrides.unwrap_or_default(),
+            model_display_order: wire.model_display_order.unwrap_or_default(),
             model_reasoning_allowed_levels: wire.model_reasoning_allowed_levels.unwrap_or_default(),
             model_reasoning_allowed_levels_present,
+            model_service_tier_overrides_present,
+            model_display_order_present,
         })
     }
 }
@@ -680,7 +192,9 @@ impl Serialize for ConfigurationPresetSettings {
     {
         let mut state = serializer.serialize_struct(
             "ConfigurationPresetSettings",
-            6 + usize::from(self.model_reasoning_allowed_levels_present),
+            6 + usize::from(self.model_reasoning_allowed_levels_present)
+                + usize::from(self.model_service_tier_overrides_present)
+                + usize::from(self.model_display_order_present),
         )?;
         state.serialize_field("sources", &self.sources)?;
         state.serialize_field("accounts", &self.accounts)?;
@@ -688,6 +202,15 @@ impl Serialize for ConfigurationPresetSettings {
         state.serialize_field("quota", &self.quota)?;
         state.serialize_field("hiddenModels", &self.hidden_models)?;
         state.serialize_field("modelPriceOverrides", &self.model_price_overrides)?;
+        if self.model_service_tier_overrides_present {
+            state.serialize_field(
+                "modelServiceTierOverrides",
+                &self.model_service_tier_overrides,
+            )?;
+        }
+        if self.model_display_order_present {
+            state.serialize_field("modelDisplayOrder", &self.model_display_order)?;
+        }
         if self.model_reasoning_allowed_levels_present {
             state.serialize_field(
                 "modelReasoningAllowedLevels",
@@ -836,11 +359,11 @@ pub fn pool_model_summaries(
     for source in sources.iter().filter(|source| {
         source.enabled && source.in_pool && !source.draining && source.secret_available
     }) {
-        let response_models = source.models_for_wire_api(WireApi::Responses);
+        let pool_models = source.models_for_any_wire_api();
         add_member_models(
             &mut models,
             &format!("source:{}", source.id),
-            &response_models,
+            &pool_models,
             &source.allowed_models,
             &source.excluded_models,
             &mut upstream_order,
@@ -897,8 +420,9 @@ pub fn pool_model_summaries(
                     reasoning_supported_levels: Vec::new(),
                     reasoning_allowed_levels: Vec::new(),
                     reasoning_configurable: false,
-                    reasoning_probe_available: false,
-                    reasoning_probe: None,
+                    speed_supported: false,
+                    speed_tier: DefaultServiceTier::Standard,
+                    speed_configurable: false,
                 },
             )
         })
@@ -943,155 +467,6 @@ fn add_member_models(
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UsageSummary {
-    pub id: i64,
-    pub request_id: String,
-    pub candidate_kind: String,
-    pub candidate_hint: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingDiagnostics>,
-    pub requested_model: Option<String>,
-    pub resolved_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_reasoning_effort: Option<String>,
-    pub wire_api: WireApi,
-    #[serde(default)]
-    pub service_tier: crate::DefaultServiceTier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_service_tier: Option<crate::DefaultServiceTier>,
-    pub success: bool,
-    pub http_status: u16,
-    pub error_category: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_origin: Option<crate::ErrorOrigin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_use: Option<crate::ToolUseDiagnostics>,
-    pub latency_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttft_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation_ms: Option<u64>,
-    pub input_tokens: Option<u64>,
-    pub cached_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_ttl: Option<CacheWriteTtl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub total_tokens: Option<u64>,
-    #[serde(default)]
-    pub api_equivalent: ApiEquivalentSummary,
-    pub created_at_ms: u64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageTotals {
-    pub requests: u64,
-    pub successful_requests: u64,
-    pub latency_ms: u64,
-    pub ttft_ms: u64,
-    pub ttft_samples: u64,
-    pub generation_ms: u64,
-    pub generation_samples: u64,
-    pub generation_output_tokens: u64,
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cached_input_samples: u64,
-    #[serde(default)]
-    pub cache_write_input_tokens: u64,
-    #[serde(default)]
-    pub cache_write_input_samples: u64,
-    pub reasoning_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub speed_output_tokens: u64,
-    pub speed_duration_ms: u64,
-    pub api_equivalent: ApiEquivalentSummary,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageGroup {
-    pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub totals: UsageTotals,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageBucket {
-    pub start_ms: u64,
-    pub totals: UsageTotals,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsagePage {
-    pub events: Vec<UsageSummary>,
-    pub total: u64,
-    pub page: u32,
-    pub page_size: u32,
-    pub total_pages: u32,
-    #[serde(default)]
-    pub totals: UsageTotals,
-    #[serde(default)]
-    pub models: Vec<UsageGroup>,
-    #[serde(default)]
-    pub pool_members: Vec<UsageGroup>,
-    #[serde(default)]
-    pub buckets: Vec<UsageBucket>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageRange {
-    Daily,
-    Weekly,
-    Monthly,
-    Custom,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageQuery {
-    #[serde(default)]
-    pub page: u32,
-    #[serde(default)]
-    pub page_size: u32,
-    pub range: Option<UsageRange>,
-    pub from_ms: Option<u64>,
-    pub to_ms: Option<u64>,
-    pub bucket_ms: Option<u64>,
-    pub model_query: Option<String>,
-    pub source_or_account_query: Option<String>,
-    pub wire_api: Option<WireApi>,
-    pub success: Option<bool>,
-    pub error_category: Option<String>,
-    pub request_id_query: Option<String>,
-}
-
-impl UsageQuery {
-    pub fn normalize_pagination(&mut self) {
-        self.page = self.page.max(1);
-        self.page_size = if self.page_size == 0 {
-            50
-        } else {
-            self.page_size.clamp(1, 200)
-        };
-        self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GatewayDiagnostic {
     pub stream: bool,
     pub model: String,
@@ -1117,7 +492,11 @@ pub struct ErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};
+    use crate::{
+        accounts::{AccountAuthState, AccountHealthState},
+        quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription, SubscriptionStatus},
+        CandidateHealth, CandidateQuota,
+    };
     use crate::{
         ActiveModelRuntime, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
         MessagesReasoningMode, SourceAdapter,
@@ -1160,6 +539,7 @@ mod tests {
             priority: 0,
             weight: 1,
             api_equivalent: ApiEquivalentSummary::default(),
+            quota_window_usage: None,
             purchase_cost_micro_usd: None,
             subscription: Subscription::default(),
             quota: QuotaSnapshot::default(),
@@ -1266,8 +646,9 @@ mod tests {
             reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
-            reasoning_probe_available: false,
-            reasoning_probe: None,
+            speed_supported: false,
+            speed_tier: DefaultServiceTier::Standard,
+            speed_configurable: false,
         };
 
         apply_model_reasoning_summary(
@@ -1329,8 +710,9 @@ mod tests {
             reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
-            reasoning_probe_available: false,
-            reasoning_probe: None,
+            speed_supported: false,
+            speed_tier: DefaultServiceTier::Standard,
+            speed_configurable: false,
         };
         apply_model_reasoning_summary(
             &mut model,
@@ -1559,7 +941,7 @@ mod tests {
         };
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Responses),
-            ["gpt-native", "claude-bridged", "claude-native"]
+            ["gpt-native", "claude-bridged"]
         );
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Messages),
@@ -1774,6 +1156,79 @@ mod tests {
         assert_eq!(
             state.routing_block_reason,
             Some(AccountRoutingBlockReason::SecretUnavailable)
+        );
+    }
+
+    #[test]
+    fn expired_chatgpt_entitlement_does_not_block_working_codex_account() {
+        let subscription = Subscription {
+            plan_type: Some("business".into()),
+            active_until_ms: Some(900),
+            status: SubscriptionStatus::Expired,
+            updated_at_ms: Some(900),
+        };
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &QuotaSnapshot {
+                primary: Some(QuotaWindow {
+                    kind: QuotaWindowKind::Primary,
+                    provider_cycle_id: None,
+                    window_start_ms: None,
+                    available_basis_points: Some(8_000),
+                    explicitly_full: None,
+                    reset_at_ms: None,
+                    window_minutes: None,
+                    observed_at_ms: 1_000,
+                    full_transition_fingerprint: None,
+                    exhaustion_transition_fingerprint: None,
+                }),
+                updated_at_ms: Some(1_000),
+                ..Default::default()
+            },
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10_000,
+        });
+
+        assert_eq!(state.health, CandidateHealth::Healthy);
+        assert!(state.routing_eligible);
+        assert_eq!(state.routing_block_reason, None);
+    }
+
+    #[test]
+    fn forbidden_chatgpt_subscription_still_blocks_routing() {
+        let subscription = Subscription {
+            plan_type: Some("business".into()),
+            status: SubscriptionStatus::Forbidden,
+            ..Default::default()
+        };
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &QuotaSnapshot::default(),
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10_000,
+        });
+
+        assert_eq!(state.health, CandidateHealth::Blocked);
+        assert!(!state.routing_eligible);
+        assert_eq!(
+            state.routing_block_reason,
+            Some(AccountRoutingBlockReason::SubscriptionForbidden)
         );
     }
 

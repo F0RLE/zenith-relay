@@ -494,7 +494,7 @@ mod pricing_tests {
             250_000
         );
         let catalog = price_catalog().unwrap();
-        assert_eq!(catalog.catalog_version, "openai-standard-2026-07-26");
+        assert_eq!(catalog.catalog_version, "openai-standard-2026-08-25");
         assert_eq!(
             catalog.source_url,
             "https://developers.openai.com/api/docs/pricing/"
@@ -508,6 +508,36 @@ mod pricing_tests {
                 .cached_input_micro_usd_per_million,
             Some(75_000)
         );
+    }
+
+    #[test]
+    fn gpt_56_official_catalog_prices_match_current_rates() {
+        let expected = [
+            ("gpt-5.6-sol", 4_000_000, 400_000, 5_000_000, 20_000_000),
+            ("gpt-5.6-terra", 2_000_000, 200_000, 2_500_000, 12_000_000),
+            ("gpt-5.6-luna", 200_000, 20_000, 250_000, 1_200_000),
+        ];
+
+        for (model, input, cached_input, cache_write, output) in expected {
+            let price = api_model_price(model).expect("GPT-5.6 model is in the official catalog");
+            assert_eq!(price.input_micro_usd_per_million, input, "{model}");
+            assert_eq!(
+                price.cached_input_micro_usd_per_million, cached_input,
+                "{model} cached input"
+            );
+            assert_eq!(
+                price.cache_write_5m_micro_usd_per_million,
+                Some(cache_write),
+                "{model} cache write"
+            );
+            assert_eq!(price.output_micro_usd_per_million, output, "{model}");
+        }
+
+        let legacy = api_model_price("gpt-5.5").expect("GPT-5.5 is in the official catalog");
+        assert_eq!(legacy.input_micro_usd_per_million, 5_000_000);
+        assert_eq!(legacy.cached_input_micro_usd_per_million, 500_000);
+        assert_eq!(legacy.cache_write_5m_micro_usd_per_million, None);
+        assert_eq!(legacy.output_micro_usd_per_million, 30_000_000);
     }
 
     #[test]
@@ -557,7 +587,7 @@ mod pricing_tests {
                 Some(1_000_000)
             )
             .micro_usd,
-            3_550_000
+            2_840_000
         );
         assert_eq!(
             estimate_api_equivalent(
@@ -604,6 +634,39 @@ mod pricing_tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn anthropic_cache_write_is_priced_once_after_input_components_are_split() {
+        let price = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_000_000,
+            cached_input_micro_usd_per_million: Some(100_000),
+            cache_write_5m_micro_usd_per_million: Some(2_000_000),
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 3_000_000,
+        };
+
+        // Anthropic reports 100 uncached + 40 cache-read + 20 cache-write
+        // tokens as input_tokens=160. Each component must be charged exactly
+        // once rather than charging the aggregate input at the base rate too.
+        assert_eq!(
+            estimate_api_equivalent_with_cache_ttl_and_price_override(
+                Some("private-model"),
+                Some(160),
+                Some(40),
+                Some(20),
+                None,
+                None,
+                Some(10),
+                Some(170),
+                Some(price),
+            ),
+            ApiEquivalentSummary {
+                micro_usd: 174,
+                priced_tokens: 170,
+                unpriced_tokens: 0,
+            }
+        );
     }
 
     #[test]

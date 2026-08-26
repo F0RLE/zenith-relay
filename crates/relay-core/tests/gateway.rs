@@ -72,6 +72,93 @@ async fn responses_websocket_falls_back_to_http_sse_upstream() {
     assert!(events.lock().unwrap().iter().any(|event| event.success));
 }
 
+#[tokio::test]
+async fn responses_websocket_fallback_locks_the_first_later_stream_id() {
+    let (upstream, state) = spawn_upstream().await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+
+    for payload in [
+        json!({
+            "type": "response.create",
+            "model": "gpt-test",
+            "input": "terminal-fragmented"
+        }),
+        json!({
+            "type": "response.create",
+            "stream_id": "stream-a",
+            "model": "gpt-test",
+            "input": "terminal-fragmented"
+        }),
+    ] {
+        socket
+            .send(ClientWsMessage::Text(payload.to_string()))
+            .await
+            .unwrap();
+
+        let mut saw_completed = false;
+        for _ in 0..8 {
+            let message = match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+                Ok(Some(Ok(message))) => message,
+                _ => panic!("fallback did not produce a websocket event"),
+            };
+            let ClientWsMessage::Text(text) = message else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+            if value["type"] == "response.completed" {
+                saw_completed = true;
+                break;
+            }
+        }
+        assert!(saw_completed, "HTTP/SSE upstream was not bridged to WS");
+    }
+
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "stream_id": "stream-b",
+                "model": "gpt-test",
+                "input": "different-stream-id"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let mut rejection = None;
+    for _ in 0..8 {
+        let message = match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+            Ok(Some(Ok(message))) => message,
+            _ => panic!("fallback did not reject the conflicting stream_id"),
+        };
+        let ClientWsMessage::Text(text) = message else {
+            continue;
+        };
+        let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+        if value["type"] == "error" {
+            rejection = Some(value);
+            break;
+        }
+    }
+    let rejection = rejection.expect("fallback did not emit an error event");
+    assert_eq!(rejection["error"]["code"], "invalid_request");
+    assert!(rejection["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("only one WebSocket stream_id is supported per connection"));
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+}
+
 #[derive(Clone, Debug)]
 struct ObservedRequest {
     path: &'static str,
@@ -248,6 +335,120 @@ async fn models_are_discovered_with_the_source_credential() {
 }
 
 #[tokio::test]
+async fn root_openai_discovery_retries_v1_after_404_and_returns_resolved_url() {
+    let state = UpstreamState::default();
+    let root_state = state.clone();
+    let v1_state = state.clone();
+    let root_status = StatusCode::NOT_FOUND;
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/models",
+                get(move |headers: HeaderMap| {
+                    let state = root_state.clone();
+                    async move {
+                        observe(&state, "/models", &headers);
+                        root_status.into_response()
+                    }
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(move |headers: HeaderMap| {
+                    let state = v1_state.clone();
+                    async move { upstream_models(State(state), headers).await }
+                }),
+            ),
+    )
+    .await;
+
+    let discovery = discover_source_models_and_protocol_bindings(
+        &ProviderSource {
+            id: "source-root".into(),
+            name: "Root OpenAI-compatible upstream".into(),
+            base_url: upstream.base_url.clone(),
+            api_key: SOURCE_KEY.into(),
+            wire_api: WireApi::Responses,
+            models: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(discovery.models, ["gpt-test", "hidden-model"]);
+    let expected_base_url = format!("{}/v1", upstream.base_url);
+    assert_eq!(
+        discovery.resolved_base_url.as_deref(),
+        Some(expected_base_url.as_str())
+    );
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.path)
+            .collect::<Vec<_>>(),
+        ["/models", "/v1/models"]
+    );
+}
+
+#[tokio::test]
+async fn root_openai_discovery_does_not_guess_v1_after_auth_or_rate_limit_failures() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::TOO_MANY_REQUESTS,
+    ] {
+        let state = UpstreamState::default();
+        let root_state = state.clone();
+        let v1_state = state.clone();
+        let upstream = spawn(
+            Router::new()
+                .route(
+                    "/models",
+                    get(move |headers: HeaderMap| {
+                        let state = root_state.clone();
+                        async move {
+                            observe(&state, "/models", &headers);
+                            status.into_response()
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/models",
+                    get(move |headers: HeaderMap| {
+                        let state = v1_state.clone();
+                        async move { upstream_models(State(state), headers).await }
+                    }),
+                ),
+        )
+        .await;
+
+        let result = discover_source_models_and_protocol_bindings(
+            &ProviderSource {
+                id: "source-root".into(),
+                name: "Root OpenAI-compatible upstream".into(),
+                base_url: upstream.base_url.clone(),
+                api_key: SOURCE_KEY.into(),
+                wire_api: WireApi::Responses,
+                models: Vec::new(),
+            },
+            &[],
+        )
+        .await;
+
+        assert!(result.is_err(), "status {status} must fail discovery");
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "status {status} must not trigger fallback"
+        );
+        assert_eq!(requests[0].path, "/models");
+    }
+}
+
+#[tokio::test]
 async fn native_messages_model_discovery_uses_anthropic_headers() {
     let (upstream, state) = spawn_upstream().await;
     let models = discover_source_models_for_protocol_bindings(
@@ -387,6 +588,8 @@ async fn native_responses_catalog_refreshes_after_models_are_split_to_a_messages
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
+                // Legacy source-level reasoning values are normalized to the
+                // bridge's technical adaptive translator at runtime.
                 reasoning_mode: MessagesReasoningMode::Disabled,
                 cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".into()],
@@ -420,7 +623,7 @@ async fn native_responses_catalog_refreshes_after_models_are_split_to_a_messages
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
-                reasoning_mode: MessagesReasoningMode::Disabled,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
                 cache_write_ttl: Default::default(),
                 model_ids: vec!["claude-test".into()],
             },
@@ -1421,6 +1624,61 @@ async fn native_responses_repair_call_prefixed_function_item_ids_after_strict_re
 }
 
 #[tokio::test]
+async fn native_responses_repair_custom_tool_item_ids_after_strict_rejection() {
+    let (upstream, state) = spawn_strict_custom_tool_item_id_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "fc_cross_provider_custom_01",
+                    "call_id": "toolu_cross_provider_custom_01",
+                    "name": "PowerShell",
+                    "input": "Get-ChildItem"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "toolu_cross_provider_custom_01",
+                    "output": "Cargo.toml"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(response["id"], "resp_strict_custom_id");
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"][0]["id"], "fc_cross_provider_custom_01");
+    assert_eq!(
+        bodies[1]["input"][0]["id"],
+        "ctc_fc_cross_provider_custom_01"
+    );
+    assert_eq!(
+        bodies[1]["input"][0]["call_id"],
+        "toolu_cross_provider_custom_01"
+    );
+    assert_eq!(
+        bodies[1]["input"][1]["call_id"],
+        "toolu_cross_provider_custom_01"
+    );
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
 async fn native_responses_remove_item_prefixed_message_ids_after_strict_rejection() {
     let (upstream, state) = spawn_strict_message_item_id_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
@@ -1540,9 +1798,8 @@ async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continu
         assert_eq!(bodies[0]["model"], "claude-test");
         assert_eq!(bodies[0]["messages"][0]["role"], "user");
         assert_eq!(bodies[0]["tools"][0]["input_schema"]["type"], "object");
-        assert_eq!(bodies[0]["thinking"]["type"], "enabled");
-        assert_eq!(bodies[0]["thinking"]["budget_tokens"], 16_384);
-        assert_eq!(bodies[0]["max_tokens"], 17_408);
+        assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
+        assert_eq!(bodies[0]["output_config"]["effort"], "high");
     }
 
     let second = client
@@ -1942,6 +2199,50 @@ async fn responses_to_gemini_bridge_uses_native_routes_for_plain_and_streaming_r
 }
 
 #[tokio::test]
+async fn native_gemini_client_route_keeps_native_body_and_response_contract() {
+    let (upstream, state) = spawn_gemini_upstream().await;
+    let (gateway, events) = spawn_native_gemini_gateway(&upstream.base_url).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1beta/models/gemini-test:generateContent",
+            gateway.base_url
+        ))
+        .header("x-goog-api-key", LOCAL_KEY)
+        .json(&json!({
+            "model": "gemini-test",
+            "contents": [{"role": "user", "parts": [{"text": "Native route"}]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body["candidates"][0]["content"]["parts"][0]["text"],
+        "Native Gemini response"
+    );
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/models/gemini-test:generateContent");
+    assert!(requests[0].authorization.is_none());
+    assert_eq!(requests[0].x_goog_api_key.as_deref(), Some(SOURCE_KEY));
+    drop(requests);
+
+    let bodies = state.bodies.lock().unwrap();
+    assert!(bodies[0].get("model").is_none());
+    assert_eq!(bodies[0]["contents"][0]["parts"][0]["text"], "Native route");
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+    assert_eq!(events[0].wire_api, WireApi::Gemini);
+}
+
+#[tokio::test]
 async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperature() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
@@ -1978,7 +2279,7 @@ async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperatur
 }
 
 #[tokio::test]
-async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted() {
+async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_omitted() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
         spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
@@ -1996,12 +2297,7 @@ async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted()
         .send()
         .await
         .unwrap();
-    assert_eq!(reasoning.status(), StatusCode::BAD_REQUEST);
-    let reasoning_body: Value = reasoning.json().await.unwrap();
-    assert_eq!(
-        reasoning_body["error"]["code"],
-        "reasoning_effort_not_allowed"
-    );
+    assert_eq!(reasoning.status(), StatusCode::OK);
 
     let opaque_tool = client
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -2017,9 +2313,10 @@ async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted()
     assert_eq!(opaque_tool.status(), StatusCode::OK);
     let requests = state.requests.lock().unwrap();
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(bodies.len(), 1);
-    assert!(bodies[0].get("tools").is_none());
+    assert_eq!(requests.len(), 2);
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
+    assert!(bodies[1].get("tools").is_none());
 }
 
 #[tokio::test]
@@ -2399,6 +2696,48 @@ async fn spawn_gemini_bridge_gateway(
     (spawn(gateway::router(Arc::new(runtime))).await, events)
 }
 
+async fn spawn_native_gemini_gateway(
+    upstream_base_url: &str,
+) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let usage_events = events.clone();
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource {
+            source: ProviderSource {
+                id: "native-gemini-source".to_string(),
+                name: "Synthetic native Gemini source".to_string(),
+                base_url: format!("{upstream_base_url}/v1"),
+                api_key: SOURCE_KEY.to_string(),
+                wire_api: WireApi::Gemini,
+                models: vec!["gemini-test".to_string()],
+            },
+            protocol_bindings: vec![SourceProtocolBinding {
+                wire_api: WireApi::Gemini,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["gemini-test".to_string()],
+            }],
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            last_used_at_ms: None,
+        }],
+        vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+            id: "local-key-1".to_string(),
+            secret: LOCAL_KEY.to_string(),
+        })],
+        GatewayRuntimeOptions::default(),
+        Arc::new(move |event| usage_events.lock().unwrap().push(event)),
+    )
+    .unwrap();
+    (spawn(gateway::router(Arc::new(runtime))).await, events)
+}
+
 async fn spawn_gemini_upstream() -> (TestServer, UpstreamState) {
     let state = UpstreamState::default();
     let app = Router::new()
@@ -2440,6 +2779,17 @@ async fn spawn_strict_function_item_id_upstream() -> (TestServer, UpstreamState)
         .route(
             "/v1/responses",
             post(strict_function_item_id_upstream_responses),
+        )
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
+async fn spawn_strict_custom_tool_item_id_upstream() -> (TestServer, UpstreamState) {
+    let state = UpstreamState::default();
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(strict_custom_tool_item_id_upstream_responses),
         )
         .with_state(state.clone());
     (spawn(app).await, state)
@@ -2487,19 +2837,7 @@ async fn upstream_models(State(state): State<UpstreamState>, headers: HeaderMap)
                 {
                     "id": "claude-test",
                     "object": "model",
-                    "reasoningEffortModes": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-                    "reasoningProbe": {
-                        "status": "confirmed",
-                        "total": 7,
-                        "running": 0,
-                        "success": 7,
-                        "failed": 0,
-                        "confirmed": 7,
-                        "rejected": 0,
-                        "inconclusive": 0,
-                        "pending": 0,
-                        "lastProbeAt": "2026-08-20T00:00:00Z"
-                    }
+                    "reasoningEffortModes": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
                 },
                 {"id": "claude-hidden", "object": "model"}
             ]
@@ -2846,6 +3184,49 @@ async fn strict_function_item_id_upstream_responses(
 
     Json(json!({
         "id": "resp_strict_function_id",
+        "object": "response",
+        "model": request["model"],
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "History accepted"}]
+        }]
+    }))
+    .into_response()
+}
+
+async fn strict_custom_tool_item_id_upstream_responses(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    state.bodies.lock().unwrap().push(request.clone());
+
+    if request
+        .pointer("/input/0/id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.starts_with("ctc_"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "Invalid 'input[433].id': 'fc_cross_provider_custom_01'. Expected an ID that begins with 'ctc'."
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "id": "resp_strict_custom_id",
         "object": "response",
         "model": request["model"],
         "output": [{

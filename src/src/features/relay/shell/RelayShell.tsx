@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -6,7 +6,7 @@ import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../.
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
 import { useRelayState, type Feedback } from "../state/RelayStateProvider";
-import { Button, copyText, Dialog, IconButton } from "../components/Ui";
+import { Button, Dialog, ErrorDetailsDialog, IconButton } from "../components/Ui";
 
 const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
 type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
@@ -258,38 +258,14 @@ function ModeIcon({ mode }: { mode: RelayMode }) {
 function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback: Exclude<Feedback, null>; clearFeedback: () => void; focusAfterClose: () => void }) {
   const { t } = useTranslation();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const copyTimer = useRef<number | null>(null);
   const error = feedback.error;
-  const details = error ? JSON.stringify(error, null, 2) : null;
   const message = t(feedback.key);
   const toastMessage = error ? t("feedback.errorPrompt") : message;
   const accessibleLabel = error ? toastMessage : message;
 
   useEffect(() => {
     setDetailsOpen(false);
-    setCopied(false);
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    copyTimer.current = null;
-    return () => {
-      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    };
   }, [feedback]);
-
-  const copyError = async () => {
-    if (!details) return;
-    try {
-      await copyText(details);
-      setCopied(true);
-      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-      copyTimer.current = window.setTimeout(() => {
-        setCopied(false);
-        copyTimer.current = null;
-      }, 2_500);
-    } catch {
-      setCopied(false);
-    }
-  };
   const closeDetails = () => {
     setDetailsOpen(false);
     window.requestAnimationFrame(() => {
@@ -318,22 +294,7 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
         {!error ? <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} /> : null}
       </div>
     </div> : null}
-    {detailsOpen && details ? <Dialog
-      title={t("feedback.errorDetails")}
-      onClose={closeDetails}
-      footer={<div className="global-feedback-dialog-actions">
-        <span className="global-feedback-dialog-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
-        <Button variant="secondary" icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</Button>
-        <Button variant="primary" onClick={closeDetails}>{t("common.close")}</Button>
-      </div>}
-    >
-      <div className="global-feedback-dialog-summary">
-        <CircleAlert aria-hidden />
-        <div><strong>{message}</strong><code>{error?.code}</code></div>
-      </div>
-      <div className="config-preview global-feedback-error-json"><pre><code>{details}</code></pre></div>
-      <p className="form-note">{t("feedback.detailsHint")}</p>
-    </Dialog> : null}
+    {detailsOpen && error ? <ErrorDetailsDialog error={error} message={message} onClose={closeDetails} /> : null}
   </>;
 }
 

@@ -4,6 +4,7 @@ use super::{
     Subscription, SubscriptionInput, SupplementalQuotaWindow,
 };
 use crate::error::{normalize_error_code, safe_error_code};
+use crate::DefaultServiceTier;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
@@ -15,6 +16,8 @@ const MAX_SUPPLEMENTAL_WINDOWS: usize = 32;
 pub struct SupplementalQuotaWindowInput {
     pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<DefaultServiceTier>,
     pub window: QuotaWindowInput,
 }
 
@@ -162,6 +165,7 @@ fn normalize_supplemental(
             Ok(SupplementalQuotaWindow {
                 id: id.to_string(),
                 label: label.to_string(),
+                service_tier: input.service_tier,
                 window: QuotaWindow::normalize(input.window, previous_window)?,
             })
         })
@@ -270,6 +274,7 @@ mod tests {
         SupplementalQuotaWindowInput {
             id,
             label: " Code Review ".into(),
+            service_tier: None,
             window: window(QuotaWindowKind::Primary, 75.0),
         }
     }

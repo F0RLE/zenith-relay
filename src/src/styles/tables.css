@@ -244,7 +244,7 @@
 }
 
 .usage-aggregate-table {
-  min-width: 720px;
+  min-width: 0;
   table-layout: fixed;
 }
 
@@ -253,34 +253,46 @@
 }
 
 .usage-aggregate-table col[data-column="name"] { width: 18%; }
-.usage-aggregate-table col[data-column="requests"] { width: 9%; }
-.usage-aggregate-table col[data-column="success"] { width: 9%; }
-.usage-aggregate-table col[data-column="breakdown"] { width: 30%; }
+.usage-aggregate-table col[data-column="requests"] { width: 8%; }
+.usage-aggregate-table col[data-column="success"] { width: 8%; }
+.usage-aggregate-table col[data-column="breakdown"] { width: 28%; }
 .usage-aggregate-table col[data-column="total"] { width: 11%; }
-.usage-aggregate-table col[data-column="speed"] { width: 13%; }
-.usage-aggregate-table col[data-column="timing"] { width: 10%; }
+.usage-aggregate-table col[data-column="speed"] { width: 10%; }
+.usage-aggregate-table col[data-column="timing"] { width: 9%; }
+.usage-aggregate-table col[data-column="equivalent"] { width: 8%; }
 .usage-aggregate-table col[data-column="input"],
 .usage-aggregate-table col[data-column="output"],
 .usage-aggregate-table col[data-column="cache"] { width: 13%; }
-.usage-aggregate-table col[data-column="credits"] { width: 14%; }
-.usage-aggregate-table col[data-column="equivalent"] { width: 15%; }
 
 .usage-aggregate-table th,
 .usage-aggregate-table td {
   overflow: hidden;
   text-align: center;
-  white-space: normal;
+  white-space: nowrap;
   overflow-wrap: normal;
 }
 
 .usage-aggregate-table th {
-  height: 64px;
+  height: 46px;
+  padding: 7px 8px;
+  vertical-align: middle;
 }
 
-.usage-aggregate-table td[data-column="name"] code {
+.usage-aggregate-table td {
+  height: 68px;
+  padding: 10px 8px;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-aggregate-name {
   display: block;
   overflow: hidden;
+  color: var(--relay-text);
+  font-size: 12px;
+  font-weight: 650;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .usage-error-table {
@@ -316,8 +328,9 @@
 
 .usage-token-breakdown {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: center;
+  gap: 4px 7px;
 }
 
 .usage-token-breakdown span {
@@ -325,6 +338,7 @@
   display: grid;
   gap: 1px;
   font-variant-numeric: tabular-nums;
+  line-height: 15px;
 }
 
 .usage-token-breakdown small {
@@ -332,6 +346,40 @@
   color: var(--relay-muted);
   font-size: 10px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-token-breakdown span:not(:has(small)) {
+  color: var(--relay-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.usage-connections-table td[data-column="total"],
+.usage-connections-table td[data-column="equivalent"],
+.usage-connections-table td[data-column="speed"],
+.usage-connections-table td[data-column="timing"] {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (max-width: 980px) {
+  .usage-aggregate-table th {
+    padding-inline: 5px;
+    font-size: 10px;
+  }
+
+  .usage-aggregate-table td {
+    padding-inline: 5px;
+  }
+
+  .usage-token-breakdown {
+    column-gap: 3px;
+  }
+
+  .usage-token-breakdown small {
+    font-size: 9px;
+  }
 }
 
 .relay-table td small,

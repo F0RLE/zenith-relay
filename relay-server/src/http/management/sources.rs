@@ -71,6 +71,9 @@ pub async fn create_source(
     let mut record = source_record(id, secret_ref.clone(), input)?;
     ensure_not_server_self_source(&state, &record.base_url)?;
     let discovery = discover_models(&record, &api_key).await?;
+    if let Some(base_url) = discovery.resolved_base_url.as_deref() {
+        record.base_url = base_url.to_string();
+    }
     record.models = discovery.models;
     record.protocol_bindings = discovery.protocol_bindings;
     record.detected_model_prices = discovery.detected_model_prices;
@@ -180,13 +183,13 @@ pub async fn update_source(
     normalize_record_protocol_bindings(&mut record)?;
     if record.in_pool
         && !record
-            .supports_wire_api(WireApi::Responses)
+            .supports_any_wire_api()
             .map_err(|message| ManagementError::validation("source_protocol_invalid", message))?
     {
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
             "source_pool_protocol_unsupported",
-            "only sources with a Responses-compatible route can join the pool",
+            "source must expose at least one verified API route before joining the pool",
             "pool",
             false,
         ));
@@ -357,6 +360,9 @@ pub async fn test_source(
             return Err(error);
         }
     };
+    if let Some(base_url) = discovery.resolved_base_url.as_deref() {
+        record.base_url = base_url.to_string();
+    }
     record.models = discovery.models;
     record.protocol_bindings = discovery.protocol_bindings;
     record.detected_model_prices = discovery.detected_model_prices;

@@ -142,16 +142,16 @@ jobs:
             $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
             $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
             $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
-            if ($releaseSection.Success) {
-              $notes = $releaseSection.Value.Trim()
-            } else {
-              # Out-String preserves the line breaks that PowerShell otherwise
-              # collapses when a multiline command result is assigned.
-              $notes = (gh api "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$env:GITHUB_REF_NAME" --jq ".body" | Out-String).Trim()
+            if (-not $releaseSection.Success) {
+              throw "CHANGELOG.md must contain a user-facing section for release $version"
             }
+            $notes = $releaseSection.Value.Trim()
           }
           if (-not $notes) {
-            $notes = "## Changelog`n`nRelease notes are generated from the tagged commit history."
+            if ($env:GITHUB_REF -like "refs/tags/*") {
+              throw "User-facing release notes are empty for $env:GITHUB_REF_NAME"
+            }
+            $notes = "## Development build`n`nThis build is not a published release."
           }
           $body = "$downloads`n`n<!-- relay-notes:en -->`n$notes"
           $body | Set-Content -Path release-notes.md -Encoding utf8

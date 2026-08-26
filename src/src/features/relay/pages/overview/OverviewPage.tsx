@@ -3,18 +3,19 @@ import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, RefreshCw, 
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { LocalUsage, RemoteUsage, SourceStats, SourceSummary, UsageBucket, UsageTotals } from "../../api/types";
-import { Button, EmptyState, OptionMenu, PageHeader, StatusIcon } from "../../components/Ui";
+import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { measureTokenSpeed } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
 
 const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
 
 type Range = "today" | "week" | "month";
+type AnalyticsScope = "" | `source:${string}` | `account:${string}`;
 type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
 type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
-type ActivityItem = { id: number; success: boolean; model: string | null; latencyMs: number };
-type OverviewData = { analytics: Analytics; activity: ActivityItem[] };
+type OverviewData = { analytics: Analytics };
 type UsageSample = {
   createdAtMs: number;
   success: boolean;
@@ -27,7 +28,7 @@ type UsageSample = {
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
-  apiEquivalentMicroUsd?: number | null;
+  apiEquivalent?: UsageTotals["apiEquivalent"] | null;
 };
 
 const HOUR_MS = 60 * 60 * 1_000;
@@ -37,6 +38,10 @@ export function OverviewPage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, runtimeRevision, setPage, perform, busy } = useRelayState();
   const [range, setRange] = useState<Range>("today");
+  const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
+    const stored = localStorage.getItem("relay.overviewAnalyticsScope");
+    return stored?.startsWith("source:") || stored?.startsWith("account:") ? stored as AnalyticsScope : "";
+  });
   const [overviewData, setOverviewData] = useState<OverviewData | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
@@ -52,10 +57,25 @@ export function OverviewPage() {
   const usageAvailable = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const windowStartMs = windows[0].startMs;
   const windowEndMs = windows[windows.length - 1].endMs;
-  const usageScope = `${mode}:${range}:${windowStartMs}:${windowEndMs}`;
+  const usageScope = `${mode}:${range}:${analyticsScopeSelection}:${windowStartMs}:${windowEndMs}`;
+  const analyticsScopeQuery = analyticsScopeSelection
+    ? analyticsScopeSelection.slice(analyticsScopeSelection.indexOf(":") + 1)
+    : undefined;
+  const analyticsScopeOptions = useMemo(() => [
+    { value: "", label: t("overview.scopeAll") },
+    ...(runtime?.sources ?? []).map((source) => ({ value: `source:${source.id}`, label: `${t("overview.scopeApi")} · ${source.name}` })),
+    ...(runtime?.accounts ?? []).map((account) => ({ value: `account:${account.id}`, label: `${t("overview.scopeAccount")} · ${account.label}` })),
+  ], [runtime?.accounts, runtime?.sources, t]);
   const analytics = overviewData?.analytics ?? null;
-  const activity = overviewData?.activity ?? [];
   const running = Boolean(runtime?.gateway.running);
+
+  useEffect(() => {
+    if (!runtime) return;
+    if (analyticsScopeSelection && !analyticsScopeOptions.some((option) => option.value === analyticsScopeSelection)) {
+      setAnalyticsScopeSelection("");
+      localStorage.removeItem("relay.overviewAnalyticsScope");
+    }
+  }, [analyticsScopeOptions, analyticsScopeSelection, runtime]);
 
   useEffect(() => {
     mounted.current = true;
@@ -101,10 +121,10 @@ export function OverviewPage() {
     scopeRequests.add(requestId);
     pending.set(usageScope, scopeRequests);
     setAnalyticsLoading(true);
-    const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS };
+    const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS, sourceOrAccountQuery: analyticsScopeQuery };
     const request = mode === "local"
-      ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows), activity: page.events.map(activityFromUsage) }))
-      : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows), activity: page.events.map(activityFromUsage) } : null);
+      ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows) }))
+      : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) } : null);
     request
       .then((result) => {
         if (!active) return;
@@ -124,7 +144,7 @@ export function OverviewPage() {
         if (mounted.current && analyticsScope.current === usageScope) setAnalyticsLoading(remaining > 0);
       });
     return () => { active = false; };
-  }, [mode, range, runtimeRevision, usageAvailable, usageScope, windowEndMs, windowStartMs, windows]);
+  }, [mode, range, runtimeRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
 
   if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} />;
 
@@ -134,11 +154,11 @@ export function OverviewPage() {
   const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
 
-  const primary = mode === "local" ? <Button variant="primary" busy={busy === "gateway"} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button> : <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>{runtime ? t("overview.openServer") : t("remote.connect")}</Button>;
+  const primary = mode === "local" ? <><Button variant="primary" busy={busy === "gateway"} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button><Button variant="secondary" busy={busy === "chatgpt-launch"} icon={<Play aria-hidden />} disabled={!running} title={!running ? t("gateway.start") : t("gateway.launchChatGPT")} onClick={() => perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched")}>{t("gateway.launchChatGPT")}</Button></> : <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>{runtime ? t("overview.openServer") : t("remote.connect")}</Button>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
     {!running && !runtime ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
-      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}<section className="activity-section"><header><h2>{t("overview.activity")}</h2><Button variant="ghost" onClick={() => setPage("usage")}>{t("overview.viewUsage")}</Button></header>{activity.length ? <ul>{activity.map((item) => <li key={item.id}><StatusIcon status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /><code>{item.model ?? "-"}</code><span>{item.latencyMs} ms</span></li>)}</ul> : <p className="muted">{t("usage.empty")}</p>}</section>
+      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} scope={analyticsScopeSelection} setScope={(value) => { const next = value as AnalyticsScope; setAnalyticsScopeSelection(next); localStorage.setItem("relay.overviewAnalyticsScope", next); }} scopeOptions={analyticsScopeOptions} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}
     </>}
   </section>;
 }
@@ -232,15 +252,22 @@ function totalsFromSamples(samples: UsageSample[]) {
     totals.successfulRequests += Number(sample.success);
     totals.latencyMs += sample.latencyMs;
     if (sample.ttftMs != null) { totals.ttftMs += sample.ttftMs; totals.ttftSamples += 1; }
+    const generation = measureTokenSpeed({ success: sample.success, outputTokens: sample.outputTokens, reasoningTokens: sample.reasoningTokens, durationMs: sample.generationMs });
+    if (generation) {
+      totals.generationMs += generation.durationMs;
+      totals.generationSamples += 1;
+      totals.generationOutputTokens += generation.outputTokens;
+    }
     totals.inputTokens += sample.inputTokens ?? 0;
     if (sample.cachedInputTokens != null) { totals.cachedInputTokens += sample.cachedInputTokens; totals.cachedInputSamples += 1; }
     if (sample.cacheWriteInputTokens != null) { totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens; totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1; }
     totals.reasoningTokens += sample.reasoningTokens ?? 0;
     totals.outputTokens += sample.outputTokens ?? 0;
     totals.totalTokens += sample.totalTokens ?? 0;
-    if (sample.apiEquivalentMicroUsd != null) {
-      totals.apiEquivalent.microUsd += sample.apiEquivalentMicroUsd;
-      totals.apiEquivalent.pricedTokens += sample.totalTokens ?? 0;
+    if (sample.apiEquivalent) {
+      totals.apiEquivalent.microUsd += sample.apiEquivalent.microUsd;
+      totals.apiEquivalent.pricedTokens += sample.apiEquivalent.pricedTokens;
+      totals.apiEquivalent.unpricedTokens += sample.apiEquivalent.unpricedTokens;
     } else {
       totals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
     }
@@ -255,10 +282,6 @@ function localSamples(events: LocalUsage[]): UsageSample[] {
 
 function remoteSamples(events: RemoteUsage[]): UsageSample[] {
   return events.map((item) => ({ ...item, ttftMs: item.ttftMs ?? null, generationMs: item.generationMs ?? null }));
-}
-
-function activityFromUsage(item: LocalUsage | RemoteUsage): ActivityItem {
-  return { id: item.id, success: item.success, model: item.resolvedModel ?? item.requestedModel, latencyMs: item.latencyMs };
 }
 
 function sourceHost(value: string) {

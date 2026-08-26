@@ -18,7 +18,7 @@ pub(super) use headers::{
 };
 pub(super) use normalization::{
     apply_default_service_tier_if_missing, normalize_account_request, request_service_tier,
-    try_recover_encrypted_content,
+    responses_lite_parallel_tool_calls_valid, try_recover_encrypted_content,
 };
 
 use super::execution::execute_client_request;
@@ -166,11 +166,13 @@ fn collect_request_strings(value: Option<&Value>, output: &mut Vec<String>) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
     let effort = match wire_api {
         WireApi::Responses => request.pointer("/reasoning/effort"),
         WireApi::ChatCompletions => request.get("reasoning_effort"),
         WireApi::Messages => None,
+        WireApi::Gemini => None,
     };
     effort
         .and_then(Value::as_str)
@@ -201,6 +203,36 @@ pub(super) async fn messages(
         execute_client_request(runtime, request, WireApi::Messages).await,
     )
     .await
+}
+
+pub(super) async fn gemini(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    axum::extract::Path(model_action): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some((model, stream)) = parse_gemini_model_action(&model_action) else {
+        return super::errors::api_error(
+            axum::http::StatusCode::NOT_FOUND,
+            "Gemini endpoint must end with :generateContent or :streamGenerateContent",
+            "invalid_request",
+        );
+    };
+    super::execution::execute_gemini_client_request(runtime, request, model, stream).await
+}
+
+fn parse_gemini_model_action(value: &str) -> Option<(String, bool)> {
+    let (model, stream) = if let Some(model) = value.strip_suffix(":streamGenerateContent") {
+        (model, true)
+    } else {
+        let model = value.strip_suffix(":generateContent")?;
+        (model, false)
+    };
+    let model = model.strip_prefix("models/").unwrap_or(model).trim();
+    (!model.is_empty()
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    .then(|| (model.to_string(), stream))
 }
 
 pub(super) fn contains_tool_call_output(value: &Value) -> bool {
@@ -303,6 +335,7 @@ pub(super) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
         WireApi::Responses => &[WireApi::Responses],
         WireApi::ChatCompletions => &[WireApi::ChatCompletions],
         WireApi::Messages => &[WireApi::Messages],
+        WireApi::Gemini => &[WireApi::Gemini],
     }
 }
 
@@ -530,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_lite_keeps_provider_owned_tools_and_choices_opaque() {
+    fn responses_lite_keeps_provider_owned_tools_and_choices_opaque_and_serializes_tools() {
         let mut request = json!({
             "model": "gpt-lite",
             "tools": [
@@ -567,6 +600,11 @@ mod tests {
         assert_eq!(request["tool_choice"], original_choice);
         assert_eq!(request["input"], original_input);
         assert_eq!(request["reasoning"]["context"], "all_turns");
+        assert_eq!(request["parallel_tool_calls"], false);
+
+        let mut no_tools = json!({"model": "gpt-lite"});
+        normalize_account_request(no_tools.as_object_mut().unwrap(), true);
+        assert_eq!(no_tools["parallel_tool_calls"], false);
     }
 
     #[test]
@@ -938,11 +976,11 @@ mod tests {
         assert_eq!(
             display_names,
             [
-                "GPT 5.4",
-                "Claude Opus 4.8",
-                "Gemini 3.6 Flash",
-                "Grok 4.5",
                 "GLM 5.2",
+                "Grok 4.5",
+                "Gemini 3.6 Flash",
+                "Claude Opus 4.8",
+                "GPT 5.4",
             ]
         );
         assert!(models.iter().all(codex_catalog_entry_is_compatible));

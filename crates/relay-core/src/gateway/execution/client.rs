@@ -12,7 +12,7 @@ use crate::protocol::ClientWireApi;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderValue, Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -20,6 +20,25 @@ pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
     request: Request<Body>,
     wire_api: WireApi,
+) -> Response<Body> {
+    execute_client_request_inner(runtime, request, wire_api, None, false).await
+}
+
+pub(in crate::gateway) async fn execute_gemini_client_request(
+    runtime: Arc<GatewayRuntime>,
+    request: Request<Body>,
+    model: String,
+    force_stream: bool,
+) -> Response<Body> {
+    execute_client_request_inner(runtime, request, WireApi::Gemini, Some(model), force_stream).await
+}
+
+async fn execute_client_request_inner(
+    runtime: Arc<GatewayRuntime>,
+    request: Request<Body>,
+    wire_api: WireApi,
+    path_model: Option<String>,
+    force_stream: bool,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
@@ -34,6 +53,13 @@ pub(in crate::gateway) async fn execute_client_request(
                 .flatten()
                 .and_then(|value| value.to_str().ok())
                 .and_then(|secret| runtime.authenticate_secret(secret))
+        })
+        .or_else(|| {
+            (wire_api == WireApi::Gemini)
+                .then(|| headers.get("x-goog-api-key"))
+                .flatten()
+                .and_then(|value| value.to_str().ok())
+                .and_then(|secret| runtime.authenticate_secret(secret))
         });
     let Some(key) = key else {
         return unauthorized();
@@ -42,6 +68,7 @@ pub(in crate::gateway) async fn execute_client_request(
         WireApi::Responses => ClientWireApi::Responses,
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
         WireApi::Messages => ClientWireApi::Messages,
+        WireApi::Gemini => ClientWireApi::Gemini,
     };
     if !runtime.allows_client_wire_api(&key, client_wire_api) {
         return client_api_forbidden();
@@ -78,12 +105,21 @@ pub(in crate::gateway) async fn execute_client_request(
             "chat_feature_not_supported",
         );
     }
-    let Some(requested_model) = request
+    let body_model = request
         .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.trim().is_empty())
-        .map(str::to_string)
-    else {
+        .map(str::to_string);
+    if let (Some(path_model), Some(body_model)) = (path_model.as_deref(), body_model.as_deref()) {
+        if !path_model.eq_ignore_ascii_case(body_model) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "model in the path must match model in the request body",
+                "invalid_request",
+            );
+        }
+    }
+    let Some(requested_model) = path_model.or(body_model) else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "model must be a non-empty string",
@@ -104,7 +140,7 @@ pub(in crate::gateway) async fn execute_client_request(
             )
         }
         None => false,
-    };
+    } || force_stream;
     if let Some(kind) = background_kind {
         runtime.mark_request_origin(&request_id, kind);
         if !runtime.codex_background_tasks_enabled() {
@@ -131,16 +167,7 @@ pub(in crate::gateway) async fn execute_client_request(
         );
     };
     let responses_lite = (wire_api == WireApi::Responses)
-        .then(|| {
-            headers
-                .get(CODEX_RESPONSES_LITE_HEADER)
-                .cloned()
-                .or_else(|| {
-                    runtime
-                        .codex_model_uses_responses_lite(&resolved_model)
-                        .then(|| HeaderValue::from_static("true"))
-                })
-        })
+        .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
         .flatten();
     let response_affinity_key = (wire_api == WireApi::Responses)
         .then(|| {
@@ -154,6 +181,7 @@ pub(in crate::gateway) async fn execute_client_request(
         WireApi::Responses | WireApi::ChatCompletions => {
             forwarded_codex_headers(&headers, &request_id)
         }
+        WireApi::Gemini => super::super::request::forwarded_bridge_gemini_headers(&headers),
     };
     execute_request(
         runtime,
@@ -202,6 +230,7 @@ fn blocked_background_response(
             .to_string(),
             WireApi::ChatCompletions => serde_json::json!({"id": response_id, "object": "chat.completion", "choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}).to_string(),
             WireApi::Messages => serde_json::json!({"id": response_id, "type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 0, "output_tokens": 0}}).to_string(),
+            WireApi::Gemini => serde_json::json!({"candidates": [], "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0}}).to_string(),
         }
     };
     Response::builder()

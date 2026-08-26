@@ -58,23 +58,18 @@ const CLIENT_CONTEXT_HEADERS: &[&str] = &[
 /// leave this function.
 pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap) -> Option<String> {
     let mut digest = Sha256::new();
-    let mut found = false;
-    for &name in CLIENT_CONTEXT_HEADERS {
-        let Some(value) = client_headers
+    let (name, value) = CLIENT_CONTEXT_HEADERS.iter().find_map(|&name| {
+        client_headers
             .get(name)
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        found = true;
-        digest.update(name.as_bytes());
-        digest.update([0]);
-        digest.update(value.as_bytes());
-        digest.update([0]);
-    }
-    found.then(|| format!("client_{}", hex::encode(&digest.finalize()[..12])))
+            .map(|value| (name, value))
+    })?;
+    digest.update(name.as_bytes());
+    digest.update([0]);
+    digest.update(value.as_bytes());
+    Some(format!("client_{}", hex::encode(&digest.finalize()[..12])))
 }
 
 pub(in crate::gateway) fn forwarded_codex_headers(
@@ -207,10 +202,17 @@ mod tests {
         assert_eq!(fingerprint.len(), "client_".len() + 24);
 
         let mut different_thread = first.clone();
-        different_thread.insert("thread-id", HeaderValue::from_static("thread-43"));
+        different_thread.insert("x-session-id", HeaderValue::from_static("session-43"));
         assert_ne!(
             Some(fingerprint),
             client_context_fingerprint(&different_thread)
+        );
+
+        let mut different_window = first.clone();
+        different_window.insert("x-codex-window-id", HeaderValue::from_static("window-2"));
+        assert_eq!(
+            client_context_fingerprint(&first),
+            client_context_fingerprint(&different_window)
         );
         assert!(serde_json::to_string(&client_context_fingerprint(&first))
             .unwrap()

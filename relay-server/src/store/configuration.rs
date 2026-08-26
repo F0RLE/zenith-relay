@@ -11,8 +11,9 @@ use validation::{
     validate_configuration_settings, validate_quota_request_timeout, validate_routing_policy,
 };
 use zenith_relay_core::{
-    normalize_image_base_model, normalize_model_price_overrides,
-    normalize_model_reasoning_allowed_levels, normalize_subscription_plan_order,
+    normalize_image_base_model, normalize_model_ids, normalize_model_price_overrides,
+    normalize_model_reasoning_allowed_levels, normalize_model_service_tier_overrides,
+    normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
@@ -230,6 +231,51 @@ impl Store {
         )
     }
 
+    pub fn model_service_tier_overrides(
+        &self,
+    ) -> Result<BTreeMap<String, DefaultServiceTier>, String> {
+        let value = self
+            .metadata("model_service_tier_overrides")?
+            .unwrap_or_else(|| "{}".to_string());
+        normalize_model_service_tier_overrides(
+            serde_json::from_str(&value)
+                .map_err(|_| "model service tier overrides are invalid".to_string())?,
+        )
+        .map_err(str::to_string)
+    }
+
+    pub fn set_model_service_tier_overrides(
+        &self,
+        overrides: BTreeMap<String, DefaultServiceTier>,
+    ) -> Result<(), String> {
+        let overrides =
+            normalize_model_service_tier_overrides(overrides).map_err(str::to_string)?;
+        self.set_metadata(
+            "model_service_tier_overrides",
+            &serde_json::to_string(&overrides)
+                .map_err(|_| "model service tier overrides could not be serialized".to_string())?,
+        )
+    }
+
+    pub fn model_display_order(&self) -> Result<Vec<String>, String> {
+        let value = self
+            .metadata("model_display_order")?
+            .unwrap_or_else(|| "[]".to_string());
+        Ok(normalize_model_ids(
+            serde_json::from_str::<Vec<String>>(&value)
+                .map_err(|_| "model display order is invalid".to_string())?,
+        ))
+    }
+
+    pub fn set_model_display_order(&self, models: Vec<String>) -> Result<(), String> {
+        let models = normalize_model_ids(models);
+        self.set_metadata(
+            "model_display_order",
+            &serde_json::to_string(&models)
+                .map_err(|_| "model display order could not be serialized".to_string())?,
+        )
+    }
+
     pub(super) fn source_price_overrides(&self) -> Result<SourcePriceOverrides, String> {
         self.sources()?
             .into_iter()
@@ -382,6 +428,27 @@ fn configuration_settings_from_connection(
         model_price_overrides,
         model_reasoning_allowed_levels,
         model_reasoning_allowed_levels_present: true,
+        model_service_tier_overrides: normalize_model_service_tier_overrides(
+            metadata_from(connection, "model_service_tier_overrides")?.map_or(
+                Ok(BTreeMap::new()),
+                |value| {
+                    serde_json::from_str(&value)
+                        .map_err(|_| "model service tier overrides are invalid".to_string())
+                },
+            )?,
+        )
+        .map_err(str::to_string)?,
+        model_display_order: normalize_model_ids(
+            metadata_from(connection, "model_display_order")?.map_or(
+                Ok(Vec::<String>::new()),
+                |value| {
+                    serde_json::from_str(&value)
+                        .map_err(|_| "model display order is invalid".to_string())
+                },
+            )?,
+        ),
+        model_service_tier_overrides_present: true,
+        model_display_order_present: true,
     })
 }
 
@@ -528,6 +595,15 @@ fn write_configuration(
             "model_reasoning_allowed_levels",
             to_json(&settings.model_reasoning_allowed_levels)
                 .map_err(ConfigurationReplaceError::Store)?,
+        ),
+        (
+            "model_service_tier_overrides",
+            to_json(&settings.model_service_tier_overrides)
+                .map_err(ConfigurationReplaceError::Store)?,
+        ),
+        (
+            "model_display_order",
+            to_json(&settings.model_display_order).map_err(ConfigurationReplaceError::Store)?,
         ),
     ];
     for (key, value) in metadata {
@@ -888,6 +964,41 @@ mod tests {
                 .unwrap()
                 .get("gpt-test"),
             Some(&vec!["high".to_string(), "ultra".to_string()])
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_speed_overrides_and_display_order_are_persisted() {
+        let root = test_root("model-speed-order");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        store
+            .set_model_service_tier_overrides(BTreeMap::from([(
+                " GPT-Test ".into(),
+                DefaultServiceTier::Fast,
+            )]))
+            .unwrap();
+        store
+            .set_model_display_order(vec![" gpt-test ".into(), "other-model".into()])
+            .unwrap();
+        assert!(store
+            .set_model_service_tier_overrides(BTreeMap::from([(
+                "unsafe\nmodel".into(),
+                DefaultServiceTier::Fast,
+            )]))
+            .is_err());
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(
+            reopened.model_service_tier_overrides().unwrap(),
+            BTreeMap::from([("gpt-test".to_string(), DefaultServiceTier::Fast)])
+        );
+        assert_eq!(
+            reopened.model_display_order().unwrap(),
+            vec!["gpt-test".to_string(), "other-model".to_string()]
         );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();

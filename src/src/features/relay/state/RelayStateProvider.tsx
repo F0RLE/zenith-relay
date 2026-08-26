@@ -2,7 +2,7 @@ import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { useTranslation } from "react-i18next";
 import { recordPerformance, setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
-import type { LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import type { LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
 import { sanitizeFeedbackError } from "./feedback";
@@ -16,7 +16,7 @@ import {
   writeRelayPreference,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
-import { RelayContext, type Feedback, type RelayContextValue } from "./relayStateContext";
+import { RelayContext, type Feedback, type PerformOptions, type RelayContextValue } from "./relayStateContext";
 import {
   ERROR_FEEDBACK_TIMEOUT_MS,
   ROUTING_REFRESH_INTERVAL_MS,
@@ -27,6 +27,7 @@ import {
   isRuntimeRefreshPage,
 } from "./refreshPolicy";
 import { projectRuntimeAccountLabels } from "./runtimeDisplay";
+import { applyRuntimeActivities, applyRuntimeActivity } from "../routingOrder";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
 
 export { useRelayState } from "./relayStateContext";
@@ -66,6 +67,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const runtimeRefreshPage = useRef<PageId>("overview");
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
+  const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
   const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
   const accountIdentitiesBusy = useAccountIdentityReveal({
     accounts: runtime?.accounts ?? [],
@@ -90,7 +92,16 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     void recordPerformance("full_snapshot", performance.now() - startedAt, requestedMode);
     if (modeRef.current !== requestedMode) return;
     if (requestedMode === "zenith") setReadyState(loaded.readyState);
-    setRuntime(loaded.snapshot);
+    const snapshot = loaded.snapshot && requestedMode === "local"
+      ? {
+        ...loaded.snapshot,
+        gateway: {
+          ...loaded.snapshot.gateway,
+          routingOrder: applyRuntimeActivities(loaded.snapshot.gateway.routingOrder ?? [], runtimeActivityOverlay.current.values()),
+        },
+      }
+      : loaded.snapshot;
+    setRuntime(snapshot);
     if (requestedMode === "local") {
       setRemoteUsage([]);
       setRemoteUsagePage(null);
@@ -186,9 +197,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
           ? await relayCommands.localRuntimeOrder()
           : await relayCommands.remoteRuntimeOrder();
         if (!active || routingOrder == null) return;
+        const visibleRoutingOrder = mode === "local"
+          ? applyRuntimeActivities(routingOrder, runtimeActivityOverlay.current.values())
+          : routingOrder;
         setRuntime((snapshot) => snapshot ? {
           ...snapshot,
-          gateway: { ...snapshot.gateway, routingOrder },
+          gateway: { ...snapshot.gateway, routingOrder: visibleRoutingOrder },
         } : snapshot);
       } catch {
         // The full refresh keeps the last known order if the lightweight probe fails.
@@ -234,6 +248,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     let usageRefreshTimer: number | undefined;
     let unlisten: (() => void) | undefined;
     let unlistenUsage: (() => void) | undefined;
+    let unlistenRuntimeActivity: (() => void) | undefined;
     const scheduleUsageRefresh = () => {
       if (!active || document.visibilityState !== "visible" || pageRef.current !== "usage" || usageRefreshTimer !== undefined) return;
       usageRefreshTimer = window.setTimeout(() => {
@@ -244,6 +259,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     };
     void relayCommands.onStateChanged(() => {
       stateRevision.current += 1;
+      runtimeActivityOverlay.current.clear();
       if (!active || document.visibilityState !== "visible") return;
       if (pageRef.current === "usage") {
         scheduleUsageRefresh();
@@ -262,6 +278,25 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     }).catch(() => {
       // Initial load and periodic refresh still keep the UI current if Tauri event wiring is unavailable.
     });
+    void relayCommands.onRuntimeActivity((activity) => {
+      if (!active || modeRef.current !== "local") return;
+      const previous = runtimeActivityOverlay.current.get(activity.candidateId);
+      if (previous && activity.revision <= previous.revision) return;
+      runtimeActivityOverlay.current.set(activity.candidateId, activity);
+      if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
+      setRuntime((snapshot) => snapshot ? {
+        ...snapshot,
+        gateway: {
+          ...snapshot.gateway,
+          routingOrder: applyRuntimeActivity(snapshot.gateway.routingOrder ?? [], activity),
+        },
+      } : snapshot);
+    }).then((stop) => {
+      if (active) unlistenRuntimeActivity = stop;
+      else stop();
+    }).catch(() => {
+      // The short routing poll remains the fallback when activity events are unavailable.
+    });
     void relayCommands.onUsageRecorded(() => {
       if (modeRef.current === "local") scheduleUsageRefresh();
     }).then((stop) => {
@@ -276,6 +311,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       if (usageRefreshTimer !== undefined) window.clearTimeout(usageRefreshTimer);
       unlisten?.();
       unlistenUsage?.();
+      unlistenRuntimeActivity?.();
     };
   }, [runBackgroundRefresh]);
 
@@ -316,6 +352,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     operationRevision.current += 1;
     ++localUsageRequest.current;
     ++remoteUsageRequest.current;
+    runtimeActivityOverlay.current.clear();
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
     setLocalUsage([]);
@@ -362,7 +399,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     };
   }, [page]);
 
-  const perform = useCallback(async (id: string, work: () => Promise<unknown>, successKey?: string) => {
+  const perform = useCallback(async (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => {
     const revision = ++operationRevision.current;
     setBusy(id);
     setFeedback(null);
@@ -377,7 +414,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       if (revision !== operationRevision.current) return false;
       const code = typeof error === "object" && error && "code" in error ? String(error.code) : "general";
       const key = i18n.exists(`errors.${code}`) ? `errors.${code}` : "errors.general";
-      setFeedback({ kind: "error", key, error: sanitizeFeedbackError(error, code, t(key)) });
+      const diagnostic = sanitizeFeedbackError(error, code, t(key));
+      options?.onError?.(diagnostic, key);
+      if (options?.reportError !== false) {
+        setFeedback({ kind: "error", key, error: diagnostic });
+      }
       return false;
     } finally {
       if (revision === operationRevision.current) setBusy(null);

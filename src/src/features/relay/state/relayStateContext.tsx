@@ -16,6 +16,12 @@ import type { FeedbackError } from "./feedback";
 
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
+export type PerformOptions = {
+  /** Keep an operation error local to the surface that initiated it. */
+  reportError?: boolean;
+  onError?: (error: FeedbackError, key: string) => void;
+};
+
 export type RelayContextValue = {
   mode: RelayMode;
   setMode: (mode: RelayMode) => void;
@@ -42,7 +48,7 @@ export type RelayContextValue = {
   busy: string | null;
   feedback: Feedback;
   refresh: (force?: boolean) => Promise<void>;
-  perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean>;
+  perform: (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
   activateCodexProfile: (id: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
   launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
   clearFeedback: () => void;

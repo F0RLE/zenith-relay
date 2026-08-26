@@ -25,14 +25,23 @@ pub enum WireApi {
     Responses,
     ChatCompletions,
     Messages,
+    Gemini,
 }
 
 impl WireApi {
+    pub const ALL: [Self; 4] = [
+        Self::Responses,
+        Self::ChatCompletions,
+        Self::Messages,
+        Self::Gemini,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Responses => "responses",
             Self::ChatCompletions => "chat_completions",
             Self::Messages => "messages",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -160,9 +169,23 @@ pub fn normalize_source_protocol_bindings(
 
     let expand_empty_models = bindings.len() == 1 && bindings[0].adapter.is_passthrough();
     for binding in bindings {
+        // Source bindings select only an upstream protocol adapter. Reasoning
+        // availability belongs to the pool's model rule; the Messages bridge
+        // always uses its single technical translation path. Ignore legacy
+        // source-level values while normalizing persisted records. Both
+        // bridge adapters have an explicit local translation policy; native
+        // routes stay opaque and therefore do not advertise a synthetic mode.
+        let reasoning_mode = if matches!(
+            binding.adapter,
+            SourceAdapter::ResponsesToMessages | SourceAdapter::ResponsesToGemini
+        ) {
+            MessagesReasoningMode::Adaptive
+        } else {
+            MessagesReasoningMode::Disabled
+        };
         binding
             .adapter
-            .validate(binding.wire_api, binding.reasoning_mode)
+            .validate(binding.wire_api, reasoning_mode)
             .map_err(|error| {
                 Error::Validation(format!(
                     "source protocol binding is invalid: {}",
@@ -207,7 +230,7 @@ pub fn normalize_source_protocol_bindings(
         normalized.push(SourceProtocolBinding {
             wire_api: binding.wire_api,
             adapter: binding.adapter,
-            reasoning_mode: binding.reasoning_mode,
+            reasoning_mode,
             cache_write_ttl: binding.cache_write_ttl,
             model_ids,
         });
@@ -216,72 +239,18 @@ pub fn normalize_source_protocol_bindings(
     Ok(normalized)
 }
 
-/// Adds the runtime-only Responses route that is implied by a confirmed
-/// native Messages route.
+/// Returns the explicitly configured source protocol bindings for runtime use.
 ///
-/// Relay's primary desktop client speaks Responses, while a provider may
-/// expose a model only through Anthropic Messages. Once the source has
-/// explicitly declared that Messages route, the protocol capability is
-/// already confirmed; requiring the operator to duplicate the same model in
-/// a second UI route only creates a configuration gap. The generated bridge
-/// never overlaps an explicitly configured Responses route, so an explicit
-/// native or Gemini route always wins for that model.
-///
-/// This helper is intentionally separate from persistence normalization. The
-/// linked route is a runtime capability, not a new provider claim written
-/// back to the source record.
+/// Adapters are deliberate routing decisions, not an inferred fallback. In
+/// particular, a native Messages binding must not silently create a
+/// Responses-to-Messages route: the latter changes the request contract and
+/// must be selected and persisted explicitly by the operator.
 pub fn runtime_source_protocol_bindings(
     bindings: Vec<SourceProtocolBinding>,
     fallback_wire_api: WireApi,
     models: &[String],
 ) -> Result<Vec<SourceProtocolBinding>> {
-    let mut normalized = normalize_source_protocol_bindings(bindings, fallback_wire_api, models)?;
-    let explicitly_other_responses = normalized
-        .iter()
-        .filter(|binding| {
-            binding.wire_api == WireApi::Responses
-                && binding.adapter != SourceAdapter::ResponsesToMessages
-        })
-        .flat_map(|binding| binding.model_ids.iter())
-        .map(|model| model.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-
-    let linked_models = normalized
-        .iter()
-        .filter(|binding| {
-            binding.wire_api == WireApi::Messages && binding.adapter == SourceAdapter::Native
-        })
-        .flat_map(|binding| binding.model_ids.iter().map(move |model| (model, binding)))
-        .filter(|(model, _)| !explicitly_other_responses.contains(&model.to_ascii_lowercase()))
-        .map(|(model, _)| model.clone())
-        .collect::<Vec<_>>();
-
-    let linked_models = crate::catalog::normalize_model_ids(linked_models);
-    if linked_models.is_empty() {
-        return Ok(normalized);
-    }
-
-    if let Some(binding) = normalized.iter_mut().find(|binding| {
-        binding.wire_api == WireApi::Responses
-            && binding.adapter == SourceAdapter::ResponsesToMessages
-    }) {
-        binding.model_ids =
-            crate::catalog::normalize_model_ids(binding.model_ids.iter().chain(&linked_models));
-        return Ok(normalized);
-    }
-
-    // A native Messages binding cannot carry bridge reasoning configuration.
-    // Keep the generated route conservative: it is usable for ordinary text,
-    // while a manually configured bridge remains the only way to opt into
-    // translated reasoning or a custom cache lifetime.
-    normalized.push(SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::ResponsesToMessages,
-        reasoning_mode: MessagesReasoningMode::Disabled,
-        cache_write_ttl: CacheWriteTtl::Provider,
-        model_ids: linked_models,
-    });
-    Ok(normalized)
+    normalize_source_protocol_bindings(bindings, fallback_wire_api, models)
 }
 
 /// Returns the normalized source models available through one client protocol.
@@ -410,7 +379,41 @@ pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
             "unencrypted source base URLs are allowed only on loopback".to_string(),
         ));
     }
-    if !url.path().ends_with('/') {
+    // The UI asks for an API root, but provider dashboards and documentation
+    // often copy a concrete endpoint such as `/v1/models` or
+    // `/v1/chat/completions`. Treat those terminal paths as presentation
+    // noise so discovery and request routing do not produce `/models/models`
+    // or `/chat/completions/chat/completions`.
+    let mut segments = url
+        .path_segments()
+        .map(|items| {
+            items
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let strip_count = if segments
+        .last()
+        .is_some_and(|segment| matches!(*segment, "models" | "responses" | "messages"))
+    {
+        1
+    } else if segments.len() >= 2
+        && segments[segments.len() - 2] == "chat"
+        && segments[segments.len() - 1] == "completions"
+    {
+        2
+    } else {
+        0
+    };
+    if strip_count > 0 {
+        segments.truncate(segments.len() - strip_count);
+        let path = if segments.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}/", segments.join("/"))
+        };
+        url.set_path(&path);
+    } else if !url.path().ends_with('/') {
         let path = format!("{}/", url.path());
         url.set_path(&path);
     }
@@ -517,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_links_native_messages_models_to_the_responses_client() {
+    fn runtime_keeps_native_messages_without_an_implicit_responses_route() {
         let bindings = runtime_source_protocol_bindings(
             vec![SourceProtocolBinding {
                 wire_api: WireApi::Messages,
@@ -531,12 +534,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].wire_api, WireApi::Messages);
-        assert_eq!(bindings[1].wire_api, WireApi::Responses);
-        assert_eq!(bindings[1].adapter, SourceAdapter::ResponsesToMessages);
-        assert_eq!(bindings[1].model_ids, ["claude-test"]);
-        assert_eq!(bindings[1].cache_write_ttl, CacheWriteTtl::Provider);
+        assert_eq!(bindings[0].adapter, SourceAdapter::Native);
+        assert_eq!(bindings[0].model_ids, ["claude-test"]);
+        assert_eq!(bindings[0].cache_write_ttl, CacheWriteTtl::OneHour);
     }
 
     #[test]
@@ -577,10 +579,6 @@ mod tests {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                 },
-                SourceProtocolBindingKey {
-                    wire_api: WireApi::Responses,
-                    adapter: SourceAdapter::ResponsesToMessages,
-                },
             ]
         );
 
@@ -617,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_extends_an_explicit_messages_bridge_without_changing_its_policy() {
+    fn runtime_preserves_an_explicit_messages_bridge_without_changing_its_policy() {
         let bindings = runtime_source_protocol_bindings(
             vec![
                 SourceProtocolBinding {
@@ -641,7 +639,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(bindings.len(), 2);
-        assert_eq!(bindings[1].model_ids, ["claude-a", "claude-b"]);
+        assert_eq!(bindings[1].model_ids, ["claude-a"]);
         assert_eq!(bindings[1].reasoning_mode, MessagesReasoningMode::Adaptive);
         assert_eq!(bindings[1].cache_write_ttl, CacheWriteTtl::OneHour);
     }
@@ -679,6 +677,7 @@ mod tests {
         .unwrap();
 
         assert!(bindings[0].model_ids.is_empty());
+        assert_eq!(bindings[0].reasoning_mode, MessagesReasoningMode::Adaptive);
     }
 
     #[test]
@@ -714,7 +713,7 @@ mod tests {
             .to_string()
             .contains("cannot serve this client protocol"));
 
-        let invalid_reasoning = normalize_source_protocol_bindings(
+        let legacy_reasoning = normalize_source_protocol_bindings(
             vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
@@ -725,10 +724,11 @@ mod tests {
             WireApi::Responses,
             &["gpt-test".to_string()],
         )
-        .unwrap_err();
-        assert!(invalid_reasoning
-            .to_string()
-            .contains("does not expose reasoning"));
+        .unwrap();
+        assert_eq!(
+            legacy_reasoning[0].reasoning_mode,
+            MessagesReasoningMode::Disabled
+        );
     }
 
     #[test]
@@ -836,6 +836,7 @@ mod tests {
         assert_eq!(WireApi::Responses.as_str(), "responses");
         assert_eq!(WireApi::ChatCompletions.as_str(), "chat_completions");
         assert_eq!(WireApi::Messages.as_str(), "messages");
+        assert_eq!(WireApi::Gemini.as_str(), "gemini");
         assert_eq!(
             source_models_for_wire_api(
                 &bindings,
@@ -851,6 +852,30 @@ mod tests {
         assert!(!is_loopback_url(
             &Url::parse("https://example.test").unwrap()
         ));
+    }
+
+    #[test]
+    fn base_url_normalization_removes_copied_terminal_api_endpoints() {
+        for (input, expected) in [
+            (
+                "https://api.example.test/v1",
+                "https://api.example.test/v1/",
+            ),
+            (
+                "https://api.example.test/v1/models",
+                "https://api.example.test/v1/",
+            ),
+            (
+                "https://api.example.test/v1/responses",
+                "https://api.example.test/v1/",
+            ),
+            (
+                "https://api.example.test/v1/chat/completions",
+                "https://api.example.test/v1/",
+            ),
+        ] {
+            assert_eq!(normalized_base_url(input).unwrap().as_str(), expected);
+        }
     }
 
     #[test]

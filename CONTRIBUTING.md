@@ -93,6 +93,16 @@ a tag, move the shipped entries into a dated version section and leave
 the updater remain separate and must use the `relay-notes:<locale>` markers
 described below.
 
+Keep the audience boundary explicit: changelog entries and updater notes are
+for users. Do not put test counts, CI job status, formatter or audit output,
+review history, or unfinished acceptance evidence in them. Keep contributor
+commands in this file, current implementation facts in `PLANNING.md`, and
+unfinished or live-provider acceptance gates in `ROADMAP.md`.
+
+Stable release tags must have a matching dated section in `CHANGELOG.md`. The
+release workflow fails when that section is missing instead of publishing an
+automatically generated pull-request list as user-facing notes.
+
 To add a locale, add its overview and all three Help files, register its
 translation resources, and update the raw Markdown registry in
 <code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep Help documents

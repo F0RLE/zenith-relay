@@ -1,5 +1,5 @@
 use super::{
-    apply_candidate_policy, confirmed_source_reasoning_levels, model_rules, runtime_now_ms,
+    apply_candidate_policy, declared_source_reasoning_levels, model_rules, runtime_now_ms,
     ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
 };
 use crate::quota::QuotaSnapshot;
@@ -11,6 +11,50 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 
 impl GatewayRuntime {
+    /// Immediately blocks sibling OAuth candidates that share the same
+    /// ChatGPT Team/workspace identity. This is intentionally an in-memory
+    /// circuit breaker; the owning local/server store persists the triggering
+    /// request through the normal usage callback.
+    pub(crate) fn trip_chatgpt_team_breaker(&self, candidate_id: &str, now_ms: u64) -> bool {
+        let team_key = self
+            .chatgpt_team_members
+            .iter()
+            .find_map(|(team, members)| members.contains(candidate_id).then_some(team.clone()));
+        let Some(team_key) = team_key else {
+            return false;
+        };
+        {
+            let mut recent = self
+                .chatgpt_team_breaker_recent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if recent.get(&team_key).is_some_and(|until| *until > now_ms) {
+                return false;
+            }
+            recent.retain(|_, until| *until > now_ms);
+            recent.insert(
+                team_key.clone(),
+                now_ms.saturating_add(super::CHATGPT_TEAM_BREAKER_DEDUP_MS),
+            );
+        }
+        let siblings = self
+            .chatgpt_team_members
+            .get(&team_key)
+            .into_iter()
+            .flat_map(|members| members.iter())
+            .filter(|member| member.as_str() != candidate_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for sibling in &siblings {
+            changed |= self.set_candidate_health(sibling, CandidateHealth::Blocked);
+        }
+        if let Ok(callback) = self.chatgpt_team_breaker_callback.lock() {
+            callback(siblings.clone());
+        }
+        changed
+    }
+
     pub(crate) fn fence_execution(&self, candidate_id: &str) -> Option<ExecutionFence> {
         self.lock_scheduler()
             .set_execution_fence(candidate_id, true)
@@ -350,9 +394,10 @@ impl GatewayRuntime {
         true
     }
 
-    /// Builds a Responses-only scope from the current scheduler state without
-    /// reopening secrets or replacing a runtime that owns active streams.
-    pub fn active_responses_scope(
+    /// Builds a scope from all healthy pool protocols without reopening secrets
+    /// or replacing a runtime that owns active streams. Request admission still
+    /// filters candidates by the caller's selected wire API.
+    pub fn active_pool_scope(
         &self,
         allowed_source_ids: &BTreeSet<String>,
         allowed_account_ids: &BTreeSet<String>,
@@ -360,11 +405,7 @@ impl GatewayRuntime {
         let mut source_ids = BTreeSet::new();
         let mut account_ids = BTreeSet::new();
         for candidate in self.lock_scheduler().candidates() {
-            if candidate.protocol != crate::WireApi::Responses
-                || !candidate.enabled
-                || candidate.draining
-                || !candidate.secret_available
-            {
+            if !candidate.enabled || candidate.draining || !candidate.secret_available {
                 continue;
             }
             match candidate.kind {
@@ -390,6 +431,16 @@ impl GatewayRuntime {
         }
     }
 
+    /// Backward-compatible name for callers that historically built a pool
+    /// scope for the Responses-only desktop profile.
+    pub fn active_responses_scope(
+        &self,
+        allowed_source_ids: &BTreeSet<String>,
+        allowed_account_ids: &BTreeSet<String>,
+    ) -> CandidateScope {
+        self.active_pool_scope(allowed_source_ids, allowed_account_ids)
+    }
+
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
         self.lock_scheduler()
             .set_candidate_health(candidate_id, health)
@@ -408,24 +459,22 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
         {
-            let mut confirmed = self
+            let mut declared = self
                 .model_metadata
-                .confirmed_reasoning
+                .declared_reasoning
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for routes in confirmed.efforts.values_mut() {
+            for routes in declared.efforts.values_mut() {
                 routes.remove(candidate_id);
             }
-            confirmed.efforts.retain(|_, routes| !routes.is_empty());
-            for routes in confirmed.empty_routes.values_mut() {
+            declared.efforts.retain(|_, routes| !routes.is_empty());
+            for routes in declared.empty_routes.values_mut() {
                 routes.remove(candidate_id);
             }
-            confirmed
-                .empty_routes
-                .retain(|_, routes| !routes.is_empty());
-            let previous_levels = confirmed.levels.clone();
-            confirmed.levels = confirmed_source_reasoning_levels(
-                &confirmed.efforts,
+            declared.empty_routes.retain(|_, routes| !routes.is_empty());
+            let previous_levels = declared.levels.clone();
+            declared.levels = declared_source_reasoning_levels(
+                &declared.efforts,
                 &previous_levels,
                 &BTreeMap::new(),
             );

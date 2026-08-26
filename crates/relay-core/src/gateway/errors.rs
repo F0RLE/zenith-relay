@@ -22,9 +22,10 @@ pub(super) use cooldown::{
 
 pub(super) use failure::{
     failure_category_is_request_terminal, failure_category_requires_cooldown,
-    failure_requires_independent_source_endpoint, previous_response_not_found,
-    previous_response_not_found_value, previous_response_requires_websocket,
-    recoverable_response_affinity_miss, responses_function_call_output_has_invalid_call_id,
+    previous_response_not_found, previous_response_not_found_value,
+    previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,
     zenith_gateway_invalid_request_value,
@@ -216,8 +217,36 @@ pub(super) fn classify_upstream_error_value(
     classify_upstream_error_text(status, &upstream_error_text(value))
 }
 
+pub(crate) fn is_deactivated_workspace_value(value: &Value) -> bool {
+    [
+        "/detail/code",
+        "/error/code",
+        "/body/error/code",
+        "/response/error/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .any(|code| code.eq_ignore_ascii_case("deactivated_workspace"))
+}
+
+pub(crate) fn is_deactivated_workspace(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| is_deactivated_workspace_value(&value))
+}
+
 fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamErrorClassification {
     let category = if text_has_any(
+        text,
+        &[
+            "response_continuation_unavailable",
+            "responses continuation route is unknown",
+            "responses continuation is bound to a provider slot",
+            "responses continuation requires the same native provider endpoint",
+        ],
+    ) {
+        "response_affinity_miss"
+    } else if text_has_any(
         text,
         &[
             "previous_response_not_found",
@@ -530,6 +559,7 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
 
 pub(super) fn upstream_failure_message(category: &str) -> &'static str {
     match category {
+        "response_affinity_miss" => "Responses continuation route is unavailable",
         "upstream_previous_response_not_found" => "previous response is unavailable",
         "upstream_tool_call_mismatch" => "tool output does not match an active tool call",
         "upstream_context_too_large" => "request context exceeds the model limit",
@@ -582,7 +612,8 @@ pub(super) fn upstream_failure_status(category: &str) -> StatusCode {
         "upstream_request_timeout" => StatusCode::REQUEST_TIMEOUT,
         "upstream_conflict" => StatusCode::CONFLICT,
         "upstream_payload_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
-        "upstream_previous_response_not_found"
+        "response_affinity_miss"
+        | "upstream_previous_response_not_found"
         | "upstream_tool_call_mismatch"
         | "upstream_context_too_large"
         | "upstream_encrypted_content_invalid"

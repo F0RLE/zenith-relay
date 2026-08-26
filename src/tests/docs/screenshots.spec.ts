@@ -11,7 +11,7 @@ const shots: Array<{ file: string; nav: string; mock: MockOptions; prepare?: (pa
     mock: { mode: "local", populated: true, quotaAvailable: true, gatewayRunning: true },
     prepare: async (page) => {
       await expect(page.locator(".overview-metrics")).toBeVisible();
-      await expect(page.locator(".activity-section li").first()).toBeVisible();
+      await expect(page.locator(".overview-chart").first()).toBeVisible();
     },
   },
   {

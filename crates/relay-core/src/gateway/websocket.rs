@@ -1,8 +1,7 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
-    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
-    failure_requires_independent_source_endpoint, rate_limit_body_hint, CooldownContext,
-    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, rate_limit_body_hint,
+    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::execution::execute_client_request;
 use super::now_ms;
@@ -178,7 +177,7 @@ async fn bridge_http_fallback(
     headers: HeaderMap,
     mut request: ClientRequest,
 ) {
-    let stream_id = request.stream_id.clone();
+    let mut stream_id = request.stream_id.clone();
     loop {
         if let Err(failure) =
             serve_http_fallback_request(&mut downstream, runtime.clone(), &key, &headers, &request)
@@ -222,13 +221,18 @@ async fn bridge_http_fallback(
                 return;
             }
         };
-        if let Some(expected) = stream_id.as_deref() {
-            if next_request.stream_id.as_deref() != Some(expected) {
-                let failure = GatewayFailure::invalid_request(
-                    "only one WebSocket stream_id is supported per connection",
-                );
-                send_gateway_error(&mut downstream, &failure, Some(&next_request.request_id)).await;
-                return;
+        if let Some(next_stream_id) = next_request.stream_id.as_deref() {
+            if let Some(expected) = stream_id.as_deref() {
+                if expected != next_stream_id {
+                    let failure = GatewayFailure::invalid_request(
+                        "only one WebSocket stream_id is supported per connection",
+                    );
+                    send_gateway_error(&mut downstream, &failure, Some(&next_request.request_id))
+                        .await;
+                    return;
+                }
+            } else {
+                stream_id = Some(next_stream_id.to_string());
             }
         }
         request = next_request;
@@ -344,6 +348,9 @@ async fn connect_upstream(
     let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
     let mut encrypted_content_recovered = false;
+    let mut function_item_id_repair_attempted = false;
+    let mut custom_tool_item_id_repair_attempted = false;
+    let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
 
     'candidates: while attempts_this_run
@@ -379,16 +386,8 @@ async fn connect_upstream(
         ) else {
             continue;
         };
-        if let Some(effort) = request.requested_reasoning_effort() {
-            if !runtime.candidate_reasoning_effort_is_allowed(
-                &route.candidate_id,
-                &request.resolved_model,
-                &effort,
-            ) {
-                drop(lease);
-                continue 'candidates;
-            }
-        }
+        request.apply_service_tier_for_route(runtime, &route);
+        route.service_tier = request.service_tier();
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(client_headers);
@@ -435,7 +434,7 @@ async fn connect_upstream(
             let mut headers = upstream_headers(
                 client_headers,
                 &prepared,
-                request.responses_lite,
+                request.responses_lite_for(&route),
                 &request.request_id,
             );
             if let Some(account_id) = route.account_id.as_deref() {
@@ -453,7 +452,6 @@ async fn connect_upstream(
                 record_connect_failure(
                     runtime, key, &route, &request, attempt, started, &failure, None,
                 );
-                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue 'candidates;
             };
@@ -577,7 +575,6 @@ async fn connect_upstream(
                         .map(rate_limit_body_hint)
                         .unwrap_or_default(),
                 );
-                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -591,7 +588,6 @@ async fn connect_upstream(
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
-            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
             last_failure = Some(failure);
             continue;
         };
@@ -604,7 +600,6 @@ async fn connect_upstream(
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
-            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
             last_failure = Some(failure);
             continue;
         }
@@ -623,13 +618,48 @@ async fn connect_upstream(
                         &failure,
                         Some(&response_headers),
                     );
-                    exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     last_failure = Some(failure);
                     continue;
                 }
             };
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(EventTerminalOutcome::Failure) {
+                let terminal_body = initial_messages.last().and_then(|message| match message {
+                    UpstreamMessage::Text(text) => Some(text.as_bytes()),
+                    UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
+                    _ => None,
+                });
+                if !function_item_id_repair_attempted
+                    && terminal_body
+                        .is_some_and(super::errors::responses_function_item_id_requires_fc_prefix)
+                    && request.repair_function_item_ids()
+                {
+                    function_item_id_repair_attempted = true;
+                    tried.remove(&route.candidate_id);
+                    last_failure = None;
+                    continue;
+                }
+                if !custom_tool_item_id_repair_attempted
+                    && terminal_body.is_some_and(
+                        super::errors::responses_custom_tool_item_id_requires_ctc_prefix,
+                    )
+                    && request.repair_custom_tool_item_ids()
+                {
+                    custom_tool_item_id_repair_attempted = true;
+                    tried.remove(&route.candidate_id);
+                    last_failure = None;
+                    continue;
+                }
+                if !message_item_id_repair_attempted
+                    && terminal_body
+                        .is_some_and(super::errors::responses_message_item_id_requires_msg_prefix)
+                    && request.repair_message_item_ids()
+                {
+                    message_item_id_repair_attempted = true;
+                    tried.remove(&route.candidate_id);
+                    last_failure = None;
+                    continue;
+                }
                 let category = terminal.error_category.unwrap_or_else(|| {
                     super::errors::classify_upstream_error(
                         terminal_failure_status(terminal.status),
@@ -688,7 +718,6 @@ async fn connect_upstream(
                             Some(&terminal.headers),
                             terminal.body_hint,
                         );
-                        exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     }
                     last_failure = Some(failure);
                     if affinity_miss
@@ -783,7 +812,7 @@ async fn first_application_message(
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout(origin)),
+            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout(ErrorOrigin::Relay)),
             _ = heartbeat.tick() => {
                 upstream
                     .send(UpstreamMessage::Ping(Default::default()))
@@ -825,17 +854,6 @@ fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTermin
     let value = serde_json::from_slice::<Value>(payload).ok()?;
     let event_type = value.get("type").and_then(Value::as_str);
     Some((has_output_delta(&value, event_type), event_terminal(&value)))
-}
-
-fn exclude_correlated_source_endpoint(
-    runtime: &GatewayRuntime,
-    route: &ExecutorRoute,
-    failure: &GatewayFailure,
-    tried: &mut HashSet<String>,
-) {
-    if failure_requires_independent_source_endpoint(failure.status, failure.category) {
-        runtime.exclude_same_source_endpoint(&route.candidate_id, tried);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1117,17 +1135,27 @@ async fn bridge(
                 finish_incomplete(&runtime, &mut state, "stream_semantic_timeout");
                 send_gateway_error(
                     &mut downstream,
-                    &GatewayFailure::semantic_timeout(state.upstream_origin),
+                    &GatewayFailure::semantic_timeout(ErrorOrigin::Relay),
                     request_id.as_deref(),
                 ).await;
                 break;
             }
             _ = sleep_until(idle_deadline) => {
+                let active_request = state.in_flight.is_some();
+                let request_id = state.request_id().map(str::to_owned);
                 finish_incomplete(&runtime, &mut state, "websocket_idle_timeout");
-                let _ = downstream.send(Message::Close(Some(CloseFrame {
-                    code: close_code::AWAY,
-                    reason: "idle timeout".into(),
-                }))).await;
+                if active_request {
+                    send_gateway_error(
+                        &mut downstream,
+                        &GatewayFailure::idle_timeout(ErrorOrigin::Relay),
+                        request_id.as_deref(),
+                    ).await;
+                } else {
+                    let _ = downstream.send(Message::Close(Some(CloseFrame {
+                        code: close_code::AWAY,
+                        reason: "idle timeout".into(),
+                    }))).await;
+                }
                 break;
             }
             _ = heartbeat.tick() => {
@@ -1401,7 +1429,7 @@ async fn start_next_request(
             "a response is already in progress",
         ));
     }
-    let request = ClientRequest::parse(runtime, key, headers, payload)?;
+    let mut request = ClientRequest::parse(runtime, key, headers, payload)?;
     if let Some(stream_id) = request.stream_id.as_deref() {
         if let Some(active_stream_id) = state.stream_id.as_deref() {
             if active_stream_id != stream_id {
@@ -1456,19 +1484,11 @@ async fn start_next_request(
                 false,
             )
             .ok_or_else(GatewayFailure::unavailable)?;
-        if let Some(effort) = request.requested_reasoning_effort() {
-            if !runtime.candidate_reasoning_effort_is_allowed(
-                &route.candidate_id,
-                &request.resolved_model,
-                &effort,
-            ) {
-                drop(lease);
-                return Err(GatewayFailure::unavailable());
-            }
-        }
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(headers);
+        request.apply_service_tier_for_route(runtime, &route);
+        route.service_tier = request.service_tier();
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
         if let Err(failure) =
@@ -1672,6 +1692,12 @@ fn finish_terminal(
     if matches!(outcome, EventTerminalOutcome::Incomplete) {
         in_flight.event.error_category = Some("response_incomplete".to_string());
     }
+    if terminal.deactivated_workspace
+        && terminal.status == Some(StatusCode::PAYMENT_REQUIRED)
+        && in_flight.route.account_id.is_some()
+    {
+        runtime.trip_chatgpt_team_breaker(&in_flight.route.candidate_id, now_ms());
+    }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
         match outcome {
@@ -1757,7 +1783,10 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
         .ttft_ms
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
-    if incomplete_requires_cooldown(category) {
+    // A direct API source can serve independent requests concurrently. A
+    // failed WebSocket stream must not cool the whole source and make an
+    // unrelated response-affinity continuation fail with 409.
+    if incomplete_requires_cooldown(category) && in_flight.route.account_id.is_some() {
         let cooldown_context = CooldownContext {
             scope: &in_flight.route.scope,
             allowed_protocols: &in_flight.route.allowed_protocols,
@@ -2029,5 +2058,53 @@ mod tests {
             .payload_for(&route)
             .unwrap_or_else(|error| panic!("payload should serialize: {}", error.message));
         assert!(payload.contains("\"stream_id\":\"main\""));
+    }
+
+    #[test]
+    fn websocket_request_can_repair_foreign_message_item_ids() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let mut request = ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": [
+                    {"type":"message","id":"item_foreign","role":"assistant","content":"hello"},
+                    {"type":"message","id":"msg_native","role":"user","content":"continue"},
+                    {"type":"reasoning","id":"item_reasoning","summary":[]}
+                ]
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("request should be accepted: {}", error.message));
+
+        assert!(request.repair_message_item_ids());
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .expect("test source should be routable");
+        let payload: serde_json::Value = serde_json::from_str(
+            &request
+                .payload_for(&route)
+                .unwrap_or_else(|error| panic!("request should serialize: {}", error.message)),
+        )
+        .expect("payload should be valid JSON");
+
+        assert!(payload.pointer("/input/0/id").is_none());
+        assert_eq!(payload.pointer("/input/1/id"), Some(&json!("msg_native")));
+        assert_eq!(
+            payload.pointer("/input/2/id"),
+            Some(&json!("item_reasoning"))
+        );
+        assert!(!request.repair_message_item_ids());
     }
 }

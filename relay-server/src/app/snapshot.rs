@@ -14,12 +14,13 @@ use std::{
 };
 use zenith_relay_core::{
     protocol::{
-        apply_model_reasoning_summary, model_has_api_source_route, model_has_native_account_route,
+        apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
+        model_has_api_source_route, model_has_native_account_route,
         pooled_source_runtime_available, source_runtime_available, AccountSummary, GatewaySummary,
-        ModelSummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary,
-        SourceSummary,
+        ModelSummary, OperationalStatus, ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot,
+        RuntimeTargetSummary, SourceSummary, UsageQuery,
     },
-    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime,
     QUOTA_STALE_AFTER_MS,
 };
 
@@ -47,6 +48,8 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let hidden_models = state.store.hidden_models()?;
     let model_price_overrides = state.store.model_price_overrides()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
+    let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
+    let model_display_order = state.store.model_display_order()?;
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
     let equivalents = state.store.api_equivalents()?;
     let runtime = state.runtime()?;
@@ -73,14 +76,16 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &equivalents,
         &mut warnings,
     )?;
-    let models = model_summaries(
+    let mut models = model_summaries(
         &source_summaries,
         &account_summaries,
         &hidden_models,
         &model_price_overrides,
         &model_reasoning_allowed_levels,
+        &model_service_tier_overrides,
         runtime.as_deref(),
     );
+    apply_model_display_order(&mut models, &model_display_order);
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
@@ -210,6 +215,7 @@ fn account_summaries(
                     )
                 })
                 .unwrap_or((ProxyMode::Direct, false));
+            let quota_window_usage = account_quota_window_usage(state, record)?;
             Ok(account_summary(
                 record,
                 secret_available,
@@ -219,10 +225,38 @@ fn account_summaries(
                     .get(&identity_hint(&record.id))
                     .copied()
                     .unwrap_or_default(),
+                quota_window_usage,
                 QUOTA_STALE_AFTER_MS,
             ))
         })
         .collect()
+}
+
+fn account_quota_window_usage(
+    state: &AppState,
+    record: &ServerAccountRecord,
+) -> Result<Option<QuotaWindowUsage>, String> {
+    let Some(window) = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)
+    else {
+        return Ok(None);
+    };
+    let window_start_ms = window.window_start_ms.unwrap_or_default();
+    let window_minutes = window.window_minutes.unwrap_or_default();
+    let usage = state.store.usage_page(&UsageQuery {
+        page: 1,
+        page_size: 1,
+        from_ms: Some(window_start_ms),
+        to_ms: Some(window.observed_at_ms),
+        source_or_account_query: Some(identity_hint(&record.id)),
+        ..UsageQuery::default()
+    })?;
+    Ok(Some(QuotaWindowUsage {
+        kind: window.kind,
+        window_start_ms,
+        observed_at_ms: window.observed_at_ms,
+        window_minutes,
+        api_equivalent: usage.totals.api_equivalent,
+    }))
 }
 
 fn model_summaries(
@@ -231,6 +265,7 @@ fn model_summaries(
     hidden_models: &[String],
     model_price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
     model_reasoning_allowed_levels: &BTreeMap<String, Vec<String>>,
+    model_service_tier_overrides: &BTreeMap<String, zenith_relay_core::DefaultServiceTier>,
     runtime: Option<&GatewayRuntime>,
 ) -> Vec<ModelSummary> {
     let mut models = zenith_relay_core::protocol::pool_model_summaries(
@@ -257,14 +292,17 @@ fn model_summaries(
             has_api_source_route || model_has_native_account_route(account_summaries, &model_id);
         apply_model_reasoning_summary(
             model,
-            runtime
-                .and_then(|runtime| runtime.confirmed_source_reasoning_declared_levels(&model_id)),
+            runtime.and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
             zenith_relay_core::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
             has_pool_route,
         );
-        model.reasoning_probe_available = has_api_source_route;
-        model.reasoning_probe =
-            runtime.and_then(|runtime| runtime.reasoning_probe_progress(&model_id));
+        apply_model_speed_summary(
+            model,
+            runtime.is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model_id)),
+            model_service_tier_overrides
+                .get(&model_id.to_ascii_lowercase())
+                .copied(),
+        );
     }
     models
 }
@@ -274,7 +312,7 @@ fn candidate_count(sources: &[SourceSummary], accounts: &[AccountSummary]) -> us
         .iter()
         .filter(|record| {
             record.in_pool
-                && record.supports_wire_api(WireApi::Responses)
+                && record.supports_any_wire_api()
                 && record.operational_status == OperationalStatus::Rotation
         })
         .count()

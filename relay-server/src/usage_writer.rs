@@ -276,6 +276,7 @@ mod tests {
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: vec!["gpt-test".to_string()],
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,

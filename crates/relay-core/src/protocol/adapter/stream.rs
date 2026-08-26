@@ -1,7 +1,8 @@
 use super::contracts::{
-    AdapterError, AdapterResult, MessagesBridgeRequest, MessagesBridgeResponse, ResponsesToolKind,
+    custom_tool_item_id, AdapterError, AdapterResult, MessagesBridgeRequest,
+    MessagesBridgeResponse, ResponsesToolKind,
 };
-use super::gemini::GeminiBridgeRequest;
+use super::gemini::{apply_partial_args, function_call_args, GeminiBridgeRequest};
 use super::messages::{
     bridged_response_id_scoped, custom_tool_input, responses_output_from_messages_content,
     responses_usage, set_message_output_id, validate_messages_tool_calls,
@@ -44,6 +45,7 @@ enum StreamBlock {
     },
     Tool {
         id: String,
+        item_id: String,
         upstream_name: String,
         name: String,
         namespace: Option<String>,
@@ -332,7 +334,7 @@ impl MessagesStreamBridge {
                         "arguments": "",
                     }),
                     ResponsesToolKind::Custom => json!({
-                        "id": id,
+                        "id": custom_tool_item_id(id),
                         "type": tool_kind.response_item_type(),
                         "status": "in_progress",
                         "call_id": id,
@@ -357,6 +359,11 @@ impl MessagesStreamBridge {
                     index,
                     StreamBlock::Tool {
                         id: id.to_string(),
+                        item_id: if tool_kind == ResponsesToolKind::Custom {
+                            custom_tool_item_id(id)
+                        } else {
+                            id.to_string()
+                        },
                         upstream_name: name.to_string(),
                         name: client_name,
                         namespace: client_namespace,
@@ -629,6 +636,7 @@ impl MessagesStreamBridge {
             }
             StreamBlock::Tool {
                 id,
+                item_id,
                 name,
                 namespace,
                 kind,
@@ -698,13 +706,13 @@ impl MessagesStreamBridge {
                             json!({
                                 "type": "response.custom_tool_call_input.done",
                                 "response_id": response_id,
-                                "item_id": id,
+                                "item_id": item_id,
                                 "output_index": output_index,
                                 "input": raw_input,
                             }),
                         );
                         let mut item = json!({
-                            "id": id,
+                            "id": item_id,
                             "type": kind.response_item_type(),
                             "status": "completed",
                             "call_id": id,
@@ -1022,19 +1030,49 @@ impl MessagesStreamBridge {
 }
 
 /// Incrementally converts Gemini's native `streamGenerateContent` SSE frames
-/// into the client-facing Responses event contract. This adapter intentionally
-/// accepts only text parts; capability probes must prove tools, images, or
-/// thinking before they receive a different bridge.
+/// into the client-facing Responses event contract. Gemini can send text,
+/// thought text, and function calls as separate parts; all are retained until
+/// the terminal chunk so the exact assistant turn can be used for continuation.
 #[derive(Debug)]
 pub struct GeminiStreamBridge {
     request: GeminiBridgeRequest,
     pending: Vec<u8>,
     output: VecDeque<Vec<u8>>,
     text: String,
+    thinking: String,
+    calls: BTreeMap<usize, GeminiStreamCall>,
+    active_call: Option<usize>,
+    order: Vec<GeminiStreamOutput>,
     usage: Option<Value>,
     started: bool,
+    text_started: bool,
+    text_output_index: usize,
+    next_output_index: usize,
+    thinking_output_index: Option<usize>,
+    finished_upstream: bool,
+    finish_reason: Option<String>,
+    completed: Option<MessagesBridgeResponse>,
     terminal: bool,
     upstream_error: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct GeminiStreamCall {
+    id: String,
+    item_id: String,
+    name: String,
+    kind: ResponsesToolKind,
+    args: Value,
+    output_index: usize,
+    thought_signature: Option<String>,
+    emitted_arguments: String,
+}
+
+#[derive(Clone, Debug)]
+enum GeminiStreamOutput {
+    Text,
+    Thinking,
+    Call(usize),
 }
 
 impl GeminiStreamBridge {
@@ -1044,8 +1082,19 @@ impl GeminiStreamBridge {
             pending: Vec::new(),
             output: VecDeque::new(),
             text: String::new(),
+            thinking: String::new(),
+            calls: BTreeMap::new(),
+            active_call: None,
+            order: Vec::new(),
             usage: None,
             started: false,
+            text_started: false,
+            text_output_index: 0,
+            next_output_index: 0,
+            thinking_output_index: None,
+            finished_upstream: false,
+            finish_reason: None,
+            completed: None,
             terminal: false,
             upstream_error: None,
         }
@@ -1070,7 +1119,11 @@ impl GeminiStreamBridge {
         if self.terminal {
             return;
         }
-        self.complete();
+        if self.finished_upstream {
+            self.complete();
+        } else {
+            self.fail(AdapterError::upstream_stream_invalid());
+        }
     }
 
     pub fn pop_output(&mut self) -> Option<Vec<u8>> {
@@ -1081,13 +1134,21 @@ impl GeminiStreamBridge {
         self.terminal
     }
 
+    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+        self.completed.as_ref()
+    }
+
     pub fn take_upstream_error(&mut self) -> Option<Value> {
         self.upstream_error.take()
     }
 
     fn handle_event(&mut self, event: &[u8]) {
         if sse_done(event) {
-            self.complete();
+            if self.finished_upstream {
+                self.complete();
+            } else {
+                self.fail(AdapterError::upstream_stream_invalid());
+            }
             return;
         }
         let Some(value) = parse_sse_data(event) else {
@@ -1120,53 +1181,105 @@ impl GeminiStreamBridge {
                 .and_then(Value::as_str)
                 .is_some()
             {
+                self.finished_upstream = true;
                 self.complete();
             } else {
                 self.fail(AdapterError::upstream_stream_invalid());
             }
             return;
         };
-        let mut next = String::new();
-        for part in parts {
+        for (part_index, part) in parts.iter().enumerate() {
             let Some(part) = part.as_object() else {
                 self.fail(AdapterError::upstream_stream_invalid());
                 return;
             };
-            if part.get("thought").and_then(Value::as_bool) == Some(true) {
+            if let Some(value) = part.get("text").and_then(Value::as_str) {
+                if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                    self.ensure_started();
+                    if self.terminal {
+                        return;
+                    }
+                    let delta = incremental_delta(&self.thinking, value);
+                    if !delta.is_empty() {
+                        if self.thinking.is_empty() {
+                            self.order.push(GeminiStreamOutput::Thinking);
+                            self.thinking_output_index = Some(self.next_output_index);
+                            self.next_output_index = self.next_output_index.saturating_add(1);
+                            self.frame(
+                                "response.output_item.added",
+                                json!({"type":"response.output_item.added","output_index":self.thinking_output_index,"item":{"id":format!("reasoning_{}_0",self.request.response_id()),"type":"reasoning","status":"in_progress","summary":[]}}),
+                            );
+                        }
+                        self.thinking.push_str(&delta);
+                        self.frame(
+                            "response.reasoning_summary_text.delta",
+                            json!({
+                                "type": "response.reasoning_summary_text.delta",
+                                "response_id": self.request.response_id(),
+                                "output_index": self.thinking_output_index,
+                                "delta": delta,
+                            }),
+                        );
+                    }
+                } else {
+                    self.ensure_started();
+                    if self.terminal {
+                        return;
+                    }
+                    let delta = incremental_delta(&self.text, value);
+                    if !delta.is_empty() {
+                        if self.text.is_empty() {
+                            self.order.push(GeminiStreamOutput::Text);
+                        }
+                        self.ensure_text_output();
+                        if self.terminal {
+                            return;
+                        }
+                        self.text.push_str(&delta);
+                        self.frame(
+                            "response.output_text.delta",
+                            json!({
+                                "type": "response.output_text.delta",
+                                "response_id": self.request.response_id(),
+                                "item_id": format!("msg_{}_{}", self.request.response_id(), self.text_output_index),
+                                "output_index": self.text_output_index,
+                                "content_index": 0,
+                                "delta": delta,
+                            }),
+                        );
+                    }
+                }
                 continue;
             }
-            let Some(text) = part.get("text").and_then(Value::as_str) else {
-                self.fail(AdapterError::upstream_stream_invalid());
-                return;
-            };
-            next.push_str(text);
-        }
-        if !next.is_empty() {
-            self.ensure_started();
-            if self.terminal {
-                return;
+            if let Some(call) = part.get("functionCall").and_then(Value::as_object) {
+                self.handle_function_call(part_index, part, call);
+                if self.terminal {
+                    return;
+                }
+                continue;
             }
-            let delta = next.strip_prefix(&self.text).unwrap_or(&next).to_string();
-            if !delta.is_empty() {
-                self.text.push_str(&delta);
-                self.frame(
-                    "response.output_text.delta",
-                    json!({
-                        "type": "response.output_text.delta",
-                        "response_id": self.request.response_id(),
-                        "item_id": "gemini_bridge_output",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": delta,
-                    }),
-                );
+            if part.get("thoughtSignature").is_some() {
+                if let Some(call) = self.calls.values_mut().next_back() {
+                    call.thought_signature = part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                continue;
             }
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
         }
         if candidate
             .get("finishReason")
             .and_then(Value::as_str)
-            .is_some()
+            .map(|reason| {
+                self.finish_reason = Some(reason.to_string());
+                true
+            })
+            .unwrap_or(false)
         {
+            self.finished_upstream = true;
             self.complete();
         }
     }
@@ -1189,29 +1302,229 @@ impl GeminiStreamBridge {
                 }
             }),
         );
+    }
+
+    fn ensure_text_output(&mut self) {
+        if self.text_started {
+            return;
+        }
+        self.text_started = true;
+        self.text_output_index = self.next_output_index;
+        self.next_output_index = self.next_output_index.saturating_add(1);
+        let item_id = format!(
+            "msg_{}_{}",
+            self.request.response_id(),
+            self.text_output_index
+        );
         self.frame(
             "response.output_item.added",
-            json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "id": "gemini_bridge_output",
-                    "type": "message",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": [],
-                }
-            }),
+            json!({"type":"response.output_item.added","output_index":self.text_output_index,"item":{
+                "id": item_id, "type":"message",
+                "status":"in_progress","role":"assistant","content":[]
+            }}),
         );
         self.frame(
             "response.content_part.added",
-            json!({
-                "type": "response.content_part.added",
-                "item_id": "gemini_bridge_output",
-                "output_index": 0,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            }),
+            json!({"type":"response.content_part.added","item_id":format!("msg_{}_{}", self.request.response_id(), self.text_output_index),
+                "output_index":self.text_output_index,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        );
+    }
+
+    fn handle_function_call(
+        &mut self,
+        part_index: usize,
+        part: &Map<String, Value>,
+        call: &Map<String, Value>,
+    ) {
+        let name = call
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let call_id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let key = if let Some(call_id) = call_id {
+            self.calls
+                .iter()
+                .find_map(|(key, state)| (state.id == call_id).then_some(*key))
+        } else {
+            None
+        }
+        .or_else(|| {
+            name.and_then(|name| {
+                self.calls.iter().find_map(|(key, state)| {
+                    (state.name == name && *key == part_index).then_some(*key)
+                })
+            })
+        })
+        .or_else(|| {
+            self.active_call.filter(|active| {
+                name.is_none()
+                    || self
+                        .calls
+                        .get(active)
+                        .is_some_and(|state| Some(state.name.as_str()) == name)
+            })
+        })
+        .or_else(|| {
+            name.map(|_| {
+                if self.calls.contains_key(&part_index) {
+                    self.calls
+                        .keys()
+                        .next_back()
+                        .copied()
+                        .unwrap_or(part_index)
+                        .saturating_add(1)
+                } else {
+                    part_index
+                }
+            })
+        });
+        let Some(key) = key else {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        };
+        let name = name
+            .map(str::to_string)
+            .or_else(|| self.calls.get(&key).map(|state| state.name.clone()));
+        let Some(name) = name else {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        };
+        let Some(target) = self.request.state().client_tool(&name) else {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        };
+        let target_kind = target.kind;
+        let target_name = target.name.clone();
+        let target_namespace = target.namespace.clone();
+        let is_new = !self.calls.contains_key(&key);
+        if is_new {
+            let args = match function_call_args(call) {
+                Ok(args) => args,
+                Err(_) => {
+                    self.fail(AdapterError::upstream_stream_invalid());
+                    return;
+                }
+            };
+            self.ensure_started();
+            let output_index = self.next_output_index;
+            self.next_output_index = self.next_output_index.saturating_add(1);
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{}_{}", self.request.response_id(), key));
+            let item_id = if target_kind == ResponsesToolKind::Custom {
+                custom_tool_item_id(&id)
+            } else {
+                id.clone()
+            };
+            self.calls.insert(
+                key,
+                GeminiStreamCall {
+                    id,
+                    item_id,
+                    name,
+                    kind: target_kind,
+                    args,
+                    output_index,
+                    thought_signature: part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    emitted_arguments: String::new(),
+                },
+            );
+            self.order.push(GeminiStreamOutput::Call(key));
+        }
+        let args = if is_new {
+            self.calls
+                .get(&key)
+                .map(|state| state.args.clone())
+                .unwrap_or_else(|| json!({}))
+        } else {
+            let mut args = self
+                .calls
+                .get(&key)
+                .map(|state| state.args.clone())
+                .unwrap_or_else(|| json!({}));
+            if let Some(full_args) = call.get("args") {
+                if !full_args.is_object() {
+                    self.fail(AdapterError::upstream_stream_invalid());
+                    return;
+                }
+                args = full_args.clone();
+            }
+            if let Some(partial_args) = call.get("partialArgs") {
+                if apply_partial_args(&mut args, partial_args).is_err() {
+                    self.fail(AdapterError::upstream_stream_invalid());
+                    return;
+                }
+            }
+            args
+        };
+        if let Some(call_state) = self.calls.get_mut(&key) {
+            call_state.args = args.clone();
+            if let Some(signature) = part.get("thoughtSignature").and_then(Value::as_str) {
+                call_state.thought_signature = Some(signature.to_string());
+            }
+        }
+        if is_new {
+            let call_state = self.calls.get(&key).expect("inserted Gemini call").clone();
+            let mut item = if call_state.kind == ResponsesToolKind::Custom {
+                json!({"id":call_state.item_id,"type":"custom_tool_call","status":"in_progress","call_id":call_state.id,"name":target_name,"input":""})
+            } else {
+                json!({"id":call_state.id,"type":"function_call","status":"in_progress","call_id":call_state.id,"name":target_name,"arguments":""})
+            };
+            if let Some(namespace) = target_namespace {
+                item["namespace"] = Value::String(namespace);
+            }
+            self.frame("response.output_item.added", json!({"type":"response.output_item.added","output_index":call_state.output_index,"item":item}));
+            if call_state.kind == ResponsesToolKind::Function {
+                self.emit_call_arguments_delta(key);
+            }
+        }
+        if let Some(call_state) = self.calls.get(&key) {
+            if !is_new && call_state.kind == ResponsesToolKind::Function {
+                self.emit_call_arguments_delta(key);
+            }
+        }
+        if call.get("willContinue").and_then(Value::as_bool) == Some(true) {
+            self.active_call = Some(key);
+        } else if self.active_call == Some(key) {
+            self.active_call = None;
+        }
+    }
+
+    fn emit_call_arguments_delta(&mut self, key: usize) {
+        let Some(call_state) = self.calls.get_mut(&key) else {
+            return;
+        };
+        let Ok(arguments) = serde_json::to_string(&call_state.args) else {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        };
+        if call_state.emitted_arguments.is_empty()
+            && call_state.args.as_object().is_some_and(Map::is_empty)
+        {
+            return;
+        }
+        let delta = incremental_delta(&call_state.emitted_arguments, &arguments);
+        if delta.is_empty() {
+            return;
+        }
+        call_state.emitted_arguments = arguments;
+        let item_id = call_state.item_id.clone();
+        let output_index = call_state.output_index;
+        let response_id = self.request.response_id().to_string();
+        self.frame(
+            "response.function_call_arguments.delta",
+            json!({"type":"response.function_call_arguments.delta","response_id":response_id,"item_id":item_id,"output_index":output_index,"delta":delta}),
         );
     }
 
@@ -1219,28 +1532,80 @@ impl GeminiStreamBridge {
         if self.terminal {
             return;
         }
-        if !self.started || self.text.is_empty() {
+        if !self.started
+            || (self.text.is_empty() && self.thinking.is_empty() && self.calls.is_empty())
+        {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        let upstream = json!({"usageMetadata": self.usage.clone()});
-        let response = super::gemini::responses_body(
-            self.request.response_id(),
-            self.request.model(),
-            &self.text,
-            &upstream,
-        );
-        self.frame(
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": response["output"][0].clone(),
-            }),
-        );
+        let mut parts = Vec::new();
+        for item in &self.order {
+            match item {
+                GeminiStreamOutput::Thinking if !self.thinking.is_empty() => {
+                    parts.push(json!({"thought":true,"text":self.thinking}));
+                }
+                GeminiStreamOutput::Text if !self.text.is_empty() => {
+                    parts.push(json!({"text":self.text}));
+                }
+                GeminiStreamOutput::Call(key) => {
+                    if let Some(call) = self.calls.get(key) {
+                        let mut function_call =
+                            json!({"name":call.name,"args":call.args,"id":call.id});
+                        if let Some(signature) = call.thought_signature.as_ref() {
+                            function_call["thoughtSignature"] = Value::String(signature.clone());
+                        }
+                        parts.push(json!({"functionCall":function_call}));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let upstream = json!({"candidates":[{"content":{"parts":parts},"finishReason":self.finish_reason}],"usageMetadata":self.usage.clone()});
+        let response =
+            match super::gemini::translate_gemini_response(self.request.clone(), &upstream) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            };
+        for (output_index, item) in response.response_body["output"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            match item.get("type").and_then(Value::as_str) {
+                Some("function_call") => self.frame(
+                    "response.function_call_arguments.done",
+                    json!({"type":"response.function_call_arguments.done","response_id":self.request.response_id(),"item_id":item["id"],"call_id":item["call_id"],"name":item["name"],"output_index":output_index,"arguments":item["arguments"]}),
+                ),
+                Some("custom_tool_call") => self.frame(
+                    "response.custom_tool_call_input.done",
+                    json!({"type":"response.custom_tool_call_input.done","response_id":self.request.response_id(),"item_id":item["id"],"output_index":output_index,"input":item["input"]}),
+                ),
+                Some("message") => {
+                    self.frame(
+                        "response.output_text.done",
+                        json!({"type":"response.output_text.done","response_id":self.request.response_id(),"item_id":item["id"],"output_index":output_index,"content_index":0,"text":item["content"][0]["text"]}),
+                    );
+                    self.frame(
+                        "response.content_part.done",
+                        json!({"type":"response.content_part.done","response_id":self.request.response_id(),"item_id":item["id"],"output_index":output_index,"content_index":0}),
+                    );
+                }
+                _ => {}
+            }
+            self.frame("response.output_item.done", json!({"type":"response.output_item.done","response_id":self.request.response_id(),"output_index":output_index,"item":item}));
+        }
+        self.completed = Some(MessagesBridgeResponse {
+            response_body: response.response_body.clone(),
+            response_id: response.response_id.clone(),
+            continuation: response.continuation,
+        });
         self.frame(
             "response.completed",
-            json!({"type": "response.completed", "response": response}),
+            json!({"type": "response.completed", "response": response.response_body}),
         );
         self.terminal = true;
     }
@@ -1292,6 +1657,13 @@ fn sse_done(event: &[u8]) -> bool {
             .map(|value| value.trim_ascii() == b"[DONE]")
             .unwrap_or(false)
     })
+}
+
+fn incremental_delta(previous: &str, incoming: &str) -> String {
+    incoming
+        .strip_prefix(previous)
+        .unwrap_or(incoming)
+        .to_string()
 }
 
 fn parse_sse_data(event: &[u8]) -> Option<Value> {
@@ -1373,5 +1745,90 @@ data: {"candidates":[{"content":{"parts":[{"text":"Hello world"}]},"finishReason
         assert!(output.contains("response.output_text.delta"));
         assert!(output.contains("Hello world"));
         assert!(output.contains("\"total_tokens\":5"));
+    }
+
+    #[test]
+    fn gemini_stream_emits_tool_events_and_captures_continuation() {
+        let request = prepare_responses_to_gemini(
+            &json!({
+                "input": "inspect",
+                "tools": [{"type":"function","name":"run","parameters":{"type":"object"}}]
+            }),
+            "gemini-test",
+            true,
+            "route",
+            "request-tool",
+        )
+        .unwrap();
+        let mut bridge = GeminiStreamBridge::new(request);
+        bridge.push(
+            br#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"command":"pwd"},"id":"call-1"}}]}}]}
+
+data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}
+
+"#,
+        );
+        let output = std::iter::from_fn(|| bridge.pop_output())
+            .map(|frame| String::from_utf8(frame).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(bridge.completed().is_some());
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("response.function_call_arguments.done"));
+        assert_eq!(
+            bridge.completed().unwrap().response_body["output"][0]["type"],
+            "function_call"
+        );
+        assert_eq!(bridge.completed().unwrap().continuation.messages.len(), 2);
+    }
+
+    #[test]
+    fn gemini_stream_reassembles_vertex_partial_function_arguments() {
+        let request = prepare_responses_to_gemini(
+            &json!({
+                "input": "weather",
+                "tools": [{
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {"type":"object"}
+                }]
+            }),
+            "gemini-test",
+            true,
+            "route",
+            "partial-tool",
+        )
+        .unwrap();
+        let mut bridge = GeminiStreamBridge::new(request);
+        bridge.push(
+            br#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","willContinue":true},"thoughtSignature":"sig"}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.location","stringValue":"Paris","willContinue":true}],"willContinue":true}}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.unit","stringValue":"C","willContinue":true}],"willContinue":true}}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}}
+
+"#,
+        );
+        let output = std::iter::from_fn(|| bridge.pop_output())
+            .map(|frame| String::from_utf8(frame).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+        let completed = bridge.completed().expect("partial tool should complete");
+        assert!(
+            output
+                .matches("response.function_call_arguments.delta")
+                .count()
+                >= 2
+        );
+        assert_eq!(
+            completed.response_body["output"][0]["arguments"],
+            r#"{"location":"Paris","unit":"C"}"#
+        );
+        assert_eq!(
+            completed.continuation.messages[1]["parts"][0]["functionCall"]["thoughtSignature"],
+            "sig"
+        );
     }
 }

@@ -62,9 +62,11 @@ pub fn reduce_account_quota(
                         .as_ref()
                         .is_some_and(|error| error.code == code)
             });
+            let auth_owned_error = previous_last_error_code.is_some_and(is_auth_owned_error);
             let (health, last_error_code) = if health == AccountHealthState::Blocked {
                 (health, Some("quota_forbidden".to_string()))
-            } else if previous_last_error_code.is_some() && !quota_owned_error {
+            } else if previous_last_error_code.is_some() && !quota_owned_error && !auth_owned_error
+            {
                 (
                     previous_health,
                     previous_last_error_code.map(str::to_string),
@@ -112,6 +114,16 @@ pub fn reduce_account_quota(
             })
         }
     }
+}
+
+fn is_auth_owned_error(code: &str) -> bool {
+    matches!(
+        provider_account_failure(code),
+        Some(ProviderAccountFailure::Authentication)
+    ) || matches!(
+        code,
+        "credential_access_expiry_failed" | "upstream_unauthorized"
+    ) || code.starts_with("auth_")
 }
 
 #[cfg(test)]
@@ -240,6 +252,26 @@ mod tests {
             20,
         )
         .unwrap();
+        assert_eq!(recovered.health, AccountHealthState::Healthy);
+        assert_eq!(recovered.last_error_code, None);
+    }
+
+    #[test]
+    fn successful_quota_refresh_clears_stale_auth_error_after_recovery() {
+        let recovered = reduce_account_quota(
+            &QuotaSnapshot::default(),
+            &subscription(),
+            AccountHealthState::Unhealthy,
+            Some("invalid_grant"),
+            Ok(parse_codex_usage(
+                br#"{"rate_limit":{"primary_window":{"used_percent":20}}}"#,
+                20,
+            )
+            .unwrap()),
+            20,
+        )
+        .unwrap();
+
         assert_eq!(recovered.health, AccountHealthState::Healthy);
         assert_eq!(recovered.last_error_code, None);
     }

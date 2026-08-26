@@ -4065,19 +4065,7 @@ async fn models_response(request: Request) -> impl IntoResponse {
     Json(json!({
         "data":[{
             "id":"gpt-test",
-            "reasoningEffortModes":["low", "medium", "high"],
-            "reasoningProbe": {
-                "status": "confirmed",
-                "total": 3,
-                "running": 0,
-                "success": 3,
-                "failed": 0,
-                "confirmed": 3,
-                "rejected": 0,
-                "inconclusive": 0,
-                "pending": 0,
-                "lastProbeAt": "2026-08-20T00:00:00Z"
-            }
+            "reasoningEffortModes":["low", "medium", "high"]
         }]
     }))
 }

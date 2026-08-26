@@ -62,6 +62,22 @@
   .api-provider-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .source-add-selecting .api-provider-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) and (min-width: 701px) {
+  .source-route-matrix-heading,
+  .source-route-model-row {
+    grid-template-columns: minmax(170px, 0.9fr) minmax(0, 3.1fr);
+  }
+
+  .source-route-format-headings,
+  .source-route-model-controls {
+    grid-template-columns: repeat(var(--source-route-column-count), minmax(100px, 1fr));
+  }
 }
 
 @media (max-width: 700px) {
@@ -73,12 +89,23 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .source-route-stage:nth-child(n + 3) {
+  .source-route-arrow {
+    display: none;
+  }
+
+  .source-route-stage[data-stage-index="2"],
+  .source-route-stage[data-stage-index="3"] {
     border-top: 1px solid var(--relay-border);
   }
 
-  .source-route-stage:nth-child(odd) {
+  .source-route-stage[data-stage-index="0"],
+  .source-route-stage[data-stage-index="2"] {
     border-left: 0;
+  }
+
+  .source-route-stage {
+    gap: 4px;
+    padding-inline: 6px;
   }
 
   .source-routing-controls {
@@ -113,6 +140,25 @@
     gap: 5px;
   }
 
+  .source-configuration-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .source-configuration-stats {
+    padding-block: 10px;
+    border-block: 1px solid var(--relay-border);
+  }
+
+  .source-configuration-stats > div:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .source-configuration-summary > .relay-button {
+    width: 100%;
+  }
+
   .source-route-matrix-heading {
     display: none;
   }
@@ -120,10 +166,6 @@
   .source-cache-settings {
     grid-template-columns: minmax(0, 1fr);
     gap: 7px;
-  }
-
-  .source-cache-ttl-grid {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .source-route-model-row {
@@ -263,6 +305,27 @@
     padding-top: 10px;
   }
 
+  .relay-dialog.source-edit-dialog .source-routing-disclosure {
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .relay-dialog.source-edit-dialog .source-routing-active {
+    display: none;
+  }
+
+  .relay-dialog.source-edit-dialog .source-routing-stats > div {
+    padding-block: 6px;
+  }
+
+  .relay-dialog.source-edit-dialog .source-protocol-bindings {
+    gap: 8px;
+  }
+
+  .relay-dialog.source-edit-dialog .source-protocol-bindings > header > p {
+    display: none;
+  }
+
   .relay-dialog .source-form .api-provider-options button {
     min-height: 58px;
     gap: 4px;
@@ -339,9 +402,35 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .source-route-simple-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .source-add-dialog .api-provider-selected {
     grid-template-columns: auto minmax(0, 1fr);
     gap: 8px;
+  }
+
+  .source-add-dialog .relay-dialog-body {
+    padding: 14px 16px 16px;
+  }
+
+  .source-add-flow-heading {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .source-add-adapters > summary {
+    grid-template-columns: minmax(0, 1fr) 12px;
+  }
+
+  .source-add-adapters-state {
+    display: none;
+  }
+
+  .source-add-adapters > .source-protocol-bindings {
+    padding-inline: 8px;
   }
 
   .source-add-dialog .api-provider-change {
@@ -422,7 +511,26 @@
   }
 
   .source-priority-row {
-    grid-template-columns: 16px 22px minmax(0, 1fr) auto;
+    grid-template-columns: 24px 22px minmax(0, 1fr) auto;
+  }
+
+  .source-models-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .source-model-mode {
+    width: 100%;
+  }
+
+  .source-model-mode label {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .source-auto-route-toggle {
+    font-size: 10px;
   }
 
   .source-priority-row > .inline-actions {
@@ -450,10 +558,28 @@
   }
 
   .model-rules > header {
-    align-items: stretch;
-    flex-direction: column;
+    padding-bottom: 10px;
   }
 
+}
+
+@media (max-height: 620px) {
+  .relay-dialog.source-add-dialog .relay-dialog-body {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  .source-add-dialog .source-add-steps {
+    margin-bottom: 10px;
+  }
+
+  .source-add-dialog .source-add-flow-heading {
+    margin-bottom: 10px;
+  }
+
+  .source-add-dialog .source-add-adapters > summary {
+    min-height: 46px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -522,8 +648,17 @@
     flex-direction: column;
     gap: 8px;
   }
-  .overview-analytics-header .relay-tabs {
+  .overview-analytics-controls {
     width: 100%;
+    justify-content: stretch;
+  }
+  .overview-scope-menu,
+  .overview-scope-menu .relay-option-trigger {
+    flex: 1;
+    max-width: none;
+  }
+  .overview-analytics-header .relay-tabs {
+    flex: 1;
   }
   .overview-analytics-header .relay-tabs button {
     min-width: 0;
@@ -531,6 +666,17 @@
   }
   .overview-chart {
     padding: 14px 12px;
+  }
+  .overview-token-trend {
+    padding: 14px 12px;
+  }
+  .overview-token-trend-legend {
+    margin-left: 48px;
+    gap: 6px 10px;
+  }
+  .overview-token-trend-body {
+    grid-template-columns: 42px minmax(0, 1fr) 34px;
+    gap: 6px;
   }
   .overview-chart-body {
     grid-template-columns: 42px minmax(0, 1fr);
@@ -637,6 +783,47 @@
   .usage-view-toolbar {
     grid-template-columns: 1fr;
     gap: 0;
+  }
+
+  .source-connection-check {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+
+  .source-connection-check-stats {
+    grid-column: 2;
+  }
+
+  .source-connection-check > .relay-button {
+    grid-column: 2;
+    width: 100%;
+  }
+
+  .source-routing-overview {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+
+  .source-routing-status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .source-routing-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .source-routing-stats > div:last-child {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--relay-border);
+    border-left: 0;
+  }
+
+  .source-routing-details-action {
+    display: none;
+  }
+
+  .source-connection-check-stats > div:first-child {
+    padding-left: 0;
+    border-left: 0;
   }
 
   .usage-scope-controls {

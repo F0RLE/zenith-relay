@@ -1,6 +1,6 @@
 use super::super::errors::{
-    previous_response_not_found_value, rate_limit_body_hint_value, upstream_event_failure_category,
-    upstream_status_from_value, RateLimitBodyHint,
+    is_deactivated_workspace_value, previous_response_not_found_value, rate_limit_body_hint_value,
+    upstream_event_failure_category, upstream_status_from_value, RateLimitBodyHint,
 };
 use super::super::now_ms;
 use axum::http::header::{HeaderName, HeaderValue, RETRY_AFTER};
@@ -15,6 +15,7 @@ pub(super) struct EventTerminal {
     pub(super) headers: HeaderMap,
     pub(super) body_hint: RateLimitBodyHint,
     pub(super) previous_response_not_found: bool,
+    pub(super) deactivated_workspace: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +45,7 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
         headers: websocket_retry_headers(value),
         body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
         previous_response_not_found: previous_response_not_found_value(value),
+        deactivated_workspace: is_deactivated_workspace_value(value),
     }
 }
 

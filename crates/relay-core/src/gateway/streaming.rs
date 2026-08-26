@@ -309,7 +309,9 @@ impl StreamExecution {
                     Box::pin(bridge_messages_stream(first, remaining, *bridge, completed))
                 }
                 Some(AdapterStreamBridge::Gemini(bridge)) => {
-                    Box::pin(bridge_gemini_stream(first, remaining, *bridge))
+                    let completed = completion_bridge_state
+                        .expect("Gemini bridge state is configured for Gemini routes");
+                    Box::pin(bridge_gemini_stream(first, remaining, *bridge, completed))
                 }
                 None => Box::pin(
                     stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining),
@@ -418,12 +420,14 @@ struct GeminiBridgeStreamState {
     bridge: crate::GeminiStreamBridge,
     pending: VecDeque<Bytes>,
     finished: bool,
+    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
 }
 
 pub(super) fn bridge_gemini_stream(
     first: Bytes,
     remaining: UpstreamStream,
     bridge: crate::GeminiStreamBridge,
+    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
 ) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
     let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
     stream::unfold(
@@ -432,6 +436,7 @@ pub(super) fn bridge_gemini_stream(
             bridge,
             pending: VecDeque::new(),
             finished: false,
+            completed,
         },
         |mut state| async move {
             loop {
@@ -451,6 +456,12 @@ pub(super) fn bridge_gemini_stream(
                 while let Some(bytes) = state.bridge.pop_output() {
                     state.pending.push_back(Bytes::from(bytes));
                 }
+                if let Some(response) = state.bridge.completed().cloned() {
+                    *state
+                        .completed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+                }
                 if state.bridge.is_terminal() {
                     state.finished = true;
                 }
@@ -467,6 +478,7 @@ pub(super) struct UsageStream<S> {
     pub(super) event: Option<UsageEvent>,
     pub(super) response_id: Option<String>,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
+    pub(super) native_gemini: bool,
     pub(super) native_output_items: Vec<Value>,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
@@ -486,6 +498,7 @@ impl<S> UsageStream<S> {
         started: Instant,
         completion: CompletionCallback,
     ) -> Self {
+        let native_gemini = event.wire_api == WireApi::Gemini;
         Self {
             inner: Box::pin(stream),
             runtime: None,
@@ -494,6 +507,7 @@ impl<S> UsageStream<S> {
             event: Some(event),
             response_id: None,
             native_response: None,
+            native_gemini,
             native_output_items: Vec::new(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
@@ -514,6 +528,7 @@ impl<S> UsageStream<S> {
         native_response: Option<Arc<Mutex<Option<Value>>>>,
     ) -> Self {
         let callback = runtime.usage.clone();
+        let native_gemini = event.wire_api == WireApi::Gemini;
         Self {
             inner: Box::pin(stream),
             runtime: Some(runtime),
@@ -522,6 +537,7 @@ impl<S> UsageStream<S> {
             event: Some(event),
             response_id: None,
             native_response,
+            native_gemini,
             native_output_items: Vec::new(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
@@ -726,6 +742,41 @@ impl<S> UsageStream<S> {
         }
     }
 
+    /// Gemini's native SSE has ordinary JSON chunks and ends with a clean EOF;
+    /// it does not emit the Responses `response.completed` event. Inspect each
+    /// complete frame only for usage/TTFT diagnostics and leave the bytes
+    /// untouched for the client.
+    fn ingest_native_gemini(&mut self, bytes: &[u8]) {
+        if self.terminated {
+            return;
+        }
+        if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
+            self.sse_pending.clear();
+            self.fail_stream("stream_event_too_large");
+            return;
+        }
+        self.sse_pending.extend_from_slice(bytes);
+        while let Some(end) = sse_event_end(&self.sse_pending) {
+            let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
+            let terminal = parse_sse_event(&event);
+            if let Some(usage) = terminal.usage {
+                if let Some(current) = self.event.as_mut() {
+                    apply_usage(current, &usage);
+                }
+            }
+            if terminal.has_output_delta
+                && self
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| event.ttft_ms.is_none())
+            {
+                if let Some(current) = self.event.as_mut() {
+                    current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
+                }
+            }
+        }
+    }
+
     fn capture_native_response(&mut self, response: Option<Value>) {
         let Some(shared) = self.native_response.as_ref() else {
             return;
@@ -777,7 +828,11 @@ where
                     let now = TokioInstant::now();
                     this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
                     this.idle_watchdog.as_mut().reset(now + SSE_IDLE_TIMEOUT);
-                    this.ingest_sse(&bytes);
+                    if this.native_gemini {
+                        this.ingest_native_gemini(&bytes);
+                    } else {
+                        this.ingest_sse(&bytes);
+                    }
                     if let Some(failure) = this.output_pending.pop_front() {
                         return Poll::Ready(Some(Ok(failure)));
                     }
@@ -790,6 +845,12 @@ where
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
+                    if this.native_gemini {
+                        this.finish(Some(true), None);
+                        this.sse_pending.clear();
+                        this.terminated = true;
+                        return Poll::Ready(None);
+                    }
                     if this.event.as_ref().is_some_and(|event| event.success) {
                         if this.fail_stream("stream_incomplete") {
                             continue;

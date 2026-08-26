@@ -12,7 +12,7 @@ use std::{
 };
 use zenith_relay_core::{
     providers::chatgpt::AgentIdentityCredential, GatewayRuntime, GatewayRuntimeOptions,
-    RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, WireApi,
+    RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource,
     QUOTA_STALE_AFTER_MS,
 };
 
@@ -34,6 +34,8 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
         .collect::<Vec<_>>();
     let hidden_models = state.store.hidden_models()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
+    let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
+    let model_display_order = state.store.model_display_order()?;
     let routing_policy = state.store.routing_policy()?;
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
@@ -102,8 +104,16 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
         usage,
     )
     .map_err(|error| error.to_string())?;
+    runtime
+        .set_model_service_tier_overrides(model_service_tier_overrides)
+        .map_err(|error| error.to_string())?;
+    runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(codex_websockets_enabled);
+    let breaker_store = state.store.clone();
+    runtime.set_chatgpt_team_breaker_callback(move |account_ids| {
+        let _ = breaker_store.block_accounts_for_team(&account_ids);
+    });
     state.replace_runtime(Some(Arc::new(runtime)))
 }
 
@@ -115,12 +125,7 @@ fn pool_member_ids(
 ) -> (Vec<String>, Vec<String>) {
     let source_ids = sources
         .iter()
-        .filter(|record| {
-            record.in_pool
-                && record
-                    .supports_wire_api(WireApi::Responses)
-                    .unwrap_or(false)
-        })
+        .filter(|record| record.in_pool && record.supports_any_wire_api().unwrap_or(false))
         .map(|record| record.id.clone())
         .collect();
     let account_ids = accounts

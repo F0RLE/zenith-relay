@@ -102,6 +102,30 @@ fn messages_cache_write_lifetime_overrides_existing_markers() {
 }
 
 #[test]
+fn messages_cache_write_lifetime_marks_stable_prefix_and_latest_turn() {
+    let mut request = json!({
+        "system": [{"type": "text", "text": "stable system"}],
+        "tools": [{"name": "lookup", "description": "stable tool", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "older turn"}]},
+            {"role": "user", "content": [{"type": "text", "text": "latest turn"}]}
+        ]
+    });
+
+    messages::apply_cache_write_ttl(&mut request, CacheWriteTtl::OneHour).unwrap();
+
+    assert_eq!(request["system"][0]["cache_control"]["ttl"], "1h");
+    assert!(request["tools"][0].get("cache_control").is_none());
+    assert!(request["messages"][0]["content"][0]
+        .get("cache_control")
+        .is_none());
+    assert_eq!(
+        request["messages"][1]["content"][0]["cache_control"]["ttl"],
+        "1h"
+    );
+}
+
+#[test]
 fn messages_bridge_converts_function_tools_and_preserves_tool_turn_state() {
     let first = prepare_responses_to_messages(
         &request(Value::String("inspect the project".to_string())),
@@ -276,6 +300,14 @@ fn messages_bridge_preserves_custom_tool_call_and_output_shapes() {
     assert_eq!(
         response.response_body["output"][0]["input"],
         "Get-ChildItem -Force"
+    );
+    assert_eq!(
+        response.response_body["output"][0]["id"],
+        "ctc_toolu_custom"
+    );
+    assert_eq!(
+        response.response_body["output"][0]["call_id"],
+        "toolu_custom"
     );
 
     let second = prepare_responses_to_messages(
@@ -826,6 +858,14 @@ data: {"type":"message_stop"}
         bridge.completed().unwrap().response_body["output"][0]["input"],
         "Get-ChildItem"
     );
+    assert_eq!(
+        bridge.completed().unwrap().response_body["output"][0]["id"],
+        "ctc_toolu_custom_stream"
+    );
+    assert_eq!(
+        bridge.completed().unwrap().response_body["output"][0]["call_id"],
+        "toolu_custom_stream"
+    );
 }
 
 #[test]
@@ -1175,6 +1215,46 @@ fn call_prefixed_function_item_id_repair_keeps_the_tool_result_link() {
     assert_eq!(input[3]["id"], "call_custom_01");
     assert_eq!(input[4]["call_id"], "call_function_01");
     assert!(!repair_call_prefixed_function_item_ids(&mut request));
+}
+
+#[test]
+fn arbitrary_function_item_id_repair_adds_fc_namespace() {
+    let mut request = json!({
+        "input": [
+            {"type": "function_call", "id": "tool_bdr_01", "call_id": "tool_bdr_01"},
+            {"type": "function_call", "id": "fc_existing", "call_id": "fc_existing"}
+        ]
+    });
+
+    assert!(repair_call_prefixed_function_item_ids(&mut request));
+    assert_eq!(request["input"][0]["id"], "fc_tool_bdr_01");
+    assert_eq!(request["input"][0]["call_id"], "tool_bdr_01");
+    assert_eq!(request["input"][1]["id"], "fc_existing");
+    assert!(!repair_call_prefixed_function_item_ids(&mut request));
+}
+
+#[test]
+fn custom_tool_item_id_repair_keeps_the_tool_result_link() {
+    let mut request = json!({
+        "input": [{
+            "type": "custom_tool_call",
+            "id": "fc_custom_01",
+            "call_id": "toolu_custom_01",
+            "name": "PowerShell",
+            "input": "Get-ChildItem"
+        }, {
+            "type": "custom_tool_call_output",
+            "call_id": "toolu_custom_01",
+            "output": "Cargo.toml"
+        }]
+    });
+
+    assert!(repair_custom_tool_item_ids(&mut request));
+    let input = request["input"].as_array().expect("input is an array");
+    assert_eq!(input[0]["id"], "ctc_fc_custom_01");
+    assert_eq!(input[0]["call_id"], "toolu_custom_01");
+    assert_eq!(input[1]["call_id"], "toolu_custom_01");
+    assert!(!repair_custom_tool_item_ids(&mut request));
 }
 
 #[test]

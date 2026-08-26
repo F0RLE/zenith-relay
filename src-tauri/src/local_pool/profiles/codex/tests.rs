@@ -438,8 +438,8 @@ fn direct_source_catalog_contains_only_selected_source_models_without_native_cap
 
     assert_eq!(models.len(), 3);
     assert_eq!(models[0]["slug"], "gpt-5.6-sol");
-    assert_eq!(models[1]["slug"], "gpt-fake");
-    assert_eq!(models[2]["slug"], "vendor/claude");
+    assert_eq!(models[1]["slug"], "vendor/claude");
+    assert_eq!(models[2]["slug"], "gpt-fake");
     assert_eq!(
         models
             .iter()

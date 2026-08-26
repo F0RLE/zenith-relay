@@ -202,6 +202,10 @@ pub(super) fn usage_event(
     latency_ms: u64,
     tool_use: ToolUseDiagnostics,
 ) -> UsageEvent {
+    let mut routing = route.routing.clone();
+    if let Some(diagnostics) = routing.as_mut() {
+        diagnostics.endpoint_kind = Some(route.adapter.route_suffix(route.wire_api).to_string());
+    }
     let mut event = UsageEvent {
         request_id: request_id.to_string(),
         attempt,
@@ -210,7 +214,7 @@ pub(super) fn usage_event(
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
         client_context_id: route.client_context_id.clone(),
-        routing: route.routing.clone(),
+        routing,
         requested_model: Some(requested_model.to_string()),
         resolved_model: Some(route.source_model.clone()),
         requested_reasoning_effort: None,
@@ -341,9 +345,11 @@ pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, Attemp
 }
 
 pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
+    let gemini = usage.get("usageMetadata").unwrap_or(usage);
     let reported_input_tokens = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
+        .or_else(|| gemini.get("promptTokenCount"))
         .and_then(Value::as_u64);
     let anthropic_cache_read_tokens = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
     let anthropic_cache_write_tokens = usage
@@ -363,6 +369,7 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     let output_tokens = usage
         .get("output_tokens")
         .or_else(|| usage.get("completion_tokens"))
+        .or_else(|| gemini.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
     event.input_tokens = input_tokens;
     event.cached_input_tokens = usage
@@ -375,6 +382,7 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| usage.get("cached_tokens"))
         .or_else(|| usage.get("cache_read_input_tokens"))
+        .or_else(|| gemini.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)
         .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
     event.cache_write_input_tokens = usage
@@ -411,10 +419,14 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                 .get("completion_tokens_details")
                 .and_then(|details| details.get("reasoning_tokens"))
         })
+        .or_else(|| gemini.get("thoughtsTokenCount"))
         .and_then(Value::as_u64)
         .map(|reasoning| reasoning.min(output_tokens.unwrap_or(reasoning)));
     event.output_tokens = output_tokens;
-    let reported_total = usage.get("total_tokens").and_then(Value::as_u64);
+    let reported_total = usage
+        .get("total_tokens")
+        .or_else(|| gemini.get("totalTokenCount"))
+        .and_then(Value::as_u64);
     event.total_tokens = match (input_tokens, output_tokens) {
         (Some(input), Some(output)) => {
             let measured = input.saturating_add(output);
@@ -449,14 +461,17 @@ fn cache_write_ttl_from_usage(usage: &Value) -> Option<CacheWriteTtl> {
 }
 
 pub(super) fn find_usage(value: &Value) -> Option<&Value> {
-    value.get("usage").or_else(|| {
-        let response = value.get("response")?;
-        response.get("usage").or_else(|| {
-            response
-                .get("response")
-                .and_then(|nested| nested.get("usage"))
+    value
+        .get("usage")
+        .or_else(|| value.get("usageMetadata"))
+        .or_else(|| {
+            let response = value.get("response")?;
+            response.get("usage").or_else(|| {
+                response
+                    .get("response")
+                    .and_then(|nested| nested.get("usage"))
+            })
         })
-    })
 }
 
 pub(super) fn response_id(value: &Value) -> Option<&str> {

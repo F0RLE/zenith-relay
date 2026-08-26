@@ -1,11 +1,6 @@
-import { Route } from "lucide-react";
-import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import type { SourceProtocolBinding, SourceSummary, SourceWireApi } from "../api/types";
-import {
-  effectiveSourceProtocolBindings,
-  sourceWireApis,
-} from "../sourceProtocolBindings";
+import { effectiveSourceProtocolBindings, sourceWireApis } from "../sourceProtocolBindings";
 import { SourceProtocolBindingsEditor } from "./SourceProtocolBindingsEditor";
 
 export function SourceProtocolBindingsSummary({
@@ -24,45 +19,35 @@ export function SourceProtocolBindingsSummary({
   );
 }
 
-/**
- * The route table is Relay configuration, not a normal setup choice. Keep the
- * declared capabilities visible only when an operator needs to verify an
- * unusual source, while the default flow remains "connect source, pick model".
- */
 export function SourceProtocolRoutingDisclosure({
   models,
   value,
   onChange,
   wireApis = sourceWireApis,
+  showSimplePicker = false,
+  autoAssignModels = true,
+  exclusiveSimplePicker = false,
+  routeGroup = "all",
 }: {
   models: string[];
   value: SourceProtocolBinding[];
   onChange: (value: SourceProtocolBinding[]) => void;
   wireApis?: readonly SourceWireApi[];
+  showSimplePicker?: boolean;
+  autoAssignModels?: boolean;
+  exclusiveSimplePicker?: boolean;
+  routeGroup?: "all" | "native" | "adapters";
 }) {
-  const { t } = useTranslation();
-  const titleId = useId();
   return (
-    <section className="source-routing-disclosure" aria-labelledby={titleId}>
-      <div className="source-routing-overview">
-        <span className="source-routing-icon" aria-hidden="true"><Route /></span>
-        <span>
-          <strong id={titleId}>{t("sources.routingTitle")}</strong>
-          <small>{t("sources.modelRoutingHint")}</small>
-        </span>
-      </div>
-      <details className="source-routing-details">
-        <summary>
-          <span>{t("sources.routingAdvanced")}</span>
-          <small>{t("sources.routingAdvancedHint")}</small>
-        </summary>
-        <SourceProtocolBindingsEditor
-          models={models}
-          value={value}
-          onChange={onChange}
-          wireApis={wireApis}
-        />
-      </details>
-    </section>
+    <SourceProtocolBindingsEditor
+      models={models}
+      value={value}
+      onChange={onChange}
+      wireApis={wireApis}
+      showSimplePicker={showSimplePicker}
+      autoAssignModels={autoAssignModels}
+      exclusiveSimplePicker={exclusiveSimplePicker}
+      routeGroup={routeGroup}
+    />
   );
 }

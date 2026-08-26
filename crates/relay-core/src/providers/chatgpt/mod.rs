@@ -20,9 +20,9 @@ pub use models::{
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{
-    merge_subscription_metadata, parse_subscription_timestamp_ms, subscription_refresh_due,
-    CodexSubscriptionClient, CodexSubscriptionMetadata, CODEX_ACCOUNTS_CHECK_ENDPOINT,
-    CODEX_SUBSCRIPTIONS_ENDPOINT, SUBSCRIPTION_REFRESH_INTERVAL_MS,
+    merge_subscription_metadata, merge_subscription_metadata_at, parse_subscription_timestamp_ms,
+    subscription_refresh_due, CodexSubscriptionClient, CodexSubscriptionMetadata,
+    CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT, SUBSCRIPTION_REFRESH_INTERVAL_MS,
 };
 pub use quota_usage::{
     is_agent_identity_task_invalid_failure, parse_codex_usage, CodexQuotaClient,

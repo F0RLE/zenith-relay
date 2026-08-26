@@ -5,8 +5,9 @@ use crate::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use zenith_relay_core::{
-    is_valid_model_id, normalize_image_base_model, normalize_model_price_overrides,
-    normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
+    is_valid_model_id, normalize_image_base_model, normalize_model_ids,
+    normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
@@ -130,6 +131,10 @@ fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPres
     preset.settings.model_reasoning_allowed_levels =
         normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
             .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))?;
+    preset.settings.model_service_tier_overrides =
+        normalize_model_service_tier_overrides(preset.settings.model_service_tier_overrides)
+            .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))?;
+    preset.settings.model_display_order = normalize_model_ids(preset.settings.model_display_order);
     Ok(preset)
 }
 
@@ -441,7 +446,15 @@ fn merge_settings(
     if requested.model_reasoning_allowed_levels_present {
         merged.model_reasoning_allowed_levels = requested.model_reasoning_allowed_levels.clone();
     }
+    if requested.model_service_tier_overrides_present {
+        merged.model_service_tier_overrides = requested.model_service_tier_overrides.clone();
+    }
+    if requested.model_display_order_present {
+        merged.model_display_order = requested.model_display_order.clone();
+    }
     merged.model_reasoning_allowed_levels_present = true;
+    merged.model_service_tier_overrides_present = true;
+    merged.model_display_order_present = true;
     Ok(merged)
 }
 
@@ -534,6 +547,10 @@ mod tests {
             model_price_overrides: Default::default(),
             model_reasoning_allowed_levels: Default::default(),
             model_reasoning_allowed_levels_present: true,
+            model_service_tier_overrides: Default::default(),
+            model_display_order: Vec::new(),
+            model_service_tier_overrides_present: true,
+            model_display_order_present: true,
         }
     }
 
@@ -569,11 +586,24 @@ mod tests {
         let mut current = settings();
         current.model_reasoning_allowed_levels =
             BTreeMap::from([("gpt-test".to_string(), vec!["medium".to_string()])]);
+        current.model_service_tier_overrides = BTreeMap::from([(
+            "gpt-test".to_string(),
+            zenith_relay_core::DefaultServiceTier::Fast,
+        )]);
+        current.model_display_order = vec!["gpt-test".to_string()];
         let mut omitted_settings = serde_json::to_value(&current).unwrap();
         omitted_settings
             .as_object_mut()
             .unwrap()
             .remove("modelReasoningAllowedLevels");
+        omitted_settings
+            .as_object_mut()
+            .unwrap()
+            .remove("modelServiceTierOverrides");
+        omitted_settings
+            .as_object_mut()
+            .unwrap()
+            .remove("modelDisplayOrder");
         let omitted: ConfigurationPreset = serde_json::from_value(json!({
             "format": CONFIGURATION_PRESET_FORMAT,
             "schemaVersion": 2,
@@ -582,6 +612,8 @@ mod tests {
         .unwrap();
 
         assert!(!omitted.settings.model_reasoning_allowed_levels_present);
+        assert!(!omitted.settings.model_service_tier_overrides_present);
+        assert!(!omitted.settings.model_display_order_present);
         assert!(serde_json::to_value(&omitted).unwrap()["settings"]
             .get("modelReasoningAllowedLevels")
             .is_none());
@@ -592,6 +624,11 @@ mod tests {
             current.model_reasoning_allowed_levels
         );
         assert!(merged.model_reasoning_allowed_levels_present);
+        assert_eq!(
+            merged.model_service_tier_overrides,
+            current.model_service_tier_overrides
+        );
+        assert_eq!(merged.model_display_order, current.model_display_order);
 
         let mut explicit_settings = serde_json::to_value(&current).unwrap();
         explicit_settings["modelReasoningAllowedLevels"] = json!({});

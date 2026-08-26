@@ -58,6 +58,9 @@ pub(crate) async fn import_source_item(
                 )
             })?;
         runtime_source.models = discovery.models;
+        if let Some(base_url) = discovery.resolved_base_url {
+            runtime_source.base_url = base_url;
+        }
         (discovery.detected_model_prices, discovery.protocol_bindings)
     } else if !runtime_source.models.is_empty() {
         (

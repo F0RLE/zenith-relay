@@ -1,7 +1,7 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::execution::execute_account_endpoint;
-use super::normalization::normalize_account_request;
+use super::normalization::{normalize_account_request, responses_lite_parallel_tool_calls_valid};
 use super::{
     CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES, MAX_CLIENT_REQUEST_BODY_BYTES,
     MAX_CLIENT_REQUEST_BODY_ERROR,
@@ -60,14 +60,14 @@ pub(in crate::gateway) async fn responses_compact(
             "model_not_found",
         );
     };
-    let responses_lite = headers
-        .get(CODEX_RESPONSES_LITE_HEADER)
-        .cloned()
-        .or_else(|| {
-            runtime
-                .codex_model_uses_responses_lite(&resolved_model)
-                .then(|| HeaderValue::from_static("true"))
-        });
+    let responses_lite = headers.get(CODEX_RESPONSES_LITE_HEADER).cloned();
+    if responses_lite.is_some() && !responses_lite_parallel_tool_calls_valid(&request) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "responses Lite requires parallel_tool_calls to be a boolean",
+            "invalid_request",
+        );
+    }
     let response_affinity_key =
         runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
     normalize_account_request(&mut request, responses_lite.is_some());
