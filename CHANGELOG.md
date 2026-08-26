@@ -247,7 +247,8 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.0...main
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.1...main
+[1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1
 [1.1.0]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0
 [1.1.0-beta.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0-beta.1
 [1.0.5]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.0.5
