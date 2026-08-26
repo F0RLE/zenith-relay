@@ -420,6 +420,7 @@ export type RoutingDiagnostics = {
   quotaRemainingBasisPoints: number | null;
   inFlightBefore: number;
   dispatchesBefore: number;
+  endpointKind?: string | null;
 };
 
 export type ToolUseDiagnostics = {
@@ -551,6 +552,7 @@ export type SupportExportContext = {
 export type RemoteUsage = {
   id: number;
   requestId: string;
+  attempt: number;
   candidateKind: "account" | "source";
   candidateHint: string;
   candidateLabel?: string | null;

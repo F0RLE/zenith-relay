@@ -1373,6 +1373,8 @@ const relayRu = {
       codex_background_blocked_task_title: "Фоновый заголовок задачи Codex заблокирован",
     },
     httpStatus: "Статус HTTP",
+    attempt: "Попытка",
+    endpoint: "Маршрут endpoint",
     requestDetails: "Сведения о запросе",
     requestOrigin: "Тип запроса",
     requestSectionsLabel: "Раздел сведений о запросе",

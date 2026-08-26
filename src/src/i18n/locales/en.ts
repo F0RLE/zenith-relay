@@ -1373,6 +1373,8 @@ const relayEn = {
       codex_background_blocked_task_title: "Codex background task title blocked",
     },
     httpStatus: "HTTP status",
+    attempt: "Attempt",
+    endpoint: "Endpoint route",
     requestDetails: "Request details",
     requestOrigin: "Request type",
     requestSectionsLabel: "Request detail sections",

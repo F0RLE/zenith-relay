@@ -237,9 +237,11 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       {!row.success ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
         <h3>{t("usage.errorDetails")}</h3>
         <dl className="request-details-list">
+          <div><dt>{t("usage.attempt")}</dt><dd>{row.attempt}</dd></div>
           <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
           <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div>
           <div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
+          <div><dt>{t("usage.endpoint")}</dt><dd><code>{routing?.endpointKind ?? formatWireApi(row.wireApi, t)}</code></dd></div>
         </dl>
       </section> : null}
     </> : null}

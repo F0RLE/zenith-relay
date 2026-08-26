@@ -19,6 +19,7 @@ export type CodexRequestOrigin =
 
 export type UsageRow = {
   id: string | number;
+  attempt: number;
   time: string;
   success: boolean;
   model: string | null;

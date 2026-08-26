@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct UsageSummary {
     pub id: i64,
     pub request_id: String,
+    #[serde(default = "default_attempt")]
+    pub attempt: u16,
     pub candidate_kind: String,
     pub candidate_hint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +53,10 @@ pub struct UsageSummary {
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
     pub created_at_ms: u64,
+}
+
+fn default_attempt() -> u16 {
+    1
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
