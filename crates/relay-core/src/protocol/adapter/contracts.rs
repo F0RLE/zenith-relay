@@ -601,10 +601,10 @@ pub(crate) fn repair_call_prefixed_function_item_ids(request: &mut Value) -> boo
         let Some(id) = item.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let Some(suffix) = id.strip_prefix("call_").filter(|suffix| !suffix.is_empty()) else {
+        if id.starts_with("fc_") || id.is_empty() {
             continue;
-        };
-        item.insert("id".to_string(), Value::String(format!("fc_{suffix}")));
+        }
+        item.insert("id".to_string(), Value::String(format!("fc_{id}")));
         repaired = true;
     }
     repaired

@@ -1218,6 +1218,22 @@ fn call_prefixed_function_item_id_repair_keeps_the_tool_result_link() {
 }
 
 #[test]
+fn arbitrary_function_item_id_repair_adds_fc_namespace() {
+    let mut request = json!({
+        "input": [
+            {"type": "function_call", "id": "tool_bdr_01", "call_id": "tool_bdr_01"},
+            {"type": "function_call", "id": "fc_existing", "call_id": "fc_existing"}
+        ]
+    });
+
+    assert!(repair_call_prefixed_function_item_ids(&mut request));
+    assert_eq!(request["input"][0]["id"], "fc_tool_bdr_01");
+    assert_eq!(request["input"][0]["call_id"], "tool_bdr_01");
+    assert_eq!(request["input"][1]["id"], "fc_existing");
+    assert!(!repair_call_prefixed_function_item_ids(&mut request));
+}
+
+#[test]
 fn custom_tool_item_id_repair_keeps_the_tool_result_link() {
     let mut request = json!({
         "input": [{
