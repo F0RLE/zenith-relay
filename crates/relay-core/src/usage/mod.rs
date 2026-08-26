@@ -479,6 +479,9 @@ fn relay_error_category(category: &str) -> bool {
             | "client_cancelled"
             | "client_websocket"
             | "response_affinity_miss"
+            | "stream_event_too_large"
+            | "stream_semantic_timeout"
+            | "websocket_idle_timeout"
     )
 }
 

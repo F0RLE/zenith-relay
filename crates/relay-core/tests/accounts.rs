@@ -1921,6 +1921,98 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
 }
 
 #[tokio::test]
+async fn account_websocket_retries_foreign_message_item_id_after_native_rejection() {
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(VecDeque::from(vec![
+            vec![json!({
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "message": "Invalid 'input[0].id': 'item_foreign_user_01'. Expected an ID that begins with 'msg'.",
+                    "type": "invalid_request_error"
+                }
+            })],
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "repaired"}),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "ws-message-id-repaired",
+                        "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+                    }
+                }),
+            ],
+        ]))),
+    ))
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": [
+                    {
+                        "type": "message",
+                        "id": "item_foreign_user_01",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Inspect the workspace"}]
+                    },
+                    {
+                        "type": "message",
+                        "id": "msg_native_01",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "Keep changes scoped"}]
+                    },
+                    {
+                        "type": "reasoning",
+                        "id": "item_reasoning_01",
+                        "summary": []
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["response"]["id"],
+        "ws-message-id-repaired"
+    );
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["input"][0]["id"], "item_foreign_user_01");
+    assert!(requests[1]["input"][0].get("id").is_none());
+    assert_eq!(requests[1]["input"][1]["id"], "msg_native_01");
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
 async fn account_websocket_keeps_connection_after_max_output_incomplete() {
     let responses = VecDeque::from(vec![
         vec![
