@@ -1549,7 +1549,7 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
 }
 
 #[tokio::test]
-async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_responses() {
+async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bridge() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let mut mixed = source(
         "mixed",
@@ -1579,7 +1579,7 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
 
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
-        ["gpt-5.4", "shared-model", "gpt-5.4-mini"]
+        ["gpt-5.4", "shared-model"]
     );
 
     let catalog: Value = reqwest::Client::new()
@@ -1605,7 +1605,6 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
         [
             zenith_relay_core::codex_model_alias("gpt-5.4"),
             zenith_relay_core::codex_model_alias("shared-model"),
-            zenith_relay_core::codex_model_alias("gpt-5.4-mini"),
         ]
     );
 
@@ -1645,15 +1644,19 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
         retry_after: None,
     });
     let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": "gpt-5.4-mini", "input": "use messages bridge"}))
+        .post(format!("{}/v1/messages", gateway.base_url))
+        .header("x-api-key", LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-5.4-mini",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "use native messages"}]
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["output"][0]["content"][0]["text"], "linked");
+    assert_eq!(body["content"][0]["text"], "linked");
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/messages", gateway.base_url))
@@ -1677,14 +1680,13 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
         paths,
         [
             "/v1/models",
-            "/v1/models",
             "/v1/responses",
             "/v1/messages",
             "/v1/messages",
         ]
     );
     assert_eq!(
-        requests[3].body["tools"][0]["name"].as_str(),
+        requests[2].body["tools"][0]["name"].as_str(),
         Some("PowerShell")
     );
     drop(requests);
@@ -1699,7 +1701,7 @@ async fn protocol_bindings_keep_native_clients_and_link_messages_models_to_respo
         event.wire_api == WireApi::Messages
             && event.candidate_id.as_deref() == Some("mixed::messages")
     }));
-    assert!(events.iter().any(|event| {
+    assert!(!events.iter().any(|event| {
         event.wire_api == WireApi::Responses
             && event.candidate_id.as_deref() == Some("mixed::responses_to_messages")
     }));

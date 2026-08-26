@@ -3,6 +3,7 @@ use super::{
     WEBSOCKET_PROTOCOLS,
 };
 use crate::gateway::request::apply_default_service_tier_if_missing;
+use crate::gateway::request::client_context_fingerprint;
 use crate::gateway::request::codex_background_request_kind;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
@@ -93,10 +94,12 @@ impl ClientRequest {
             runtime.codex_model_responses_lite_candidates(&resolved_model);
         let response_affinity_key = runtime
             .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
+        let client_context_id = client_context_fingerprint(headers);
         let prompt_affinity_key = runtime.prompt_affinity_key(
             &key.id,
             &resolved_model,
             value.get("prompt_cache_key").and_then(Value::as_str),
+            client_context_id.as_deref(),
         );
         Ok(Self {
             request_id,

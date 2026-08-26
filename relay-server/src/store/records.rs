@@ -4,6 +4,24 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 impl Store {
+    pub fn weekly_reset_was_applied(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<bool, String> {
+        let key = format!("weekly_reset:{account_id}:{fingerprint}");
+        Ok(self.metadata(&key)?.is_some_and(|value| value == "1"))
+    }
+
+    pub fn mark_weekly_reset_applied(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<(), String> {
+        let key = format!("weekly_reset:{account_id}:{fingerprint}");
+        self.set_metadata(&key, "1")
+    }
+
     pub fn gateway_enabled(&self) -> Result<bool, String> {
         Ok(self
             .metadata("gateway_enabled")?
@@ -169,6 +187,25 @@ impl Store {
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         Ok(Some(value))
+    }
+
+    /// Persists Team breaker sibling state without recording synthetic usage.
+    pub fn block_accounts_for_team(&self, account_ids: &[String]) -> Result<bool, String> {
+        let mut changed = false;
+        for account_id in account_ids {
+            let updated = self.update_account(account_id, |account| {
+                let needs_update = account.health
+                    != zenith_relay_core::accounts::AccountHealthState::Blocked
+                    || account.last_error_code.as_deref() != Some("deactivated_workspace");
+                if needs_update {
+                    account.health = zenith_relay_core::accounts::AccountHealthState::Blocked;
+                    account.last_error_code = Some("deactivated_workspace".to_string());
+                }
+                Ok(needs_update)
+            })?;
+            changed |= updated.unwrap_or(false);
+        }
+        Ok(changed)
     }
 
     pub fn save_accounts(&self, records: &[ServerAccountRecord]) -> Result<(), String> {

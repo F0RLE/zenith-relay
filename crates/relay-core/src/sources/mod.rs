@@ -239,71 +239,18 @@ pub fn normalize_source_protocol_bindings(
     Ok(normalized)
 }
 
-/// Adds the runtime-only Responses route that is implied by a confirmed
-/// native Messages route.
+/// Returns the explicitly configured source protocol bindings for runtime use.
 ///
-/// Relay's primary desktop client speaks Responses, while a provider may
-/// expose a model only through Anthropic Messages. Once the source has
-/// explicitly declared that Messages route, the protocol capability is
-/// already confirmed; requiring the operator to duplicate the same model in
-/// a second UI route only creates a configuration gap. The generated bridge
-/// never overlaps an explicitly configured Responses route, so an explicit
-/// native or Gemini route always wins for that model.
-///
-/// This helper is intentionally separate from persistence normalization. The
-/// linked route is a runtime capability, not a new provider claim written
-/// back to the source record.
+/// Adapters are deliberate routing decisions, not an inferred fallback. In
+/// particular, a native Messages binding must not silently create a
+/// Responses-to-Messages route: the latter changes the request contract and
+/// must be selected and persisted explicitly by the operator.
 pub fn runtime_source_protocol_bindings(
     bindings: Vec<SourceProtocolBinding>,
     fallback_wire_api: WireApi,
     models: &[String],
 ) -> Result<Vec<SourceProtocolBinding>> {
-    let mut normalized = normalize_source_protocol_bindings(bindings, fallback_wire_api, models)?;
-    let explicitly_other_responses = normalized
-        .iter()
-        .filter(|binding| {
-            binding.wire_api == WireApi::Responses
-                && binding.adapter != SourceAdapter::ResponsesToMessages
-        })
-        .flat_map(|binding| binding.model_ids.iter())
-        .map(|model| model.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-
-    let linked_models = normalized
-        .iter()
-        .filter(|binding| {
-            binding.wire_api == WireApi::Messages && binding.adapter == SourceAdapter::Native
-        })
-        .flat_map(|binding| binding.model_ids.iter().map(move |model| (model, binding)))
-        .filter(|(model, _)| !explicitly_other_responses.contains(&model.to_ascii_lowercase()))
-        .map(|(model, _)| model.clone())
-        .collect::<Vec<_>>();
-
-    let linked_models = crate::catalog::normalize_model_ids(linked_models);
-    if linked_models.is_empty() {
-        return Ok(normalized);
-    }
-
-    if let Some(binding) = normalized.iter_mut().find(|binding| {
-        binding.wire_api == WireApi::Responses
-            && binding.adapter == SourceAdapter::ResponsesToMessages
-    }) {
-        binding.model_ids =
-            crate::catalog::normalize_model_ids(binding.model_ids.iter().chain(&linked_models));
-        return Ok(normalized);
-    }
-
-    // A native Messages binding cannot carry Responses reasoning fields
-    // directly. The generated Responses bridge translates the effort selected
-    // by the client; the pool's model rule remains the only reasoning policy.
-    normalized.push(SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::ResponsesToMessages,
-        reasoning_mode: MessagesReasoningMode::Adaptive,
-        cache_write_ttl: CacheWriteTtl::Provider,
-        model_ids: linked_models,
-    });
-    Ok(normalized)
+    normalize_source_protocol_bindings(bindings, fallback_wire_api, models)
 }
 
 /// Returns the normalized source models available through one client protocol.
@@ -573,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_links_native_messages_models_to_the_responses_client() {
+    fn runtime_keeps_native_messages_without_an_implicit_responses_route() {
         let bindings = runtime_source_protocol_bindings(
             vec![SourceProtocolBinding {
                 wire_api: WireApi::Messages,
@@ -587,12 +534,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].wire_api, WireApi::Messages);
-        assert_eq!(bindings[1].wire_api, WireApi::Responses);
-        assert_eq!(bindings[1].adapter, SourceAdapter::ResponsesToMessages);
-        assert_eq!(bindings[1].model_ids, ["claude-test"]);
-        assert_eq!(bindings[1].cache_write_ttl, CacheWriteTtl::Provider);
+        assert_eq!(bindings[0].adapter, SourceAdapter::Native);
+        assert_eq!(bindings[0].model_ids, ["claude-test"]);
+        assert_eq!(bindings[0].cache_write_ttl, CacheWriteTtl::OneHour);
     }
 
     #[test]
@@ -633,10 +579,6 @@ mod tests {
                     wire_api: WireApi::Messages,
                     adapter: SourceAdapter::Native,
                 },
-                SourceProtocolBindingKey {
-                    wire_api: WireApi::Responses,
-                    adapter: SourceAdapter::ResponsesToMessages,
-                },
             ]
         );
 
@@ -673,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_extends_an_explicit_messages_bridge_without_changing_its_policy() {
+    fn runtime_preserves_an_explicit_messages_bridge_without_changing_its_policy() {
         let bindings = runtime_source_protocol_bindings(
             vec![
                 SourceProtocolBinding {
@@ -697,7 +639,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(bindings.len(), 2);
-        assert_eq!(bindings[1].model_ids, ["claude-a", "claude-b"]);
+        assert_eq!(bindings[1].model_ids, ["claude-a"]);
         assert_eq!(bindings[1].reasoning_mode, MessagesReasoningMode::Adaptive);
         assert_eq!(bindings[1].cache_write_ttl, CacheWriteTtl::OneHour);
     }

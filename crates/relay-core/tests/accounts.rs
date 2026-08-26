@@ -758,7 +758,7 @@ async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy
             expected_tier
         );
         assert_eq!(request.responses_lite.as_deref(), Some("true"));
-        assert_eq!(request.body["parallel_tool_calls"], true);
+        assert_eq!(request.body["parallel_tool_calls"], false);
         assert_eq!(request.body["reasoning"]["effort"], "xhigh");
         assert_eq!(request.body["reasoning"]["summary"], "detailed");
         assert_eq!(request.body["reasoning"]["context"], "all_turns");
@@ -1195,7 +1195,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[0].body["parallel_tool_calls"], true);
+    assert_eq!(requests[0].body["parallel_tool_calls"], false);
     let tools = requests[0].body["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 3);
     assert_eq!(tools[0]["name"], "local_tool");
@@ -1895,7 +1895,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["type"], "response.create");
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
-    assert_eq!(requests[0]["parallel_tool_calls"], true);
+    assert_eq!(requests[0]["parallel_tool_calls"], false);
     // Fast is only synthesized after a route's catalog confirms priority.
     // This WebSocket-only fixture has no model discovery request, so the
     // standard tier remains implicit.

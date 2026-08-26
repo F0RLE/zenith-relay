@@ -22,6 +22,7 @@ const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const PROMPT_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const PROMPT_AFFINITY_TTL_MS: u64 = 60 * 60 * 1_000;
+const PROMPT_AFFINITY_MAX_IN_FLIGHT_SKEW: u32 = 1;
 const PROMPT_AFFINITY_QUOTA_SLACK_BPS: u64 = 500;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 const PROVIDER_STORM_WINDOW_MS: u64 = 10_000;
@@ -513,6 +514,9 @@ impl PoolScheduler {
                 .get(key, request.now_ms)
                 .map(str::to_string)
         });
+        let explicit_prompt_cache_key = request
+            .prompt_affinity_key
+            .is_some_and(|key| key.starts_with("cache:"));
 
         let eligible = self
             .candidates
@@ -543,7 +547,12 @@ impl PoolScheduler {
             })
             .filter(|preferred| {
                 preferred.id != baseline.id
-                    && self.prompt_affinity_allows(preferred, baseline, lane)
+                    && self.prompt_affinity_allows(
+                        preferred,
+                        baseline,
+                        lane,
+                        explicit_prompt_cache_key,
+                    )
             })
             .unwrap_or(baseline);
         let prompt_affinity_hit = selected.id != baseline.id;
@@ -599,6 +608,7 @@ impl PoolScheduler {
             },
             in_flight_before: self.in_flight_count(candidate_id, lane),
             dispatches_before: self.dispatch_count(candidate_id, lane),
+            endpoint_kind: None,
         })
     }
 
@@ -801,6 +811,23 @@ impl PoolScheduler {
         true
     }
 
+    /// Persist prompt affinity without allowing a temporary spillover
+    /// candidate to become the new durable owner.  The existing owner is
+    /// refreshed when the same candidate completes successfully and can only
+    /// be replaced after it has been invalidated by the failure path.
+    pub fn bind_prompt_affinity_sticky(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> bool {
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        self.prompt_affinity
+            .bind_if_unbound_or_same(key, candidate_id, now_ms)
+    }
+
     pub fn restore_response_affinity(
         &mut self,
         key: impl Into<String>,
@@ -816,8 +843,27 @@ impl PoolScheduler {
         true
     }
 
+    pub fn restore_prompt_affinity(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: &str,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        if !self.candidates.contains_key(candidate_id) || expires_at_ms <= now_ms {
+            return false;
+        }
+        self.prompt_affinity
+            .restore(key, candidate_id, expires_at_ms, now_ms);
+        true
+    }
+
     pub fn has_response_affinity(&mut self, key: &str, now_ms: u64) -> bool {
         self.response_affinity.contains(key, now_ms)
+    }
+
+    pub fn has_prompt_affinity(&mut self, key: &str, now_ms: u64) -> bool {
+        self.prompt_affinity.contains(key, now_ms)
     }
 
     pub fn invalidate_response_affinity(&mut self, key: &str) -> bool {
@@ -1130,10 +1176,14 @@ impl PoolScheduler {
         preferred: &RuntimeCandidate,
         baseline: &RuntimeCandidate,
         lane: InFlightLane,
+        explicit_prompt_cache_key: bool,
     ) -> bool {
+        let preferred_in_flight = self.in_flight_count(&preferred.id, lane);
+        let baseline_in_flight = self.in_flight_count(&baseline.id, lane);
         if routing_tier(preferred) != routing_tier(baseline)
             || candidate_kind_preference(preferred) != candidate_kind_preference(baseline)
-            || self.in_flight_count(&preferred.id, lane) != self.in_flight_count(&baseline.id, lane)
+            || preferred_in_flight
+                > baseline_in_flight.saturating_add(PROMPT_AFFINITY_MAX_IN_FLIGHT_SKEW)
         {
             return false;
         }
@@ -1145,6 +1195,15 @@ impl PoolScheduler {
         {
             return false;
         }
+        if explicit_prompt_cache_key {
+            // An explicit provider cache key is a strong cache contract. Keep
+            // its owner across quota differences while it remains eligible;
+            // hard exhaustion and protected reserves were filtered above.
+            return true;
+        }
+        // A derived session fingerprint is only a best-effort hint. Preserve
+        // the regular quota-aware rotation for clients that do not send a
+        // provider cache key.
         match (self.routing_quota(preferred), self.routing_quota(baseline)) {
             (CandidateQuota::Available(preferred), CandidateQuota::Available(baseline)) => {
                 preferred.saturating_add(PROMPT_AFFINITY_QUOTA_SLACK_BPS) >= baseline
@@ -1180,6 +1239,17 @@ impl PoolScheduler {
                 request_count,
             })
             .collect()
+    }
+
+    pub(crate) fn runtime_activity_for(
+        &self,
+        candidate_id: &str,
+    ) -> (u32, u32, Vec<ActiveModelRuntime>) {
+        (
+            self.in_flight_count(candidate_id, InFlightLane::Text),
+            self.active_request_count(candidate_id),
+            self.active_models_for(candidate_id),
+        )
     }
 
     fn dispatch_count(&self, candidate_id: &str, lane: InFlightLane) -> u64 {

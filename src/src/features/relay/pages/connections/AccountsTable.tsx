@@ -51,6 +51,7 @@ import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
 import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
+import { compareStableText } from "../../poolHelpers";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
 
@@ -95,7 +96,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   const errorCount = allAccounts.filter(currentAccountErrorCode).length;
   const inPoolCount = allAccounts.filter(accountParticipates).length;
   const disabledCount = allAccounts.filter((account) => !account.enabled).length;
-  const storedPosition = new Map(allAccounts.map((account, index) => [account.id, index]));
   const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
   const runtimeByAccount = new Map(allAccounts.map((account) => [
@@ -126,8 +126,8 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     .filter((account) => activePlan === "all" || (activePlan === "errors" ? Boolean(currentAccountErrorCode(account)) : accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan))
     .filter((account) => participationFilter === "all" || (participationFilter === "included") === accountParticipates(account))
     .sort((left, right) => groupByPlan
-      ? compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareRoutingOrder(left.id, right.id, runtimePosition, storedPosition)
-      : compareRoutingOrder(left.id, right.id, runtimePosition, storedPosition));
+      ? compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareRoutingOrder(left.id, right.id, runtimePosition) || compareStableText(left.identityHint || left.label, right.identityHint || right.label)
+      : compareRoutingOrder(left.id, right.id, runtimePosition) || compareStableText(left.identityHint || left.label, right.identityHint || right.label));
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
   const selectedAccounts = accounts.filter((account) => selected.includes(account.id));
@@ -351,7 +351,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           ? t("pool.recoveryProbe")
           : modelRetryHint;
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
-        const poolLabel = participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
+        const poolActionLabel = participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool");
         const quotaStatus = account.quotaRefreshStatus;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
         const indicatorTone = onServer
@@ -382,7 +382,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
             <div className="account-card-header-actions">
               <ActionMenu className="account-row-menu">
                 {errorCode ? <ActionMenuItem icon={<CircleAlert aria-hidden />} onClick={() => setErrorDetails(account)}>{t("accounts.errorDetailsTitle")}</ActionMenuItem> : null}
-                {mode === "local" && (account.authState.state === "requires_reauth" || account.subscription.status === "expired") ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
+                {mode === "local" && account.authState.state === "requires_reauth" ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
@@ -402,7 +402,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           <footer className="account-card-footer"><div className="account-card-actions">
             {onServer
               ? <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />
-              : <IconButton className={participates ? "danger" : ""} label={poolLabel} icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `pool-${account.id}`} onClick={() => void perform(`pool-${account.id}`, () => updateParticipation(account, !participates), "feedback.saved")} />}
+              : <IconButton className={participates ? "danger" : ""} label={poolActionLabel} icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `pool-${account.id}`} onClick={() => void perform(`pool-${account.id}`, () => updateParticipation(account, !participates), "feedback.saved")} />}
             <IconButton label={t("accounts.refreshQuota")} icon={busy === `connection-account-quota-${account.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !account.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(account)} />
             <IconButton label={`${t("proxies.proxy")}: ${proxyLabel}`} icon={<Pencil aria-hidden />} disabled={onServer || !canManageProxies} onClick={() => onProxy(account)} />
             {mode === "local" ? <IconButton label={t("accounts.launchAccount")} icon={<Play aria-hidden />} disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`} title={onServer ? t("accounts.onServerHint") : !account.secretAvailable ? t("accounts.credentialsUnavailable") : t("accounts.launchAccount")} onClick={() => void activateCodexProfile(`launch-account-${account.id}`, () => relayCommands.launchCodexAccount(account.id), true)} /> : null}

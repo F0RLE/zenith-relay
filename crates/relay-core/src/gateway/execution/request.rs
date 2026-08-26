@@ -16,8 +16,8 @@ use super::super::request::requested_reasoning_effort;
 use super::super::request::{
     apply_default_service_tier_if_missing, candidate_protocols, contains_tool_call_output,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
-    request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
-    with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
+    request_service_tier, responses_lite_parallel_tool_calls_valid, tool_use_diagnostics,
+    try_recover_encrypted_content, with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_error_response,
@@ -86,15 +86,12 @@ pub(in crate::gateway::execution) async fn execute_request(
             .get("previous_response_id")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
-    let prompt_affinity_key = (wire_api != WireApi::Messages)
-        .then(|| {
-            runtime.prompt_affinity_key(
-                &key.id,
-                &resolved_model,
-                request.get("prompt_cache_key").and_then(Value::as_str),
-            )
-        })
-        .flatten();
+    let prompt_affinity_key = runtime.prompt_affinity_key(
+        &key.id,
+        &resolved_model,
+        request.get("prompt_cache_key").and_then(Value::as_str),
+        client_context_id.as_deref(),
+    );
 
     while attempts_this_run
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
@@ -236,6 +233,13 @@ pub(in crate::gateway::execution) async fn execute_request(
             let Value::Object(object) = upstream_body else {
                 unreachable!("request object was validated before execution")
             };
+            if route_responses_lite.is_some() && !responses_lite_parallel_tool_calls_valid(object) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "responses Lite requires parallel_tool_calls to be a boolean",
+                    "invalid_request",
+                );
+            }
             normalize_account_request(object, route_responses_lite.is_some());
         }
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(

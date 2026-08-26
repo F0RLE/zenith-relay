@@ -19,7 +19,7 @@ export function AccountValueStrip({ account }: { account: AccountSummary }) {
       purchase: formatAccountValueMicroUsd(purchaseCost, locale),
     });
 
-  return <dl className="account-value-strip" data-columns={remainingApiEquivalent == null ? 2 : 3}>
+  return <dl className="account-value-strip" data-columns={remainingApiEquivalent ? 3 : 2}>
     <div title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}>
       <dt>{t("accounts.accountValue.used")}</dt>
       <dd>{formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale, approximate)}</dd>

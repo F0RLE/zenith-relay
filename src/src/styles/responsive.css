@@ -103,6 +103,11 @@
     border-left: 0;
   }
 
+  .source-route-stage {
+    gap: 4px;
+    padding-inline: 6px;
+  }
+
   .source-routing-controls {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -161,10 +166,6 @@
   .source-cache-settings {
     grid-template-columns: minmax(0, 1fr);
     gap: 7px;
-  }
-
-  .source-cache-ttl-grid {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .source-route-model-row {
@@ -557,8 +558,7 @@
   }
 
   .model-rules > header {
-    align-items: stretch;
-    flex-direction: column;
+    padding-bottom: 10px;
   }
 
 }
@@ -648,8 +648,17 @@
     flex-direction: column;
     gap: 8px;
   }
-  .overview-analytics-header .relay-tabs {
+  .overview-analytics-controls {
     width: 100%;
+    justify-content: stretch;
+  }
+  .overview-scope-menu,
+  .overview-scope-menu .relay-option-trigger {
+    flex: 1;
+    max-width: none;
+  }
+  .overview-analytics-header .relay-tabs {
+    flex: 1;
   }
   .overview-analytics-header .relay-tabs button {
     min-width: 0;
@@ -657,6 +666,17 @@
   }
   .overview-chart {
     padding: 14px 12px;
+  }
+  .overview-token-trend {
+    padding: 14px 12px;
+  }
+  .overview-token-trend-legend {
+    margin-left: 48px;
+    gap: 6px 10px;
+  }
+  .overview-token-trend-body {
+    grid-template-columns: 42px minmax(0, 1fr) 34px;
+    gap: 6px;
   }
   .overview-chart-body {
     grid-template-columns: 42px minmax(0, 1fr);

@@ -1660,6 +1660,12 @@ fn finish_terminal(
     if matches!(outcome, EventTerminalOutcome::Incomplete) {
         in_flight.event.error_category = Some("response_incomplete".to_string());
     }
+    if terminal.deactivated_workspace
+        && terminal.status == Some(StatusCode::PAYMENT_REQUIRED)
+        && in_flight.route.account_id.is_some()
+    {
+        runtime.trip_chatgpt_team_breaker(&in_flight.route.candidate_id, now_ms());
+    }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
         match outcome {

@@ -70,7 +70,12 @@ test("source editor exposes native Gemini separately from the Responses bridge",
   await expect(matrix.locator('[data-wire-api="gemini"]')).toHaveCount(1);
   await expect(matrix.locator('[data-wire-api="gemini"] strong')).toHaveText("Gemini");
   await expect(matrix.locator('[data-wire-api="gemini"] input')).toBeChecked();
+  await expect(matrix.locator(".source-route-bridge-heading")).toHaveCount(0);
+  await page.screenshot({ path: "output/playwright/native-gemini-route-en-1160x760.png" });
+
+  await dialog.getByRole("tab", { name: "Adapters", exact: true }).click();
+  await expect(matrix.locator('[data-wire-api="gemini"]')).toHaveCount(0);
   await expect(matrix.locator(".source-route-bridge-heading")).toHaveCount(2);
   await expect(matrix.locator(".source-route-bridge-heading").nth(1)).toContainText("Responses → Gemini");
-  await page.screenshot({ path: "output/playwright/native-gemini-route-en-1160x760.png" });
+  await page.screenshot({ path: "output/playwright/native-gemini-adapters-en-1160x760.png" });
 });

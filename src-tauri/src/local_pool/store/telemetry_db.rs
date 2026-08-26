@@ -360,6 +360,7 @@ mod tests {
                 quota_remaining_basis_points: Some(6_300),
                 in_flight_before: 0,
                 dispatches_before: 3,
+                endpoint_kind: None,
             }),
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),

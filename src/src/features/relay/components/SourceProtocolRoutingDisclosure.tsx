@@ -27,6 +27,7 @@ export function SourceProtocolRoutingDisclosure({
   showSimplePicker = false,
   autoAssignModels = true,
   exclusiveSimplePicker = false,
+  routeGroup = "all",
 }: {
   models: string[];
   value: SourceProtocolBinding[];
@@ -35,6 +36,7 @@ export function SourceProtocolRoutingDisclosure({
   showSimplePicker?: boolean;
   autoAssignModels?: boolean;
   exclusiveSimplePicker?: boolean;
+  routeGroup?: "all" | "native" | "adapters";
 }) {
   return (
     <SourceProtocolBindingsEditor
@@ -45,6 +47,7 @@ export function SourceProtocolRoutingDisclosure({
       showSimplePicker={showSimplePicker}
       autoAssignModels={autoAssignModels}
       exclusiveSimplePicker={exclusiveSimplePicker}
+      routeGroup={routeGroup}
     />
   );
 }

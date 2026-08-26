@@ -121,7 +121,7 @@ describe("source protocol bindings", () => {
     expect(sourceSupportsWireApi(source, "responses")).toBe(false);
   });
 
-  test("links confirmed Messages models into the Responses route", () => {
+  test("keeps native Messages separate from the Responses route", () => {
     const source = {
       wireApi: "responses",
       models: ["gpt-native", "claude-messages"],
@@ -136,23 +136,15 @@ describe("source protocol bindings", () => {
           wireApi: "messages",
           adapter: "native",
           reasoningMode: "disabled",
+          cacheWriteTtl: "1h",
           modelIds: ["claude-messages"],
         },
       ],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceModelsForWireApi(source, "responses")).toEqual([
-      "gpt-native",
-      "claude-messages",
-    ]);
+    expect(sourceModelsForWireApi(source, "responses")).toEqual(["gpt-native"]);
     expect(sourceModelsForWireApi(source, "messages")).toEqual(["claude-messages"]);
-    expect(runtimeSourceProtocolBindings(source).at(-1)).toEqual({
-      wireApi: "responses",
-      adapter: "responses_to_messages",
-      reasoningMode: "adaptive",
-      cacheWriteTtl: "provider",
-      modelIds: ["claude-messages"],
-    });
+    expect(runtimeSourceProtocolBindings(source)).toEqual(effectiveSourceProtocolBindings(source));
   });
 
   test("uses the source catalog for a sole legacy-compatible empty binding", () => {
@@ -192,7 +184,7 @@ describe("source protocol bindings", () => {
       ],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceModelsForWireApi(source, "responses")).toEqual(["claude-messages"]);
+    expect(sourceModelsForWireApi(source, "responses")).toEqual([]);
     expect(sourceSupportsNativeResponses(source)).toBe(false);
     expect(sourceModelsForWireApi(source, "messages")).toEqual(["claude-messages"]);
   });

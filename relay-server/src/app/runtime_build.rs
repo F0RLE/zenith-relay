@@ -110,6 +110,10 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(codex_websockets_enabled);
+    let breaker_store = state.store.clone();
+    runtime.set_chatgpt_team_breaker_callback(move |account_ids| {
+        let _ = breaker_store.block_accounts_for_team(&account_ids);
+    });
     state.replace_runtime(Some(Arc::new(runtime)))
 }
 

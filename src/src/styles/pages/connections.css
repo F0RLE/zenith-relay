@@ -1209,6 +1209,21 @@
   font-size: 12px;
 }
 
+.account-quota-refresh-state.is-action {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.account-quota-refresh-state.is-action:hover,
+.account-quota-refresh-state.is-action:focus-visible {
+  background: var(--relay-error-soft, color-mix(in srgb, var(--relay-error) 10%, transparent));
+  outline: 1px solid color-mix(in srgb, var(--relay-error) 35%, transparent);
+  outline-offset: -1px;
+}
+
 .account-quota-refresh-state svg {
   width: 16px;
   height: 16px;

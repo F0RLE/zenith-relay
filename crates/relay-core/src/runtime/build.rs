@@ -31,6 +31,7 @@ pub(super) struct SourceRuntimeParts {
 pub(super) struct AccountRuntimeParts {
     pub(super) executors: BTreeMap<String, ChatGptAccountExecutor>,
     pub(super) passive_quotas: BTreeMap<String, PassiveQuotaState>,
+    pub(super) team_members: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct ConfiguredKeyRule {
@@ -182,6 +183,7 @@ pub(super) fn build_accounts(
     }
     let mut executors = BTreeMap::new();
     let mut passive_quotas = BTreeMap::new();
+    let mut team_members = BTreeMap::<String, BTreeSet<String>>::new();
     for account in accounts {
         require_runtime_value("account candidate id", &account.id)?;
         require_runtime_value("account source id", &account.source_id)?;
@@ -249,6 +251,10 @@ pub(super) fn build_accounts(
         registry.replace(candidate.id.clone(), published_models.iter());
         let candidate_id = candidate.id.clone();
         scheduler.upsert(candidate);
+        team_members
+            .entry(account.chatgpt_account_id.trim().to_ascii_lowercase())
+            .or_default()
+            .insert(candidate_id.clone());
         scheduler
             .set_candidate_subscription_expiry(&candidate_id, account.subscription_expires_at_ms);
         scheduler.set_candidate_subscription_plan(
@@ -278,6 +284,7 @@ pub(super) fn build_accounts(
     Ok(AccountRuntimeParts {
         executors,
         passive_quotas,
+        team_members,
     })
 }
 

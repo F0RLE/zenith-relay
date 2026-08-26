@@ -217,8 +217,36 @@ pub(super) fn classify_upstream_error_value(
     classify_upstream_error_text(status, &upstream_error_text(value))
 }
 
+pub(crate) fn is_deactivated_workspace_value(value: &Value) -> bool {
+    [
+        "/detail/code",
+        "/error/code",
+        "/body/error/code",
+        "/response/error/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .any(|code| code.eq_ignore_ascii_case("deactivated_workspace"))
+}
+
+pub(crate) fn is_deactivated_workspace(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| is_deactivated_workspace_value(&value))
+}
+
 fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamErrorClassification {
     let category = if text_has_any(
+        text,
+        &[
+            "response_continuation_unavailable",
+            "responses continuation route is unknown",
+            "responses continuation is bound to a provider slot",
+            "responses continuation requires the same native provider endpoint",
+        ],
+    ) {
+        "response_affinity_miss"
+    } else if text_has_any(
         text,
         &[
             "previous_response_not_found",
@@ -531,6 +559,7 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
 
 pub(super) fn upstream_failure_message(category: &str) -> &'static str {
     match category {
+        "response_affinity_miss" => "Responses continuation route is unavailable",
         "upstream_previous_response_not_found" => "previous response is unavailable",
         "upstream_tool_call_mismatch" => "tool output does not match an active tool call",
         "upstream_context_too_large" => "request context exceeds the model limit",
@@ -583,7 +612,8 @@ pub(super) fn upstream_failure_status(category: &str) -> StatusCode {
         "upstream_request_timeout" => StatusCode::REQUEST_TIMEOUT,
         "upstream_conflict" => StatusCode::CONFLICT,
         "upstream_payload_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
-        "upstream_previous_response_not_found"
+        "response_affinity_miss"
+        | "upstream_previous_response_not_found"
         | "upstream_tool_call_mismatch"
         | "upstream_context_too_large"
         | "upstream_encrypted_content_invalid"

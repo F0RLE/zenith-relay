@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tauri::{Emitter, Manager, UserAttentionType};
-use zenith_relay_core::{ResponseAffinityStore, UsageCallback};
+use zenith_relay_core::{ResponseAffinityStore, RuntimeActivitySnapshot, UsageCallback};
 
 impl DesktopState {
     pub(crate) fn account_metadata_sink(&self) -> Arc<StoreAccountMetadata> {
@@ -30,6 +30,30 @@ impl DesktopState {
 
     pub(crate) fn set_app_handle(&self, app: tauri::AppHandle) {
         self.oauth_events.set_app_handle(app);
+    }
+
+    pub(crate) fn runtime_activity_callback(
+        &self,
+    ) -> impl Fn(RuntimeActivitySnapshot) + Send + Sync + 'static {
+        let events = self.oauth_events.clone();
+        move |activity| events.emit_runtime_activity(activity)
+    }
+
+    pub(crate) fn runtime_team_breaker_callback(
+        &self,
+    ) -> impl Fn(Vec<String>) + Send + Sync + 'static {
+        let store = self.store.clone();
+        let events = self.oauth_events.clone();
+        move |account_ids| {
+            let changed = store
+                .lock()
+                .ok()
+                .and_then(|mut store| store.block_accounts_for_team(&account_ids).ok())
+                .unwrap_or(false);
+            if changed {
+                events.emit_state_changed();
+            }
+        }
     }
 
     pub fn usage_callback(&self) -> UsageCallback {
@@ -73,6 +97,12 @@ impl DesktopOAuthEvents {
     pub(in crate::local_pool) fn emit_state_changed(&self) {
         if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
             let _ = app.emit("zenith-state-changed", ());
+        }
+    }
+
+    pub(in crate::local_pool) fn emit_runtime_activity(&self, activity: RuntimeActivitySnapshot) {
+        if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
+            let _ = app.emit("zenith-runtime-activity", activity);
         }
     }
 

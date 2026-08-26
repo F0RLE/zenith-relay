@@ -42,14 +42,15 @@ pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
 pub use runtime::{
     normalize_image_base_model, normalize_model_service_tier_overrides, DefaultServiceTier,
     GatewayRuntime, GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore,
-    RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
-    RuntimeSourcePolicyUpdate,
+    RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey,
+    RuntimeSource, RuntimeSourcePolicyUpdate,
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
     CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
     ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    Selection, SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
+    Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
+    RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,

@@ -6,6 +6,25 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+- Tool-call continuations from Messages and Gemini API sources now stay on the
+  exact source route that created the response, preventing route rotation from
+  interrupting an active Codex task with a continuation mismatch.
+- Responses Lite requests now follow the provider tool contract by sending
+  serial tool execution explicitly and rejecting malformed values.
+- Prompt-cache affinity no longer moves permanently to a temporary spillover
+  account; the original account remains preferred until a real failure, even
+  when another eligible account reports a fresher or larger quota. Provider
+  source priority, exhaustion, health, and bounded load spillover still apply.
+  Opaque prompt/session bindings now persist across Relay restarts, and
+  rotating window or installation headers no longer split one session into
+  separate affinity keys. Persisted bindings are restored before the first
+  post-restart selection, so the cache owner is used immediately.
+- Server pools can automatically redeem an available reset credit when a
+  configured weekly quota reaches zero, with per-account locking and cycle
+  deduplication.
+- Usage diagnostics now record the safe upstream route kind used for each
+  request (without hosts, credentials, prompts, or response bodies).
+
 - Updated the bundled official OpenAI API reference prices for GPT-5.6 Sol,
   Terra, and Luna, including cached-input and cache-write rates.
 - The API-source editor now separates connection settings, manual model and

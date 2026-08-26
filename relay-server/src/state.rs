@@ -9,7 +9,7 @@ use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
 };
 use zenith_relay_core::{
@@ -242,6 +242,7 @@ pub struct AppState {
     pub started_at_ms: u64,
     pub wake_lock: tokio::sync::Mutex<()>,
     pub configuration_lock: tokio::sync::Mutex<()>,
+    pub quota_reset_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) failed_usage_writes: AtomicU64,
     pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
@@ -265,10 +266,22 @@ impl AppState {
             started_at_ms: now_ms(),
             wake_lock: tokio::sync::Mutex::new(()),
             configuration_lock: tokio::sync::Mutex::new(()),
+            quota_reset_locks: Mutex::new(HashMap::new()),
             failed_usage_writes: AtomicU64::new(0),
             usage_writer: Mutex::new(None),
             runtime: RwLock::new(None),
         }))
+    }
+
+    pub(crate) fn quota_reset_lock(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .quota_reset_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks
+            .entry(account_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     pub fn runtime(&self) -> Result<Option<Arc<GatewayRuntime>>, String> {

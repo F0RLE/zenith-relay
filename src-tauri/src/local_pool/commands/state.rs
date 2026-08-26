@@ -20,7 +20,6 @@ use zenith_relay_core::protocol::{
     RuntimeTargetSummary, SourceSummary, UsageQuery,
 };
 use zenith_relay_core::{
-    quota::{QuotaSnapshot, QuotaWindowKind},
     unix_time_ms, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
     QUOTA_STALE_AFTER_MS,
 };
@@ -72,14 +71,19 @@ pub async fn get_local_runtime_state(
     )?;
     let mut quota_window_usages = BTreeMap::new();
     for record in &inputs.accounts {
-        let Some((kind, window_start_ms)) = quota_window_usage_window(&record.account.quota) else {
+        let Some(window) =
+            zenith_relay_core::protocol::api_equivalent_projection_window(&record.account.quota)
+        else {
             continue;
         };
+        let window_start_ms = window.window_start_ms.unwrap_or_default();
+        let window_minutes = window.window_minutes.unwrap_or_default();
         let usage = state.telemetry.usage_page_with_price_overrides(
             &UsageQuery {
                 page: 1,
                 page_size: 1,
                 from_ms: Some(window_start_ms),
+                to_ms: Some(window.observed_at_ms),
                 source_or_account_query: Some(record.account.id.clone()),
                 ..UsageQuery::default()
             },
@@ -89,8 +93,10 @@ pub async fn get_local_runtime_state(
         quota_window_usages.insert(
             record.account.id.clone(),
             QuotaWindowUsage {
-                kind,
+                kind: window.kind,
                 window_start_ms,
+                observed_at_ms: window.observed_at_ms,
+                window_minutes,
                 api_equivalent: usage.totals.api_equivalent,
             },
         );
@@ -433,11 +439,6 @@ fn local_account_summary(
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
     })
-}
-
-fn quota_window_usage_window(quota: &QuotaSnapshot) -> Option<(QuotaWindowKind, u64)> {
-    let window = quota.secondary.as_ref().or(quota.primary.as_ref())?;
-    Some((window.kind, window.window_start_ms?))
 }
 
 fn oauth_account_runtime_available(

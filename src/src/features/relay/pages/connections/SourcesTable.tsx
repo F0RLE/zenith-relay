@@ -10,7 +10,8 @@ import { effectiveSourceProtocolBindings, sourceSupportsAnyWireApi, sourceSuppor
 import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
-import { runtimeCandidateForMember } from "../../routingOrder";
+import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
+import { compareStableText } from "../../poolHelpers";
 export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: SourceSummary) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
@@ -26,13 +27,16 @@ export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
   }
-  const sources = runtime.sources.filter((source) => matchesQuery(
-    query,
-    source.name,
-    source.baseUrl,
-    effectiveSourceProtocolBindings(source).map((binding) => binding.wireApi),
-    source.models,
-  ));
+  const runtimePosition = routingOrderPositions(runtime.gateway.routingOrder ?? []);
+  const sources = runtime.sources
+    .filter((source) => matchesQuery(
+      query,
+      source.name,
+      source.baseUrl,
+      effectiveSourceProtocolBindings(source).map((binding) => binding.wireApi),
+      source.models,
+    ))
+    .sort((left, right) => compareRoutingOrder(left.id, right.id, runtimePosition) || compareStableText(left.name, right.name));
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
   const runtimeOrder = runtime.gateway.routingOrder ?? [];

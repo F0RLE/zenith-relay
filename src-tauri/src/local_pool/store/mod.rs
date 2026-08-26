@@ -229,6 +229,27 @@ impl LocalPoolStore {
         self.replace_all_records(self.sources.clone(), accounts, keys, automations)
     }
 
+    /// Persists a Team breaker fan-out without synthesizing a usage event.
+    /// This updates only the listed local accounts and keeps telemetry intact.
+    pub fn block_accounts_for_team(&mut self, account_ids: &[String]) -> Result<bool> {
+        let mut changed = false;
+        let mut accounts = self.accounts.clone();
+        for account in &mut accounts {
+            if account_ids.iter().any(|id| id == &account.account.id)
+                && (account.account.health != zenith_relay_core::accounts::AccountHealthState::Blocked
+                    || account.account.last_error_code.as_deref() != Some("deactivated_workspace"))
+            {
+                account.account.health = zenith_relay_core::accounts::AccountHealthState::Blocked;
+                account.account.last_error_code = Some("deactivated_workspace".to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            self.replace_all_records(self.sources.clone(), accounts, self.keys.clone(), self.automations.clone())?;
+        }
+        Ok(changed)
+    }
+
     pub fn delete_account_state(
         &mut self,
         account_id: &str,

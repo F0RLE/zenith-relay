@@ -253,7 +253,7 @@ async fn send_wake_request(
     Ok((status, bytes))
 }
 
-fn core_account(account: &ServerAccountRecord) -> Result<AccountRecord, String> {
+pub(crate) fn core_account(account: &ServerAccountRecord) -> Result<AccountRecord, String> {
     let identity = AccountIdentity::from_hashed_parts(
         "openai_codex",
         "chatgpt.com",

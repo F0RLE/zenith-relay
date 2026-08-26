@@ -18,7 +18,7 @@ pub(super) use headers::{
 };
 pub(super) use normalization::{
     apply_default_service_tier_if_missing, normalize_account_request, request_service_tier,
-    try_recover_encrypted_content,
+    responses_lite_parallel_tool_calls_valid, try_recover_encrypted_content,
 };
 
 use super::execution::execute_client_request;
@@ -563,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_lite_keeps_provider_owned_tools_and_choices_opaque() {
+    fn responses_lite_keeps_provider_owned_tools_and_choices_opaque_and_serializes_tools() {
         let mut request = json!({
             "model": "gpt-lite",
             "tools": [
@@ -600,6 +600,11 @@ mod tests {
         assert_eq!(request["tool_choice"], original_choice);
         assert_eq!(request["input"], original_input);
         assert_eq!(request["reasoning"]["context"], "all_turns");
+        assert_eq!(request["parallel_tool_calls"], false);
+
+        let mut no_tools = json!({"model": "gpt-lite"});
+        normalize_account_request(no_tools.as_object_mut().unwrap(), true);
+        assert_eq!(no_tools["parallel_tool_calls"], false);
     }
 
     #[test]

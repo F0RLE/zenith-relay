@@ -149,7 +149,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   const moveColumnBy = (column: AggregateColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<AggregateColumnId, { label: string; cell: (group: AggregateRow) => ReactNode }> = {
-    name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <code>{group.name}</code> },
+    name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <span className="usage-aggregate-name" title={group.name}>{group.name}</span> },
     requests: { label: t("usage.requests"), cell: (group) => <CompactNumber value={group.requests} locale={i18n.language} /> },
     success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
     breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span>{group.cacheWriteInputSamples ? <span title={`${t("usage.cacheWriteInputTokens")}: ${formatFullNumber(group.cacheWriteInputTokens, i18n.language)}`}><small>{t("usage.cacheWriteShort")}</small>{formatCompactNumber(group.cacheWriteInputTokens, i18n.language)}</span> : null}<span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span></div> },
@@ -162,7 +162,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
     equivalent: { label: t("usage.value"), cell: (group) => formatUsageApiEquivalent(group.apiEquivalent, i18n.language) },
   };
   if (!aggregateRows.length) return <EmptyState title={t("usage.emptyTitle")} description={empty} />;
-  return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table usage-sortable-table">
+  return <div className="relay-table-wrap"><table className={`relay-table usage-aggregate-table usage-sortable-table ${field === "connection" ? "usage-connections-table" : "usage-models-table"}`}>
     <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
     <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
     <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>

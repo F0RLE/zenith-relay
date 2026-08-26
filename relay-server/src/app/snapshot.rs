@@ -20,7 +20,6 @@ use zenith_relay_core::{
         ModelSummary, OperationalStatus, ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot,
         RuntimeTargetSummary, SourceSummary, UsageQuery,
     },
-    quota::{QuotaSnapshot, QuotaWindowKind},
     ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime,
     QUOTA_STALE_AFTER_MS,
 };
@@ -237,26 +236,27 @@ fn account_quota_window_usage(
     state: &AppState,
     record: &ServerAccountRecord,
 ) -> Result<Option<QuotaWindowUsage>, String> {
-    let Some((kind, window_start_ms)) = quota_window_usage_window(&record.quota) else {
+    let Some(window) = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)
+    else {
         return Ok(None);
     };
+    let window_start_ms = window.window_start_ms.unwrap_or_default();
+    let window_minutes = window.window_minutes.unwrap_or_default();
     let usage = state.store.usage_page(&UsageQuery {
         page: 1,
         page_size: 1,
         from_ms: Some(window_start_ms),
+        to_ms: Some(window.observed_at_ms),
         source_or_account_query: Some(identity_hint(&record.id)),
         ..UsageQuery::default()
     })?;
     Ok(Some(QuotaWindowUsage {
-        kind,
+        kind: window.kind,
         window_start_ms,
+        observed_at_ms: window.observed_at_ms,
+        window_minutes,
         api_equivalent: usage.totals.api_equivalent,
     }))
-}
-
-fn quota_window_usage_window(quota: &QuotaSnapshot) -> Option<(QuotaWindowKind, u64)> {
-    let window = quota.secondary.as_ref().or(quota.primary.as_ref())?;
-    Some((window.kind, window.window_start_ms?))
 }
 
 fn model_summaries(

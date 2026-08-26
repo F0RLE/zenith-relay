@@ -1,8 +1,9 @@
 use super::super::errors::{
     api_error, api_error_with_origin, api_error_with_origin_and_category,
     apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
-    apply_failure_state, cooldown_error, preserved_upstream_error, previous_response_not_found,
-    recoverable_response_affinity_miss, responses_custom_tool_item_id_requires_ctc_prefix,
+    apply_failure_state, cooldown_error, is_deactivated_workspace, preserved_upstream_error,
+    previous_response_not_found, recoverable_response_affinity_miss,
+    responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, AttemptFailure, CooldownContext,
     PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
@@ -10,9 +11,9 @@ use super::super::errors::{
 use super::super::now_ms;
 use super::super::request::{
     account_endpoint_url, apply_default_service_tier_if_missing, client_context_fingerprint,
-    forwarded_codex_headers, request_id, request_service_tier, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, AccountEndpoint,
-    CODEX_RESPONSES_LITE_HEADER,
+    forwarded_codex_headers, request_id, request_service_tier,
+    responses_lite_parallel_tool_calls_valid, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
@@ -55,6 +56,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         &key.id,
         &resolved_model,
         request.get("prompt_cache_key").and_then(Value::as_str),
+        client_context_id.as_deref(),
     );
     let has_previous_response_id = request
         .get("previous_response_id")
@@ -150,6 +152,13 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         }
         if route_responses_lite.is_some() {
             if let Some(object) = upstream_body.as_object_mut() {
+                if !responses_lite_parallel_tool_calls_valid(object) {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "responses Lite requires parallel_tool_calls to be a boolean",
+                        "invalid_request",
+                    );
+                }
                 crate::gateway::request::normalize_account_request(object, true);
                 // Responses Lite is also used by the compact endpoint, but
                 // compact remains a non-streaming contract. The shared
@@ -296,6 +305,12 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            if status == StatusCode::PAYMENT_REQUIRED
+                && route.account_id.is_some()
+                && is_deactivated_workspace(&bytes)
+            {
+                runtime.trip_chatgpt_team_breaker(&route.candidate_id, now_ms());
+            }
             last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
             let mut event = usage_event(
                 &request_id,

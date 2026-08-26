@@ -108,7 +108,9 @@ function useTooltip<T extends HTMLElement>(label: string) {
     const tooltip = tooltipRef.current;
     if (!anchor || !tooltip) return;
     const margin = 9;
-    const gap = 8;
+    // The 7px pointer and a small breathing space keep the arrow connected to
+    // its trigger without making the tooltip feel attached to the control.
+    const gap = 10;
     let placement: "top" | "bottom" = "bottom";
     let top = anchor.bottom + gap;
     if (top + tooltip.offsetHeight > window.innerHeight - margin && anchor.top - tooltip.offsetHeight - gap >= margin) {

@@ -60,6 +60,8 @@ export type ApiEquivalentSummary = {
 export type QuotaWindowUsage = {
   kind: "primary" | "secondary";
   windowStartMs: number;
+  observedAtMs: number;
+  windowMinutes: number;
   apiEquivalent: ApiEquivalentSummary;
 };
 
@@ -204,6 +206,17 @@ export type CandidateRuntimeSnapshot = {
   nextRetryAtMs: number | null;
   halfOpen: boolean;
   dispatches: number;
+};
+
+export type RuntimeActivitySnapshot = {
+  revision: number;
+  candidateId: string;
+  inFlight: number;
+  activeRequestCount: number;
+  activeModels: Array<{
+    model: string;
+    requestCount: number;
+  }>;
 };
 
 export type WakeTask = {

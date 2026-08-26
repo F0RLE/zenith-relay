@@ -102,6 +102,30 @@ fn messages_cache_write_lifetime_overrides_existing_markers() {
 }
 
 #[test]
+fn messages_cache_write_lifetime_marks_stable_prefix_and_latest_turn() {
+    let mut request = json!({
+        "system": [{"type": "text", "text": "stable system"}],
+        "tools": [{"name": "lookup", "description": "stable tool", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "older turn"}]},
+            {"role": "user", "content": [{"type": "text", "text": "latest turn"}]}
+        ]
+    });
+
+    messages::apply_cache_write_ttl(&mut request, CacheWriteTtl::OneHour).unwrap();
+
+    assert_eq!(request["system"][0]["cache_control"]["ttl"], "1h");
+    assert!(request["tools"][0].get("cache_control").is_none());
+    assert!(request["messages"][0]["content"][0]
+        .get("cache_control")
+        .is_none());
+    assert_eq!(
+        request["messages"][1]["content"][0]["cache_control"]["ttl"],
+        "1h"
+    );
+}
+
+#[test]
 fn messages_bridge_converts_function_tools_and_preserves_tool_turn_state() {
     let first = prepare_responses_to_messages(
         &request(Value::String("inspect the project".to_string())),

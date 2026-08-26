@@ -234,9 +234,20 @@ impl MessagesBridgeStore {
         state: MessagesBridgeState,
         now_ms: u64,
     ) {
+        let _ = self.insert_if_stored(local_key_id, response_id, candidate_id, state, now_ms);
+    }
+
+    pub(crate) fn insert_if_stored(
+        &mut self,
+        local_key_id: &str,
+        response_id: &str,
+        candidate_id: &str,
+        state: MessagesBridgeState,
+        now_ms: u64,
+    ) -> bool {
         self.prune(now_ms);
         let Some(size_bytes) = serialized_size_bytes(&state) else {
-            return;
+            return false;
         };
         if self.max_entries == 0
             || self.max_entry_bytes == 0
@@ -244,7 +255,7 @@ impl MessagesBridgeStore {
             || size_bytes > self.max_entry_bytes
             || size_bytes > self.max_total_bytes
         {
-            return;
+            return false;
         }
         let key = (local_key_id.to_string(), response_id.to_string());
         if let Some(existing) = self.entries.remove(&key) {
@@ -254,7 +265,7 @@ impl MessagesBridgeStore {
             || self.total_bytes.saturating_add(size_bytes) > self.max_total_bytes
         {
             if !self.evict_oldest() {
-                return;
+                return false;
             }
         }
         self.entries.insert(
@@ -267,6 +278,7 @@ impl MessagesBridgeStore {
             },
         );
         self.total_bytes = self.total_bytes.saturating_add(size_bytes);
+        true
     }
 
     fn prune(&mut self, now_ms: u64) {

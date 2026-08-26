@@ -1072,6 +1072,7 @@ mod tests {
                             quota_remaining_basis_points: Some(5_400),
                             in_flight_before: 0,
                             dispatches_before: index - 1,
+                            endpoint_kind: None,
                         }),
                         requested_model: Some(model.to_string()),
                         resolved_model: Some(model.to_string()),

@@ -265,7 +265,7 @@
 }
 
 .client-options button {
-  min-height: 64px;
+  min-height: 88px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1133,7 +1133,7 @@
 .source-cache-settings {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(110px, 0.65fr) minmax(0, 2.35fr);
+  grid-template-columns: minmax(0, 1fr) minmax(132px, 180px);
   align-items: center;
   gap: 12px;
   padding: 0 0 12px;
@@ -1146,26 +1146,8 @@
   font-weight: 650;
 }
 
-.source-cache-ttl-grid {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.source-cache-ttl {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(116px, 142px);
-  align-items: center;
-  gap: 8px;
-  color: var(--relay-secondary);
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.source-cache-ttl .field-option-menu,
-.source-cache-ttl .field-option-menu .relay-option-trigger {
+.source-cache-settings .field-option-menu,
+.source-cache-settings .field-option-menu .relay-option-trigger {
   width: 100%;
 }
 
@@ -1209,11 +1191,40 @@
   grid-template-columns: repeat(var(--source-route-column-count), minmax(116px, 1fr));
 }
 
+.source-route-format-headings {
+  grid-template-rows: minmax(64px, auto);
+}
+
+.source-route-matrix.grouped .source-route-format-headings {
+  grid-template-rows: 24px minmax(64px, auto);
+}
+
+.source-route-group-heading {
+  display: grid;
+  place-items: center;
+  grid-row: 1;
+  min-width: 0;
+  border-bottom: 1px solid var(--relay-border);
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.source-route-group-heading.native {
+  grid-column: 1 / span var(--source-route-group-span);
+}
+
+.source-route-group-heading.adapters {
+  grid-column: calc(var(--source-route-column-count) - 1) / span 2;
+  border-left: 1px solid var(--relay-border);
+}
+
 .source-route-format-heading,
 .source-route-bridge-heading {
   min-width: 0;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
+  grid-template-columns: 16px auto;
+  justify-content: center;
   grid-template-rows: minmax(0, 1fr) 18px;
   align-items: center;
   gap: 6px;
@@ -1223,10 +1234,16 @@
   cursor: pointer;
 }
 
+.source-route-matrix.grouped .source-route-format-heading,
+.source-route-matrix.grouped .source-route-bridge-heading {
+  grid-row: 2;
+}
+
 .source-route-bridge-heading {
-  grid-template-columns: 16px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) auto;
-  align-content: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
   cursor: default;
 }
 
@@ -1335,36 +1352,6 @@
 
 .source-route-cell.selected {
   background: color-mix(in srgb, var(--relay-accent-soft) 64%, transparent);
-}
-
-.source-route-auto-cell {
-  cursor: default;
-  background: color-mix(in srgb, var(--relay-accent-soft) 32%, transparent);
-}
-
-.source-route-auto-cell:hover {
-  background: color-mix(in srgb, var(--relay-accent-soft) 32%, transparent);
-}
-
-.source-route-auto-indicator {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: var(--relay-accent-hover);
-}
-
-.source-route-auto-indicator svg {
-  width: 15px;
-  height: 15px;
-}
-
-.source-route-auto-indicator small {
-  color: var(--relay-secondary);
-  font-size: 9px;
-  font-weight: 650;
-  line-height: 12px;
-  text-transform: uppercase;
 }
 
 .source-route-cell:has(input:disabled) {
@@ -1703,7 +1690,11 @@
 
 .source-route-map {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns:
+    minmax(0, 1fr) 24px
+    minmax(0, 1fr) 24px
+    minmax(0, 1fr) 24px
+    minmax(0, 1fr);
   align-items: stretch;
   gap: 0;
   overflow: hidden;
@@ -1714,9 +1705,9 @@
 
 .source-route-arrow {
   align-self: center;
+  justify-self: center;
   width: 14px;
   height: 14px;
-  margin-inline: -7px;
   z-index: 2;
   color: var(--relay-muted);
   pointer-events: none;
@@ -1730,7 +1721,7 @@
   min-width: 0;
   min-height: 46px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) minmax(20px, auto);
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -1801,8 +1792,7 @@
 
 .source-route-stage strong {
   min-width: 0;
-  overflow: hidden;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   font-size: 12px;
   line-height: 16px;
 }

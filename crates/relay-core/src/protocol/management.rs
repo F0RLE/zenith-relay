@@ -12,8 +12,8 @@ mod routing;
 mod usage;
 
 pub use account::{
-    model_has_native_account_route, AccountSummary, QuotaWindowUsage, RemoteAccountLocation,
-    RevealedAccountIdentity, SourceSummary,
+    api_equivalent_projection_window, model_has_native_account_route, AccountSummary,
+    QuotaWindowUsage, RemoteAccountLocation, RevealedAccountIdentity, SourceSummary,
 };
 pub use model::{
     apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
@@ -495,7 +495,7 @@ mod tests {
     use crate::{
         accounts::{AccountAuthState, AccountHealthState},
         quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription, SubscriptionStatus},
-        CandidateQuota,
+        CandidateHealth, CandidateQuota,
     };
     use crate::{
         ActiveModelRuntime, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
@@ -941,7 +941,7 @@ mod tests {
         };
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Responses),
-            ["gpt-native", "claude-bridged", "claude-native"]
+            ["gpt-native", "claude-bridged"]
         );
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Messages),
@@ -1156,6 +1156,79 @@ mod tests {
         assert_eq!(
             state.routing_block_reason,
             Some(AccountRoutingBlockReason::SecretUnavailable)
+        );
+    }
+
+    #[test]
+    fn expired_chatgpt_entitlement_does_not_block_working_codex_account() {
+        let subscription = Subscription {
+            plan_type: Some("business".into()),
+            active_until_ms: Some(900),
+            status: SubscriptionStatus::Expired,
+            updated_at_ms: Some(900),
+        };
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &QuotaSnapshot {
+                primary: Some(QuotaWindow {
+                    kind: QuotaWindowKind::Primary,
+                    provider_cycle_id: None,
+                    window_start_ms: None,
+                    available_basis_points: Some(8_000),
+                    explicitly_full: None,
+                    reset_at_ms: None,
+                    window_minutes: None,
+                    observed_at_ms: 1_000,
+                    full_transition_fingerprint: None,
+                    exhaustion_transition_fingerprint: None,
+                }),
+                updated_at_ms: Some(1_000),
+                ..Default::default()
+            },
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10_000,
+        });
+
+        assert_eq!(state.health, CandidateHealth::Healthy);
+        assert!(state.routing_eligible);
+        assert_eq!(state.routing_block_reason, None);
+    }
+
+    #[test]
+    fn forbidden_chatgpt_subscription_still_blocks_routing() {
+        let subscription = Subscription {
+            plan_type: Some("business".into()),
+            status: SubscriptionStatus::Forbidden,
+            ..Default::default()
+        };
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &QuotaSnapshot::default(),
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10_000,
+        });
+
+        assert_eq!(state.health, CandidateHealth::Blocked);
+        assert!(!state.routing_eligible);
+        assert_eq!(
+            state.routing_block_reason,
+            Some(AccountRoutingBlockReason::SubscriptionForbidden)
         );
     }
 

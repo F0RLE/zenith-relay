@@ -210,7 +210,10 @@ pub(crate) fn recoverable_response_affinity_miss(
 ) -> bool {
     has_previous_response_id
         && previous_response_not_found
-        && matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
+        && matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+        )
 }
 
 pub(crate) fn retry_candidate_limit(
@@ -322,6 +325,9 @@ pub(crate) fn previous_response_not_found_value(value: &Value) -> bool {
             value
                 .trim()
                 .eq_ignore_ascii_case("previous_response_not_found")
+                || value
+                    .trim()
+                    .eq_ignore_ascii_case("response_continuation_unavailable")
         })
         || [value.pointer("/error/message"), value.get("message")]
             .into_iter()

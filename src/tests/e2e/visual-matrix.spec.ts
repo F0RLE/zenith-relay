@@ -298,6 +298,22 @@ test("API source routing editor stays readable in the standard window", async ({
   const dialog = page.getByRole("dialog", { name: /Правила участника пула.*Example compatible API/ });
   await expect(dialog.locator('.source-route-map[role="radiogroup"] > button[role="radio"]')).toHaveCount(3);
   await expect(dialog.getByLabel("Порядок перехода при ошибке")).toContainText("Учётные записи");
+  expect(await dialog.locator(".source-route-map").evaluate((map) => {
+    const stages = [...map.querySelectorAll<HTMLElement>(".source-route-stage")];
+    const arrows = [...map.querySelectorAll<HTMLElement>(".source-route-arrow")];
+    const stagesDoNotOverlap = stages.every((stage, index) => {
+      const stageRect = stage.getBoundingClientRect();
+      const titleRect = stage.querySelector("strong")!.getBoundingClientRect();
+      const countRect = stage.querySelector(":scope > span")!.getBoundingClientRect();
+      return titleRect.left >= stageRect.left && titleRect.right <= countRect.left;
+    });
+    const arrowsStayBetweenStages = arrows.every((arrow, index) => {
+      const arrowRect = arrow.getBoundingClientRect();
+      return arrowRect.left >= stages[index].getBoundingClientRect().right
+        && arrowRect.right <= stages[index + 1].getBoundingClientRect().left;
+    });
+    return stagesDoNotOverlap && arrowsStayBetweenStages;
+  })).toBe(true);
   await expect(dialog.getByRole("spinbutton", { name: "Доля трафика" })).toHaveCount(0);
   await expect(dialog.getByRole("list", { name: "Порядок API в этой роли" }).getByRole("listitem")).toHaveCount(1);
   await expect(dialog.getByRole("button", { name: /^Повторная проверка:/ })).toBeVisible();
@@ -335,10 +351,15 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await page.goto("/");
   await page.getByRole("tab", { name: "Месяц" }).click();
 
-  const charts = page.locator(".overview-chart");
+  const charts = page.locator(".overview-chart, .overview-token-trend");
   await expect(charts).toHaveCount(5);
   expect(await charts.evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
-  const tokenPoint = charts.first().locator(".overview-chart-bar");
+  const tokenTrend = page.locator(".overview-token-trend");
+  await expect(tokenTrend).toContainText("Вход");
+  await expect(tokenTrend).toContainText("Попадания в кэш");
+  await expect(tokenTrend.locator(".overview-token-trend-dot").first()).toBeVisible();
+  await tokenTrend.screenshot({ path: "output/playwright/overview-token-trend-ru-dark-840x560.png" });
+  const tokenPoint = page.locator(".overview-chart.requests .overview-chart-bar");
   await tokenPoint.hover();
   await expect(tokenPoint.getByRole("tooltip")).toBeVisible();
   await page.screenshot({ path: "output/playwright/overview-analytics-tooltip-ru-dark-840x560.png" });
@@ -348,6 +369,25 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await expect(charts.last().locator(".overview-chart-title small")).toHaveCount(0);
   await expect(page.locator(".activity-section")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/overview-analytics-lower-ru-dark-840x560.png" });
+});
+
+test("overview header keeps ChatGPT launch beside the API control", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+
+  const stop = page.getByRole("button", { name: "Остановить API", exact: true });
+  const launch = page.getByRole("button", { name: "Запустить ChatGPT", exact: true });
+  await expect(stop).toBeVisible();
+  await expect(launch).toBeVisible();
+  const [stopBox, launchBox] = await Promise.all([stop.boundingBox(), launch.boundingBox()]);
+  expect(stopBox).not.toBeNull();
+  expect(launchBox).not.toBeNull();
+  expect(launchBox!.x).toBeGreaterThan(stopBox!.x + stopBox!.width);
+
+  await launch.click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_managed_codex_profile"))).toBe(true);
+  await page.screenshot({ path: "output/playwright/overview-header-chatgpt-launch-ru-dark-1160x760.png" });
 });
 
 for (const theme of themes) {
@@ -433,14 +473,14 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await page.getByRole("button", { name: "Пул", exact: true }).click();
   await page.getByRole("tab", { name: "Правила моделей" }).click();
   const table = page.locator(".model-rules-table");
-  await expect(table.getByRole("columnheader")).toHaveCount(6);
-  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center", "center", "center"]);
+  await expect(table.getByRole("columnheader")).toHaveCount(4);
+  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center"]);
   await expect(table.locator(".model-group-row").first()).toContainText("ChatGPT");
   await expect(table.locator(".model-group-row").nth(1)).toContainText("Anthropic");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();
   await expect(model).toHaveAttribute("data-enabled", "false");
-  await expect(model.locator('.relay-status-icon[aria-label="Отключена"]')).toBeVisible();
+  await expect(model.getByRole("button", { name: "Включить gpt-5.4-mini" })).toHaveAttribute("aria-pressed", "false");
   expect(await page.locator(".model-rules tbody tr").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await expect(page.locator(".model-sort-select")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/model-rules-disabled-ru-dark-840x560.png" });
@@ -520,7 +560,7 @@ test("source editor keeps each tab focused", async ({ page }) => {
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
-  await expect(dialog.getByRole("tab")).toHaveText(["General", "Models and formats", "Pricing"]);
+  await expect(dialog.getByRole("tab")).toHaveText(["General", "Models and formats", "Adapters", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
   await expect(dialog.getByLabel("API address", { exact: true })).toBeVisible();
   await expect(dialog.getByLabel("New API key (optional)", { exact: true })).toBeVisible();
@@ -532,7 +572,7 @@ test("source editor keeps each tab focused", async ({ page }) => {
   await dialog.getByRole("tab", { name: "Models and formats" }).click();
   await expect(dialog.locator(".source-route-matrix")).toBeVisible();
   await expect(dialog.locator(".source-route-format-heading")).toHaveCount(4);
-  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(2);
+  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(0);
   expect(await dialog.locator(".source-route-matrix").evaluate((element) => ({
     fitsDialog: element.getBoundingClientRect().bottom <= element.closest("[data-relay-dialog]")!.getBoundingClientRect().bottom,
   }))).toEqual({ fitsDialog: true });
@@ -543,6 +583,13 @@ test("source editor keeps each tab focused", async ({ page }) => {
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/source-editor-routes-en-light-840x560.png" });
+
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await dialog.getByRole("tab", { name: "Adapters" }).click();
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(0);
+  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(2);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-editor-adapters-en-light-1160x760.png" });
 
   await dialog.getByRole("tab", { name: "Pricing" }).click();
   await expect(dialog.locator(".source-price-tab-status")).toHaveText("API prices in use");
@@ -556,6 +603,44 @@ test("source editor keeps each tab focused", async ({ page }) => {
   })).toBe(true);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
   await page.screenshot({ path: "output/playwright/source-editor-general-en-light-840x560.png" });
+});
+
+test("prompt cache policy fits the Russian dark source editor", async ({ page }) => {
+  await installTauriMock(page, {
+    locale: "ru",
+    mode: "local",
+    theme: "dark",
+    populated: true,
+    sourceProtocolBindings: [{
+      wireApi: "messages",
+      adapter: "native",
+      reasoningMode: "disabled",
+      cacheWriteTtl: "1h",
+      modelIds: [],
+    }],
+  });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  await page.getByRole("tab", { name: "Источники API" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  const dialog = page.getByRole("dialog", { name: "Изменить источник" });
+  await dialog.getByRole("tab", { name: "Модели и форматы" }).click();
+
+  await expect(dialog.getByRole("button", { name: "Prompt-кэш: 1 час" })).toBeVisible();
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-cache-policy-ru-dark-840x560.png" });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await dialog.locator(".source-cache-settings").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const dialogRect = element.closest("[data-relay-dialog]")!.getBoundingClientRect();
+    return rect.left >= dialogRect.left && rect.right <= dialogRect.right;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-cache-policy-ru-dark-390x844.png" });
 });
 
 test("Claude model price uses the compact cache editor", async ({ page }) => {
@@ -651,11 +736,13 @@ for (const viewport of viewports) {
       return priority.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom >= 9;
     })).toBe(true);
     const headerActions = page.locator(".pool-header-actions");
-    await expect(headerActions.locator(":scope > *")).toHaveCount(4);
+    await expect(headerActions.locator(":scope > *")).toHaveCount(3);
     await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Сохранить пресет", exact: true })).toBeVisible();
+    await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Применить пресет", exact: true })).toBeVisible();
+    await expect(headerActions.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Сохранить пресет", "Применить пресет", "Добавить участника", "Переключить ChatGPT на пул"]);
     await expect(headerActions.getByRole("button", { name: "Добавить участника", exact: true })).toBeVisible();
-    await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toBeVisible();
-    await expect(headerActions.getByRole("button", { name: "Переключить ChatGPT на пул", exact: true })).toBeVisible();
+    await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toHaveCount(0);
+    await expect(headerActions.getByRole("button", { name: "Переключить ChatGPT на пул", exact: true })).toBeDisabled();
     const actionBoxes = await headerActions.locator(":scope > .relay-button").evaluateAll((buttons) => buttons.map((button) => {
       const rect = button.getBoundingClientRect();
       return { width: rect.width, height: rect.height, overflow: button.scrollWidth - button.clientWidth };
@@ -726,6 +813,7 @@ for (const viewport of viewports) {
     await expect(apiCard.getByRole("button", { name: "Обновить баланс" })).toBeVisible();
     await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Режим работы");
     await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Параллельность");
+    await expect(apiCard.locator(".pool-member-active-runtime")).toHaveCount(0);
     expect(await apiCard.locator(".pool-member-runtime-meta > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members.getByRole("button", { name: "Обновить квоту" })).toHaveCount(5);
     expect(await members.locator(".pool-member-context").evaluateAll((items) => items.every((item) => getComputedStyle(item).justifyContent === "center" && getComputedStyle(item).textAlign === "center"))).toBe(true);
@@ -972,7 +1060,8 @@ for (const viewport of viewports) {
     expect(await page.locator(".account-subscription-line").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     await expect(cards.locator(".account-card-actions")).toHaveCount(3);
     await expect(cards.locator(".account-card-actions > .relay-icon-button")).toHaveCount(12);
-    await expect(cards.locator('.account-card-actions > .relay-icon-button:first-child[aria-label="В пуле"]')).toHaveCount(3);
+    // The pool button is a call to action, not a state label.
+    await expect(cards.locator('.account-card-actions > .relay-icon-button:first-child[aria-label="Убрать из пула"]')).toHaveCount(3);
 
     await expect(page.getByRole("button", { name: "Список" })).toHaveCount(0);
     expect(await cards.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);

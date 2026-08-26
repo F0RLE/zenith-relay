@@ -229,6 +229,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
         usage_callback,
     )
     .map_err(core_error)?;
+    runtime.set_activity_callback(state.runtime_activity_callback());
+    runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
     runtime

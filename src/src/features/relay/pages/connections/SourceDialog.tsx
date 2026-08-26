@@ -10,7 +10,7 @@ import { effectiveSourceProtocolBindings, normalizedBindings } from "../../sourc
 import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
 
-type SourceEditTab = "main" | "routes" | "prices";
+type SourceEditTab = "main" | "routes" | "adapters" | "prices";
 type SourceAddStep = "provider" | "configure";
 
 export function SourceDialog({ source, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
@@ -29,6 +29,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   const sourceEditTabs = [
     { id: "main", label: t("sources.editorMainTab") },
     { id: "routes", label: t("sources.editorRoutesTab") },
+    { id: "adapters", label: t("sources.editorAdaptersTab") },
     { id: "prices", label: t("sources.editorPricesTab") },
   ];
 
@@ -94,7 +95,8 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
       : <><Button variant="secondary" onClick={backToProviderStep}>{t("common.back")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!apiProviderReady(provider)} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>;
   return <><Dialog wide className={dialogClassName} title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={footer}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />
      {activeTab === "main" ? <section className="source-editor-tab-panel source-editor-main" role="tabpanel" aria-label={t("sources.editorMainTab")}><section className="source-form-section source-basic-fields"><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section></section> : null}
-    {activeTab === "routes" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorRoutesTab")}><SourceProtocolRoutingDisclosure models={source.models} value={protocolBindings} onChange={setProtocolBindings} /></section> : null}
+    {activeTab === "routes" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorRoutesTab")}><SourceProtocolRoutingDisclosure models={source.models} value={protocolBindings} onChange={setProtocolBindings} routeGroup="native" /></section> : null}
+    {activeTab === "adapters" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorAdaptersTab")}><SourceProtocolRoutingDisclosure models={source.models} value={protocolBindings} onChange={setProtocolBindings} routeGroup="adapters" /></section> : null}
     {activeTab === "prices" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorPricesTab")}><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} presentation="tab" /></section> : null}
   </> : <>
     <ol className="source-add-steps" aria-label={t("sources.addFlowSteps")}>

@@ -205,7 +205,6 @@ export function comparePoolMembers(
   order: Map<string, number>,
 ) {
   return (
-    unavailable(left) - unavailable(right) ||
     compareRoutingOrder(left.id, right.id, order) ||
     compareStableText(memberName(left), memberName(right))
   );
@@ -231,13 +230,6 @@ function compareSources(left: SourceSummary, right: SourceSummary) {
     compareStableText(left.name, right.name) ||
     compareStableText(left.id, right.id)
   );
-}
-
-function unavailable(member: PoolMember) {
-  return member.operationalStatus === "unavailable" ||
-    member.operationalStatus === "disabled"
-    ? 1
-    : 0;
 }
 
 export function compareStableText(left: string, right: string) {

@@ -70,8 +70,17 @@ pub(crate) async fn refresh_account_now(
     state: &Arc<AppState>,
     account: ServerAccountRecord,
 ) -> Result<ServerAccountRecord, String> {
-    let (updated, transitions) =
+    let (mut updated, transitions) =
         quota_refresh::refresh_account_metadata(state, account, true, true).await?;
+    if !transitions.is_empty()
+        && quota_refresh::try_auto_reset_weekly(state, &updated, &transitions)
+            .await
+            .unwrap_or(false)
+    {
+        updated = quota_refresh::refresh_one(state, updated, false)
+            .await
+            .map(|(account, _)| account)?;
+    }
     if !transitions.is_empty() {
         wake_automation::schedule_transitions(state, &updated, &transitions).await?;
     }
@@ -124,10 +133,21 @@ async fn refresh_accounts_now(
     let mut refreshed = 0;
     let mut failed = 0;
     for result in results {
-        let Ok((updated, transitions)) = result else {
+        let Ok((mut updated, transitions)) = result else {
             failed += 1;
             continue;
         };
+        if !transitions.is_empty()
+            && quota_refresh::try_auto_reset_weekly(state, &updated, &transitions)
+                .await
+                .unwrap_or(false)
+        {
+            if let Ok((refreshed, _)) =
+                quota_refresh::refresh_one(state, updated.clone(), false).await
+            {
+                updated = refreshed;
+            }
+        }
         if updated.quota.error.is_some() {
             failed += 1;
             continue;

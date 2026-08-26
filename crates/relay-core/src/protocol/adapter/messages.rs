@@ -174,37 +174,39 @@ pub(crate) fn apply_cache_write_ttl(
     let mut updated = false;
     for key in ["system", "tools"] {
         if let Some(blocks) = object.get_mut(key).and_then(Value::as_array_mut) {
-            updated |= blocks.iter_mut().any(|block| {
-                block
+            for block in blocks {
+                if block
                     .as_object()
                     .is_some_and(|block| block.contains_key("cache_control"))
-                    && set_cache_control(block, ttl)
-            });
+                {
+                    updated |= set_cache_control(block, ttl);
+                }
+            }
         }
     }
     if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
         for message in messages {
             if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
-                updated |= blocks.iter_mut().any(|block| {
-                    block
+                for block in blocks {
+                    if block
                         .as_object()
                         .is_some_and(|block| block.contains_key("cache_control"))
-                        && set_cache_control(block, ttl)
-                });
+                    {
+                        updated |= set_cache_control(block, ttl);
+                    }
+                }
             }
         }
     }
     if updated {
         return Ok(());
     }
-    if let Some(system) = object.get_mut("system") {
-        if set_last_cache_control(system, ttl) {
-            return Ok(());
-        }
-    }
-    if let Some(tools) = object.get_mut("tools") {
-        if set_last_cache_control(tools, ttl) {
-            return Ok(());
+    let prefix_marked = object
+        .get_mut("system")
+        .is_some_and(|system| set_last_cache_control(system, ttl));
+    if !prefix_marked {
+        if let Some(tools) = object.get_mut("tools") {
+            set_last_cache_control(tools, ttl);
         }
     }
     if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {

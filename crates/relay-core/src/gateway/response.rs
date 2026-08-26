@@ -202,6 +202,10 @@ pub(super) fn usage_event(
     latency_ms: u64,
     tool_use: ToolUseDiagnostics,
 ) -> UsageEvent {
+    let mut routing = route.routing.clone();
+    if let Some(diagnostics) = routing.as_mut() {
+        diagnostics.endpoint_kind = Some(route.adapter.route_suffix(route.wire_api).to_string());
+    }
     let mut event = UsageEvent {
         request_id: request_id.to_string(),
         attempt,
@@ -210,7 +214,7 @@ pub(super) fn usage_event(
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
         client_context_id: route.client_context_id.clone(),
-        routing: route.routing.clone(),
+        routing,
         requested_model: Some(requested_model.to_string()),
         resolved_model: Some(route.source_model.clone()),
         requested_reasoning_effort: None,

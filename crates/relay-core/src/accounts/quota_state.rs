@@ -62,8 +62,7 @@ pub fn reduce_account_quota(
                         .as_ref()
                         .is_some_and(|error| error.code == code)
             });
-            let auth_owned_error =
-                previous_last_error_code.is_some_and(|code| is_auth_owned_error(code));
+            let auth_owned_error = previous_last_error_code.is_some_and(is_auth_owned_error);
             let (health, last_error_code) = if health == AccountHealthState::Blocked {
                 (health, Some("quota_forbidden".to_string()))
             } else if previous_last_error_code.is_some() && !quota_owned_error && !auth_owned_error

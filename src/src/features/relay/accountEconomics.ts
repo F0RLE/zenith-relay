@@ -1,9 +1,15 @@
 import type { ApiEquivalentSummary, QuotaSnapshot, QuotaWindowUsage } from "./api/types";
 
+const MIN_OBSERVED_USAGE_BASIS_POINTS = 500;
+const MIN_PRICING_COVERAGE_BASIS_POINTS = 8_000;
+const MIN_WEEKLY_WINDOW_MINUTES = 6 * 24 * 60;
+const MAX_WEEKLY_WINDOW_MINUTES = 8 * 24 * 60;
+
 export type RemainingApiEquivalentEstimate = {
   microUsd: number;
   approximate: boolean;
   windowKind: "primary" | "secondary" | null;
+  windowMinutes: number | null;
 };
 
 export type AccountValueProjection = {
@@ -17,8 +23,7 @@ export type AccountValueProjection = {
  * Builds the shared display projection for account usage cards.
  *
  * These values do not affect quota state, routing, provider cost, or customer
- * billing. Remaining API equivalent is available only when the local or
- * user-managed server ledger can isolate usage inside the active quota window.
+ * billing.
  */
 export function buildAccountValueProjection(
   usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
@@ -35,32 +40,54 @@ export function buildAccountValueProjection(
   };
 }
 
+/**
+ * Estimates the API-price equivalent still represented by the provider's
+ * longest quota window. The estimate is intentionally withheld until Relay
+ * observed enough of that exact window and priced at least 80% of its tokens.
+ */
 export function estimateRemainingApiEquivalent(
   quota?: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,
-  quotaWindowUsage?: QuotaWindowUsage | null,
+  evidence?: QuotaWindowUsage | null,
 ): RemainingApiEquivalentEstimate | null {
   if (!quota) return null;
   const directBalance = quota.directBalanceMicroUsd;
   if (directBalance != null && Number.isFinite(directBalance) && directBalance >= 0) {
-    return { microUsd: Math.round(directBalance), approximate: false, windowKind: null };
+    return {
+      microUsd: Math.round(directBalance),
+      approximate: false,
+      windowKind: null,
+      windowMinutes: null,
+    };
   }
-  if (!quotaWindowUsage) return null;
-  const window = quota[quotaWindowUsage.kind];
+  if (!evidence) return null;
+
+  const window = quota[evidence.kind];
   const available = window?.availableBasisPoints;
+  const totalTokens = evidence.apiEquivalent.pricedTokens + evidence.apiEquivalent.unpricedTokens;
   if (
-    window?.windowStartMs !== quotaWindowUsage.windowStartMs
+    window?.windowStartMs !== evidence.windowStartMs
+    || window?.observedAtMs !== evidence.observedAtMs
+    || window?.windowMinutes !== evidence.windowMinutes
     || available == null
     || !Number.isFinite(available)
     || available < 0
     || available > 10_000
-    || quotaWindowUsage.apiEquivalent.microUsd <= 0
-    || quotaWindowUsage.apiEquivalent.unpricedTokens > 0
+    || evidence.windowMinutes < MIN_WEEKLY_WINDOW_MINUTES
+    || evidence.windowMinutes > MAX_WEEKLY_WINDOW_MINUTES
+    || evidence.apiEquivalent.microUsd <= 0
+    || totalTokens <= 0
+    || evidence.apiEquivalent.pricedTokens * 10_000
+      < totalTokens * MIN_PRICING_COVERAGE_BASIS_POINTS
   ) return null;
+
   const consumed = 10_000 - available;
-  if (consumed <= 0) return null;
+  if (consumed < MIN_OBSERVED_USAGE_BASIS_POINTS) return null;
+  const microUsd = Math.round(evidence.apiEquivalent.microUsd * available / consumed);
+  if (!Number.isFinite(microUsd) || microUsd < 0) return null;
   return {
-    microUsd: Math.round(quotaWindowUsage.apiEquivalent.microUsd * available / consumed),
+    microUsd,
     approximate: true,
-    windowKind: quotaWindowUsage.kind,
+    windowKind: evidence.kind,
+    windowMinutes: evidence.windowMinutes,
   };
 }

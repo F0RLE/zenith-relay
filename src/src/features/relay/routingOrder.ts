@@ -1,4 +1,4 @@
-import type { CandidateRuntimeSnapshot } from "./api/types";
+import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/types";
 
 const subscriptionPlanPriority = ["enterprise", "business", "pro-20x", "pro-5x", "pro", "plus", "go", "edu", "free", "unknown"];
 const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
@@ -91,6 +91,34 @@ export function compareRoutingOrder(leftId: string, rightId: string, order: Map<
 
 export function activeRequestCount(candidate: CandidateRuntimeSnapshot | undefined) {
   return candidate?.activeRequestCount ?? candidate?.inFlight ?? 0;
+}
+
+/** Apply a host activity event without waiting for the next full snapshot. */
+export function applyRuntimeActivity(
+  order: CandidateRuntimeSnapshot[],
+  activity: RuntimeActivitySnapshot,
+) {
+  let changed = false;
+  const next = order.map((candidate) => {
+    if (candidate.candidateId !== activity.candidateId) return candidate;
+    changed = true;
+    return {
+      ...candidate,
+      inFlight: activity.inFlight,
+      activeRequestCount: activity.activeRequestCount,
+      activeModels: activity.activeModels,
+    };
+  });
+  return changed ? next : order;
+}
+
+export function applyRuntimeActivities(
+  order: CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  let next = order;
+  for (const activity of activities) next = applyRuntimeActivity(next, activity);
+  return next;
 }
 
 export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {

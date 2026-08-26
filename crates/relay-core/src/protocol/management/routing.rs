@@ -198,7 +198,11 @@ fn account_routing_block_reason(
         SubscriptionStatus::Forbidden => {
             return Some(AccountRoutingBlockReason::SubscriptionForbidden)
         }
-        SubscriptionStatus::Expired => return Some(AccountRoutingBlockReason::SubscriptionExpired),
+        // ChatGPT Team/Business may continue serving Codex after the
+        // entitlement date exposed by the auxiliary subscription endpoint has
+        // gone stale. Only an explicit forbidden signal blocks routing;
+        // successful /wham/usage and Responses results remain authoritative.
+        SubscriptionStatus::Expired => {}
         _ => {}
     }
     if !health.is_eligible() {

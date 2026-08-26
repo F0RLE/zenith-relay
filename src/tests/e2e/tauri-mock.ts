@@ -188,7 +188,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       priority: 20,
       weight: 100,
       apiEquivalent: { microUsd: 14_100_000, pricedTokens: 2_800_000, unpricedTokens: 0 },
-      quotaWindowUsage: { kind: "secondary" as const, windowStartMs: secondaryResetAtMs - 10_080 * 60_000, apiEquivalent: { microUsd: 5_000_000, pricedTokens: 1_000_000, unpricedTokens: 0 } },
+      quotaWindowUsage: {
+        kind: "secondary" as const,
+        windowStartMs: secondaryResetAtMs - 10_080 * 60_000,
+        observedAtMs: quotaNowMs,
+        windowMinutes: 10_080,
+        apiEquivalent: { microUsd: 5_000_000, pricedTokens: 1_000_000, unpricedTokens: 0 },
+      },
       purchaseCostMicroUsd: 18_000_000 as number | null,
       subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
       quota,
@@ -512,6 +518,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_local_runtime_state": return structuredClone(localRuntime);
           case "get_local_runtime_order": return structuredClone(localRuntime.gateway.routingOrder);
           case "export_local_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
+          case "preview_local_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
+          case "apply_local_configuration_preset": localRuntime.gateway.maxRetryCandidates = 4; localRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: localRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
           case "get_remote_runtime_order": return input.remoteConnected === false ? null : structuredClone(remoteRuntime.gateway.routingOrder);
           case "export_remote_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";

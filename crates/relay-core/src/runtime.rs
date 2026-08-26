@@ -63,6 +63,20 @@ const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 8 * 60 * 60 * 1_000;
 const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
+const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
+
+/// A request activity delta for hosts that render the pool while requests are
+/// in flight. It intentionally contains only routing identifiers and counts;
+/// prompts, keys, and provider responses never cross this boundary.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeActivitySnapshot {
+    pub revision: u64,
+    pub candidate_id: String,
+    pub in_flight: u32,
+    pub active_request_count: u32,
+    pub active_models: Vec<crate::ActiveModelRuntime>,
+}
 
 #[derive(Default)]
 pub(crate) struct CodexSourceModelMetadata {
@@ -395,6 +409,8 @@ pub struct GatewayRuntime {
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
+    chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
+    chatgpt_team_breaker_recent: Mutex<BTreeMap<String, u64>>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_availability: Arc<tokio::sync::Notify>,
@@ -414,8 +430,14 @@ pub struct GatewayRuntime {
     quota_stale_after_ms: u64,
     default_service_tier_fast: AtomicBool,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+    activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
+    activity_revision: Arc<AtomicU64>,
+    chatgpt_team_breaker_callback: Arc<Mutex<RuntimeTeamBreakerCallback>>,
     pub(crate) usage: UsageCallback,
 }
+
+type RuntimeActivityCallback = Arc<dyn Fn(RuntimeActivitySnapshot) + Send + Sync>;
+type RuntimeTeamBreakerCallback = Arc<dyn Fn(Vec<String>) + Send + Sync>;
 
 #[derive(Clone, Debug)]
 struct PassiveQuotaState {
@@ -488,6 +510,8 @@ pub(crate) struct CandidateLease {
     candidate_id: String,
     model: String,
     lane: CandidateLeaseLane,
+    activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
+    activity_revision: Arc<AtomicU64>,
     released: AtomicBool,
 }
 
@@ -508,20 +532,43 @@ impl CandidateLease {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        let released = match self.lane {
-            CandidateLeaseLane::Text => self
+        let activity = {
+            let mut scheduler = self
                 .scheduler
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .release_for(&self.candidate_id, Some(&self.model)),
-            CandidateLeaseLane::Image => self
-                .scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .release_image_for(&self.candidate_id, Some(&self.model)),
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let released = match self.lane {
+                CandidateLeaseLane::Text => {
+                    scheduler.release_for(&self.candidate_id, Some(&self.model))
+                }
+                CandidateLeaseLane::Image => {
+                    scheduler.release_image_for(&self.candidate_id, Some(&self.model))
+                }
+            };
+            if !released {
+                None
+            } else {
+                let (in_flight, active_request_count, active_models) =
+                    scheduler.runtime_activity_for(&self.candidate_id);
+                Some(RuntimeActivitySnapshot {
+                    revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
+                    candidate_id: self.candidate_id.clone(),
+                    in_flight,
+                    active_request_count,
+                    active_models,
+                })
+            }
         };
-        if released {
+        if let Some(activity) = activity {
             self.availability.notify_one();
+            let callback = self
+                .activity_callback
+                .lock()
+                .ok()
+                .map(|callback| callback.clone());
+            if let Some(callback) = callback {
+                callback(activity);
+            }
         }
     }
 }
@@ -799,12 +846,24 @@ impl GatewayRuntime {
             let now_ms = runtime_now_ms();
             if let Ok(bindings) = store.load(now_ms) {
                 for binding in bindings {
-                    if !scheduler.restore_response_affinity(
-                        binding.key.clone(),
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    ) {
+                    let restored = if binding.key.starts_with("cache:")
+                        || binding.key.starts_with("session:")
+                    {
+                        scheduler.restore_prompt_affinity(
+                            binding.key.clone(),
+                            &binding.candidate_id,
+                            binding.expires_at_ms,
+                            now_ms,
+                        )
+                    } else {
+                        scheduler.restore_response_affinity(
+                            binding.key.clone(),
+                            &binding.candidate_id,
+                            binding.expires_at_ms,
+                            now_ms,
+                        )
+                    };
+                    if !restored {
                         let _ = store.delete(&binding.key);
                     }
                 }
@@ -818,6 +877,8 @@ impl GatewayRuntime {
             source_candidate_bindings: source_parts.candidate_bindings,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
+            chatgpt_team_members: account_parts.team_members,
+            chatgpt_team_breaker_recent: Mutex::new(BTreeMap::new()),
             keys: key_parts.runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
@@ -839,8 +900,46 @@ impl GatewayRuntime {
                 options.default_service_tier == DefaultServiceTier::Fast,
             ),
             response_affinity_store: affinity_store,
+            activity_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+            activity_revision: Arc::new(AtomicU64::new(0)),
+            chatgpt_team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
             usage,
         })
+    }
+
+    /// Installs a lightweight observer for request start/end activity.
+    /// The callback carries only routing identifiers and live counts; request
+    /// data and provider responses never cross the host boundary.
+    pub fn set_activity_callback(
+        &self,
+        callback: impl Fn(RuntimeActivitySnapshot) + Send + Sync + 'static,
+    ) {
+        if let Ok(mut current) = self.activity_callback.lock() {
+            *current = Arc::new(callback);
+        }
+    }
+
+    /// Installs the host-specific persistence hook for Team breaker siblings.
+    /// The callback receives only candidate ids; local and server pools keep
+    /// their own account stores and may persist the block independently.
+    pub fn set_chatgpt_team_breaker_callback(
+        &self,
+        callback: impl Fn(Vec<String>) + Send + Sync + 'static,
+    ) {
+        if let Ok(mut current) = self.chatgpt_team_breaker_callback.lock() {
+            *current = Arc::new(callback);
+        }
+    }
+
+    pub(crate) fn emit_activity_changed(&self, activity: RuntimeActivitySnapshot) {
+        let callback = self
+            .activity_callback
+            .lock()
+            .ok()
+            .map(|callback| callback.clone());
+        if let Some(callback) = callback {
+            callback(activity);
+        }
     }
 
     pub fn codex_background_tasks_enabled(&self) -> bool {

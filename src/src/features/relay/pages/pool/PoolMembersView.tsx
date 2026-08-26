@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
+import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, LogIn, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
@@ -19,7 +19,7 @@ import { AccountErrorDialog } from "../connections/AccountsTable";
 type Member = PoolMember;
 type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: boolean };
 
-export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
+export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; onReauthenticate: (account: AccountSummary) => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
   const confirm = useConfirm();
@@ -287,7 +287,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
             </div>
           </header>
           <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>
-            {member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}
+            {member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} onReauthenticate={onReauthenticate} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}
             {mode === "local" && member.kind === "account" ? <ResetCreditsControl account={member} onCompleted={() => refresh()} /> : null}
           </div>
           <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}{runtimeHint ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-runtime-hint" data-warning="false">{runtimeHint}</span></> : null}</> : <div className="pool-member-runtime-meta"><div><span>{t("pool.operationMode")}</span><strong>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</strong></div><div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div>}</div>
@@ -312,11 +312,15 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
   </>;
 }
 
-function PoolAccountQuota({ account, nowMs }: { account: AccountSummary; nowMs: number }) {
+function PoolAccountQuota({ account, nowMs, onReauthenticate }: { account: AccountSummary; nowMs: number; onReauthenticate: (account: AccountSummary) => void }) {
   const { t } = useTranslation();
   const hasQuota = Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
-  const status = account.quotaRefreshStatus ?? (account.authState.state === "requires_reauth" ? "requires_reauth" : account.quota.error ? "failed" : account.quota.updatedAtMs != null ? "updated" : "pending");
-  return <>{!hasQuota ? <div className={`account-quota-refresh-state ${status}`} role="status">{status === "refreshing" ? <Loader2 className="spin" aria-hidden /> : status === "updated" ? <CheckCheck aria-hidden /> : status === "requires_reauth" ? <UserRound aria-hidden /> : status === "failed" ? <RefreshCw aria-hidden /> : <Clock3 aria-hidden />}<span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></div> : <QuotaStack snapshot={account.quota} nowMs={nowMs} concise />}</>;
+  // A signed-out account must ask for sign-in even when the last quota refresh
+  // still reports a successful snapshot.
+  const status = account.authState.state === "requires_reauth"
+    ? "requires_reauth"
+    : account.quotaRefreshStatus ?? (account.quota.error ? "failed" : account.quota.updatedAtMs != null ? "updated" : "pending");
+  return <>{status === "requires_reauth" ? <button type="button" className={`account-quota-refresh-state ${status} is-action`} onClick={() => onReauthenticate(account)}><LogIn aria-hidden /><span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></button> : !hasQuota ? <div className={`account-quota-refresh-state ${status}`} role="status">{status === "refreshing" ? <Loader2 className="spin" aria-hidden /> : status === "updated" ? <CheckCheck aria-hidden /> : status === "failed" ? <RefreshCw aria-hidden /> : <Clock3 aria-hidden />}<span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></div> : <QuotaStack snapshot={account.quota} nowMs={nowMs} concise />}</>;
 }
 
 function PoolSourceStats({ source, state }: { source: SourceSummary; state?: SourceStatsState }) {

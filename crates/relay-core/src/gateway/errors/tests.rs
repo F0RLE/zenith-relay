@@ -124,6 +124,27 @@ fn bad_request_affinity_recovery_requires_a_structured_missing_response_error() 
         true,
         false,
     ));
+    assert!(recoverable_response_affinity_miss(
+        StatusCode::CONFLICT,
+        true,
+        true,
+        true,
+    ));
+}
+
+#[test]
+fn gateway_continuation_error_is_classified_as_relay_affinity_failure() {
+    let payload = br#"{"error":{"code":"response_continuation_unavailable","message":"The Responses continuation route is unknown."}}"#;
+    let classification = classify_upstream_error(StatusCode::CONFLICT, Some(payload));
+    assert_eq!(classification.category, "response_affinity_miss");
+    assert_eq!(
+        classification.message,
+        "Responses continuation route is unavailable"
+    );
+    assert_eq!(
+        canonical_upstream_status(StatusCode::CONFLICT, classification.category),
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[test]
@@ -354,6 +375,25 @@ fn upstream_errors_use_stable_status_and_body_categories() {
             "status={status} body={}",
             String::from_utf8_lossy(body)
         );
+    }
+}
+
+#[test]
+fn deactivated_workspace_detection_requires_the_exact_structured_code() {
+    for payload in [
+        br#"{"detail":{"code":"deactivated_workspace"}}"#.as_slice(),
+        br#"{"error":{"code":"deactivated_workspace"}}"#.as_slice(),
+        br#"{"response":{"error":{"code":"deactivated_workspace"}}}"#.as_slice(),
+    ] {
+        assert!(is_deactivated_workspace(payload));
+    }
+    for payload in [
+        br#"{"detail":{"code":"workspace_disabled"}}"#.as_slice(),
+        br#"{"error":{"message":"deactivated_workspace"}}"#.as_slice(),
+        br#"{"code":"deactivated_workspace"}"#.as_slice(),
+        br#"not-json"#.as_slice(),
+    ] {
+        assert!(!is_deactivated_workspace(payload));
     }
 }
 
@@ -644,6 +684,18 @@ fn rate_limit_body_hint_accepts_top_level_quota_variants() {
     );
     assert_eq!(hint.retry_after_ms, Some(9_000));
     assert!(hint.global);
+}
+
+#[test]
+fn quota_exhaustion_scope_is_global_without_a_global_body_hint() {
+    assert_eq!(
+        cooldown::rate_limit_scope("upstream_quota_exhausted", false, "gpt-5"),
+        "*"
+    );
+    assert_eq!(
+        cooldown::rate_limit_scope("upstream_rate_limited", false, "gpt-5"),
+        "gpt-5"
+    );
 }
 
 #[test]

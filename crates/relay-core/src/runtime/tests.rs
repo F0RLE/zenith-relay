@@ -7,6 +7,7 @@ use crate::catalog::source_reasoning_capabilities;
 use crate::{CandidateHealth, CandidateQuota, ToolUseDiagnostics, QUOTA_STALE_AFTER_MS};
 use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 struct NeverRefresh;
 
@@ -99,7 +100,7 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
 }
 
 #[test]
-fn messages_source_models_are_available_to_responses_and_messages_clients() {
+fn messages_source_models_stay_on_the_explicit_messages_route() {
     let mut provider = source("anthropic-source", "provider-secret", &["claude-test"]);
     provider.wire_api = WireApi::Messages;
     let runtime = GatewayRuntime::from_pool(
@@ -113,7 +114,7 @@ fn messages_source_models_are_available_to_responses_and_messages_clients() {
     assert_eq!(
         runtime
             .visible_models_for_secret("local-secret", &[WireApi::Responses], current_time_ms(),),
-        ["claude-test"]
+        Vec::<String>::new()
     );
     assert_eq!(
         runtime.visible_models_for_secret("local-secret", &[WireApi::Messages], current_time_ms(),),
@@ -125,10 +126,8 @@ fn messages_source_models_are_available_to_responses_and_messages_clients() {
         .into_iter()
         .map(|route| route.candidate_id)
         .collect::<Vec<_>>();
-    assert!(route_ids
-        .iter()
-        .any(|id| id == "anthropic-source::messages"));
-    assert!(route_ids
+    assert!(route_ids.iter().any(|id| id == "anthropic-source"));
+    assert!(!route_ids
         .iter()
         .any(|id| id == "anthropic-source::responses_to_messages"));
 }
@@ -184,6 +183,60 @@ fn quota_runtime(snapshot: QuotaSnapshot) -> GatewayRuntime {
         Arc::new(|_| {}),
     )
     .unwrap()
+}
+
+#[test]
+fn chatgpt_team_breaker_blocks_siblings_and_deduplicates() {
+    let first = quota_account(QuotaSnapshot::default());
+    let mut sibling = first.clone();
+    sibling.id = "account-2".to_string();
+    sibling.chatgpt_account_id = "team-1".to_string();
+    let mut first = first;
+    first.chatgpt_account_id = "team-1".to_string();
+    let runtime = GatewayRuntime::from_mixed_pool(
+        Vec::new(),
+        vec![first, sibling],
+        vec![RuntimeMixedLocalKey {
+            key: key("key-1", "local-secret"),
+            enabled: true,
+            source_ids: None,
+            account_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: None,
+        }],
+        RuntimeChatGptAuth {
+            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
+            refresh_adapter: Arc::new(NeverRefresh),
+            persistence_adapter: Arc::new(NoopPersistence),
+            refresh_skew_ms: 60_000,
+            agent_identities: HashMap::new(),
+        },
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+
+    let persisted = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+    let capture = persisted.clone();
+    runtime.set_chatgpt_team_breaker_callback(move |ids| {
+        capture.lock().unwrap().push(ids);
+    });
+
+    assert!(runtime.trip_chatgpt_team_breaker("account-1", 1_000));
+    let snapshots = runtime
+        .candidate_runtime_order()
+        .into_iter()
+        .map(|snapshot| (snapshot.candidate_id, snapshot.available))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(snapshots.get("account-1"), Some(&true));
+    assert_eq!(snapshots.get("account-2"), Some(&false));
+    assert_eq!(
+        persisted.lock().unwrap().as_slice(),
+        &[vec!["account-2".to_string()]]
+    );
+    assert!(!runtime.trip_chatgpt_team_breaker("account-1", 2_000));
 }
 
 #[test]
@@ -339,6 +392,135 @@ fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
 }
 
 #[tokio::test]
+async fn saving_bridge_continuation_binds_its_response_to_the_creating_candidate() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("source-a", "secret-a", &["gpt-test"])),
+            RuntimeSource::unrestricted(source("source-b", "secret-b", &["gpt-test"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let bridge_request = crate::prepare_responses_to_messages_scoped(
+        &serde_json::json!({"model": "gpt-test", "input": "hello"}),
+        "gpt-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+        "source-a",
+    )
+    .unwrap();
+    let bridge_response = crate::protocol::translate_messages_response(
+        bridge_request,
+        &serde_json::json!({
+            "id": "msg-1",
+            "content": [{"type": "text", "text": "hello"}]
+        }),
+    )
+    .unwrap();
+
+    runtime.save_messages_bridge_response("key-1", "source-a", &bridge_response, 123);
+
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let affinity_key = runtime
+        .response_affinity_key(Some(&bridge_response.response_id))
+        .unwrap();
+    let (selection, lease) = runtime
+        .select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (Some(&affinity_key), None),
+            124,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(selection.candidate_id, "source-a");
+    assert!(selection.response_affinity_hit);
+    assert_eq!(
+        selection.diagnostics.reason,
+        crate::SelectionReason::ResponseAffinity
+    );
+    drop(lease);
+}
+
+#[test]
+fn prompt_affinity_persists_only_its_opaque_binding_and_ttl() {
+    let store = Arc::new(RecordedResponseAffinityStore::default());
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "upstream-secret",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions {
+            response_affinity_store: Some(store.clone()),
+            ..GatewayRuntimeOptions::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+
+    runtime.bind_prompt_affinity(Some("cache:opaque-hash"), "source-1", 123);
+
+    assert_eq!(
+        *store
+            .upserts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![ResponseAffinityBinding {
+            key: "cache:opaque-hash".to_string(),
+            candidate_id: "source-1".to_string(),
+            expires_at_ms: 123 + crate::PROMPT_AFFINITY_TTL_MS,
+        }]
+    );
+}
+
+#[test]
+fn prompt_affinity_uses_explicit_cache_key_before_session_context() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "upstream-secret",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+
+    let explicit = runtime.prompt_affinity_key(
+        "key-1",
+        "gpt-test",
+        Some("cache-key"),
+        Some("client-session"),
+    );
+    let session = runtime.prompt_affinity_key("key-1", "gpt-test", None, Some("client-session"));
+    let other_session =
+        runtime.prompt_affinity_key("key-1", "gpt-test", None, Some("other-session"));
+
+    assert!(explicit.is_some());
+    assert!(session.is_some());
+    assert_ne!(explicit, session);
+    assert_ne!(session, other_session);
+    assert_eq!(
+        session,
+        runtime.prompt_affinity_key("key-1", "gpt-test", None, Some("client-session"))
+    );
+    assert!(runtime
+        .prompt_affinity_key("key-1", "gpt-test", None, None)
+        .is_none());
+}
+
+#[tokio::test]
 async fn selection_restores_persisted_response_affinity_before_reserving() {
     let store = Arc::new(RecordedResponseAffinityStore::default());
     let runtime = GatewayRuntime::from_pool(
@@ -399,6 +581,76 @@ async fn selection_restores_persisted_response_affinity_before_reserving() {
             candidate_id: "source-b".to_string(),
             expires_at_ms: 123 + crate::RESPONSE_AFFINITY_TTL_MS,
         }]
+    );
+    drop(lease);
+}
+
+#[tokio::test]
+async fn selection_restores_persisted_prompt_affinity_before_reserving() {
+    let store = Arc::new(RecordedResponseAffinityStore::default());
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("source-a", "secret-a", &["gpt-test"])),
+            RuntimeSource::unrestricted(source("source-b", "secret-b", &["gpt-test"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions {
+            response_affinity_store: Some(store.clone()),
+            ..GatewayRuntimeOptions::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    assert!(runtime.update_candidate_availability_at(
+        "source-a",
+        true,
+        CandidateHealth::Healthy,
+        CandidateQuota::Available(1_000),
+        Some(123),
+    ));
+    assert!(runtime.update_candidate_availability_at(
+        "source-b",
+        true,
+        CandidateHealth::Healthy,
+        CandidateQuota::Available(9_000),
+        Some(123),
+    ));
+    let affinity_key = "cache:restored-prompt";
+    *store
+        .restored_binding
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ResponseAffinityBinding {
+        key: affinity_key.to_string(),
+        candidate_id: "source-a".to_string(),
+        expires_at_ms: 123 + crate::PROMPT_AFFINITY_TTL_MS,
+    });
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+
+    let (selection, lease) = runtime
+        .select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, Some(affinity_key)),
+            123,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(selection.candidate_id, "source-a");
+    assert_eq!(
+        selection.diagnostics.reason,
+        crate::SelectionReason::PromptCacheAffinity
+    );
+    assert_eq!(
+        *store
+            .found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![affinity_key.to_string()]
     );
     drop(lease);
 }

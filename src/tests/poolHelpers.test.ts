@@ -11,7 +11,7 @@ import {
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
-import { routingOrderPositions, runtimeCandidateForMember } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivity, routingOrderPositions, runtimeCandidateForMember } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -173,11 +173,11 @@ describe("pool helpers", () => {
     expect(clampRoutingCount("bad")).toBe(1);
   });
 
-  test("sorts unavailable members after healthy routing candidates", () => {
+  test("keeps backend routing order even when a member is unavailable", () => {
     const healthy = { ...account({ id: "healthy", label: "Z" }), kind: "account" as const };
     const unavailable = { ...account({ id: "unavailable", label: "A", operationalStatus: "unavailable" }), kind: "account" as const };
     const order = new Map([["unavailable", 0], ["healthy", 1]]);
-    expect(comparePoolMembers(healthy, unavailable, order)).toBeLessThan(0);
+    expect(comparePoolMembers(unavailable, healthy, order)).toBeLessThan(0);
   });
 
   test("sorts a multi-protocol source by its first protocol candidate", () => {
@@ -204,6 +204,25 @@ describe("pool helpers", () => {
     expect(state).toMatchObject({ candidateId: "zenith-api", available: true, inFlight: 3, activeRequestCount: 3, lastUsedAtMs: 20, nextRetryAtMs: 500, halfOpen: true, dispatches: 5 });
     expect(state?.activeModels).toEqual([{ model: "gpt-test", requestCount: 3 }]);
     expect(state?.modelRetries).toEqual([{ model: "gpt-test", retryAtMs: 500 }, { model: "gpt-other", retryAtMs: 700 }]);
+  });
+
+  test("applies an activity snapshot without mutating the previous order", () => {
+    const order = [
+      { candidateId: "account-a", kind: "oauth_account" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "source-b::messages", kind: "api_source" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+    ];
+    const next = applyRuntimeActivity(order, {
+      revision: 1,
+      candidateId: "source-b::messages",
+      inFlight: 2,
+      activeRequestCount: 2,
+      activeModels: [{ model: "claude-opus", requestCount: 2 }],
+    });
+
+    expect(next).not.toBe(order);
+    expect(next[1]).toMatchObject({ inFlight: 2, activeRequestCount: 2, activeModels: [{ model: "claude-opus", requestCount: 2 }] });
+    expect(order[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0, activeModels: [] });
+    expect(applyRuntimeActivity(order, { revision: 2, candidateId: "missing", inFlight: 1, activeRequestCount: 1, activeModels: [] })).toBe(order);
   });
 
   test("uses only the Responses route for a pooled source", () => {
