@@ -255,7 +255,7 @@ async fn source_creation_preserves_native_and_bridged_responses_routes() {
 }
 
 #[tokio::test]
-async fn native_messages_source_joins_the_shared_pool_for_messages_and_responses_clients() {
+async fn explicit_messages_routes_join_the_shared_pool_for_both_client_protocols() {
     let root = TempDir::new().unwrap();
     let (responses_upstream, responses_task) = spawn_upstream().await;
     let (messages_upstream, messages_state, messages_task) = spawn_messages_upstream().await;
@@ -302,10 +302,18 @@ async fn native_messages_source_joins_the_shared_pool_for_messages_and_responses
             "baseUrl": format!("{messages_upstream}/v1"),
             "apiKey": "messages-source-key",
             "wireApi": "messages",
-            "protocolBindings": [{
-                "wireApi": "messages",
-                "modelIds": ["claude-native"]
-            }],
+            "protocolBindings": [
+                {
+                    "wireApi": "messages",
+                    "adapter": "native",
+                    "modelIds": ["claude-native"]
+                },
+                {
+                    "wireApi": "responses",
+                    "adapter": "responses_to_messages",
+                    "modelIds": ["claude-native"]
+                }
+            ],
             "models": ["claude-native"]
         }))
         .send()
@@ -364,8 +372,8 @@ async fn native_messages_source_joins_the_shared_pool_for_messages_and_responses
     assert!(system_model_ids.contains(&"gpt-test"));
     assert!(system_model_ids.contains(&"claude-native"));
 
-    // Source discovery is allowed during setup. Count only the two execution
-    // paths below: native Messages and Responses translated to Messages.
+    // Source discovery is allowed during setup. Count only the two explicitly
+    // configured execution paths below: native Messages and its Responses adapter.
     messages_state.lock().unwrap().clear();
 
     let request = json!({

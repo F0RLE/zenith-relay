@@ -236,7 +236,8 @@ impl LocalPoolStore {
         let mut accounts = self.accounts.clone();
         for account in &mut accounts {
             if account_ids.iter().any(|id| id == &account.account.id)
-                && (account.account.health != zenith_relay_core::accounts::AccountHealthState::Blocked
+                && (account.account.health
+                    != zenith_relay_core::accounts::AccountHealthState::Blocked
                     || account.account.last_error_code.as_deref() != Some("deactivated_workspace"))
             {
                 account.account.health = zenith_relay_core::accounts::AccountHealthState::Blocked;
@@ -245,7 +246,12 @@ impl LocalPoolStore {
             }
         }
         if changed {
-            self.replace_all_records(self.sources.clone(), accounts, self.keys.clone(), self.automations.clone())?;
+            self.replace_all_records(
+                self.sources.clone(),
+                accounts,
+                self.keys.clone(),
+                self.automations.clone(),
+            )?;
         }
         Ok(changed)
     }

@@ -29,8 +29,7 @@ use zenith_relay_core::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
         ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetPreview,
         ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy, SourcePresetRule,
-        CONFIGURATION_PRESET_FORMAT,
-        CONFIGURATION_PRESET_SCHEMA_VERSION,
+        CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
     ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
 };
@@ -164,7 +163,10 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
 
 fn local_preset_revision(preset: &ConfigurationPreset) -> CommandResult<String> {
     let bytes = serde_json::to_vec(preset).map_err(|error| {
-        LocalPoolError::new(ErrorCode::InvalidState, format!("configuration preset could not be serialized: {error}"))
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            format!("configuration preset could not be serialized: {error}"),
+        )
     })?;
     Ok(format!("cfg_local_{}", hex::encode(Sha256::digest(bytes))))
 }
@@ -173,8 +175,10 @@ fn local_configuration_diff(
     before: &ConfigurationPreset,
     after: &ConfigurationPreset,
 ) -> CommandResult<Vec<ConfigurationPresetChange>> {
-    let before = serde_json::to_value(before).map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    let after = serde_json::to_value(after).map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    let before = serde_json::to_value(before)
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    let after = serde_json::to_value(after)
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
     let mut changes = Vec::new();
     diff_json("".into(), &before, &after, &mut changes);
     Ok(changes)
@@ -188,7 +192,10 @@ fn diff_json(
 ) {
     match (before, after) {
         (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
-            let keys = left.keys().chain(right.keys()).collect::<std::collections::BTreeSet<_>>();
+            let keys = left
+                .keys()
+                .chain(right.keys())
+                .collect::<std::collections::BTreeSet<_>>();
             for key in keys {
                 let child = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
                 match (left.get(key), right.get(key)) {
@@ -226,18 +233,30 @@ pub fn preview_local_configuration_preset(
     let path = path.into_path().map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "selected preset path is invalid")
     })?;
-    let content = std::fs::read(&path)
-        .map_err(|_| LocalPoolError::new(ErrorCode::Io, "configuration preset could not be read"))?;
+    let content = std::fs::read(&path).map_err(|_| {
+        LocalPoolError::new(ErrorCode::Io, "configuration preset could not be read")
+    })?;
     if content.len() > 1024 * 1024 {
-        return Err(LocalPoolError::new(ErrorCode::InvalidState, "configuration preset is too large").into());
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset is too large",
+        )
+        .into());
     }
     let preset: ConfigurationPreset = serde_json::from_slice(&content).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "configuration preset is invalid or contains unsupported fields")
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset is invalid or contains unsupported fields",
+        )
     })?;
     let current = local_configuration_preset(&state)?;
     let base_revision = local_preset_revision(&current)?;
     let changes = local_configuration_diff(&current, &preset)?;
-    Ok(Some(ConfigurationPresetPreview { base_revision, preset, changes }))
+    Ok(Some(ConfigurationPresetPreview {
+        base_revision,
+        preset,
+        changes,
+    }))
 }
 
 #[tauri::command]
@@ -249,23 +268,64 @@ pub async fn apply_local_configuration_preset(
     let current = local_configuration_preset(&state)?;
     let current_revision = local_preset_revision(&current)?;
     if input.base_revision != current_revision {
-        return Err(LocalPoolError::new(ErrorCode::Conflict, "local configuration changed; preview the preset again").into());
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "local configuration changed; preview the preset again",
+        )
+        .into());
     }
     let changes = local_configuration_diff(&current, &input.preset)?;
     if changes.is_empty() {
-        return Ok(ConfigurationPresetApplyResult { previous_revision: current_revision.clone(), revision: current_revision, changes });
+        return Ok(ConfigurationPresetApplyResult {
+            previous_revision: current_revision.clone(),
+            revision: current_revision,
+            changes,
+        });
     }
     let (old_gateway, old_sources, old_accounts, old_keys) = {
         let store = state.store()?;
-        (store.gateway().clone(), store.sources().to_vec(), store.accounts().to_vec(), store.keys().to_vec())
+        (
+            store.gateway().clone(),
+            store.sources().to_vec(),
+            store.accounts().to_vec(),
+            store.keys().to_vec(),
+        )
     };
-    let source_rules = input.preset.settings.sources.iter().map(|rule| (rule.id.as_str(), rule)).collect::<std::collections::BTreeMap<_, _>>();
-    let account_rules = input.preset.settings.accounts.iter().map(|rule| (rule.id.as_str(), rule)).collect::<std::collections::BTreeMap<_, _>>();
-    if source_rules.len() != input.preset.settings.sources.len() || account_rules.len() != input.preset.settings.accounts.len() {
-        return Err(LocalPoolError::new(ErrorCode::InvalidState, "configuration preset contains duplicate member ids").into());
+    let source_rules = input
+        .preset
+        .settings
+        .sources
+        .iter()
+        .map(|rule| (rule.id.as_str(), rule))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let account_rules = input
+        .preset
+        .settings
+        .accounts
+        .iter()
+        .map(|rule| (rule.id.as_str(), rule))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if source_rules.len() != input.preset.settings.sources.len()
+        || account_rules.len() != input.preset.settings.accounts.len()
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset contains duplicate member ids",
+        )
+        .into());
     }
-    if old_sources.iter().any(|source| !source_rules.contains_key(source.id.as_str())) || old_accounts.iter().any(|account| !account_rules.contains_key(account.account.id.as_str())) {
-        return Err(LocalPoolError::new(ErrorCode::Conflict, "configuration preset must include every existing local member").into());
+    if old_sources
+        .iter()
+        .any(|source| !source_rules.contains_key(source.id.as_str()))
+        || old_accounts
+            .iter()
+            .any(|account| !account_rules.contains_key(account.account.id.as_str()))
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "configuration preset must include every existing local member",
+        )
+        .into());
     }
     let mut sources = old_sources.clone();
     for source in &mut sources {
@@ -291,11 +351,19 @@ pub async fn apply_local_configuration_preset(
             LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
         })?;
         let current_proxy_id = credential.as_ref().and_then(|credential| {
-            credential.proxy_url().and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+            credential
+                .proxy_url()
+                .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
         });
-        let current_bypass = credential.as_ref().is_some_and(|credential| credential.bypass_common_proxy());
+        let current_bypass = credential
+            .as_ref()
+            .is_some_and(|credential| credential.bypass_common_proxy());
         if rule.proxy_id != current_proxy_id || rule.bypass_common_proxy != current_bypass {
-            return Err(LocalPoolError::new(ErrorCode::Conflict, "configuration preset references a different account proxy").into());
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "configuration preset references a different account proxy",
+            )
+            .into());
         }
         account.account.enabled = rule.enabled;
         account.account.in_pool = rule.in_pool;
@@ -306,10 +374,18 @@ pub async fn apply_local_configuration_preset(
     }
     let settings = &input.preset.settings;
     let current_proxy_id = if old_gateway.common_proxy_configured {
-        secret_store::load(COMMON_PROXY_SECRET_REF)?.as_deref().and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
-    } else { None };
+        secret_store::load(COMMON_PROXY_SECRET_REF)?
+            .as_deref()
+            .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+    } else {
+        None
+    };
     if settings.quota.common_proxy_id != current_proxy_id {
-        return Err(LocalPoolError::new(ErrorCode::Conflict, "configuration preset references a different common proxy").into());
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "configuration preset references a different common proxy",
+        )
+        .into());
     }
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = settings.routing.max_retry_candidates;
@@ -325,17 +401,27 @@ pub async fn apply_local_configuration_preset(
     gateway.model_reasoning_allowed_levels = settings.model_reasoning_allowed_levels.clone();
     gateway.model_service_tier_overrides = settings.model_service_tier_overrides.clone();
     gateway.model_display_order = settings.model_display_order.clone();
-    state.store()?.replace_pool_records(sources, accounts, old_keys.clone())?;
+    state
+        .store()?
+        .replace_pool_records(sources, accounts, old_keys.clone())?;
     state.store()?.replace_gateway(gateway)?;
     if let Err(error) = restart_or_rollback(&state, || {
-        state.store()?.replace_pool_records(old_sources, old_accounts, old_keys)?;
+        state
+            .store()?
+            .replace_pool_records(old_sources, old_accounts, old_keys)?;
         state.store()?.replace_gateway(old_gateway)?;
         Ok(())
-    }).await {
+    })
+    .await
+    {
         return Err(error.into());
     }
     let revision = local_preset_revision(&input.preset)?;
-    Ok(ConfigurationPresetApplyResult { previous_revision: current_revision, revision, changes })
+    Ok(ConfigurationPresetApplyResult {
+        previous_revision: current_revision,
+        revision,
+        changes,
+    })
 }
 
 pub(super) fn write_configuration_preset(

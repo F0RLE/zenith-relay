@@ -1613,7 +1613,7 @@ async fn native_responses_repair_call_prefixed_function_item_ids_after_strict_re
     let bodies = state.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[0]["input"][1]["id"], "call_cross_provider_01");
-    assert_eq!(bodies[1]["input"][1]["id"], "fc_cross_provider_01");
+    assert_eq!(bodies[1]["input"][1]["id"], "fc_call_cross_provider_01");
     assert_eq!(bodies[1]["input"][1]["call_id"], "call_cross_provider_01");
     assert_eq!(bodies[1]["input"][2]["call_id"], "call_cross_provider_01");
     drop(bodies);

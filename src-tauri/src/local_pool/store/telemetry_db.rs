@@ -212,6 +212,9 @@ impl TelemetryDb {
         if version <= 26 {
             connection.execute_batch(MIGRATION_027).map_err(db_error)?;
         }
+        if version <= 27 {
+            connection.execute_batch(MIGRATION_028).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -945,9 +948,10 @@ mod tests {
 
         let bindings = database.affinity_bindings(0).unwrap();
         assert_eq!(bindings.len(), MAX_RESPONSE_AFFINITY_ROWS);
+        let newest_key = format!("response-{:05}", MAX_RESPONSE_AFFINITY_ROWS + 1);
         assert_eq!(
             bindings.first().map(|binding| binding.key.as_str()),
-            Some("response-04097")
+            Some(newest_key.as_str())
         );
         assert_eq!(
             bindings.last().map(|binding| binding.key.as_str()),

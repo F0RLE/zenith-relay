@@ -38,7 +38,7 @@ const SSE_FIRST_BYTE_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
 
 const SSE_REPLAY_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(2);
 
-const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 

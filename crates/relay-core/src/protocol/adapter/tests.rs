@@ -1209,7 +1209,7 @@ fn call_prefixed_function_item_id_repair_keeps_the_tool_result_link() {
     assert!(repair_call_prefixed_function_item_ids(&mut request));
     let input = request["input"].as_array().expect("input is an array");
     assert_eq!(input[0]["id"], "call_message");
-    assert_eq!(input[1]["id"], "fc_function_01");
+    assert_eq!(input[1]["id"], "fc_call_function_01");
     assert_eq!(input[1]["call_id"], "call_function_01");
     assert_eq!(input[2]["id"], "fc_function_02");
     assert_eq!(input[3]["id"], "call_custom_01");

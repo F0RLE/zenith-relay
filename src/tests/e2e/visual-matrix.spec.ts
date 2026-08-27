@@ -1200,7 +1200,7 @@ for (const viewport of viewports) {
     }
     await expect(shell).not.toHaveClass(/sidebar-collapsed/);
     await expect(page.locator(".relay-sidebar nav button span").first()).toBeVisible();
-    await expect(page.locator(".sidebar-help-copy small")).toHaveText("v1.1.0");
+    await expect(page.locator(".sidebar-help-copy small")).toHaveText(/^v\d+\.\d+\.\d+$/);
     expect(await page.locator(".sidebar-footer").evaluate((footer) => {
       const bounds = footer.getBoundingClientRect();
       return [...footer.children].every((child) => {

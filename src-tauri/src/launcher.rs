@@ -381,8 +381,13 @@ fn is_codex_process_identity(
                 || path.contains("\\chatgpt\\")
                 || path.contains("\\codex\\");
         }
+        // Do not match the standalone Codex CLI (`...\\OpenAI\\Codex\\bin\\codex.exe`):
+        // profile switching must never terminate the active Relay/Codex task.
+        let packaged_desktop = path.contains("\\windowsapps\\openai.")
+            || path.contains("\\program files\\chatgpt\\")
+            || path.contains("\\program files\\codex\\");
         (name.eq_ignore_ascii_case("OpenAI.Codex.exe")
-            || (name.eq_ignore_ascii_case("Codex.exe") && path.contains("openai")))
+            || (name.eq_ignore_ascii_case("Codex.exe") && packaged_desktop))
             && !path.contains("\\resources\\codex.exe")
     }
 
@@ -516,6 +521,13 @@ mod tests {
         assert!(!is_codex_process_identity(
             "codex.exe",
             Some(Path::new(r"C:\tools\codex.exe")),
+            &["app-server"]
+        ));
+        assert!(!is_codex_process_identity(
+            "codex.exe",
+            Some(Path::new(
+                r"C:\Users\FORLE\AppData\Local\OpenAI\Codex\bin\codex.exe"
+            )),
             &["app-server"]
         ));
         assert!(is_codex_process_identity(
