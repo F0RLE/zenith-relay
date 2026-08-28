@@ -10,6 +10,13 @@ import { Button, Dialog, IconButton, OptionMenu, StatusIcon } from "./Ui";
 import { apiSourcePriority, apiSourceRole, type ApiSourceRole } from "../routingOrder";
 import { sourceOrderForRole, sourceRoutingStages, toggle, type PoolMember } from "../poolHelpers";
 import { useRelayState } from "../state/RelayStateProvider";
+import {
+  modelSelectionForMember,
+  modelSelectionPayload,
+  moveSourceBy as moveSourceByOrder,
+  moveSourceOrder,
+  sourcePrioritiesForOrder,
+} from "./poolMemberEditorModel";
 
 export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onClose: () => void }) {
   const { t } = useTranslation();
@@ -23,15 +30,8 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const [dropRole, setDropRole] = useState<ApiSourceRole | null>(null);
   const sourceDragRef = useRef<{ pointerId: number; sourceId: string; clientX: number; clientY: number } | null>(null);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
-  const pricedModels = member.kind === "source"
-    ? [...Object.keys(member.modelPriceOverrides ?? {}), ...Object.keys(member.detectedModelPrices ?? {})]
-    : [];
-  const modelIds = [...new Map([...pricedModels, ...member.allowedModels, ...member.excludedModels, ...member.models].map((model) => [model.toLocaleLowerCase(), model])).values()];
-  const [enabledModels, setEnabledModels] = useState(() => {
-    const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
-    const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
-    return modelIds.filter((model) => (!allowed.size || allowed.has(model.toLocaleLowerCase())) && !excluded.has(model.toLocaleLowerCase()));
-  });
+  const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
+  const [enabledModels, setEnabledModels] = useState(initialEnabledModels);
   const toggleEnabledModel = useCallback((model: string) => {
     setEnabledModels((values) => toggle(values, model));
   }, []);
@@ -56,19 +56,10 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
     clearSourceDrag();
   }, [clearSourceDrag, member.id, runtime?.sources]);
   const moveSource = useCallback((sourceId: string, targetId: string, after = false) => {
-    if (sourceId === targetId) return;
-    setSourceOrder((current) => {
-      const next = current.filter((id) => id !== sourceId);
-      const targetIndex = next.indexOf(targetId);
-      if (targetIndex < 0) return current;
-      next.splice(targetIndex + (after ? 1 : 0), 0, sourceId);
-      return next;
-    });
+    setSourceOrder((current) => moveSourceOrder(current, sourceId, targetId, after));
   }, []);
   const moveSourceBy = (sourceId: string, offset: number) => {
-    const index = sourceOrder.indexOf(sourceId);
-    const target = sourceOrder[index + offset];
-    if (target) moveSource(sourceId, target, offset > 0);
+    setSourceOrder((current) => moveSourceByOrder(current, sourceId, offset));
   };
   const updateSourceDragAt = useCallback((clientX: number, clientY: number) => {
     const sourceId = sourceDragRef.current?.sourceId;
@@ -155,9 +146,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   };
   const save = () => {
     if (member.kind === "source" && !sourcePriceOverrides) return;
-    const allEnabled = modelIds.every((model) => enabledModels.includes(model));
-    const allowedModels = allEnabled ? [] : modelIds.filter((model) => enabledModels.includes(model));
-    const excludedModels = allEnabled ? [] : modelIds.filter((model) => !enabledModels.includes(model));
+    const { allowedModels, excludedModels } = modelSelectionPayload(modelIds, enabledModels);
     const persist = () => {
       if (member.kind === "account") {
         const payload = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
@@ -166,7 +155,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
       const protocolBindings = effectiveSourceProtocolBindings(member);
-      const sourcePriorities = Object.fromEntries(sourceOrder.map((sourceId, index) => [sourceId, apiSourcePriority(sourceRole, index, sourceOrder.length)]));
+      const sourcePriorities = sourcePrioritiesForOrder(sourceOrder, sourceRole);
       const priority = sourcePriorities[member.id] ?? apiSourcePriority(sourceRole);
       const payload = { allowedModels, excludedModels, draining: member.draining, priority, sourcePriorities, weight: 1, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
