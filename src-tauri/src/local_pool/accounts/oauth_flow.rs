@@ -191,11 +191,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn start(&self, oauth: &CodexOAuthClient) -> Result<OAuthFlowStart, OAuthFlowError> {
-        self.start_for_account(oauth, None).await
-    }
-
     pub async fn start_for_account(
         &self,
         oauth: &CodexOAuthClient,
@@ -1063,7 +1058,7 @@ mod tests {
         let events = Events::default();
         let manager = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
         let start = manager
-            .start(&CodexOAuthClient::new().unwrap())
+            .start_for_account(&CodexOAuthClient::new().unwrap(), None)
             .await
             .unwrap();
         assert!(CODEX_OAUTH_CALLBACK_PORTS
@@ -1100,7 +1095,7 @@ mod tests {
         let events = Events::default();
         let manager = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
         let start = manager
-            .start(&CodexOAuthClient::new().unwrap())
+            .start_for_account(&CodexOAuthClient::new().unwrap(), None)
             .await
             .unwrap();
         let callback = callback_url_for(&start, "authorization-code", Some("wrong-state"));
@@ -1125,7 +1120,7 @@ mod tests {
         let first_events = Events::default();
         let first = OAuthFlowManager::new(root.clone(), secrets.clone(), first_events);
         let start = first
-            .start(&CodexOAuthClient::new().unwrap())
+            .start_for_account(&CodexOAuthClient::new().unwrap(), None)
             .await
             .unwrap();
         first.shutdown().await;
@@ -1174,7 +1169,7 @@ mod tests {
         let manager =
             OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
         let start = manager
-            .start(&CodexOAuthClient::new().unwrap())
+            .start_for_account(&CodexOAuthClient::new().unwrap(), None)
             .await
             .unwrap();
         let port = Url::parse(&start.redirect_uri).unwrap().port().unwrap();
@@ -1198,7 +1193,7 @@ mod tests {
         );
 
         let start = manager
-            .start(&CodexOAuthClient::new().unwrap())
+            .start_for_account(&CodexOAuthClient::new().unwrap(), None)
             .await
             .unwrap();
         let oversized = format!(
@@ -1300,7 +1295,7 @@ mod tests {
         let manager =
             OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
         let start = manager
-            .start(&CodexOAuthClient::new().unwrap())
+            .start_for_account(&CodexOAuthClient::new().unwrap(), None)
             .await
             .unwrap();
         assert_eq!(
