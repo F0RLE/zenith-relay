@@ -159,38 +159,6 @@ pub async fn set_local_account_enabled(
 }
 
 #[tauri::command]
-pub async fn set_local_account_draining(
-    account_id: String,
-    draining: bool,
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
-    let _mutation = state.setup_guard().await;
-    let mut account = state
-        .store()?
-        .account(&account_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    if account.account.draining == draining {
-        return state.snapshot().await.map_err(Into::into);
-    }
-    account.account.draining = draining;
-    let (old_accounts, old_keys) = current_account_records(&state)?;
-    let catalog_changed = account.account.in_pool;
-    state.store()?.upsert_account(account.clone())?;
-    let updated_in_place = apply_account_policy_if_running(&state, &account).await;
-    if !updated_in_place {
-        sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
-    }
-    let snapshot = state.snapshot().await?;
-    drop(_mutation);
-    if updated_in_place && catalog_changed {
-        refresh_active_codex_catalog_in_background(app);
-    }
-    Ok(snapshot)
-}
-
-#[tauri::command]
 pub async fn delete_local_account(
     account_id: String,
     app: AppHandle,

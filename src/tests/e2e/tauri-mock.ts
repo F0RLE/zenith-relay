@@ -607,15 +607,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "cancel_local_account_import": return null;
           case "refresh_local_account_quota": return structuredClone(localRuntime);
           case "refresh_all_local_account_quotas": return localRuntime.accounts.map((item) => ({ accountId: item.id, status: "succeeded" }));
-          case "get_local_reset_credits": {
-            const target = localRuntime.accounts.find((item) => item.id === String(args.accountId));
-            const count = target?.quota.resetCreditsAvailable ?? 0;
-            return {
-              availableCount: count,
-              credits: count > 0 ? [{ id: "reset_synthetic", status: "available", expiresAt: Math.floor((Date.now() + 24 * 60 * 60_000) / 1_000) }] : [],
-              nextExpiresAt: count > 0 ? Math.floor((Date.now() + 24 * 60 * 60_000) / 1_000) : null,
-            };
-          }
           case "consume_local_reset_credit": {
             const target = localRuntime.accounts.find((item) => item.id === String(args.accountId));
             if (target) target.quota.resetCreditsAvailable = Math.max(0, target.quota.resetCreditsAvailable - 1);
@@ -634,12 +625,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_local_account_enabled": {
             const target = localRuntime.accounts.find((item) => item.id === args.accountId);
             if (target) target.enabled = Boolean(args.enabled);
-            refreshGatewayModels(localRuntime);
-            return structuredClone(localRuntime);
-          }
-          case "set_local_account_draining": {
-            const target = localRuntime.accounts.find((item) => item.id === args.accountId);
-            if (target) target.draining = Boolean(args.draining);
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
           }
