@@ -2,37 +2,14 @@ import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState }
 import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, RefreshCw, Server, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { LocalUsage, RemoteUsage, SourceStats, SourceSummary, UsageBucket, UsageTotals } from "../../api/types";
+import type { SourceStats, SourceSummary } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { measureTokenSpeed } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
+import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, sourceHost, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
 
 const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
-
-type Range = "today" | "week" | "month";
-type AnalyticsScope = "" | `source:${string}` | `account:${string}`;
-type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
-type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
-type OverviewData = { analytics: Analytics };
-type UsageSample = {
-  createdAtMs: number;
-  success: boolean;
-  latencyMs: number;
-  ttftMs: number | null;
-  generationMs: number | null;
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  cacheWriteInputTokens?: number | null;
-  reasoningTokens: number | null;
-  outputTokens: number | null;
-  totalTokens: number | null;
-  apiEquivalent?: UsageTotals["apiEquivalent"] | null;
-};
-
-const HOUR_MS = 60 * 60 * 1_000;
-const DAY_MS = 24 * HOUR_MS;
 
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
@@ -42,7 +19,7 @@ export function OverviewPage() {
     const stored = localStorage.getItem("relay.overviewAnalyticsScope");
     return stored?.startsWith("source:") || stored?.startsWith("account:") ? stored as AnalyticsScope : "";
   });
-  const [overviewData, setOverviewData] = useState<OverviewData | null>(null);
+  const [overviewData, setOverviewData] = useState<Analytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
   const [chartsReady, setChartsReady] = useState(false);
@@ -66,7 +43,7 @@ export function OverviewPage() {
     ...(runtime?.sources ?? []).map((source) => ({ value: `source:${source.id}`, label: `${t("overview.scopeApi")} · ${source.name}` })),
     ...(runtime?.accounts ?? []).map((account) => ({ value: `account:${account.id}`, label: `${t("overview.scopeAccount")} · ${account.label}` })),
   ], [runtime?.accounts, runtime?.sources, t]);
-  const analytics = overviewData?.analytics ?? null;
+  const analytics = overviewData;
   const running = Boolean(runtime?.gateway.running);
 
   useEffect(() => {
@@ -123,8 +100,8 @@ export function OverviewPage() {
     setAnalyticsLoading(true);
     const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS, sourceOrAccountQuery: analyticsScopeQuery };
     const request = mode === "local"
-      ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows) }))
-      : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) } : null);
+      ? relayCommands.localUsagePage(input).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
+      : relayCommands.remoteUsage(input).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
     request
       .then((result) => {
         if (!active) return;
@@ -162,7 +139,6 @@ export function OverviewPage() {
     </>}
   </section>;
 }
-
 function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOpen: () => void }) {
   const { t, i18n } = useTranslation();
   const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
@@ -213,81 +189,4 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
       <section className="direct-api-models"><header><div><h2>{t("overview.availableModels")}</h2><p>{t("overview.availableModelsHint")}</p></div><strong>{source.models.length}</strong></header><ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul></section>
     </div>}
   </section>;
-}
-
-function chartWindows(range: Range, locale: string, now = new Date()): WindowBucket[] {
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const count = range === "today" ? 24 : range === "week" ? 7 : 30;
-  const bucketMs = range === "today" ? HOUR_MS : DAY_MS;
-  const startMs = today.getTime() - (range === "today" ? 0 : (count - 1) * DAY_MS);
-  const hour = new Intl.DateTimeFormat(locale, { hour: "2-digit", hourCycle: "h23" });
-  const weekday = new Intl.DateTimeFormat(locale, { weekday: "short" });
-  const day = new Intl.DateTimeFormat(locale, { day: "numeric" });
-  const full = new Intl.DateTimeFormat(locale, range === "today" ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" } : { day: "numeric", month: "long" });
-  return Array.from({ length: count }, (_, index) => {
-    const bucketStart = startMs + index * bucketMs;
-    const date = new Date(bucketStart);
-    return {
-      startMs: bucketStart,
-      endMs: bucketStart + bucketMs - 1,
-      label: range === "today" ? hour.format(date) : range === "week" ? weekday.format(date) : day.format(date),
-      fullLabel: full.format(date),
-      showLabel: range === "week" || index % (range === "today" ? 4 : 5) === 0 || index === count - 1,
-    };
-  });
-}
-
-function analyticsFromPage(totals: UsageTotals | undefined, buckets: UsageBucket[] | undefined, samples: UsageSample[], windows: WindowBucket[]): Analytics {
-  return { totals: totals ?? totalsFromSamples(samples), buckets: buckets?.length ? buckets : bucketsFromSamples(windows, samples) };
-}
-
-function bucketsFromSamples(windows: WindowBucket[], samples: UsageSample[]) {
-  return windows.map((window) => ({ startMs: window.startMs, totals: totalsFromSamples(samples.filter((sample) => sample.createdAtMs >= window.startMs && sample.createdAtMs <= window.endMs)) }));
-}
-
-function totalsFromSamples(samples: UsageSample[]) {
-  return samples.reduce<UsageTotals>((totals, sample) => {
-    const outputTokens = sample.success ? Math.max(0, sample.outputTokens ?? 0) : 0;
-    totals.requests += 1;
-    totals.successfulRequests += Number(sample.success);
-    totals.latencyMs += sample.latencyMs;
-    if (sample.ttftMs != null) { totals.ttftMs += sample.ttftMs; totals.ttftSamples += 1; }
-    const generation = measureTokenSpeed({ success: sample.success, outputTokens: sample.outputTokens, reasoningTokens: sample.reasoningTokens, durationMs: sample.generationMs });
-    if (generation) {
-      totals.generationMs += generation.durationMs;
-      totals.generationSamples += 1;
-      totals.generationOutputTokens += generation.outputTokens;
-    }
-    totals.inputTokens += sample.inputTokens ?? 0;
-    if (sample.cachedInputTokens != null) { totals.cachedInputTokens += sample.cachedInputTokens; totals.cachedInputSamples += 1; }
-    if (sample.cacheWriteInputTokens != null) { totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens; totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1; }
-    totals.reasoningTokens += sample.reasoningTokens ?? 0;
-    totals.outputTokens += sample.outputTokens ?? 0;
-    totals.totalTokens += sample.totalTokens ?? 0;
-    if (sample.apiEquivalent) {
-      totals.apiEquivalent.microUsd += sample.apiEquivalent.microUsd;
-      totals.apiEquivalent.pricedTokens += sample.apiEquivalent.pricedTokens;
-      totals.apiEquivalent.unpricedTokens += sample.apiEquivalent.unpricedTokens;
-    } else {
-      totals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
-    }
-    if (outputTokens > 0 && sample.latencyMs > 0) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += sample.latencyMs; }
-    return totals;
-  }, emptyUsageTotals());
-}
-
-function localSamples(events: LocalUsage[]): UsageSample[] {
-  return events.map((item) => ({ ...item, createdAtMs: Date.parse(item.createdAt) }));
-}
-
-function remoteSamples(events: RemoteUsage[]): UsageSample[] {
-  return events.map((item) => ({ ...item, ttftMs: item.ttftMs ?? null, generationMs: item.generationMs ?? null }));
-}
-
-function sourceHost(value: string) {
-  try {
-    return new URL(value).host;
-  } catch {
-    return value;
-  }
 }

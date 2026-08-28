@@ -1,14 +1,11 @@
 import type { ReactNode } from "react";
 import { Activity, CreditCard, Database, Gauge, Timer } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { UsageBucket, UsageTotals } from "../../api/types";
+import type { UsageTotals } from "../../api/types";
 import { OptionMenu, Tabs } from "../../components/Ui";
 import { formatTokenSpeed } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
-
-type Range = "today" | "week" | "month";
-type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
-type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
+import { fillBuckets, formatApiEquivalent, formatUsd, lineSegments, type Analytics, type Range, type WindowBucket } from "./overviewAnalyticsModel";
 
 export default function AnalyticsPanel({ range, setRange, windows, analytics, loading, error, scope, setScope, scopeOptions }: { range: Range; setRange: (range: Range) => void; windows: WindowBucket[]; analytics: Analytics | null; loading: boolean; error: boolean; scope: string; setScope: (scope: string) => void; scopeOptions: Array<{ value: string; label: string }> }) {
   const { t, i18n } = useTranslation();
@@ -37,7 +34,6 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
     </div>
   </section>;
 }
-
 function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: UsageTotals[]; totals: UsageTotals; windows: WindowBucket[]; loading: boolean }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
@@ -85,7 +81,6 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
     </div>
   </article>;
 }
-
 function OverviewChart({ icon, title, summary, values, windows, variant, tone, formatValue, formatAxis, loading }: { icon: ReactNode; title: string; summary: string; values: Array<number | null>; windows: WindowBucket[]; variant: "bars" | "line"; tone: string; formatValue: (value: number) => string; formatAxis: (value: number) => string; loading: boolean }) {
   const { t } = useTranslation();
   const measured = values.filter((value): value is number => value != null);
@@ -112,34 +107,4 @@ function OverviewChart({ icon, title, summary, values, windows, variant, tone, f
       </div>
     </div>
   </article>;
-}
-
-function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {
-  const byStart = new Map(buckets.map((bucket) => [bucket.startMs, bucket.totals]));
-  return windows.map((window) => byStart.get(window.startMs) ?? emptyUsageTotals());
-}
-
-function lineSegments(values: Array<number | null>, max: number) {
-  const segments: string[] = [];
-  let current = "";
-  values.forEach((value, index) => {
-    if (value == null) {
-      if (current) segments.push(current);
-      current = "";
-      return;
-    }
-    const x = (index + 0.5) / values.length * 100;
-    const y = (1 - value / max) * 100;
-    current += `${current ? " L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`;
-  });
-  if (current) segments.push(current);
-  return segments;
-}
-
-function formatApiEquivalent(value: number | null, locale: string) {
-  return value == null ? "—" : `≈${formatUsd(value, locale)}`;
-}
-
-function formatUsd(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value < 0.01 ? 6 : value < 1 ? 4 : 2 }).format(value);
 }
