@@ -340,7 +340,6 @@ pub fn run() {
             local_pool::commands::gateway::set_local_codex_websockets,
             local_pool::commands::gateway::set_codex_profile_websockets,
             local_pool::commands::gateway::diagnose_local_gateway,
-            local_pool::commands::usage::get_local_usage,
             local_pool::commands::usage::get_local_usage_page,
             local_pool::commands::usage::clear_local_usage,
             local_pool::commands::profiles::update_chatgpt_interface_quota_reserve,

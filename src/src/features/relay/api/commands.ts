@@ -12,7 +12,6 @@ import type {
   ConsumeResetCreditResponse,
   DefaultServiceTier,
   ImportSession,
-  LocalUsage,
   LocalUsagePage,
   MoveAccountsToRemoteResult,
   OAuthFlow,
@@ -57,7 +56,6 @@ export const relayCommands = {
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
   remoteRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[] | null>("get_remote_runtime_order"),
   remoteUsage: (input: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input }),
-  localUsage: (limit = 100) => invoke<LocalUsage[]>("get_local_usage", { limit }),
   localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
   clearLocalUsage: () => invoke("clear_local_usage"),
 

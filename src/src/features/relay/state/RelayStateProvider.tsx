@@ -2,7 +2,7 @@ import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { useTranslation } from "react-i18next";
 import { recordPerformance, setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
-import type { LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
+import type { PageId, ProfileActivation, ProfileBinding, RelayMode, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
 import {
@@ -13,6 +13,7 @@ import {
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
 import { useRelayOperations } from "./useRelayOperations";
 import { useRelayPreferences } from "./useRelayPreferences";
+import { useRelayUsage } from "./useRelayUsage";
 import { RelayContext, type PerformOptions, type RelayContextValue } from "./relayStateContext";
 import {
   ROUTING_REFRESH_INTERVAL_MS,
@@ -36,15 +37,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [usageRevision, setUsageRevision] = useState(0);
-  const [localUsage, setLocalUsage] = useState<LocalUsage[]>([]);
-  const [localUsagePage, setLocalUsagePage] = useState<LocalUsagePage | null>(null);
-  const [remoteUsage, setRemoteUsage] = useState<RemoteUsage[]>([]);
-  const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
   const [readyState, setReadyState] = useState<UiState | null>(null);
   const [loading, setLoading] = useState(true);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
-  const localUsageRequest = useRef(0);
-  const remoteUsageRequest = useRef(0);
   const {
     busy,
     feedback,
@@ -53,6 +48,15 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     clearFeedback,
     reportErrorFeedback,
   } = useRelayOperations();
+  const {
+    localUsagePage,
+    remoteUsage,
+    remoteUsagePage,
+    loadLocalUsage,
+    loadRemoteUsage,
+    resetUsage,
+    clearInactiveUsage,
+  } = useRelayUsage(relayCommands);
   const modeRef = useRef(mode);
   const pageRef = useRef(page);
   const stateRevision = useRef(1);
@@ -73,19 +77,14 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
     modeRef.current = next;
     stateRevision.current += 1;
-    ++localUsageRequest.current;
-    ++remoteUsageRequest.current;
     runtimeActivityOverlay.current.clear();
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
-    setLocalUsage([]);
-    setLocalUsagePage(null);
-    setRemoteUsage([]);
-    setRemoteUsagePage(null);
+    resetUsage();
     setModeState(next);
     setPage("overview");
     cancelOperations();
-  }, [cancelOperations, setPage]);
+  }, [cancelOperations, resetUsage, setPage]);
   const {
     onboardingComplete,
     finishOnboarding,
@@ -139,40 +138,10 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       }
       : loaded.snapshot;
     setRuntime(snapshot);
-    if (requestedMode === "local") {
-      setRemoteUsage([]);
-      setRemoteUsagePage(null);
-    } else if (requestedMode === "remote") {
-      setLocalUsage([]);
-      setLocalUsagePage(null);
-    } else {
-      setLocalUsagePage(null);
-      setRemoteUsage([]);
-      setRemoteUsagePage(null);
-    }
+    clearInactiveUsage(requestedMode);
     refreshedRevision.current = requestedRevision;
     setRuntimeRevision((current) => current + 1);
-  }, [mode]);
-
-  const loadLocalUsage = useCallback(async (query: RemoteUsageQuery) => {
-    const request = ++localUsageRequest.current;
-    const usage = await relayCommands.localUsagePage(query);
-    if (request === localUsageRequest.current) {
-      setLocalUsage(usage.events);
-      setLocalUsagePage(usage);
-    }
-    return usage;
-  }, []);
-
-  const loadRemoteUsage = useCallback(async (query: RemoteUsageQuery) => {
-    const request = ++remoteUsageRequest.current;
-    const usage = await relayCommands.remoteUsage(query);
-    if (request === remoteUsageRequest.current) {
-      setRemoteUsage(usage?.events ?? []);
-      setRemoteUsagePage(usage);
-    }
-    return usage;
-  }, []);
+  }, [clearInactiveUsage, mode]);
 
   const runBackgroundRefresh = useCallback(() => {
     const refreshMode = mode;
@@ -491,7 +460,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    localUsage,
     localUsagePage,
     loadLocalUsage,
     remoteUsage,
@@ -519,7 +487,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
     codexWebsocketsEnabled: displayRuntime?.gateway.codexWebsocketsEnabled ?? true,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection, setCodexBackgroundTasksEnabled, setCodexWebsocketsEnabled]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible, accountDisplayName, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection, setCodexBackgroundTasksEnabled, setCodexWebsocketsEnabled]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

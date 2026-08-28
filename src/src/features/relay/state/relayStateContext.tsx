@@ -1,6 +1,5 @@
 import { createContext, useContext } from "react";
 import type {
-  LocalUsage,
   LocalUsagePage,
   PageId,
   ProfileActivation,
@@ -31,7 +30,6 @@ export type RelayContextValue = {
   accountValueVisible: boolean;
   setAccountValueVisible: (visible: boolean) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
-  localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;
   loadLocalUsage: (query: RemoteUsageQuery) => Promise<LocalUsagePage>;
   remoteUsage: RemoteUsage[];
