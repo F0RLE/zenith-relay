@@ -15,6 +15,14 @@ import {
   initialReasoningLevels,
   toggleReasoningLevel,
 } from "./modelReasoningPolicy";
+import {
+  formatModelDisplayName,
+  modelSignature,
+  normalizeReasoningSelection,
+  reorderById,
+  reorderModelGroups,
+  supportedReasoningLevels,
+} from "./modelRulesModel";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type ModelDragState = {
@@ -38,28 +46,10 @@ export function ModelRulesView() {
   const [dropGroupId, setDropGroupId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const modelDragRef = useRef<ModelDragState | null>(null);
-  const modelSignature = models.map((model) => [
-    model.id,
-    model.enabled,
-    model.speedSupported,
-    model.speedTier,
-    model.speedConfigurable,
-    model.codexVisible,
-    model.codexDisplayName,
-    model.catalogRank,
-    model.inputMicroUsdPerMillion,
-    model.cachedInputMicroUsdPerMillion,
-    model.cacheWrite5mMicroUsdPerMillion,
-    model.cacheWrite1hMicroUsdPerMillion,
-    model.outputMicroUsdPerMillion,
-    model.customPrice,
-    model.reasoningLevels?.join(","),
-    model.reasoningSupportedLevels?.join(","),
-    model.reasoningAllowedLevels?.join(","),
-  ].join(":" )).join("\u0000");
+  const catalogSignature = modelSignature(models);
   useEffect(() => {
     setOrderedModels(models);
-  }, [runtime?.configurationRevision, modelSignature]);
+  }, [runtime?.configurationRevision, catalogSignature]);
   const modelGroups = groupModelSummariesForRules(orderedModels, runtime?.accounts ?? []);
   // A provider/API source can be temporarily unreachable while the local
   // OAuth pool still has a valid catalog. Keep that source error visible on
@@ -104,25 +94,14 @@ export function ModelRulesView() {
     "feedback.saved",
   );
   const reorderModels = (sourceId: string, targetId: string) => {
-    if (sourceId === targetId) return;
-    const next = [...orderedModels];
-    const source = next.findIndex((model) => model.id === sourceId);
-    const target = next.findIndex((model) => model.id === targetId);
-    if (source < 0 || target < 0) return;
-    const [moved] = next.splice(source, 1);
-    next.splice(target, 0, moved!);
+    const next = reorderById(orderedModels, sourceId, targetId);
+    if (!next) return;
     setOrderedModels(next);
     void saveModelOrder(next);
   };
   const reorderGroups = (sourceId: string, targetId: string) => {
-    if (sourceId === targetId) return;
-    const source = modelGroups.findIndex((group) => group.id === sourceId);
-    const target = modelGroups.findIndex((group) => group.id === targetId);
-    if (source < 0 || target < 0) return;
-    const blocks = modelGroups.map((group) => group.items);
-    const [moved] = blocks.splice(source, 1);
-    blocks.splice(target, 0, moved!);
-    const next = blocks.flat();
+    const next = reorderModelGroups(modelGroups, sourceId, targetId);
+    if (!next) return;
     setOrderedModels(next);
     void saveModelOrder(next);
   };
@@ -271,15 +250,10 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
   // The backend owns the provider contract and its order. Never synthesize
   // or reorder levels in the editor, and discard stale custom values from old
   // local policies before they can be sent back to the runtime.
-  const supportedLevels = (model.reasoningSupportedLevels?.length
-    ? model.reasoningSupportedLevels
-    : model.reasoningLevels ?? [])
-    .map((level) => level.trim().toLowerCase())
-    .filter((level, index, levels) => Boolean(level) && levels.indexOf(level) === index);
+  const supportedLevels = supportedReasoningLevels(model);
   const editable = Boolean(model.reasoningConfigurable);
   const normalizeToSupported = (levels: string[]) => {
-    const selected = new Set(levels.map((level) => level.trim().toLowerCase()));
-    return supportedLevels.filter((level) => selected.has(level));
+    return normalizeReasoningSelection(supportedLevels, levels);
   };
   const [allowedLevels, setAllowedLevels] = useState(() => normalizeToSupported(
     initialReasoningLevels(model.reasoningAllowedLevels, model.reasoningLevels ?? []),
@@ -328,18 +302,6 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
       </div>
     </div>
   </Dialog>;
-}
-
-function formatModelDisplayName(value: string) {
-  return value
-    .replace(/\bgpt\s*/i, "GPT-")
-    .replace(/\bclaude\s*/i, "Claude ")
-    .replace(/\bgemini\s*/i, "Gemini ")
-    .replace(/\bgrok\s*/i, "Grok ")
-    .replace(/\b(o\d)\b/i, (_, token: string) => token.toUpperCase())
-    .replace(/(\d)\s+(\d)(?=\s*$)/, "$1.$2")
-    .replace(/\s{2,}/g, " ")
-    .trim();
 }
 
 function ModelPriceDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
