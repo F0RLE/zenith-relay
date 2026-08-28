@@ -13,7 +13,7 @@ use crate::{
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::LocalPoolSnapshot,
-        profiles::{codex, repair, snapshots},
+        profiles::{codex, snapshots},
         remote::client::RemoteProfileCredential,
         state::DesktopState,
         store::secret_store,
@@ -29,6 +29,7 @@ use zenith_relay_core::{
 };
 
 mod catalog;
+mod history;
 mod policy;
 
 use catalog::{
@@ -36,6 +37,10 @@ use catalog::{
     validate_direct_source,
 };
 pub(in crate::local_pool) use catalog::{refresh_active_codex_catalog, CodexCatalogRefreshStatus};
+pub(crate) use history::{
+    discard_codex_history_backup, synchronize_codex_history, CodexHistoryProvider,
+};
+use history::{rollback_history_on_error, synchronize_history_for_command};
 use policy::{
     gateway_oauth_binding_request, prioritize_account_candidates, profile_quota_rank,
     GatewayOAuthBindingRequest,
@@ -45,43 +50,6 @@ use policy::{
 #[serde(rename_all = "camelCase")]
 pub struct ProfileActivation {
     binding: codex::ProfileBinding,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum CodexHistoryProvider {
-    ChatGpt,
-    LocalGateway,
-    ReadyApi,
-}
-
-pub(crate) fn synchronize_codex_history(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-    provider: CodexHistoryProvider,
-) -> Result<Option<String>, String> {
-    let provider = match provider {
-        CodexHistoryProvider::ChatGpt => repair::TargetProvider::Openai,
-        CodexHistoryProvider::LocalGateway => repair::TargetProvider::ZenithRelayLocal,
-        CodexHistoryProvider::ReadyApi => repair::TargetProvider::CodexLocalAccess,
-    };
-    repair::synchronize(
-        &state.transient_root(),
-        &state.history_repair_backup_root(),
-        profile_dir,
-        provider,
-    )
-    .map(|result| result.map(|result| result.backup_id))
-}
-
-pub(crate) fn rollback_codex_history(state: &DesktopState, backup_id: &str) -> Result<(), String> {
-    repair::rollback(&state.history_repair_backup_root(), backup_id)?;
-    repair::discard(&state.history_repair_backup_root(), backup_id)
-}
-
-pub(crate) fn discard_codex_history_backup(state: &DesktopState, backup_id: Option<&str>) {
-    if let Some(backup_id) = backup_id {
-        let _ = repair::discard(&state.history_repair_backup_root(), backup_id);
-    }
 }
 
 #[derive(Deserialize)]
@@ -776,39 +744,6 @@ async fn set_runtime_pool_interface_reserve(
 ) {
     if let Some(runtime) = state.gateway.runtime().await {
         runtime.set_protected_candidate(account_id, reserve_basis_points);
-    }
-}
-
-fn synchronize_history_for_command(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-    provider: CodexHistoryProvider,
-) -> Result<Option<String>, CommandError> {
-    synchronize_codex_history(state, profile_dir, provider)
-        .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message).into())
-}
-
-fn rollback_history_on_error<T>(
-    state: &DesktopState,
-    backup_id: Option<&str>,
-    result: Result<T, CommandError>,
-) -> Result<T, CommandError> {
-    match result {
-        Ok(value) => {
-            discard_codex_history_backup(state, backup_id);
-            Ok(value)
-        }
-        Err(mut error) => {
-            if let Some(backup_id) = backup_id {
-                if let Err(rollback) = rollback_codex_history(state, backup_id) {
-                    error.message = format!(
-                        "{}; automatic history rollback failed: {rollback}",
-                        error.message
-                    );
-                }
-            }
-            Err(error)
-        }
     }
 }
 
