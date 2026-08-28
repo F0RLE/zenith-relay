@@ -3,6 +3,7 @@ mod health_probe;
 pub(crate) mod quota_refresh;
 mod retention;
 mod wake_automation;
+mod weekly_reset;
 
 use crate::state::AppState;
 use std::{future::Future, sync::Arc, time::Duration};
