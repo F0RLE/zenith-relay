@@ -43,13 +43,13 @@ use events::{
 use failure::{send_gateway_error, GatewayFailure};
 use request::ClientRequest;
 
-const WEBSOCKET_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(180);
+const WEBSOCKET_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(600);
 
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::request::MAX_CLIENT_REQUEST_BODY_BYTES;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
-const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
-const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 const WEBSOCKET_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const RESPONSES_WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_METADATA_KEY: &str =

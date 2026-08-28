@@ -18,9 +18,11 @@ pub use snapshot::{
     SelectionReason,
 };
 
-const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
+// Keep response ownership across busy personal pools without allowing an
+// unbounded in-memory map. The durable store uses the same capacity policy.
+const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 16_384;
 pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
-const PROMPT_AFFINITY_MAX_ENTRIES: usize = 4_096;
+const PROMPT_AFFINITY_MAX_ENTRIES: usize = 16_384;
 pub const PROMPT_AFFINITY_TTL_MS: u64 = 60 * 60 * 1_000;
 const PROMPT_AFFINITY_MAX_IN_FLIGHT_SKEW: u32 = 1;
 const PROMPT_AFFINITY_QUOTA_SLACK_BPS: u64 = 500;

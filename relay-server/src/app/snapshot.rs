@@ -168,7 +168,7 @@ fn source_summaries(
             }
             let runtime_available = (running && record.enabled).then(|| {
                 if record.in_pool {
-                    pooled_source_runtime_available(routing_order, &record.id, record.wire_api)
+                    pooled_source_runtime_available(routing_order, &record.id)
                 } else {
                     source_runtime_available(routing_order, &record.id)
                 }

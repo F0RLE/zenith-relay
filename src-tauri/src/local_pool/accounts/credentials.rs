@@ -38,6 +38,18 @@ impl CredentialError {
     }
 }
 
+pub(super) fn bearer_authorization(access_token: &str) -> Result<HeaderValue, CredentialError> {
+    let mut authorization =
+        HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
+            CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "stored ChatGPT token is invalid",
+            )
+        })?;
+    authorization.set_sensitive(true);
+    Ok(authorization)
+}
+
 impl fmt::Display for CredentialError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
@@ -205,15 +217,7 @@ impl StoredCodexCredentials {
                 )
             });
         }
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.access_token))
-            .map_err(|_| {
-                CredentialError::new(
-                    CredentialErrorCode::InvalidSecret,
-                    "stored ChatGPT token is invalid",
-                )
-            })?;
-        authorization.set_sensitive(true);
-        Ok(authorization)
+        bearer_authorization(&self.access_token)
     }
 
     pub fn refresh_token(&self) -> Option<&str> {
@@ -855,6 +859,16 @@ mod tests {
         }
         assert!(debug.contains("[redacted]"));
         assert!(snapshot.contains("s***@e***.test"));
+    }
+
+    #[test]
+    fn bearer_authorization_is_sensitive_and_uses_the_canonical_scheme() {
+        let authorization = bearer_authorization("synthetic-access-token").unwrap();
+        assert_eq!(
+            authorization.to_str().unwrap(),
+            "Bearer synthetic-access-token"
+        );
+        assert!(authorization.is_sensitive());
     }
 
     #[test]

@@ -283,11 +283,10 @@ model assignment to that route. A <code>/models</code> response alone does not
 prove that a provider accepts a completion on every protocol; when one source
 has multiple routes, the binding assignment is the capability declaration and
 must be verified against the provider's documentation or a safe operator test.
-Because a confirmed native Messages binding already proves the upstream
-contract, runtime also exposes its unclaimed models to Responses clients through
-the existing Responses-to-Messages adapter. This linked route is derived at
-runtime and is not written back as new provider evidence. An explicit native
-Responses or Gemini route keeps ownership of any overlapping model.
+Cross-protocol access is explicit. A native Messages binding serves Messages
+clients only; exposing the same model to Responses clients requires a saved
+Responses-to-Messages binding. An explicit native Responses or Gemini route
+keeps ownership of any overlapping model.
 The same generic source catalog may optionally declare reasoning through
 <code>capabilities.reasoning</code>, <code>reasoning</code>,
 Codex-compatible fields, <code>reasoningEffortModes</code>, or explicit
@@ -433,9 +432,9 @@ profile credential, usage, and scheduler remain shared.
 
 - Only the ChatGPT account connector is shipped today.
 - The current ChatGPT/Codex profile integration uses the Responses client
-  contract. Confirmed native Messages source models are exposed through the
-  managed profile by the linked Responses-to-Messages runtime route. A native
-  Messages client still uses the original passthrough route.
+  contract. A native Messages source model appears in that profile only when a
+  Responses-to-Messages binding is explicitly configured. A native Messages
+  client uses the original passthrough route.
 - The Responses-to-Messages and Responses-to-Gemini bridges support namespace
   tools through stable aliases, but neither claims hosted or dynamic-discovery
   tools, structured custom results, native encrypted reasoning, or Responses

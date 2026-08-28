@@ -1,7 +1,6 @@
 use super::SourceSummary;
 use crate::{
-    CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier, ImageRequestPrice,
-    RoutingStrategy, WireApi,
+    CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier, ImageRequestPrice, RoutingStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -204,29 +203,14 @@ pub fn source_runtime_available(
     })
 }
 
-/// Returns whether an API source has a healthy runtime route for the Responses
-/// contract used by the pool. A healthy Messages-only route must not make the
-/// pooled source look available. Responses-to-Messages bridge candidates keep
-/// the `::responses_*` prefix and are therefore included. Legacy
-/// single-protocol candidates keep their source id without a suffix; their
-/// configured wire API disambiguates that form.
+/// Returns whether an API source has any healthy runtime route exposed through
+/// the pool's multi-protocol system key. Candidate ids may be the legacy source
+/// id or a protocol-specific child such as `source::messages`.
 pub fn pooled_source_runtime_available(
     routing_order: &[CandidateRuntimeSnapshot],
     source_id: &str,
-    legacy_wire_api: WireApi,
 ) -> bool {
-    routing_order.iter().any(|candidate| {
-        if candidate.kind != CandidateKind::ApiSource || !candidate.available {
-            return false;
-        }
-        if candidate.candidate_id == source_id {
-            return legacy_wire_api == WireApi::Responses;
-        }
-        candidate
-            .candidate_id
-            .strip_prefix(source_id)
-            .is_some_and(|suffix| suffix == "::responses" || suffix.starts_with("::responses_"))
-    })
+    source_runtime_available(routing_order, source_id)
 }
 
 fn default_cooldown_after_failures() -> u8 {

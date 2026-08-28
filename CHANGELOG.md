@@ -41,6 +41,9 @@ information.
 
 ## [Unreleased]
 
+- Newly added ChatGPT subscriptions now discover their model catalog with the
+  same registered Codex authorization used by the runtime. Quota and models
+  therefore appear together for accounts that require Agent Identity.
 - Tool-call continuations from Messages and Gemini API sources now stay on the
   exact source route that created the response, preventing route rotation from
   interrupting an active Codex task with a continuation mismatch.

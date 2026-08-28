@@ -1,4 +1,5 @@
 mod app;
+pub mod backup;
 pub mod config;
 pub mod config_presets;
 pub mod http;

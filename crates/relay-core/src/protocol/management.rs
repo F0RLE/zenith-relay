@@ -584,37 +584,15 @@ mod tests {
             runtime_candidate("source", CandidateKind::OAuthAccount, true),
         ];
         assert!(source_runtime_available(&runtime, "source"));
-        assert!(!pooled_source_runtime_available(
-            &runtime,
-            "source",
-            WireApi::Messages,
-        ));
-        assert!(!pooled_source_runtime_available(
-            &runtime,
-            "source",
-            WireApi::Responses,
-        ));
+        assert!(pooled_source_runtime_available(&runtime, "source"));
         let responses = [runtime_candidate(
             "source::responses_to_messages",
             CandidateKind::ApiSource,
             true,
         )];
-        assert!(pooled_source_runtime_available(
-            &responses,
-            "source",
-            WireApi::Messages,
-        ));
+        assert!(pooled_source_runtime_available(&responses, "source"));
         let legacy = [runtime_candidate("source", CandidateKind::ApiSource, true)];
-        assert!(pooled_source_runtime_available(
-            &legacy,
-            "source",
-            WireApi::Responses,
-        ));
-        assert!(!pooled_source_runtime_available(
-            &legacy,
-            "source",
-            WireApi::Messages,
-        ));
+        assert!(pooled_source_runtime_available(&legacy, "source"));
         assert!(!source_runtime_available(&runtime, "missing"));
         assert!(!source_runtime_available(&runtime, "sour"));
 
