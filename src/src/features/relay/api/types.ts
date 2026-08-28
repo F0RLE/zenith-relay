@@ -32,20 +32,6 @@ export type QuotaSnapshot = {
   error: { code: string; occurredAtMs: number } | null;
 };
 
-export type ResetCredit = {
-  status?: string;
-  resetType?: string;
-  grantedAt?: number;
-  expiresAt?: number;
-  redeemedAt?: number;
-};
-
-export type ResetCreditsSnapshot = {
-  availableCount: number | null;
-  credits: ResetCredit[];
-  nextExpiresAt: number | null;
-};
-
 export type ConsumeResetCreditResponse = {
   refreshed: boolean;
   refreshError?: string;

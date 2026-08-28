@@ -42,78 +42,6 @@ struct SourceMetadataManifest {
 }
 
 impl GatewayRuntime {
-    /// Fast is an upstream entitlement, not a model-name heuristic. The
-    /// management surface consults the last confirmed manifest for an eligible
-    /// route, so a free or otherwise ineligible account never gets a fabricated
-    /// Fast toggle.
-    pub fn model_supports_fast_service_tier(&self, model: &str) -> bool {
-        let model = model.trim();
-        if model.is_empty() {
-            return false;
-        }
-        self.current_candidate_ids_for_model(model)
-            .into_iter()
-            .any(|candidate_id| self.candidate_supports_fast_service_tier(&candidate_id, model))
-    }
-
-    /// Returns Fast capability for one concrete scheduler route. A model can
-    /// be shared by several providers, so a manifest from one route must never
-    /// authorize a priority request on another route.
-    pub(crate) fn candidate_supports_fast_service_tier(
-        &self,
-        candidate_id: &str,
-        model: &str,
-    ) -> bool {
-        let model = model.trim();
-        if candidate_id.trim().is_empty() || model.is_empty() {
-            return false;
-        }
-        let has_model = self
-            .lock_scheduler()
-            .candidate(candidate_id)
-            .is_some_and(|candidate| {
-                candidate
-                    .models
-                    .iter()
-                    .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
-            });
-        if !has_model {
-            return false;
-        }
-        let manifest = if self.source_candidate_bindings.contains_key(candidate_id) {
-            self.model_metadata
-                .source_manifests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(candidate_id)
-                .cloned()
-        } else if self.chatgpt_accounts.contains_key(candidate_id) {
-            self.model_metadata
-                .codex_manifests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(candidate_id)
-                .cloned()
-        } else {
-            None
-        };
-        manifest.is_some_and(|manifest| manifest_supports_fast_service_tier(&manifest.value, model))
-    }
-
-    fn current_candidate_ids_for_model(&self, model: &str) -> Vec<String> {
-        let scheduler = self.lock_scheduler();
-        scheduler
-            .candidates()
-            .filter(|candidate| {
-                candidate
-                    .models
-                    .iter()
-                    .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
-            })
-            .map(|candidate| candidate.id.clone())
-            .collect()
-    }
-
     /// Starts a best-effort metadata refresh for the management UI. The result
     /// arrives on the next state poll and never delays the current one.
     pub fn prefetch_source_model_metadata(self: &Arc<Self>) {
@@ -502,57 +430,6 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn set_codex_model_uses_responses_lite(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        enabled: bool,
-    ) {
-        let mut models = self
-            .codex_responses_lite_models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if enabled {
-            models.insert((candidate_id.to_string(), model.to_ascii_lowercase()));
-        } else {
-            models.remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
-        }
-    }
-
-    pub(crate) fn codex_model_responses_lite_candidates(&self, model: &str) -> Vec<String> {
-        let model = model.to_ascii_lowercase();
-        self.codex_responses_lite_models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter(|(_, candidate_model)| candidate_model == &model)
-            .map(|(candidate_id, _)| candidate_id.clone())
-            .collect()
-    }
-
-    pub(crate) fn remember_codex_model_manifest(
-        &self,
-        candidate_id: &str,
-        value: Value,
-        observed_at_ms: u64,
-    ) {
-        let scheduler = self.lock_scheduler();
-        if scheduler.candidate(candidate_id).is_none() {
-            return;
-        }
-        self.model_metadata
-            .codex_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                candidate_id.to_string(),
-                CachedModelManifest {
-                    value,
-                    observed_at_ms,
-                },
-            );
-    }
-
     pub(super) fn remember_source_model_manifest(
         &self,
         candidate_id: &str,
@@ -583,25 +460,6 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(candidate_id)
             .cloned()
-    }
-
-    pub(crate) fn stale_codex_model_manifests<'a>(
-        &self,
-        candidate_ids: impl IntoIterator<Item = &'a str>,
-    ) -> Vec<(String, Value)> {
-        let manifests = self
-            .model_metadata
-            .codex_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        candidate_ids
-            .into_iter()
-            .filter_map(|candidate_id| {
-                manifests
-                    .get(candidate_id)
-                    .map(|manifest| (candidate_id.to_string(), manifest.value.clone()))
-            })
-            .collect()
     }
 
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
@@ -718,57 +576,4 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = allowed_levels;
         Ok(())
     }
-}
-
-fn manifest_supports_fast_service_tier(manifest: &Value, model: &str) -> bool {
-    let Some(models) = manifest
-        .get("models")
-        .or_else(|| manifest.get("data"))
-        .and_then(Value::as_array)
-    else {
-        return false;
-    };
-    models.iter().any(|entry| {
-        let Some(object) = entry.as_object() else {
-            return false;
-        };
-        let id = object
-            .get("slug")
-            .or_else(|| object.get("id"))
-            .and_then(Value::as_str)
-            .map(str::trim);
-        if !id.is_some_and(|id| id.eq_ignore_ascii_case(model)) {
-            return false;
-        }
-        object
-            .get("service_tiers")
-            .and_then(Value::as_array)
-            .is_some_and(|tiers| {
-                tiers.iter().any(|tier| {
-                    tier.get("id")
-                        .and_then(Value::as_str)
-                        .is_some_and(is_fast_service_tier)
-                })
-            })
-            || object
-                .get("additional_speed_tiers")
-                .and_then(Value::as_array)
-                .is_some_and(|tiers| {
-                    tiers
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(is_fast_service_tier)
-                })
-            || object
-                .get("default_service_tier")
-                .and_then(Value::as_str)
-                .is_some_and(is_fast_service_tier)
-    })
-}
-
-fn is_fast_service_tier(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "fast" | "priority"
-    )
 }

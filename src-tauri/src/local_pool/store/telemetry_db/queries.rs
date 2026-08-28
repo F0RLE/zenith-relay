@@ -3,6 +3,7 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 impl TelemetryDb {
+    #[cfg(test)]
     pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
         let connection = self
             .connection

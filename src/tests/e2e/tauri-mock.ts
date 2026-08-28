@@ -525,7 +525,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "export_remote_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
           case "preview_remote_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "apply_remote_configuration_preset": remoteRuntime.gateway.maxRetryCandidates = 4; remoteRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: remoteRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
-          case "get_local_usage": return structuredClone(localUsage);
           case "get_local_usage_page": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
             const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
@@ -608,15 +607,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "cancel_local_account_import": return null;
           case "refresh_local_account_quota": return structuredClone(localRuntime);
           case "refresh_all_local_account_quotas": return localRuntime.accounts.map((item) => ({ accountId: item.id, status: "succeeded" }));
-          case "get_local_reset_credits": {
-            const target = localRuntime.accounts.find((item) => item.id === String(args.accountId));
-            const count = target?.quota.resetCreditsAvailable ?? 0;
-            return {
-              availableCount: count,
-              credits: count > 0 ? [{ id: "reset_synthetic", status: "available", expiresAt: Math.floor((Date.now() + 24 * 60 * 60_000) / 1_000) }] : [],
-              nextExpiresAt: count > 0 ? Math.floor((Date.now() + 24 * 60 * 60_000) / 1_000) : null,
-            };
-          }
           case "consume_local_reset_credit": {
             const target = localRuntime.accounts.find((item) => item.id === String(args.accountId));
             if (target) target.quota.resetCreditsAvailable = Math.max(0, target.quota.resetCreditsAvailable - 1);
@@ -635,12 +625,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_local_account_enabled": {
             const target = localRuntime.accounts.find((item) => item.id === args.accountId);
             if (target) target.enabled = Boolean(args.enabled);
-            refreshGatewayModels(localRuntime);
-            return structuredClone(localRuntime);
-          }
-          case "set_local_account_draining": {
-            const target = localRuntime.accounts.find((item) => item.id === args.accountId);
-            if (target) target.draining = Boolean(args.draining);
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
           }

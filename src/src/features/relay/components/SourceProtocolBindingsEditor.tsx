@@ -1,38 +1,24 @@
-import { Braces, Globe2, MessageSquareText, Route, Sparkles, type LucideIcon } from "lucide-react";
+import { Route, Sparkles } from "lucide-react";
 import { type CSSProperties, useId } from "react";
 import { useTranslation } from "react-i18next";
 import type { CacheWriteTtl, SourceAdapter, SourceProtocolBinding, SourceWireApi } from "../api/types";
 import {
   normalizedAdapter,
   normalizedBindings,
-  normalizedModelIds,
   sourceWireApis,
 } from "../sourceProtocolBindings";
 import { OptionMenu } from "./Ui";
-
-const protocolPresentation = {
-  responses: { icon: Sparkles, endpoint: "/responses" },
-  messages: { icon: MessageSquareText, endpoint: "/messages" },
-  chat_completions: { icon: Braces, endpoint: "/chat/completions" },
-  gemini: { icon: Globe2, endpoint: "/v1beta/models/{model}:generateContent" },
-} as const;
-
-type SimpleRouteCard = {
-  id: string;
-  wireApi: SourceWireApi;
-  adapter: SourceAdapter;
-  icon: LucideIcon;
-  titleKey: string;
-  subtitleKey: string;
-};
-
-const simpleRouteCards: readonly SimpleRouteCard[] = [
-  { id: "openai", wireApi: "responses", adapter: "native", icon: Sparkles, titleKey: "sources.simpleRouteCards.openai.title", subtitleKey: "sources.simpleRouteCards.openai.protocol" },
-  { id: "anthropic", wireApi: "messages", adapter: "native", icon: MessageSquareText, titleKey: "sources.simpleRouteCards.anthropic.title", subtitleKey: "sources.simpleRouteCards.anthropic.protocol" },
-  // Google sources use the provider's native Gemini contract by default. The
-  // Responses-to-Gemini bridge remains available in the advanced route matrix.
-  { id: "google", wireApi: "gemini", adapter: "native", icon: Globe2, titleKey: "sources.simpleRouteCards.google.title", subtitleKey: "sources.simpleRouteCards.google.protocol" },
-] as const;
+import {
+  updateBridgeModel,
+  updateCacheWriteTtl,
+  updateModelRoute,
+  updateNativeProtocol,
+} from "./sourceProtocolBindingsEditorModel";
+import {
+  protocolPresentation,
+  simpleRouteCards,
+  type SimpleRouteCard,
+} from "./sourceProtocolPresentation";
 
 export function SourceProtocolBindingsEditor({
   models,
@@ -93,44 +79,6 @@ export function SourceProtocolBindingsEditor({
       selected: assignedCount > 0,
       partial: assignedCount > 0 && assignedCount < models.length,
     };
-  };
-  const routesMayShareModel = (
-    left: SourceProtocolBinding,
-    right: SourceProtocolBinding,
-  ) => (
-    (left.wireApi === "messages"
-      && normalizedAdapter(left) === "native"
-      && right.wireApi === "responses"
-      && normalizedAdapter(right) === "responses_to_messages")
-    || (right.wireApi === "messages"
-      && normalizedAdapter(right) === "native"
-      && left.wireApi === "responses"
-      && normalizedAdapter(left) === "responses_to_messages")
-  );
-  const removeModelFromOtherRoutes = (
-    sourceBindings: SourceProtocolBinding[],
-    target: SourceProtocolBinding,
-    model: string,
-  ) => sourceBindings.map((binding) => {
-    if (binding === target || routesMayShareModel(binding, target)) return binding;
-    const selectedIds = selectedModels(binding);
-    const nextModelIds = selectedIds.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase());
-    return {
-      ...binding,
-      // Materialize the remaining catalog when a legacy single-route binding
-      // was using an empty model list as its source-wide fallback.
-      modelIds: normalizedModelIds(nextModelIds, models),
-    };
-  });
-  const addModelToRoute = (
-    sourceBindings: SourceProtocolBinding[],
-    target: SourceProtocolBinding,
-    model: string,
-  ) => {
-    const selectedIds = selectedModels(target);
-    return sourceBindings.map((binding) => binding === target
-      ? { ...binding, modelIds: normalizedModelIds([...selectedIds, model], models) }
-      : binding);
   };
   const modelIsSelected = (binding: SourceProtocolBinding | undefined, model: string) =>
     Boolean(binding && selectedModels(binding).some(
@@ -212,31 +160,7 @@ export function SourceProtocolBindingsEditor({
   }
 
   const setNativeProtocol = (wireApi: SourceWireApi, selected: boolean) => {
-    if (!selected) {
-      onChange(bindings.filter((binding) => !(
-        binding.wireApi === wireApi && normalizedAdapter(binding) === "native"
-      )));
-      return;
-    }
-    const existing = routeBinding(wireApi, "native");
-    if (existing) {
-      const nextModels = normalizedModelIds([...selectedModels(existing), ...models], models);
-      onChange(bindings.map((binding) => binding === existing
-        ? { ...binding, modelIds: nextModels }
-        : binding));
-      return;
-    }
-    const target = existing ?? {
-      wireApi,
-      // A secondary format starts unassigned. Its model cells become active
-      // immediately, while the header remains off until a model is routed.
-      modelIds: bindings.length ? [] : [...models],
-      adapter: "native" as const,
-      reasoningMode: "disabled" as const,
-      cacheWriteTtl: wireApi === "messages" ? "1h" as const : "provider" as const,
-    };
-    const withTarget = existing ? bindings : [...bindings, target];
-    onChange(withTarget);
+    onChange(updateNativeProtocol({ bindings, models, autoAssignModels, wireApi, selected }));
   };
 
   const setModel = (
@@ -245,122 +169,33 @@ export function SourceProtocolBindingsEditor({
     model: string,
     selected: boolean,
   ) => {
-    const target = routeBinding(wireApi, adapter);
-    if (!target) return;
-    if (!selected) {
-      const selectedIds = selectedModels(target);
-      const nextModelIds = selectedIds.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase());
-      if (!nextModelIds.length && hasMultipleRoutes) {
-        onChange(bindings.filter((binding) => binding !== target));
-        return;
-      }
-      onChange(bindings.map((binding) => binding === target
-        ? {
-          ...binding,
-          // A single legacy binding may use an empty list as its source-wide
-          // fallback. Keep the final route intact so the source cannot become
-          // unroutable through a model checkbox.
-          modelIds: nextModelIds.length || hasMultipleRoutes
-            ? normalizedModelIds(nextModelIds, models)
-            : selectedIds,
-        }
-        : binding));
-      return;
-    }
-    const moved = removeModelFromOtherRoutes(bindings, target, model);
-    const nextBindings = addModelToRoute(moved, target, model);
-    onChange(nextBindings);
+    onChange(updateModelRoute({ bindings, models, autoAssignModels, wireApi, adapter, model, selected }));
   };
 
   const setMessagesBridgeModel = (model: string, selected: boolean) => {
-    if (!selected) {
-      if (!messagesBridgeBinding) return;
-      const nextModelIds = normalizedModelIds(
-        messagesBridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
-        models,
-      );
-      onChange(nextModelIds.length
-        ? bindings.map((binding) => (
-          binding === messagesBridgeBinding
-            ? { ...binding, modelIds: nextModelIds }
-            : binding
-        ))
-        : bindings.filter((binding) => binding !== messagesBridgeBinding));
-      return;
-    }
-
-    if (messagesBridgeBinding) {
-      const moved = removeModelFromOtherRoutes(bindings, messagesBridgeBinding, model);
-      onChange(moved.map((binding) => (
-        binding === messagesBridgeBinding
-          ? {
-            ...binding,
-            modelIds: normalizedModelIds([...messagesBridgeModels, model], models),
-          }
-          : binding
-      )));
-      return;
-    }
-    onChange([
-      ...removeModelFromOtherRoutes(bindings, {
-        wireApi: "responses",
-        adapter: "responses_to_messages",
-        reasoningMode: "adaptive",
-        cacheWriteTtl: "1h",
-        modelIds: [model],
-      }, model),
-      {
-        wireApi: "responses",
-        adapter: "responses_to_messages",
-        reasoningMode: "adaptive",
-        cacheWriteTtl: cacheWriteTtl === "provider" ? "1h" : cacheWriteTtl,
-        modelIds: [model],
-      },
-    ]);
+    onChange(updateBridgeModel({
+      bindings,
+      models,
+      autoAssignModels,
+      adapter: "responses_to_messages",
+      model,
+      selected,
+      cacheWriteTtl,
+    }));
   };
   const setGeminiBridgeModel = (model: string, selected: boolean) => {
-    if (!selected) {
-      if (!geminiBridgeBinding) return;
-      const nextModelIds = normalizedModelIds(
-        geminiBridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
-        models,
-      );
-      onChange(nextModelIds.length
-        ? bindings.map((binding) => (
-          binding === geminiBridgeBinding
-            ? { ...binding, modelIds: nextModelIds }
-            : binding
-        ))
-        : bindings.filter((binding) => binding !== geminiBridgeBinding));
-      return;
-    }
-
-    if (geminiBridgeBinding) {
-      const moved = removeModelFromOtherRoutes(bindings, geminiBridgeBinding, model);
-      onChange(addModelToRoute(moved, geminiBridgeBinding, model).map((binding) => (
-        binding === geminiBridgeBinding
-          ? { ...binding, modelIds: normalizedModelIds([...geminiBridgeModels, model], models) }
-          : binding
-      )));
-      return;
-    }
-    const target: SourceProtocolBinding = {
-      wireApi: "responses",
+    onChange(updateBridgeModel({
+      bindings,
+      models,
+      autoAssignModels,
       adapter: "responses_to_gemini",
-      reasoningMode: "disabled",
-      modelIds: [model],
-    };
-    onChange([
-      ...removeModelFromOtherRoutes(bindings, target, model),
-      target,
-    ]);
+      model,
+      selected,
+      cacheWriteTtl,
+    }));
   };
   const setCacheWriteTtl = (cacheWriteTtl: CacheWriteTtl) => {
-    onChange(bindings.map((binding) => (
-      binding.wireApi === "messages" || normalizedAdapter(binding) === "responses_to_messages"
-        ? { ...binding, cacheWriteTtl }
-        : binding
-    )));
+    onChange(updateCacheWriteTtl(bindings, cacheWriteTtl));
   };
   return (
     <section className="source-protocol-bindings" aria-labelledby={titleId}>

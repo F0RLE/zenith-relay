@@ -34,11 +34,13 @@ use url::Url;
 mod authorization;
 mod build;
 mod candidates;
+mod codex_metadata;
 mod control;
 mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
+mod source_speed;
 
 use control::RuntimeControl;
 use session_state::CodexTurnStateStore;

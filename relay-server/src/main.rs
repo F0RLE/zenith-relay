@@ -1,5 +1,5 @@
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
-use std::{fs, future::IntoFuture, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fs, future::IntoFuture, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use zenith_relay_server::{
     backup,
@@ -21,18 +21,11 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let config = Config::from_env()?;
-    let command = std::env::args().skip(1).collect::<Vec<_>>();
-    if !command.is_empty() && command.len() != 2 {
-        return Err("supported commands are --backup <dir> and --restore <dir>".to_string());
-    }
+    let command = MaintenanceCommand::parse(std::env::args().skip(1).collect())?;
     fs::create_dir_all(&config.data_dir).map_err(|error| format!("server I/O failed: {error}"))?;
     let _data_lock = acquire_data_lock(&config.data_dir)?;
-    if let [operation, path] = command.as_slice() {
-        return match operation.as_str() {
-            "--backup" => backup::backup(&config, std::path::Path::new(path)),
-            "--restore" => backup::restore(&config, std::path::Path::new(path)),
-            _ => Err("supported commands are --backup <dir> and --restore <dir>".to_string()),
-        };
+    if let Some(command) = command {
+        return command.execute(&config);
     }
     let store = Arc::new(Store::open(config.data_dir.join("relay.sqlite"))?);
     let vault = Arc::new(Vault::open(
@@ -74,6 +67,40 @@ async fn run() -> Result<(), String> {
     usage_result
 }
 
+#[derive(Debug)]
+enum MaintenanceCommand {
+    Backup(PathBuf),
+    Restore(PathBuf),
+}
+
+impl MaintenanceCommand {
+    fn parse(args: Vec<String>) -> Result<Option<Self>, String> {
+        if args.is_empty() {
+            return Ok(None);
+        }
+        if args.len() != 2 {
+            return Err(Self::usage());
+        }
+        let command = match args[0].as_str() {
+            "--backup" => Self::Backup(PathBuf::from(&args[1])),
+            "--restore" => Self::Restore(PathBuf::from(&args[1])),
+            _ => return Err(Self::usage()),
+        };
+        Ok(Some(command))
+    }
+
+    fn execute(self, config: &Config) -> Result<(), String> {
+        match self {
+            Self::Backup(path) => backup::backup(config, &path),
+            Self::Restore(path) => backup::restore(config, &path),
+        }
+    }
+
+    fn usage() -> String {
+        "supported commands are --backup <dir> and --restore <dir>".to_string()
+    }
+}
+
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     if *shutdown.borrow() {
         return;
@@ -101,5 +128,35 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MaintenanceCommand;
+
+    #[test]
+    fn maintenance_command_parser_keeps_server_start_as_the_default() {
+        assert!(MaintenanceCommand::parse(Vec::new()).unwrap().is_none());
+    }
+
+    #[test]
+    fn maintenance_command_parser_accepts_backup_and_restore() {
+        assert!(MaintenanceCommand::parse(vec!["--backup".into(), "backup".into()]).is_ok());
+        assert!(MaintenanceCommand::parse(vec!["--restore".into(), "backup".into()]).is_ok());
+    }
+
+    #[test]
+    fn maintenance_command_parser_rejects_unknown_or_incomplete_commands() {
+        for args in [
+            vec!["--unknown".into(), "path".into()],
+            vec!["--backup".into()],
+            vec!["--restore".into(), "one".into(), "two".into()],
+        ] {
+            assert_eq!(
+                MaintenanceCommand::parse(args).unwrap_err(),
+                "supported commands are --backup <dir> and --restore <dir>"
+            );
+        }
     }
 }

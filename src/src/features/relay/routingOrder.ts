@@ -82,7 +82,7 @@ function aggregateModelRetries(candidates: CandidateRuntimeSnapshot[]) {
   return [...retries.values()].sort((left, right) => left.retryAtMs - right.retryAtMs || left.model.localeCompare(right.model));
 }
 
-export function compareRoutingOrder(leftId: string, rightId: string, order: Map<string, number>, fallback?: Map<string, number>) {
+export function compareRoutingOrder(leftId: string, rightId: string, order: ReadonlyMap<string, number>, fallback?: ReadonlyMap<string, number>) {
   const left = order.get(leftId);
   const right = order.get(rightId);
   if (left != null || right != null) return (left ?? Number.MAX_SAFE_INTEGER) - (right ?? Number.MAX_SAFE_INTEGER);

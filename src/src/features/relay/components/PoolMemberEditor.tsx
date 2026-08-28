@@ -1,15 +1,24 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { ArrowDown, ArrowRight, ArrowUp, GripVertical, Power } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { SourceSummary } from "../api/types";
-import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./SourcePriceEditor";
+import { SourcePriceEditor } from "./SourcePriceEditor";
+import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./sourcePriceEditorModel";
 import { effectiveSourceProtocolBindings } from "../sourceProtocolBindings";
 import { Button, Dialog, IconButton, OptionMenu, StatusIcon } from "./Ui";
 import { apiSourcePriority, apiSourceRole, type ApiSourceRole } from "../routingOrder";
 import { sourceOrderForRole, sourceRoutingStages, toggle, type PoolMember } from "../poolHelpers";
 import { useRelayState } from "../state/RelayStateProvider";
+import {
+  modelSelectionForMember,
+  modelSelectionPayload,
+  moveSourceBy as moveSourceByOrder,
+  moveSourceOrder,
+  sourcePrioritiesForOrder,
+} from "./poolMemberEditorModel";
+import { useSourceOrderDrag } from "./useSourceOrderDrag";
 
 export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onClose: () => void }) {
   const { t } = useTranslation();
@@ -17,21 +26,9 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
   const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
   const [sourceOrder, setSourceOrder] = useState<string[]>(() => member.kind === "source" ? sourceOrderForRole(runtime?.sources ?? [], apiSourceRole(member.priority), member.id) : []);
-  const [draggedSource, setDraggedSource] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
-  const [dropAfter, setDropAfter] = useState(false);
-  const [dropRole, setDropRole] = useState<ApiSourceRole | null>(null);
-  const sourceDragRef = useRef<{ pointerId: number; sourceId: string; clientX: number; clientY: number } | null>(null);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
-  const pricedModels = member.kind === "source"
-    ? [...Object.keys(member.modelPriceOverrides ?? {}), ...Object.keys(member.detectedModelPrices ?? {})]
-    : [];
-  const modelIds = [...new Map([...pricedModels, ...member.allowedModels, ...member.excludedModels, ...member.models].map((model) => [model.toLocaleLowerCase(), model])).values()];
-  const [enabledModels, setEnabledModels] = useState(() => {
-    const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
-    const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
-    return modelIds.filter((model) => (!allowed.size || allowed.has(model.toLocaleLowerCase())) && !excluded.has(model.toLocaleLowerCase()));
-  });
+  const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
+  const [enabledModels, setEnabledModels] = useState(initialEnabledModels);
   const toggleEnabledModel = useCallback((model: string) => {
     setEnabledModels((values) => toggle(values, model));
   }, []);
@@ -43,121 +40,31 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
   const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole) : [];
   const orderedSources = sourceOrder.map((sourceId) => runtime?.sources.find((source) => source.id === sourceId)).filter((source): source is SourceSummary => Boolean(source));
-  const clearSourceDrag = useCallback(() => {
-    sourceDragRef.current = null;
-    setDraggedSource(null);
-    setDropTarget(null);
-    setDropAfter(false);
-    setDropRole(null);
-  }, []);
   const chooseSourceRole = useCallback((role: ApiSourceRole) => {
     setSourceRole(role);
     setSourceOrder(sourceOrderForRole(runtime?.sources ?? [], role, member.id));
-    clearSourceDrag();
-  }, [clearSourceDrag, member.id, runtime?.sources]);
+  }, [member.id, runtime?.sources]);
   const moveSource = useCallback((sourceId: string, targetId: string, after = false) => {
-    if (sourceId === targetId) return;
-    setSourceOrder((current) => {
-      const next = current.filter((id) => id !== sourceId);
-      const targetIndex = next.indexOf(targetId);
-      if (targetIndex < 0) return current;
-      next.splice(targetIndex + (after ? 1 : 0), 0, sourceId);
-      return next;
-    });
+    setSourceOrder((current) => moveSourceOrder(current, sourceId, targetId, after));
   }, []);
   const moveSourceBy = (sourceId: string, offset: number) => {
-    const index = sourceOrder.indexOf(sourceId);
-    const target = sourceOrder[index + offset];
-    if (target) moveSource(sourceId, target, offset > 0);
+    setSourceOrder((current) => moveSourceByOrder(current, sourceId, offset));
   };
-  const updateSourceDragAt = useCallback((clientX: number, clientY: number) => {
-    const sourceId = sourceDragRef.current?.sourceId;
-    if (!sourceId) return;
-    const target = document.elementFromPoint(clientX, clientY);
-    const role = sourceId === member.id ? sourceRoleAt(target) : null;
-    if (role) {
-      setDropRole(role);
-      setDropTarget(null);
-      setDropAfter(false);
-      return;
-    }
-    const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId ?? null;
-    setDropRole(null);
-    setDropTarget(targetId && targetId !== sourceId ? targetId : null);
-    if (targetId && targetId !== sourceId && row) {
-      const bounds = row.getBoundingClientRect();
-      setDropAfter(clientY >= bounds.top + bounds.height / 2);
-    } else {
-    setDropAfter(false);
-    }
-  }, [member.id]);
-  const finishSourceDragAt = useCallback((clientX: number, clientY: number) => {
-    const sourceId = sourceDragRef.current?.sourceId;
-    if (!sourceId) return;
-    const target = document.elementFromPoint(clientX, clientY);
-    const role = sourceId === member.id ? sourceRoleAt(target) : null;
-    if (role) {
-      chooseSourceRole(role);
-      return;
-    }
-    const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId;
-    if (targetId && targetId !== sourceId && row) {
-      const bounds = row.getBoundingClientRect();
-      moveSource(sourceId, targetId, clientY >= bounds.top + bounds.height / 2);
-    }
-    clearSourceDrag();
-  }, [clearSourceDrag, member.id, moveSource, chooseSourceRole]);
-  useEffect(() => {
-    const drag = sourceDragRef.current;
-    if (!drag || draggedSource !== drag.sourceId) return;
-    const onPointerMove = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      drag.clientX = event.clientX;
-      drag.clientY = event.clientY;
-      updateSourceDragAt(event.clientX, event.clientY);
-    };
-    const onPointerUp = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      finishSourceDragAt(event.clientX, event.clientY);
-    };
-    const onPointerCancel = (event: globalThis.PointerEvent) => {
-      if (event.pointerId === drag.pointerId) clearSourceDrag();
-    };
-    const onWheel = () => {
-      // Let the dialog's scroll container handle the wheel normally. Re-check
-      // the target after scrolling so the drop indicator follows the row.
-      requestAnimationFrame(() => {
-        if (sourceDragRef.current !== drag) return;
-        updateSourceDragAt(drag.clientX, drag.clientY);
-      });
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
-    window.addEventListener("wheel", onWheel, { passive: true });
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      window.removeEventListener("wheel", onWheel);
-    };
-  }, [clearSourceDrag, draggedSource, finishSourceDragAt, updateSourceDragAt]);
-  const startSourceDrag = (event: PointerEvent<HTMLButtonElement>, sourceId: string) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    sourceDragRef.current = { pointerId: event.pointerId, sourceId, clientX: event.clientX, clientY: event.clientY };
-    setDraggedSource(sourceId);
-    setDropTarget(null);
-    setDropAfter(false);
-    setDropRole(null);
-  };
+  const {
+    draggedSource,
+    dropTarget,
+    dropAfter,
+    dropRole,
+    startSourceDrag,
+  } = useSourceOrderDrag({
+    memberId: member.id,
+    sourceRole,
+    onRoleDrop: chooseSourceRole,
+    onSourceDrop: moveSource,
+  });
   const save = () => {
     if (member.kind === "source" && !sourcePriceOverrides) return;
-    const allEnabled = modelIds.every((model) => enabledModels.includes(model));
-    const allowedModels = allEnabled ? [] : modelIds.filter((model) => enabledModels.includes(model));
-    const excludedModels = allEnabled ? [] : modelIds.filter((model) => !enabledModels.includes(model));
+    const { allowedModels, excludedModels } = modelSelectionPayload(modelIds, enabledModels);
     const persist = () => {
       if (member.kind === "account") {
         const payload = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
@@ -166,7 +73,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
       const protocolBindings = effectiveSourceProtocolBindings(member);
-      const sourcePriorities = Object.fromEntries(sourceOrder.map((sourceId, index) => [sourceId, apiSourcePriority(sourceRole, index, sourceOrder.length)]));
+      const sourcePriorities = sourcePrioritiesForOrder(sourceOrder, sourceRole);
       const priority = sourcePriorities[member.id] ?? apiSourcePriority(sourceRole);
       const payload = { allowedModels, excludedModels, draining: member.draining, priority, sourcePriorities, weight: 1, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
@@ -226,9 +133,4 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
 
 function formatRecoveryDelay(seconds: number, t: TFunction) {
   return seconds < 60 ? t("sources.recoverySeconds", { count: seconds }) : t("sources.recoveryMinutes", { count: seconds / 60 });
-}
-
-function sourceRoleAt(target: Element | null): ApiSourceRole | null {
-  const role = target?.closest<HTMLElement>("[data-source-role]")?.dataset.sourceRole;
-  return role === "primary" || role === "stabilizer" || role === "reserve" ? role : null;
 }

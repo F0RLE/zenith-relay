@@ -13,6 +13,7 @@ use zenith_relay_core::{
 
 mod account_runtime;
 mod runtime_build;
+mod runtime_records;
 mod snapshot;
 
 pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};

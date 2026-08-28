@@ -1,6 +1,6 @@
 use crate::{
     codex_config::load_api_key_for_launch,
-    launcher::{is_codex_running, launch_codex_with_profile, stop_codex_and_wait},
+    launcher::{is_codex_running, launch_codex_with_profile},
     local_pool::{
         accounts::{
             credentials::CredentialStore,
@@ -13,7 +13,7 @@ use crate::{
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::LocalPoolSnapshot,
-        profiles::{codex, repair, snapshots},
+        profiles::{codex, snapshots},
         remote::client::RemoteProfileCredential,
         state::DesktopState,
         store::secret_store,
@@ -25,58 +25,36 @@ use std::path::{Path, PathBuf};
 use tauri::State;
 use zenith_relay_core::{
     protocol::{Feature, ProfileKeyRotation},
-    CandidateQuota, DefaultServiceTier, QUOTA_STALE_AFTER_MS,
+    DefaultServiceTier, QUOTA_STALE_AFTER_MS,
 };
 
 mod catalog;
+mod history;
+mod policy;
+mod process;
 
 use catalog::{
     fetch_codex_model_catalog, fetch_direct_source_model_manifest, load_direct_source_api_key,
     validate_direct_source,
 };
 pub(in crate::local_pool) use catalog::{refresh_active_codex_catalog, CodexCatalogRefreshStatus};
+pub(crate) use history::{
+    discard_codex_history_backup, synchronize_codex_history, CodexHistoryProvider,
+};
+use history::{rollback_history_on_error, synchronize_history_for_command};
+use policy::{
+    gateway_oauth_binding_request, prioritize_account_candidates, profile_quota_rank,
+    GatewayOAuthBindingRequest,
+};
+use process::{
+    restart_codex_after_failed_change, restart_codex_after_restore, stop_codex_and_sync_account,
+    stop_codex_and_sync_account_at, stop_codex_for_profile_change,
+};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileActivation {
     binding: codex::ProfileBinding,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum CodexHistoryProvider {
-    ChatGpt,
-    LocalGateway,
-    ReadyApi,
-}
-
-pub(crate) fn synchronize_codex_history(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-    provider: CodexHistoryProvider,
-) -> Result<Option<String>, String> {
-    let provider = match provider {
-        CodexHistoryProvider::ChatGpt => repair::TargetProvider::Openai,
-        CodexHistoryProvider::LocalGateway => repair::TargetProvider::ZenithRelayLocal,
-        CodexHistoryProvider::ReadyApi => repair::TargetProvider::CodexLocalAccess,
-    };
-    repair::synchronize(
-        &state.transient_root(),
-        &state.history_repair_backup_root(),
-        profile_dir,
-        provider,
-    )
-    .map(|result| result.map(|result| result.backup_id))
-}
-
-pub(crate) fn rollback_codex_history(state: &DesktopState, backup_id: &str) -> Result<(), String> {
-    repair::rollback(&state.history_repair_backup_root(), backup_id)?;
-    repair::discard(&state.history_repair_backup_root(), backup_id)
-}
-
-pub(crate) fn discard_codex_history_backup(state: &DesktopState, backup_id: Option<&str>) {
-    if let Some(backup_id) = backup_id {
-        let _ = repair::discard(&state.history_repair_backup_root(), backup_id);
-    }
 }
 
 #[derive(Deserialize)]
@@ -372,35 +350,6 @@ pub async fn attach_codex_to_remote_gateway(
     restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GatewayOAuthBindingRequest<'a> {
-    Disabled,
-    Automatic,
-    Account(&'a str),
-}
-
-fn gateway_oauth_binding_request(
-    disabled: bool,
-    requested_account_id: Option<&str>,
-) -> LocalResult<GatewayOAuthBindingRequest<'_>> {
-    let requested_account_id = requested_account_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if disabled && requested_account_id.is_some() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "OAuth binding cannot be disabled and assigned to an account together",
-        ));
-    }
-    Ok(if disabled {
-        GatewayOAuthBindingRequest::Disabled
-    } else if let Some(account_id) = requested_account_id {
-        GatewayOAuthBindingRequest::Account(account_id)
-    } else {
-        GatewayOAuthBindingRequest::Automatic
-    })
-}
-
 async fn resolve_gateway_oauth_binding(
     state: &DesktopState,
     request: GatewayOAuthBindingRequest<'_>,
@@ -497,39 +446,6 @@ async fn resolve_gateway_oauth_binding(
         Some(error) => Err(error),
         None => Ok(None),
     }
-}
-
-fn profile_quota_rank(quota: CandidateQuota, allow_quota_wait: bool) -> Option<u64> {
-    match quota {
-        CandidateQuota::Available(remaining) => Some(remaining),
-        CandidateQuota::Unknown | CandidateQuota::Stale => Some(0),
-        CandidateQuota::Exhausted if allow_quota_wait => Some(0),
-        CandidateQuota::Exhausted => None,
-    }
-}
-
-fn prioritize_account_candidates(
-    candidates: &mut Vec<(String, u64)>,
-    preferred: Option<&str>,
-    automatic: bool,
-) {
-    candidates.sort_by(|left, right| {
-        let left_preferred = Some(left.0.as_str()) == preferred;
-        let right_preferred = Some(right.0.as_str()) == preferred;
-        if automatic {
-            right
-                .1
-                .cmp(&left.1)
-                .then_with(|| right_preferred.cmp(&left_preferred))
-                .then_with(|| left.0.cmp(&right.0))
-        } else {
-            right_preferred
-                .cmp(&left_preferred)
-                .then_with(|| right.1.cmp(&left.1))
-                .then_with(|| left.0.cmp(&right.0))
-        }
-    });
-    candidates.dedup_by(|left, right| left.0 == right.0);
 }
 
 #[tauri::command]
@@ -836,39 +752,6 @@ async fn set_runtime_pool_interface_reserve(
     }
 }
 
-fn synchronize_history_for_command(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-    provider: CodexHistoryProvider,
-) -> Result<Option<String>, CommandError> {
-    synchronize_codex_history(state, profile_dir, provider)
-        .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message).into())
-}
-
-fn rollback_history_on_error<T>(
-    state: &DesktopState,
-    backup_id: Option<&str>,
-    result: Result<T, CommandError>,
-) -> Result<T, CommandError> {
-    match result {
-        Ok(value) => {
-            discard_codex_history_backup(state, backup_id);
-            Ok(value)
-        }
-        Err(mut error) => {
-            if let Some(backup_id) = backup_id {
-                if let Err(rollback) = rollback_codex_history(state, backup_id) {
-                    error.message = format!(
-                        "{}; automatic history rollback failed: {rollback}",
-                        error.message
-                    );
-                }
-            }
-            Err(error)
-        }
-    }
-}
-
 fn verify_remote_profile_binding(
     profile_dir: &std::path::Path,
     backup_root: &std::path::Path,
@@ -954,76 +837,6 @@ fn profile_rotation_commit_state(
     }
 }
 
-fn stop_codex_for_profile_change() -> Result<bool, CommandError> {
-    stop_codex_and_wait().map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::Io,
-            format!("failed to stop ChatGPT before changing its profile: {error}"),
-        )
-        .into()
-    })
-}
-
-async fn stop_codex_and_sync_account(state: &DesktopState) -> Result<bool, CommandError> {
-    stop_codex_and_sync_account_at(state, &default_codex_home()).await
-}
-
-async fn stop_codex_and_sync_account_at(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-) -> Result<bool, CommandError> {
-    let stopped = stop_codex_for_profile_change()?;
-    let result: Result<(), CommandError> = async {
-        if let Some(account_id) =
-            codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
-        {
-            if state.store()?.account(&account_id).is_some() {
-                sync_managed_account_profile(state, &account_id).await?;
-            }
-        }
-        Ok(())
-    }
-    .await;
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)?;
-    Ok(stopped)
-}
-
-fn restart_codex_after_failed_change<T>(
-    stopped: bool,
-    result: Result<T, CommandError>,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<T, CommandError> {
-    match result {
-        Err(mut error) if stopped => {
-            if let Err(launch_error) = launch() {
-                error.message = format!(
-                    "{}; failed to restart ChatGPT: {launch_error}",
-                    error.message
-                );
-            }
-            Err(error)
-        }
-        result => result,
-    }
-}
-
-fn restart_codex_after_restore<T>(
-    stopped: bool,
-    result: Result<T, CommandError>,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<T, CommandError> {
-    match result {
-        Ok(value) if stopped => launch().map(|()| value).map_err(|error| {
-            LocalPoolError::new(
-                ErrorCode::Io,
-                format!("profile restored, but ChatGPT failed to restart: {error}"),
-            )
-            .into()
-        }),
-        result => restart_codex_after_failed_change(stopped, result, launch),
-    }
-}
-
 fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandError> {
     let Some(profile_dir) = profile_dir else {
         return Ok(default_codex_home());
@@ -1058,7 +871,7 @@ fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandEr
 mod tests {
     use super::*;
     use crate::local_pool::models::{LocalGatewayKeyRecord, ProviderSourceRecord};
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use zenith_relay_core::{MessagesReasoningMode, SourceAdapter, SourceProtocolBinding, WireApi};
 
@@ -1187,115 +1000,6 @@ mod tests {
             profile_rotation_commit_state(None, &current, &rotation),
             ProfileRotationCommitState::Unknown
         );
-    }
-
-    #[test]
-    fn failed_profile_change_restarts_a_previously_running_codex() {
-        let launched = Cell::new(false);
-        let error = restart_codex_after_failed_change::<()>(
-            true,
-            Err(LocalPoolError::new(ErrorCode::Conflict, "profile conflict").into()),
-            || {
-                launched.set(true);
-                Ok(())
-            },
-        )
-        .unwrap_err();
-
-        assert!(launched.get());
-        assert!(matches!(error.code, ErrorCode::Conflict));
-    }
-
-    #[test]
-    fn successful_restore_restarts_a_previously_running_codex() {
-        let launched = Cell::new(false);
-        restart_codex_after_restore(true, Ok(()), || {
-            launched.set(true);
-            Ok(())
-        })
-        .unwrap();
-
-        assert!(launched.get());
-    }
-
-    #[test]
-    fn automatic_oauth_binding_prefers_highest_quota() {
-        let mut candidates = vec![
-            ("account-z".into(), 9_000),
-            ("account-a".into(), 8_000),
-            ("account-m".into(), 1_000),
-        ];
-
-        prioritize_account_candidates(&mut candidates, Some("account-m"), true);
-
-        assert_eq!(
-            candidates,
-            [
-                ("account-z".to_string(), 9_000),
-                ("account-a".to_string(), 8_000),
-                ("account-m".to_string(), 1_000),
-            ]
-        );
-    }
-
-    #[test]
-    fn automatic_oauth_binding_keeps_low_quota_fallbacks() {
-        let mut candidates = vec![
-            ("preferred".into(), 100),
-            ("highest".into(), 9_000),
-            ("available".into(), 5_000),
-            ("unknown".into(), 0),
-        ];
-
-        prioritize_account_candidates(&mut candidates, Some("preferred"), true);
-
-        assert_eq!(
-            candidates,
-            [
-                ("highest".to_string(), 9_000),
-                ("available".to_string(), 5_000),
-                ("preferred".to_string(), 100),
-                ("unknown".to_string(), 0),
-            ]
-        );
-    }
-
-    #[test]
-    fn automatic_oauth_binding_never_uses_exhausted_quota() {
-        assert_eq!(
-            profile_quota_rank(CandidateQuota::Available(1), false),
-            Some(1)
-        );
-        assert_eq!(profile_quota_rank(CandidateQuota::Unknown, false), Some(0));
-        assert_eq!(profile_quota_rank(CandidateQuota::Stale, false), Some(0));
-        assert_eq!(profile_quota_rank(CandidateQuota::Exhausted, false), None);
-        assert_eq!(profile_quota_rank(CandidateQuota::Exhausted, true), Some(0));
-    }
-
-    #[test]
-    fn manual_oauth_binding_keeps_the_explicit_account() {
-        let mut candidates = vec![("selected".into(), 100), ("highest".into(), 9_000)];
-
-        prioritize_account_candidates(&mut candidates, Some("selected"), false);
-
-        assert_eq!(candidates[0], ("selected".to_string(), 100));
-    }
-
-    #[test]
-    fn oauth_binding_request_distinguishes_none_automatic_and_manual() {
-        assert_eq!(
-            gateway_oauth_binding_request(true, None).unwrap(),
-            GatewayOAuthBindingRequest::Disabled
-        );
-        assert_eq!(
-            gateway_oauth_binding_request(false, None).unwrap(),
-            GatewayOAuthBindingRequest::Automatic
-        );
-        assert_eq!(
-            gateway_oauth_binding_request(false, Some(" account-a ")).unwrap(),
-            GatewayOAuthBindingRequest::Account("account-a")
-        );
-        assert!(gateway_oauth_binding_request(true, Some("account-a")).is_err());
     }
 
     #[test]
