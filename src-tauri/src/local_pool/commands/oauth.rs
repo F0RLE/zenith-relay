@@ -22,7 +22,7 @@ use crate::local_pool::{
     models::{LocalAccountRecord, LocalGatewayKeyRecord},
     state::DesktopState,
 };
-use reqwest::{header::HeaderValue, redirect::Policy};
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 use tauri::{AppHandle, State};
@@ -52,13 +52,6 @@ struct InitialModelIssue {
     retryable: bool,
     auth_error: bool,
     blocked: bool,
-}
-
-fn initial_model_authorization(
-    credentials: &StoredCodexCredentials,
-    now_ms: u64,
-) -> LocalResult<HeaderValue> {
-    credentials.authorization(now_ms).map_err(credential_error)
 }
 
 #[tauri::command]
@@ -256,11 +249,12 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     let previous_models = existing
         .map(|account| account.effective_models().to_vec())
         .unwrap_or_default();
-    let model_authorization = initial_model_authorization(&credentials, now_ms)?;
     let (models, model_issue) = match CodexModelsClient::new_with_proxy(proxy.as_ref()) {
         Ok(client) => match client
             .discover_authorized(
-                model_authorization,
+                credentials
+                    .authorization(now_ms)
+                    .map_err(credential_error)?,
                 &checkpoint.provider_account_id,
                 zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
             )
@@ -1184,7 +1178,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            initial_model_authorization(&oauth, 1_785_000_000_000)
+            oauth
+                .authorization(1_785_000_000_000)
+                .map_err(credential_error)
                 .unwrap()
                 .to_str()
                 .unwrap(),
@@ -1199,7 +1195,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let authorization = initial_model_authorization(&registered, 1_785_000_000_000).unwrap();
+        let authorization = registered.authorization(1_785_000_000_000).unwrap();
         assert!(authorization
             .to_str()
             .unwrap()
