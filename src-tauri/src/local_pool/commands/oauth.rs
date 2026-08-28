@@ -22,7 +22,7 @@ use crate::local_pool::{
     models::{LocalAccountRecord, LocalGatewayKeyRecord},
     state::DesktopState,
 };
-use reqwest::redirect::Policy;
+use reqwest::{header::HeaderValue, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 use tauri::{AppHandle, State};
@@ -52,6 +52,13 @@ struct InitialModelIssue {
     retryable: bool,
     auth_error: bool,
     blocked: bool,
+}
+
+fn initial_model_authorization(
+    credentials: &StoredCodexCredentials,
+    now_ms: u64,
+) -> LocalResult<HeaderValue> {
+    credentials.authorization(now_ms).map_err(credential_error)
 }
 
 #[tauri::command]
@@ -249,10 +256,11 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     let previous_models = existing
         .map(|account| account.effective_models().to_vec())
         .unwrap_or_default();
+    let model_authorization = initial_model_authorization(&credentials, now_ms)?;
     let (models, model_issue) = match CodexModelsClient::new_with_proxy(proxy.as_ref()) {
         Ok(client) => match client
-            .discover(
-                &checkpoint.access_token,
+            .discover_authorized(
+                model_authorization,
                 &checkpoint.provider_account_id,
                 zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
             )
@@ -1039,6 +1047,11 @@ fn apply_initial_model_issue(record: &mut LocalAccountRecord, issue: InitialMode
 mod tests {
     use super::*;
 
+    // Synthetic PKCS#8 bytes used only to exercise Agent Identity formatting.
+    // This is not a credential and is never registered with a provider.
+    const TEST_ED25519_PKCS8_FIXTURE: &str =
+        "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+
     #[test]
     fn authorization_url_validation_allows_generated_url_only() {
         let oauth = CodexOAuthClient::new()
@@ -1149,6 +1162,51 @@ mod tests {
         assert_eq!(
             record.account.last_error_code.as_deref(),
             Some("models_unauthorized")
+        );
+    }
+
+    #[test]
+    fn initial_model_probe_uses_the_registered_agent_identity() {
+        let oauth = StoredCodexCredentials::new(
+            "account_models",
+            "oauth-access-secret".into(),
+            Some("oauth-refresh-secret".into()),
+            None,
+            Some(1_785_000_060_000),
+            1_785_000_000_000,
+            1,
+            None,
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("business".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            initial_model_authorization(&oauth, 1_785_000_000_000)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer oauth-access-secret"
+        );
+
+        let registered = oauth.with_agent_identity(
+            AgentIdentityCredential::new(
+                TEST_ED25519_PKCS8_FIXTURE.into(),
+                "runtime-models".into(),
+                "task-models".into(),
+            )
+            .unwrap(),
+        );
+        let authorization = initial_model_authorization(&registered, 1_785_000_000_000).unwrap();
+        assert!(authorization
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion "));
+        assert_ne!(
+            authorization.to_str().unwrap(),
+            "Bearer oauth-access-secret"
         );
     }
 
