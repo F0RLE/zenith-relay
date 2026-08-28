@@ -460,7 +460,10 @@ fn prompt_cache_affinity_applies_to_accounts_with_quota_and_load_guards() {
     );
 
     assert!(scheduler.reserve("cached"));
+    assert_eq!(select_thread(&mut scheduler).candidate_id, "cached");
+    assert!(scheduler.reserve("cached"));
     assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
+    assert!(scheduler.release("cached"));
     assert!(scheduler.release("cached"));
 
     assert!(scheduler.update_candidate_availability(
@@ -508,6 +511,76 @@ fn prompt_cache_affinity_does_not_override_api_source_order() {
 
     assert_eq!(selected.candidate_id, "first");
     assert_eq!(selected.diagnostics.reason, SelectionReason::ManualPriority);
+}
+
+#[test]
+fn prompt_cache_affinity_wins_over_a_large_quota_difference() {
+    let mut scheduler = PoolScheduler::new();
+    let mut cached = oauth_candidate("cached");
+    cached.quota = CandidateQuota::Available(1_000);
+    scheduler.upsert(cached);
+    let mut fullest = oauth_candidate("fullest");
+    fullest.quota = CandidateQuota::Available(9_000);
+    scheduler.upsert(fullest);
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "cached", 0));
+
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(selected.candidate_id, "cached");
+    assert_eq!(
+        selected.diagnostics.reason,
+        SelectionReason::PromptCacheAffinity
+    );
+}
+
+#[test]
+fn sticky_prompt_affinity_does_not_rebind_to_spillover_candidate() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(oauth_candidate("owner"));
+    scheduler.upsert(oauth_candidate("spillover"));
+    assert!(scheduler.bind_prompt_affinity("session:thread", "owner", 0));
+
+    assert!(!scheduler.bind_prompt_affinity_sticky("session:thread", "spillover", 1));
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("session:thread"),
+            now_ms: 2,
+        })
+        .unwrap();
+    assert_eq!(selected.candidate_id, "owner");
+
+    scheduler.remove("owner");
+    assert!(scheduler.bind_prompt_affinity_sticky("session:thread", "spillover", 3));
+    assert_eq!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("session:thread"),
+                now_ms: 4,
+            })
+            .unwrap()
+            .candidate_id,
+        "spillover"
+    );
 }
 
 #[test]
@@ -572,6 +645,33 @@ fn api_source_roles_remain_strict_around_fair_oauth_routing() {
             .candidate_id,
         "account"
     );
+}
+
+#[test]
+fn stabilizer_sources_are_exhausted_by_priority_before_last_reserve() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, priority) in [
+        ("stabilizer-first", 300),
+        ("stabilizer-second", 200),
+        ("stabilizer-third", 100),
+        ("last-reserve", API_SOURCE_RESERVE_PRIORITY),
+    ] {
+        let mut source = candidate(id);
+        source.priority = priority;
+        scheduler.upsert(source);
+    }
+
+    let mut tried = HashSet::new();
+    for expected in [
+        "stabilizer-first",
+        "stabilizer-second",
+        "stabilizer-third",
+        "last-reserve",
+    ] {
+        let selected = select(&mut scheduler, &tried).unwrap();
+        assert_eq!(selected.candidate_id, expected);
+        tried.insert(selected.candidate_id);
+    }
 }
 
 #[test]

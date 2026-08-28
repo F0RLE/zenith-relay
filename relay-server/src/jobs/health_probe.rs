@@ -32,10 +32,17 @@ async fn run(state: &Arc<AppState>) -> Result<(), String> {
         match discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings).await
         {
             Ok(discovery) if !discovery.models.is_empty() => {
-                if record.models != discovery.models
+                let resolved_base_url = discovery.resolved_base_url.clone();
+                if resolved_base_url
+                    .as_deref()
+                    .is_some_and(|base_url| record.base_url != base_url)
+                    || record.models != discovery.models
                     || record.protocol_bindings != discovery.protocol_bindings
                     || record.last_error_code.is_some()
                 {
+                    if let Some(base_url) = resolved_base_url {
+                        record.base_url = base_url;
+                    }
                     record.models = discovery.models;
                     record.protocol_bindings = discovery.protocol_bindings;
                     record.last_error_code = None;

@@ -1,24 +1,29 @@
 use super::super::errors::{
     api_error, api_error_with_origin, api_error_with_origin_and_category,
     apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
-    apply_failure_state, cooldown_error, preserved_upstream_error, previous_response_not_found,
-    recoverable_response_affinity_miss, responses_function_item_id_requires_fc_prefix,
-    responses_message_item_id_requires_msg_prefix, retry_candidate_limit, retryable_failure,
-    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    apply_failure_state, cooldown_error, is_deactivated_workspace, preserved_upstream_error,
+    previous_response_not_found, recoverable_response_affinity_miss,
+    responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+    retry_candidate_limit, retryable_failure, AttemptFailure, CooldownContext,
+    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 use super::super::request::{
     account_endpoint_url, apply_default_service_tier_if_missing, client_context_fingerprint,
-    forwarded_codex_headers, request_id, request_service_tier, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, AccountEndpoint,
-    CODEX_RESPONSES_LITE_HEADER,
+    forwarded_codex_headers, request_id, request_service_tier,
+    responses_lite_parallel_tool_calls_valid, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
     usage_event,
 };
 use super::super::turn_state::{guard_account_request, relay_account_response_header};
-use crate::protocol::{remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids};
+use crate::protocol::{
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    repair_custom_tool_item_ids,
+};
 use crate::runtime::AuthenticatedKey;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, WireApi};
@@ -42,7 +47,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     response_affinity_key: Option<String>,
     rewrite_model: bool,
 ) -> Response<Body> {
-    apply_default_service_tier_if_missing(&mut request, runtime.default_service_tier());
+    let client_supplied_service_tier = request.get("service_tier").is_some();
     let request_id = request_id();
     let service_tier = request_service_tier(&request);
     let client_tool_use = tool_use_diagnostics(&request);
@@ -51,6 +56,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         &key.id,
         &resolved_model,
         request.get("prompt_cache_key").and_then(Value::as_str),
+        client_context_id.as_deref(),
     );
     let has_previous_response_id = request
         .get("previous_response_id")
@@ -62,6 +68,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut owner_recovery_confirmed = false;
     let mut encrypted_content_recovered = false;
     let mut function_item_id_repair_attempted = false;
+    let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -101,10 +108,32 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         if route.account_id.is_none() {
             continue;
         }
+        if !client_supplied_service_tier {
+            request
+                .as_object_mut()
+                .expect("request object was validated before routing")
+                .remove("service_tier");
+        }
+        apply_default_service_tier_if_missing(
+            &mut request,
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+        );
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_id.clone();
         route.service_tier = service_tier;
+        let route_responses_lite = responses_lite.clone().or_else(|| {
+            route
+                .account_id
+                .as_deref()
+                .is_some_and(|candidate_id| {
+                    runtime
+                        .codex_model_responses_lite_candidates(&resolved_model)
+                        .iter()
+                        .any(|id| id == candidate_id)
+                })
+                .then(|| HeaderValue::from_static("true"))
+        });
         let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
@@ -120,6 +149,25 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 "model".to_string(),
                 Value::String(route.source_model.clone()),
             );
+        }
+        if route_responses_lite.is_some() {
+            if let Some(object) = upstream_body.as_object_mut() {
+                if !responses_lite_parallel_tool_calls_valid(object) {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "responses Lite requires parallel_tool_calls to be a boolean",
+                        "invalid_request",
+                    );
+                }
+                crate::gateway::request::normalize_account_request(object, true);
+                // Responses Lite is also used by the compact endpoint, but
+                // compact remains a non-streaming contract. The shared
+                // account normalizer sets the native streaming defaults, so
+                // remove that field again for this endpoint only.
+                if endpoint == AccountEndpoint::Compact {
+                    object.remove("stream");
+                }
+            }
         }
         let reasoning_effort =
             ReasoningEffortDiagnostics::from_bodies(&request, &upstream_body, WireApi::Responses);
@@ -149,7 +197,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             .header(ACCEPT, "application/json")
             .headers(request_headers);
         if endpoint == AccountEndpoint::Compact {
-            if let Some(value) = responses_lite.as_ref() {
+            if let Some(value) = route_responses_lite.as_ref() {
                 upstream_request =
                     upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
             }
@@ -238,6 +286,15 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 tried.remove(&route.candidate_id);
                 continue;
             }
+            if !custom_tool_item_id_repair_attempted
+                && responses_custom_tool_item_id_requires_ctc_prefix(&bytes)
+                && repair_custom_tool_item_ids(&mut request)
+            {
+                custom_tool_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
             if !message_item_id_repair_attempted
                 && responses_message_item_id_requires_msg_prefix(&bytes)
                 && remove_item_prefixed_message_ids(&mut request)
@@ -248,6 +305,12 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            if status == StatusCode::PAYMENT_REQUIRED
+                && route.account_id.is_some()
+                && is_deactivated_workspace(&bytes)
+            {
+                runtime.trip_chatgpt_team_breaker(&route.candidate_id, now_ms());
+            }
             last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
             let mut event = usage_event(
                 &request_id,

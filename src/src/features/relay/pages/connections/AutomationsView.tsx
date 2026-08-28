@@ -1,12 +1,20 @@
 import { useState } from "react";
 import { Pencil, Play, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { defaultWakeInput, relayCommands } from "../../api/commands";
+import { relayCommands } from "../../api/commands";
 import type { WakeTask } from "../../api/types";
-import { sortModelIdsForLauncher } from "../../modelGroups";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
+import {
+  automationAccountSelectionValid,
+  automationFormValid,
+  availableAutomationModels,
+  buildAutomationSubmission,
+  eligibleAutomationAccounts,
+  resolveAutomationModel,
+  selectedAutomationAccounts,
+} from "./automationModel";
 export function AutomationsTable({ query, onEdit }: { query: string; onEdit: (task: WakeTask) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
@@ -49,23 +57,15 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const [accountIds, setAccountIds] = useState<string[]>(task?.accountSelector.kind === "account_ids" ? task.accountSelector.values : []);
   const [modelId, setModelId] = useState(task?.modelPolicy.kind === "explicit" ? task.modelPolicy.value : "");
   const accounts = runtime?.accounts ?? [];
-  const poolAccounts = accounts.filter((account) => account.inPool && account.enabled && !account.draining);
-  const selectedAccounts = poolAccounts.filter((account) => accountIds.includes(account.id));
+  const poolAccounts = eligibleAutomationAccounts(accounts);
+  const selectedAccounts = selectedAutomationAccounts(poolAccounts, accountIds);
   const weeklyReset = triggerKind === "weekly";
   const targetAccounts = selectorKind === "account_ids" ? selectedAccounts : selectorKind === "all_eligible" ? poolAccounts : [];
-  const rawPoolModels = runtime?.gateway.visibleModelIds.length
-    ? runtime.gateway.visibleModelIds
-    : (runtime?.gateway.models ?? []).filter((model) => model.enabled).map((model) => model.id);
-  const poolModels = sortModelIdsForLauncher(rawPoolModels.filter((model, index) => rawPoolModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index));
-  const modelSets = targetAccounts.map((account) => account.models.filter((model) => (account.allowedModels.length === 0 || account.allowedModels.some((allowed) => allowed.toLowerCase() === model.toLowerCase())) && !account.excludedModels.some((excluded) => excluded.toLowerCase() === model.toLowerCase())));
-  const targetModels = selectorKind === "account_ids" && modelSets.length > 1
-    ? modelSets[0].filter((model) => modelSets.slice(1).every((set) => set.some((candidate) => candidate.toLowerCase() === model.toLowerCase())))
-    : modelSets.flat();
-  const availableModels = poolModels.filter((model) => targetModels.some((candidate) => candidate.toLowerCase() === model.toLowerCase()));
+  const availableModels = runtime ? availableAutomationModels(runtime.gateway, targetAccounts, selectorKind) : [];
   const toggleAccount = (id: string) => setAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const accountSelectionValid = selectorKind === "all_eligible" ? poolAccounts.length > 0 : selectorKind === "account_ids" && accountIds.length > 0 && selectedAccounts.length === accountIds.length;
-  const selectedModel = availableModels.find((model) => model.toLowerCase() === modelId.trim().toLowerCase()) ?? availableModels[0] ?? "";
-  const valid = Boolean(name.trim() && accountSelectionValid && (weeklyReset || selectedModel));
+  const accountSelectionValid = automationAccountSelectionValid(selectorKind, poolAccounts, accountIds, selectedAccounts);
+  const selectedModel = resolveAutomationModel(availableModels, modelId);
+  const valid = automationFormValid(name, accountSelectionValid, weeklyReset, selectedModel);
   const selectorOptions = [
     { value: "all_eligible", label: t("automations.allEligible") },
     { value: "account_ids", label: t("automations.selectedAccounts") },
@@ -79,12 +79,8 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const save = async () => {
     if (!valid) return;
     const now = Date.now();
-    const accountSelector = selectorKind === "account_ids" ? { kind: selectorKind, values: accountIds } : { kind: "all_eligible" as const };
-    const modelPolicy = weeklyReset ? { kind: "lightest_supported" as const } : { kind: "explicit" as const, value: selectedModel };
-    const base = { ...defaultWakeInput(name), enabled: task?.enabled ?? true, accountSelector, windowKinds: weeklyReset ? ["secondary" as const] : ["primary" as const], modelPolicy, trigger: { kind: triggerKind }, executionPolicy: weeklyReset ? "automatic" as const : executionPolicy, jitterSeconds: task?.jitterSeconds ?? 0, maxAttemptsPerCycle: task?.maxAttemptsPerCycle ?? 1 };
-    const remoteInput = task ? { ...task, ...base, updatedAtMs: now } : { ...base, id: "", fallbackSchedule: null, createdAtMs: now, updatedAtMs: now };
-    const id = task ? `automation-update-${task.id}` : "automation-create";
-    const ok = await perform(id, () => mode === "local" ? (task ? relayCommands.updateAutomation(task.id, base) : relayCommands.createAutomation(base)) : relayCommands.remoteAction({ type: task ? "update_wake_task" : "create_wake_task", ...(task ? { id: task.id } : {}) }, remoteInput), task ? "feedback.saved" : "feedback.automationAdded");
+    const submission = buildAutomationSubmission({ task, name, executionPolicy, triggerKind, selectorKind, accountIds, selectedModel, nowMs: now });
+    const ok = await perform(submission.operationId, () => mode === "local" ? (task ? relayCommands.updateAutomation(task.id, submission.base) : relayCommands.createAutomation(submission.base)) : relayCommands.remoteAction({ type: task ? "update_wake_task" : "create_wake_task", ...(task ? { id: task.id } : {}) }, submission.remoteInput), task ? "feedback.saved" : "feedback.automationAdded");
     if (ok) onClose();
   };
   return <Dialog wide title={task ? t("automations.edit") : t("automations.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === (task ? `automation-update-${task.id}` : "automation-create")} disabled={!valid} onClick={save}>{t("common.save")}</Button></>}>

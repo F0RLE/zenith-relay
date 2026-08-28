@@ -17,6 +17,7 @@ export type QuotaWindow = {
 export type SupplementalQuotaWindow = {
   id: string;
   label: string;
+  serviceTier?: DefaultServiceTier | null;
   window: QuotaWindow;
 };
 
@@ -31,20 +32,6 @@ export type QuotaSnapshot = {
   error: { code: string; occurredAtMs: number } | null;
 };
 
-export type ResetCredit = {
-  status?: string;
-  resetType?: string;
-  grantedAt?: number;
-  expiresAt?: number;
-  redeemedAt?: number;
-};
-
-export type ResetCreditsSnapshot = {
-  availableCount: number | null;
-  credits: ResetCredit[];
-  nextExpiresAt: number | null;
-};
-
 export type ConsumeResetCreditResponse = {
   refreshed: boolean;
   refreshError?: string;
@@ -56,6 +43,14 @@ export type ApiEquivalentSummary = {
   unpricedTokens: number;
 };
 
+export type QuotaWindowUsage = {
+  kind: "primary" | "secondary";
+  windowStartMs: number;
+  observedAtMs: number;
+  windowMinutes: number;
+  apiEquivalent: ApiEquivalentSummary;
+};
+
 export type ApiModelPriceOverride = {
   inputMicroUsdPerMillion: number;
   cachedInputMicroUsdPerMillion?: number | null;
@@ -64,7 +59,7 @@ export type ApiModelPriceOverride = {
   outputMicroUsdPerMillion: number;
 };
 
-export type SourceWireApi = "responses" | "chat_completions" | "messages";
+export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini";
 
 export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini";
 
@@ -130,6 +125,7 @@ export type AccountSummary = {
   priority: number;
   weight: number;
   apiEquivalent: ApiEquivalentSummary;
+  quotaWindowUsage?: QuotaWindowUsage | null;
   purchaseCostMicroUsd?: number | null;
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
@@ -166,8 +162,9 @@ export type ModelSummary = {
   reasoningSupportedLevels?: string[];
   reasoningAllowedLevels?: string[];
   reasoningConfigurable?: boolean;
-  reasoningProbeAvailable?: boolean;
-  reasoningProbe?: ReasoningProbeProgress;
+  speedSupported?: boolean;
+  speedTier?: DefaultServiceTier;
+  speedConfigurable?: boolean;
 };
 
 export type ImageRequestPrice = {
@@ -175,34 +172,6 @@ export type ImageRequestPrice = {
   quality: string;
   size: string;
   microUsd: number;
-};
-
-export type ReasoningProbeProgress = {
-  status: "queued" | "running" | "confirmed" | "rejected" | "inconclusive" | string;
-  total: number;
-  running: number;
-  success: number;
-  failed: number;
-  confirmed: number;
-  rejected: number;
-  inconclusive: number;
-  pending: number;
-  lastProbeAt: string | null;
-};
-
-export type ModelReasoningProbeSourceResult = {
-  sourceId: string;
-  sourceName: string;
-  available: boolean;
-};
-
-export type ModelReasoningProbeResult = {
-  modelId: string;
-  level: string;
-  sourceCount: number;
-  availableCount: number;
-  appliedToSettings: boolean;
-  sources: ModelReasoningProbeSourceResult[];
 };
 
 export type CandidateRuntimeSnapshot = {
@@ -223,6 +192,17 @@ export type CandidateRuntimeSnapshot = {
   nextRetryAtMs: number | null;
   halfOpen: boolean;
   dispatches: number;
+};
+
+export type RuntimeActivitySnapshot = {
+  revision: number;
+  candidateId: string;
+  inFlight: number;
+  activeRequestCount: number;
+  activeModels: Array<{
+    model: string;
+    requestCount: number;
+  }>;
 };
 
 export type WakeTask = {
@@ -280,7 +260,7 @@ export type RuntimeSnapshot = {
   platform: string;
   capabilities: {
     features: string[];
-    supportedWireApis?: Array<"responses" | "chat_completions" | "messages">;
+    supportedWireApis?: Array<"responses" | "chat_completions" | "messages" | "gemini">;
     [key: string]: unknown;
   };
   sources: SourceSummary[];
@@ -338,6 +318,9 @@ export type ConfigurationPreset = {
     };
     hiddenModels: string[];
     modelPriceOverrides: Record<string, ApiModelPriceOverride>;
+    modelServiceTierOverrides?: Record<string, DefaultServiceTier>;
+    modelDisplayOrder?: string[];
+    modelReasoningAllowedLevels?: Record<string, string[]>;
   };
 };
 
@@ -423,6 +406,7 @@ export type RoutingDiagnostics = {
   quotaRemainingBasisPoints: number | null;
   inFlightBefore: number;
   dispatchesBefore: number;
+  endpointKind?: string | null;
 };
 
 export type ToolUseDiagnostics = {
@@ -450,7 +434,7 @@ export type LocalUsage = {
   resolvedModel: string | null;
   requestedReasoningEffort?: ReasoningEffort | null;
   effectiveReasoningEffort?: ReasoningEffort | null;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: "responses" | "chat_completions" | "messages" | "gemini";
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;
   success: boolean;
@@ -554,6 +538,7 @@ export type SupportExportContext = {
 export type RemoteUsage = {
   id: number;
   requestId: string;
+  attempt: number;
   candidateKind: "account" | "source";
   candidateHint: string;
   candidateLabel?: string | null;
@@ -562,7 +547,7 @@ export type RemoteUsage = {
   resolvedModel: string | null;
   requestedReasoningEffort?: ReasoningEffort | null;
   effectiveReasoningEffort?: ReasoningEffort | null;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: "responses" | "chat_completions" | "messages" | "gemini";
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;
   success: boolean;
@@ -593,7 +578,7 @@ export type RemoteUsageQuery = {
   bucketMs?: number;
   modelQuery?: string;
   sourceOrAccountQuery?: string;
-  wireApi?: "responses" | "chat_completions" | "messages";
+  wireApi?: "responses" | "chat_completions" | "messages" | "gemini";
   success?: boolean;
   errorCategory?: string;
   requestIdQuery?: string;
@@ -672,6 +657,7 @@ export type OAuthFlow = {
   redirectUri: string;
   expiresAtMs: number;
   status: OAuthFlowStatus;
+  targetAccountId?: string;
 };
 
 export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status">;

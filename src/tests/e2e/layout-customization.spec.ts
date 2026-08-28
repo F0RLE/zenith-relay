@@ -57,11 +57,6 @@ test("usage report columns move with pointer input and persist independently", a
   await page.getByRole("tab", { name: "Errors" }).click();
   await expect.poll(() => columnOrder(page.locator(".usage-error-table"))).toEqual(["model", "time", "connection", "origin", "error", "request"]);
 
-  await page.getByRole("button", { name: "Overview", exact: true }).click();
-  const activity = page.locator(".activity-section li").first();
-  await expect(activity).toBeVisible();
-  await expect(activity.locator("[data-column]")).toHaveCount(0);
-  await expect(activity.locator(":scope > *")).toHaveCount(3);
 });
 
 test("account grouping is explicit and saved on connections", async ({ page }) => {

@@ -1,5 +1,5 @@
 use super::is_valid_model_id;
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -118,7 +118,7 @@ impl SourceReasoningCapabilities {
         );
         // API sources must not inherit a provider-specific automatic default
         // such as `ultra`. Relay uses the neutral middle option only when it
-        // was actually confirmed; native ChatGPT catalog rows never use this
+        // was explicitly declared; native ChatGPT catalog rows never use this
         // template and retain their provider-owned defaults.
         let default_effort = self
             .levels
@@ -188,9 +188,9 @@ pub(crate) fn source_context_windows(
 
 /// Reads reasoning modes declared by a provider/Gateway catalog.
 ///
-/// Declared modes are the default enabled set. They are still operator
-/// editable, and the explicit Relay probe is only an additional manual
-/// diagnostic; it is not required before a declared mode can be used.
+/// Declared modes are the default enabled set and remain operator editable.
+/// They are catalog metadata only; Relay never probes a mode to decide whether
+/// the model is available.
 pub(crate) fn source_reasoning_capabilities(
     manifest: &Value,
     configured_models: &BTreeSet<String>,
@@ -221,30 +221,6 @@ pub(crate) fn source_reasoning_capabilities(
     capabilities
 }
 
-pub(crate) fn source_reasoning_probe_progress(
-    manifest: &Value,
-    configured_models: &BTreeSet<String>,
-) -> BTreeMap<String, SourceReasoningProbeProgress> {
-    source_catalog_model_rows(manifest)
-        .filter_map(|model| {
-            let object = model.as_object()?;
-            let id = source_catalog_model_id(object)?.trim();
-            if !configured_models
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(id))
-            {
-                return None;
-            }
-            let probe = object
-                .get("reasoningProbe")
-                .or_else(|| object.get("reasoning_probe"))
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())?;
-            Some((id.to_ascii_lowercase(), probe))
-        })
-        .collect()
-}
-
 fn source_catalog_model_rows(manifest: &Value) -> impl Iterator<Item = &Value> {
     ["data", "models"].into_iter().flat_map(move |key| {
         manifest
@@ -263,7 +239,7 @@ fn source_catalog_model_id(model: &Map<String, Value>) -> Option<&str> {
         .find(|id| !id.is_empty())
 }
 
-/// Combines modes published as confirmed by one or more Gateway routes.
+/// Combines modes published by one or more Gateway routes.
 ///
 /// A route without an explicit publication is intentionally absent. It stays
 /// eligible for ordinary requests, but cannot add a reasoning selector.
@@ -383,10 +359,9 @@ fn parse_source_reasoning_capabilities(
         .get("reasoningEffortModes")
         .or_else(|| model.get("reasoning_effort_modes"))
         .and_then(Value::as_array)?;
-    // Probe state is diagnostic and must never gate the route or defaults.
     // A missing field means that the provider did not publish reasoning
     // metadata. An explicitly empty array is a real declaration that this
-    // route has no reasoning modes, even when no probe object is present.
+    // route has no reasoning modes, even when the provider declares an empty list.
     if raw_modes.is_empty() {
         return Some(SourceReasoningCapabilities::empty());
     }
@@ -606,21 +581,6 @@ fn valid_reasoning_description(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceReasoningProbeProgress {
-    pub status: String,
-    pub total: i64,
-    pub running: i64,
-    pub success: i64,
-    pub failed: i64,
-    pub confirmed: i64,
-    pub rejected: i64,
-    pub inconclusive: i64,
-    pub pending: i64,
-    pub last_probe_at: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_declared_gateway_modes_without_waiting_for_probe() {
+    fn accepts_declared_modes_without_probe() {
         let configured = ["grok-4.5", "provider/unknown"]
             .into_iter()
             .map(str::to_string)
@@ -720,35 +680,11 @@ mod tests {
             "data": [
                 {
                     "id": "grok-4.5",
-                    "reasoningEffortModes": ["low", "medium", "high"],
-                    "reasoningProbe": {
-                        "status": "confirmed",
-                        "total": 8,
-                        "running": 0,
-                        "success": 3,
-                        "failed": 5,
-                        "confirmed": 3,
-                        "rejected": 5,
-                        "inconclusive": 0,
-                        "pending": 0,
-                        "lastProbeAt": "2026-08-19T00:00:00Z"
-                    }
+                    "reasoningEffortModes": ["low", "medium", "high"]
                 },
                 {
                     "id": "provider/unknown",
-                    "reasoningEffortModes": ["high"],
-                    "reasoningProbe": {
-                        "status": "running",
-                        "total": 8,
-                        "running": 1,
-                        "success": 0,
-                        "failed": 0,
-                        "confirmed": 0,
-                        "rejected": 0,
-                        "inconclusive": 0,
-                        "pending": 7,
-                        "lastProbeAt": null
-                    }
+                    "reasoningEffortModes": ["high"]
                 }
             ]
         });
@@ -779,24 +715,12 @@ mod tests {
     }
 
     #[test]
-    fn explicit_rejection_publishes_an_empty_capability() {
+    fn explicit_empty_modes_publish_an_empty_capability() {
         let configured = ["glm-5.2"].into_iter().map(str::to_string).collect();
         let manifest = json!({
             "models": [{
                 "slug": "glm-5.2",
-                "reasoningEffortModes": [],
-                "reasoningProbe": {
-                    "status": "rejected",
-                    "total": 8,
-                    "running": 0,
-                    "success": 0,
-                    "failed": 8,
-                    "confirmed": 0,
-                    "rejected": 8,
-                    "inconclusive": 0,
-                    "pending": 0,
-                    "lastProbeAt": "2026-08-19T00:00:00Z"
-                }
+                "reasoningEffortModes": []
             }]
         });
 
@@ -842,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn unions_reasoning_confirmed_by_any_route() {
+    fn unions_reasoning_declared_by_any_route() {
         let first = parse_reasoning_object(
             json!({
                 "reasoningEffortModes": ["low", "high", "ultra"],

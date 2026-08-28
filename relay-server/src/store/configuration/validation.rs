@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
-    is_valid_model_id, normalize_image_base_model, normalize_model_price_overrides,
-    normalize_model_reasoning_allowed_levels, normalize_subscription_plan_order,
+    is_valid_model_id, normalize_image_base_model, normalize_model_ids,
+    normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, normalize_subscription_plan_order,
     protocol::ConfigurationPresetSettings,
 };
 
@@ -28,6 +29,10 @@ pub(super) fn validate_configuration_settings(
         || normalize_model_reasoning_allowed_levels(
             settings.model_reasoning_allowed_levels.clone(),
         )? != settings.model_reasoning_allowed_levels
+        || normalize_model_service_tier_overrides(settings.model_service_tier_overrides.clone())
+            .map_err(str::to_string)?
+            != settings.model_service_tier_overrides
+        || normalize_model_ids(settings.model_display_order.iter()) != settings.model_display_order
     {
         return Err("configuration preset is not normalized".to_string());
     }

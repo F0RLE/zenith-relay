@@ -235,7 +235,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, attempt \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -248,6 +248,7 @@ impl Store {
                 Ok(UsageSummary {
                     id: row.get(0)?,
                     request_id: row.get(1)?,
+                    attempt: row.get::<_, i64>(29)?.clamp(0, i64::from(u16::MAX)) as u16,
                     candidate_kind: row.get(3)?,
                     candidate_hint: row.get(4)?,
                     candidate_label: None,
@@ -734,6 +735,7 @@ mod tests {
                 auth_state: AccountAuthState::Active,
                 health: AccountHealthState::Healthy,
                 models: vec!["gpt-test".into()],
+                discovered_models: None,
                 allowed_models: Vec::new(),
                 excluded_models: Vec::new(),
                 priority: 0,
@@ -1071,6 +1073,7 @@ mod tests {
                             quota_remaining_basis_points: Some(5_400),
                             in_flight_before: 0,
                             dispatches_before: index - 1,
+                            endpoint_kind: None,
                         }),
                         requested_model: Some(model.to_string()),
                         resolved_model: Some(model.to_string()),

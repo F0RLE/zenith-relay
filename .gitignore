@@ -17,6 +17,7 @@ crates/relay-core/target/
 playwright-report/
 test-results/
 src/output/
+output/
 
 *.pdb
 *.log

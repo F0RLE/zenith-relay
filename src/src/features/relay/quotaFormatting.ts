@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { QuotaWindow } from "./api/types";
+import type { DefaultServiceTier, QuotaWindow } from "./api/types";
 
 export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
   const totalSeconds = Math.max(0, Math.floor((targetMs - nowMs) / 1_000));
@@ -26,6 +26,10 @@ export function formatQuotaRemaining(basisPoints: number | null, locale: string)
   return basisPoints == null ? "—" : new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }).format(basisPoints / 10_000);
 }
 
+export function isFastSupplementalQuota(item: { label: string; serviceTier?: DefaultServiceTier | null }) {
+  return item.serviceTier === "fast" || /\b(priority|fast)\b/i.test(item.label);
+}
+
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
   const minutes = window?.windowMinutes;
   if (!minutes) return t(`quota.${kind}`);
@@ -36,4 +40,19 @@ export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "
   if (minutes % 1_440 === 0) return t("quota.days", { count: minutes / 1_440 });
   if (minutes % 60 === 0) return t("quota.hours", { count: minutes / 60 });
   return t("quota.minutes", { count: minutes });
+}
+
+export function formatSupplementalQuotaLabel(
+  label: string,
+  serviceTier: DefaultServiceTier | null | undefined,
+  t: TFunction,
+) {
+  const normalized = label.trim();
+  if (serviceTier !== "fast") return normalized;
+  const baseLabel = normalized
+    .replace(/\b(priority|fast)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*[·-]\s*$/u, "")
+    .trim();
+  return baseLabel ? `${baseLabel} · ${t("quota.fastTier")}` : t("quota.fastTier");
 }

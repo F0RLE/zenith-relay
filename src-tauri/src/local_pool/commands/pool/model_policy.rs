@@ -19,9 +19,14 @@ pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> Loca
     }
     let store = state.store()?;
     for source in store.sources().iter().filter(|source| source.in_pool) {
-        let models = source
-            .models_for_wire_api(WireApi::Responses)
-            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        let mut models = Vec::new();
+        for wire_api in WireApi::ALL {
+            models.extend(
+                source
+                    .models_for_wire_api(wire_api)
+                    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?,
+            );
+        }
         if let Some(model) = models
             .into_iter()
             .find(|model| model.eq_ignore_ascii_case(requested))
@@ -33,7 +38,7 @@ pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> Loca
         .accounts()
         .iter()
         .filter(|account| account.account.in_pool)
-        .flat_map(|account| account.models.iter())
+        .flat_map(|account| account.effective_models().iter())
         .find(|model| model.eq_ignore_ascii_case(requested))
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
@@ -48,7 +53,7 @@ pub(crate) fn local_pool_member_ids(
     let mut source_ids = BTreeSet::new();
     for source in sources.iter().filter(|source| source.in_pool) {
         if source
-            .supports_wire_api(WireApi::Responses)
+            .supports_any_wire_api()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
         {
             source_ids.insert(source.id.clone());

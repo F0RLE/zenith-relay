@@ -64,4 +64,9 @@ pub struct RoutingDiagnostics {
     pub quota_remaining_basis_points: Option<u64>,
     pub in_flight_before: u32,
     pub dispatches_before: u64,
+    /// Safe endpoint classification populated once the executor has resolved
+    /// the actual upstream route.  It intentionally contains no host, query,
+    /// credential, or provider response data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_kind: Option<String>,
 }

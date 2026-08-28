@@ -53,13 +53,13 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     if (event.status === "callback_received") void finishRef.current(event.loginId);
   };
 
-  const start = useCallback(async (openBrowser = true) => {
+  const start = useCallback(async (openBrowser = true, accountId?: string) => {
     if (startingRef.current) return false;
     startingRef.current = true;
     const result: { current: OAuthFlow | null } = { current: null };
     const ok = await perform("oauth-start", async () => {
       await ensureListener();
-      result.current = await relayCommands.startOAuth(openBrowser);
+      result.current = await relayCommands.startOAuth(openBrowser, accountId);
     });
     startingRef.current = false;
     const started = result.current;

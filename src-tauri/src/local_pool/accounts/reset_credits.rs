@@ -32,7 +32,7 @@ const CHATGPT_WEB_USER_AGENT: &str =
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResetCredit {
+struct ResetCredit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,7 +47,7 @@ pub struct ResetCredit {
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResetCreditsSnapshot {
+struct ResetCreditsSnapshot {
     pub available_count: Option<u32>,
     pub credits: Vec<ResetCredit>,
     pub next_expires_at: Option<i64>,
@@ -64,16 +64,6 @@ pub struct ConsumeResetCreditResponse {
 struct ResetHttpResponse {
     status: StatusCode,
     body: Vec<u8>,
-}
-
-#[tauri::command]
-pub async fn get_local_reset_credits(
-    account_id: String,
-    state: State<'_, DesktopState>,
-) -> CommandResult<ResetCreditsSnapshot> {
-    fetch_account_reset_credits(&state, &account_id)
-        .await
-        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -127,14 +117,6 @@ pub(crate) async fn consume_local_reset_credit_for_account(
 }
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
-
-async fn fetch_account_reset_credits(
-    state: &DesktopState,
-    account_id: &str,
-) -> LocalResult<ResetCreditsSnapshot> {
-    let mut prepared = prepare_account_request_authorization(state, account_id).await?;
-    fetch_reset_snapshot_with_retry(state, account_id, &mut prepared, true).await
-}
 
 async fn fetch_reset_snapshot_with_retry(
     state: &DesktopState,

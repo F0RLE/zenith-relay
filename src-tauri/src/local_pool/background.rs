@@ -1,8 +1,9 @@
 use super::{
     accounts::{
         quota_refresh::{
-            next_quota_refresh_at, prepare_account_credentials, record_quota_refresh_error,
-            refresh_account_quota_once, AccountQuotaOutcome, AccountQuotaRefreshResponse,
+            next_quota_refresh_at, prepare_account_credentials, record_model_refresh_error,
+            record_quota_refresh_error, refresh_account_quota_once, AccountQuotaOutcome,
+            AccountQuotaRefreshResponse,
         },
         reset_credits::consume_local_reset_credit_for_account,
         wake::{completion_from_execution, CodexWakeClient},
@@ -35,6 +36,7 @@ const WORKER_ERROR_RETRY_MS: u64 = 60_000;
 const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
 const SOURCE_MODEL_REFRESH_START_DELAY_SECONDS: u64 = 5;
+const ACCOUNT_MODEL_REFRESH_START_DELAY_SECONDS: u64 = 5;
 const SOURCE_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 const ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 
@@ -53,6 +55,10 @@ pub(crate) fn start(app: AppHandle) {
     let _source_model_worker = tauri::async_runtime::spawn(async move {
         source_model_loop(source_app).await;
     });
+    let account_model_app = app.clone();
+    let _account_model_worker = tauri::async_runtime::spawn(async move {
+        account_model_loop(account_model_app).await;
+    });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_loop(app).await;
     });
@@ -68,14 +74,9 @@ pub(crate) async fn run_due_confirmation_wakes(
 }
 
 async fn quota_loop(app: AppHandle) {
-    let mut next_model_refresh_at_ms = current_time_ms();
     loop {
         let state = app.state::<DesktopState>();
-        let session_was_inactive = !state.background_session_active();
         state.wait_for_background_session_active().await;
-        if session_was_inactive {
-            next_model_refresh_at_ms = current_time_ms();
-        }
         let wait_result = tokio::select! {
             _ = state.wait_for_background_session_inactive() => continue,
             result = wait_for_quota_due(&state) => result,
@@ -87,13 +88,50 @@ async fn quota_loop(app: AppHandle) {
         if !state.background_session_active() {
             continue;
         }
-        let refresh_models = current_time_ms() >= next_model_refresh_at_ms;
-        if run_due_quota_refreshes(&app, refresh_models).await.is_err() {
+        if run_due_quota_refreshes(&app, false).await.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
-        if refresh_models {
-            next_model_refresh_at_ms = current_time_ms()
-                .saturating_add(ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS.saturating_mul(1_000));
+    }
+}
+
+async fn account_model_loop(app: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(
+        ACCOUNT_MODEL_REFRESH_START_DELAY_SECONDS,
+    ))
+    .await;
+    loop {
+        let state = app.state::<DesktopState>();
+        state.wait_for_background_session_active().await;
+        let account_ids = state.store().map(|store| {
+            store
+                .accounts()
+                .iter()
+                .filter(|account| {
+                    account.remote_location.is_none()
+                        && account.account.is_automatic_quota_monitoring_eligible()
+                })
+                .map(|account| account.account.id.clone())
+                .collect::<Vec<_>>()
+        });
+        if let Ok(account_ids) = account_ids {
+            for account_id in account_ids {
+                if !state.background_session_active() {
+                    break;
+                }
+                let result = super::accounts::quota_refresh::refresh_account_models_once(
+                    &state,
+                    &account_id,
+                )
+                .await;
+                if let Err(error) = result {
+                    let _ = record_model_refresh_error(&state, &account_id, &error);
+                }
+                let _ = app.emit("zenith-state-changed", ());
+            }
+        }
+        tokio::select! {
+            _ = state.wait_for_background_session_inactive() => {},
+            _ = tokio::time::sleep(Duration::from_secs(ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS)) => {},
         }
     }
 }
@@ -121,9 +159,10 @@ async fn source_model_loop(app: AppHandle) {
                 if !state.background_session_active() {
                     break;
                 }
-                let _ =
-                    super::commands::connections::refresh_local_source_models(&state, &source_id)
-                        .await;
+                let _ = super::commands::connections::refresh_local_source_models(
+                    &state, &source_id, false,
+                )
+                .await;
                 let _ = app.emit("zenith-state-changed", ());
             }
             if !state.background_session_active() {
@@ -579,6 +618,12 @@ mod tests {
     }
 
     #[test]
+    fn account_models_refresh_is_independent_from_quota_schedule() {
+        assert_eq!(ACCOUNT_MODEL_REFRESH_START_DELAY_SECONDS, 5);
+        assert_eq!(ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS, 8 * 60 * 60);
+    }
+
+    #[test]
     fn only_reauthentication_stops_automatic_quota_retries() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-background-auth-{}",
@@ -643,6 +688,17 @@ mod tests {
         );
         assert_eq!(policy.output_token_cap, WAKE_OUTPUT_TOKEN_CAP);
         assert_eq!(policy.verification_delay_ms, WAKE_VERIFICATION_DELAY_MS);
+
+        account.discovered_models = Some(vec!["gpt-discovered-mini".into()]);
+        let discovered_policy = codex_wake_policy(&account, &capabilities);
+        assert_eq!(
+            discovered_policy
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-discovered-mini"]
+        );
     }
 
     #[test]
@@ -756,6 +812,7 @@ mod tests {
             remote_location: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,

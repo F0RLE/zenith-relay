@@ -16,9 +16,9 @@ use std::collections::BTreeMap;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
-    source_points_to_gateway, ApiModelPriceOverride, ProviderSource, SourceProtocolBinding,
-    SourceProviderStats, WireApi,
+    discover_source_models_and_protocol_bindings, fetch_source_provider_stats, normalize_model_ids,
+    normalize_source_protocol_bindings, source_points_to_gateway, ApiModelPriceOverride,
+    ProviderSource, SourceDiscovery, SourceProtocolBinding, SourceProviderStats, WireApi,
 };
 #[cfg(test)]
 use zenith_relay_core::{MessagesReasoningMode, SourceAdapter};
@@ -99,10 +99,32 @@ pub async fn create_local_source(
     };
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
-    let discovery =
+    let manual_models = normalize_model_ids(&runtime_source.models);
+    let manual_mode = !manual_models.is_empty();
+    let discovery = if manual_models.is_empty() {
         discover_source_models_and_protocol_bindings(&runtime_source, &input.protocol_bindings)
             .await
-            .map_err(core_error)?;
+            .map_err(core_error)?
+    } else {
+        // A manual catalog is an explicit operator assertion for providers
+        // that do not expose GET /models. Protocol bindings still go through
+        // the same validation as an automatically discovered catalog.
+        let protocol_bindings = normalize_source_protocol_bindings(
+            input.protocol_bindings.clone(),
+            runtime_source.wire_api,
+            &manual_models,
+        )
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+        SourceDiscovery {
+            models: manual_models,
+            protocol_bindings,
+            resolved_base_url: None,
+            detected_model_prices: BTreeMap::new(),
+        }
+    };
+    if let Some(base_url) = discovery.resolved_base_url.as_deref() {
+        runtime_source.base_url = base_url.to_string();
+    }
     runtime_source.models = discovery.models;
     if runtime_source.models.is_empty() {
         return Err(LocalPoolError::new(
@@ -132,7 +154,7 @@ pub async fn create_local_source(
         detected_model_prices: discovery.detected_model_prices,
         last_used_at: None,
         last_test_at: Some(Utc::now().to_rfc3339()),
-        last_test_status: Some("ok".into()),
+        last_test_status: Some(if manual_mode { "manual" } else { "ok" }.into()),
         last_error: None,
     };
     record.normalize();
@@ -368,18 +390,25 @@ pub async fn test_local_source(
     source_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
-    refresh_local_source_models(&state, &source_id).await
+    refresh_local_source_models(&state, &source_id, true).await
 }
 
 pub(crate) async fn refresh_local_source_models(
     state: &DesktopState,
     source_id: &str,
+    force_manual_refresh: bool,
 ) -> CommandResult<ProviderSourceRecord> {
     let source = state
         .store()?
         .source(source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    if !force_manual_refresh && source.last_test_status.as_deref() == Some("manual") {
+        // Manual catalogs are intentionally not re-probed by the background
+        // scheduler. An explicit "Refresh models" action can still opt back
+        // into discovery and replace the operator's list when supported.
+        return Ok(source);
+    }
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     let runtime_source = ProviderSource {
@@ -428,9 +457,16 @@ pub(crate) async fn refresh_local_source_models(
             return Err(error.into());
         }
     };
-    let runtime_changed = current.models != discovery.models
+    let resolved_base_url = discovery.resolved_base_url.clone();
+    let runtime_changed = resolved_base_url
+        .as_deref()
+        .is_some_and(|base_url| current.base_url != base_url)
+        || current.models != discovery.models
         || current.protocol_bindings != discovery.protocol_bindings;
     let mut updated = current;
+    if let Some(base_url) = resolved_base_url {
+        updated.base_url = base_url;
+    }
     updated.models = discovery.models;
     updated.protocol_bindings = discovery.protocol_bindings;
     updated.detected_model_prices = discovery.detected_model_prices;
@@ -454,9 +490,13 @@ fn persist_source_refresh_failure(
     mut source: ProviderSourceRecord,
     error: &LocalPoolError,
 ) -> CommandResult<()> {
+    let manual_catalog = source.last_test_status.as_deref() == Some("manual");
     source.last_test_at = Some(Utc::now().to_rfc3339());
-    source.last_test_status = Some("error".into());
-    source.last_error = Some(error.message.clone());
+    source.last_test_status = Some(if manual_catalog { "manual" } else { "error" }.into());
+    // A failed opt-in refresh does not invalidate the manually asserted
+    // catalog. The command still returns the error to the dialog, while the
+    // source remains usable and quiet in the pool/background status.
+    source.last_error = (!manual_catalog).then(|| error.message.clone());
     state.store()?.upsert_source(source)?;
     Ok(())
 }

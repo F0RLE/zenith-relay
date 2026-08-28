@@ -1,6 +1,6 @@
 use super::{
     normalize_source_protocol_bindings, ProviderSource, SourceAdapter, SourceConnector,
-    SourceProtocolBinding, SourceProtocolBindingKey, WireApi,
+    SourceProtocolBinding, SourceProtocolBindingKey,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
@@ -42,6 +42,10 @@ pub async fn discover_source_models_for_protocol_bindings(
 pub struct SourceDiscovery {
     pub models: Vec<String>,
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    /// A provider may expose its OpenAI-compatible catalog below `/v1` even
+    /// when the user entered only the host root. This is set only after the
+    /// root request returned 404 and the `/v1` retry succeeded.
+    pub resolved_base_url: Option<String>,
     /// Complete token prices declared by the source model catalog. These are
     /// refreshed with discovery and never replace a user-configured override.
     pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
@@ -116,9 +120,10 @@ fn automatic_catalog_routes(
     }
 
     let source_models = normalized_model_ids(source_models);
-    for binding in bindings.iter().filter(|binding| {
-        binding.wire_api == WireApi::Responses && binding.adapter == SourceAdapter::Native
-    }) {
+    for binding in bindings
+        .iter()
+        .filter(|binding| binding.adapter == SourceAdapter::Native)
+    {
         let assigned_elsewhere = bindings
             .iter()
             .filter(|candidate| {
@@ -166,6 +171,8 @@ async fn discover_protocol_bindings_with_client(
     automatic_catalog_routes: &BTreeSet<SourceProtocolBindingKey>,
 ) -> Result<SourceDiscovery> {
     let mut last_error = None;
+    let mut connector = source.clone();
+    let mut resolved_base_url = None;
     let mut discovered_models = Vec::new();
     let mut discovered_model_keys = HashSet::new();
     let mut discovered_bindings = Vec::new();
@@ -175,20 +182,42 @@ async fn discover_protocol_bindings_with_client(
     for binding in bindings {
         let (authorization_name, authorization) = source.authorization_for_binding(binding);
         let request = client
-            .get(source.models_url.clone())
-            .headers(source.protocol_headers_for_binding(binding))
-            .header(authorization_name, authorization);
-        let response = match request.send().await {
+            .get(connector.models_url.clone())
+            .headers(connector.protocol_headers_for_binding(binding))
+            .header(authorization_name.clone(), authorization.clone());
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
                 last_error = Some(Error::Upstream(error));
                 continue;
             }
         };
+        if response.status() == reqwest::StatusCode::NOT_FOUND
+            && resolved_base_url.is_none()
+            && root_v1_fallback_allowed(&connector, binding)
+        {
+            if let Some(v1_connector) = connector.with_appended_v1(bindings) {
+                let retry = client
+                    .get(v1_connector.models_url.clone())
+                    .headers(v1_connector.protocol_headers_for_binding(binding))
+                    .header(authorization_name, authorization);
+                if let Ok(candidate) = retry.send().await {
+                    if candidate.status().is_success() {
+                        resolved_base_url = Some(
+                            v1_connector
+                                .base_url
+                                .as_str()
+                                .trim_end_matches('/')
+                                .to_string(),
+                        );
+                        connector = v1_connector;
+                        response = candidate;
+                    }
+                }
+            }
+        }
         if !response.status().is_success() {
-            last_error = Some(Error::InvalidUpstreamResponse(
-                "upstream model discovery failed",
-            ));
+            last_error = Some(Error::UpstreamStatus(response.status().as_u16()));
             continue;
         }
         let body = match collect_limited(response, MAX_MODEL_CATALOG_BODY_BYTES).await {
@@ -306,7 +335,16 @@ async fn discover_protocol_bindings_with_client(
         models: discovered_models,
         protocol_bindings: discovered_bindings,
         detected_model_prices,
+        resolved_base_url,
     })
+}
+
+fn root_v1_fallback_allowed(connector: &SourceConnector, binding: &SourceProtocolBinding) -> bool {
+    connector.base_url.path() == "/"
+        && matches!(
+            binding.adapter.upstream_protocol(binding.wire_api),
+            UpstreamProtocol::Responses | UpstreamProtocol::ChatCompletions
+        )
 }
 
 fn parse_upstream_models(

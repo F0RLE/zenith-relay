@@ -16,8 +16,7 @@ pub use context::{
 };
 pub(crate) use context::{
     source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
-    source_reasoning_probe_progress, union_source_reasoning_capabilities,
-    SourceReasoningCapabilities, SourceReasoningProbeProgress,
+    union_source_reasoning_capabilities, SourceReasoningCapabilities,
 };
 pub use order::{
     anthropic_max_implies_ultra, canonicalize_model_ids, canonicalize_reasoning_levels,

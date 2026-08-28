@@ -1,15 +1,24 @@
-import { useCallback, useMemo, useState, type DragEvent } from "react";
-import { ArrowDown, ArrowUp, GripVertical, Power } from "lucide-react";
+import { Fragment, useCallback, useMemo, useState } from "react";
+import { ArrowDown, ArrowRight, ArrowUp, GripVertical, Power } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { SourceSummary } from "../api/types";
-import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./SourcePriceEditor";
+import { SourcePriceEditor } from "./SourcePriceEditor";
+import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./sourcePriceEditorModel";
 import { effectiveSourceProtocolBindings } from "../sourceProtocolBindings";
 import { Button, Dialog, IconButton, OptionMenu, StatusIcon } from "./Ui";
 import { apiSourcePriority, apiSourceRole, type ApiSourceRole } from "../routingOrder";
 import { sourceOrderForRole, sourceRoutingStages, toggle, type PoolMember } from "../poolHelpers";
 import { useRelayState } from "../state/RelayStateProvider";
+import {
+  modelSelectionForMember,
+  modelSelectionPayload,
+  moveSourceBy as moveSourceByOrder,
+  moveSourceOrder,
+  sourcePrioritiesForOrder,
+} from "./poolMemberEditorModel";
+import { useSourceOrderDrag } from "./useSourceOrderDrag";
 
 export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onClose: () => void }) {
   const { t } = useTranslation();
@@ -17,17 +26,9 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
   const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
   const [sourceOrder, setSourceOrder] = useState<string[]>(() => member.kind === "source" ? sourceOrderForRole(runtime?.sources ?? [], apiSourceRole(member.priority), member.id) : []);
-  const [draggedSource, setDraggedSource] = useState<string | null>(null);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
-  const pricedModels = member.kind === "source"
-    ? [...Object.keys(member.modelPriceOverrides ?? {}), ...Object.keys(member.detectedModelPrices ?? {})]
-    : [];
-  const modelIds = [...new Map([...pricedModels, ...member.allowedModels, ...member.excludedModels, ...member.models].map((model) => [model.toLocaleLowerCase(), model])).values()];
-  const [enabledModels, setEnabledModels] = useState(() => {
-    const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
-    const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
-    return modelIds.filter((model) => (!allowed.size || allowed.has(model.toLocaleLowerCase())) && !excluded.has(model.toLocaleLowerCase()));
-  });
+  const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
+  const [enabledModels, setEnabledModels] = useState(initialEnabledModels);
   const toggleEnabledModel = useCallback((model: string) => {
     setEnabledModels((values) => toggle(values, model));
   }, []);
@@ -39,32 +40,32 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
   const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole) : [];
   const orderedSources = sourceOrder.map((sourceId) => runtime?.sources.find((source) => source.id === sourceId)).filter((source): source is SourceSummary => Boolean(source));
-  const chooseSourceRole = (role: ApiSourceRole) => {
+  const chooseSourceRole = useCallback((role: ApiSourceRole) => {
     setSourceRole(role);
     setSourceOrder(sourceOrderForRole(runtime?.sources ?? [], role, member.id));
-    setDraggedSource(null);
-  };
-  const moveSource = (sourceId: string, targetId: string, after = false) => {
-    if (sourceId === targetId) return;
-    setSourceOrder((current) => {
-      const next = current.filter((id) => id !== sourceId);
-      const targetIndex = next.indexOf(targetId);
-      if (targetIndex < 0) return current;
-      next.splice(targetIndex + (after ? 1 : 0), 0, sourceId);
-      return next;
-    });
-  };
+  }, [member.id, runtime?.sources]);
+  const moveSource = useCallback((sourceId: string, targetId: string, after = false) => {
+    setSourceOrder((current) => moveSourceOrder(current, sourceId, targetId, after));
+  }, []);
   const moveSourceBy = (sourceId: string, offset: number) => {
-    const index = sourceOrder.indexOf(sourceId);
-    const target = sourceOrder[index + offset];
-    if (target) moveSource(sourceId, target, offset > 0);
+    setSourceOrder((current) => moveSourceByOrder(current, sourceId, offset));
   };
-  const save = async () => {
+  const {
+    draggedSource,
+    dropTarget,
+    dropAfter,
+    dropRole,
+    startSourceDrag,
+  } = useSourceOrderDrag({
+    memberId: member.id,
+    sourceRole,
+    onRoleDrop: chooseSourceRole,
+    onSourceDrop: moveSource,
+  });
+  const save = () => {
     if (member.kind === "source" && !sourcePriceOverrides) return;
-    const allEnabled = modelIds.every((model) => enabledModels.includes(model));
-    const allowedModels = allEnabled ? [] : modelIds.filter((model) => enabledModels.includes(model));
-    const excludedModels = allEnabled ? [] : modelIds.filter((model) => !enabledModels.includes(model));
-    const ok = await perform(`member-${member.id}`, () => {
+    const { allowedModels, excludedModels } = modelSelectionPayload(modelIds, enabledModels);
+    const persist = () => {
       if (member.kind === "account") {
         const payload = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
         return mode === "local"
@@ -72,13 +73,14 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
       const protocolBindings = effectiveSourceProtocolBindings(member);
-      const sourcePriorities = Object.fromEntries(sourceOrder.map((sourceId, index) => [sourceId, apiSourcePriority(sourceRole, index, sourceOrder.length)]));
+      const sourcePriorities = sourcePrioritiesForOrder(sourceOrder, sourceRole);
       const priority = sourcePriorities[member.id] ?? apiSourcePriority(sourceRole);
       const payload = { allowedModels, excludedModels, draining: member.draining, priority, sourcePriorities, weight: 1, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
-    }, "feedback.saved");
-    if (ok) onClose();
+    };
+    onClose();
+    void perform(`member-${member.id}`, persist, "feedback.saved");
   };
   return <Dialog wide className={member.kind === "source" ? "source-policy-dialog" : ""} title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave || !purchaseCostValid || (member.kind === "source" && !sourcePriceOverrides)} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}>
     <div className="relay-form member-editor">
@@ -86,14 +88,15 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
         <header className="source-routing-heading"><div><h3>{t("sources.poolRole")}</h3><p className="sr-only">{t("sources.routingHint")}</p></div></header>
         <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
           <span>{t("sources.fallbackOrder")}</span>
-          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")}>
+          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")} data-dragging={draggedSource ? "true" : undefined}>
             {sourceStages.map((stage, index) => {
               const label = stage.role === "accounts" ? t("connections.accounts") : t(`sources.roles.${stage.role}`);
+              const arrow = index > 0 ? <ArrowRight className="source-route-arrow" aria-hidden /> : null;
               if (stage.role === "accounts") {
-                return <div className="source-route-stage accounts" key={stage.role} aria-label={`${label}: ${stage.count}`}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></div>;
+                return <Fragment key={stage.role}>{arrow}<div className="source-route-stage accounts" data-stage-index={index} aria-label={`${label}: ${stage.count}`}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></div></Fragment>;
               }
               const role: ApiSourceRole = stage.role;
-              return <button className="source-route-stage" data-current={role === sourceRole ? "true" : undefined} key={role} type="button" role="radio" aria-checked={role === sourceRole} aria-label={`${label}: ${t(`sources.roleHints.${role}`)}`} onClick={() => chooseSourceRole(role)}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></button>;
+              return <Fragment key={role}>{arrow}<button className="source-route-stage" data-stage-index={index} data-current={role === sourceRole ? "true" : undefined} data-source-role={role} data-drop-available={draggedSource === member.id ? "true" : undefined} data-drop-target={dropRole === role ? "true" : undefined} type="button" role="radio" aria-checked={role === sourceRole} aria-label={`${label}: ${t(`sources.roleHints.${role}`)}`} onClick={() => chooseSourceRole(role)}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></button></Fragment>;
             })}
           </div>
         </div>
@@ -101,13 +104,8 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
         <div className="source-priority-policy">
           <header title={t("sources.sourceOrderHint")}><strong>{t("sources.sourceOrder")}</strong><small className="sr-only">{t("sources.sourceOrderHint")}</small></header>
           <div className="subscription-plan-order source-priority-order" role="list" aria-label={t("sources.sourceOrder")}>{orderedSources.map((source, index) => {
-            const drop = (event: DragEvent<HTMLDivElement>) => {
-              event.preventDefault();
-              if (draggedSource) moveSource(draggedSource, source.id, sourceOrder.indexOf(draggedSource) < index);
-              setDraggedSource(null);
-            };
-            return <div key={source.id} className="subscription-plan-order-row source-priority-row" role="listitem" draggable onDragStart={() => setDraggedSource(source.id)} onDragEnd={() => setDraggedSource(null)} onDragOver={(event) => event.preventDefault()} onDrop={drop} data-source-id={source.id} data-current={source.id === member.id ? "true" : undefined} data-dragging={draggedSource === source.id ? "true" : "false"}>
-              <GripVertical aria-hidden />
+            return <div key={source.id} className="subscription-plan-order-row source-priority-row" role="listitem" data-source-id={source.id} data-current={source.id === member.id ? "true" : undefined} data-dragging={draggedSource === source.id ? "true" : undefined} data-drop-target={dropTarget === source.id ? "true" : undefined} data-drop-after={dropTarget === source.id && dropAfter ? "true" : undefined}>
+              <button className="source-priority-drag-handle" data-source-drag-handle type="button" aria-label={t("sources.reorderSource", { source: source.name })} title={t("sources.reorderSource", { source: source.name })} onPointerDown={(event) => startSourceDrag(event, source.id)}><GripVertical aria-hidden /></button>
               <span className="subscription-plan-rank">{index + 1}</span>
               <span className="source-priority-name"><strong>{source.name}</strong>{source.id === member.id ? <small>{t("sources.currentSource")}</small> : null}</span>
               <div className="inline-actions"><IconButton label={t("sources.moveSourceUp", { source: source.name })} icon={<ArrowUp aria-hidden />} disabled={index === 0} onClick={() => moveSourceBy(source.id, -1)} /><IconButton label={t("sources.moveSourceDown", { source: source.name })} icon={<ArrowDown aria-hidden />} disabled={index === orderedSources.length - 1} onClick={() => moveSourceBy(source.id, 1)} /></div>

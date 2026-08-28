@@ -359,8 +359,32 @@ PRAGMA user_version = 27;
 COMMIT;
 "#;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 27;
-pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
+pub(super) const MIGRATION_028: &str = r#"
+BEGIN IMMEDIATE;
+DROP TRIGGER IF EXISTS response_affinity_retention;
+DELETE FROM response_affinity
+WHERE response_key IN (
+    SELECT response_key FROM response_affinity
+    ORDER BY updated_at_ms DESC, response_key DESC
+    LIMIT -1 OFFSET 16384
+);
+CREATE TRIGGER response_affinity_retention
+AFTER INSERT ON response_affinity
+BEGIN
+    DELETE FROM response_affinity WHERE expires_at_ms <= NEW.updated_at_ms;
+    DELETE FROM response_affinity
+    WHERE response_key IN (
+        SELECT response_key FROM response_affinity
+        ORDER BY updated_at_ms DESC, response_key DESC
+        LIMIT -1 OFFSET 16384
+    );
+END;
+PRAGMA user_version = 28;
+COMMIT;
+"#;
+
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 28;
+pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"
 INSERT INTO usage_candidate_rollups(

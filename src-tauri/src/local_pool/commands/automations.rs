@@ -250,7 +250,7 @@ fn validate_automation_targets(task: &WakeTask, state: &DesktopState) -> Result<
     };
     let supports_model = |account: &crate::local_pool::models::LocalAccountRecord| {
         account
-            .models
+            .effective_models()
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(model))
             && (account.allowed_models.is_empty()
@@ -475,6 +475,7 @@ mod tests {
             remote_location: None,
             wire_api: WireApi::Responses,
             models: models.iter().map(|model| (*model).to_string()).collect(),
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,

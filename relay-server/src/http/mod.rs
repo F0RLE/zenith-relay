@@ -37,6 +37,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/backend-api/codex/alpha/search", post(public_api::proxy))
         .route("/v1/chat/completions", post(public_api::proxy))
         .route("/v1/messages", post(public_api::proxy))
+        .route("/v1beta/models/{*model_action}", post(public_api::proxy))
+        .route("/v1/models/{*model_action}", post(public_api::proxy))
         .route("/v1/images/generations", post(public_api::proxy))
         .route("/v1/images/edits", post(public_api::proxy))
         .fallback(public_api::not_found)

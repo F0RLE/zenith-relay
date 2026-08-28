@@ -786,6 +786,9 @@ async fn confirm_one_account_import(
             .as_ref()
             .map(|value| value.models.clone())
             .unwrap_or(preview.models),
+        discovered_models: existing
+            .as_ref()
+            .and_then(|value| value.discovered_models.clone()),
         allowed_models: existing
             .as_ref()
             .map(|value| value.allowed_models.clone())

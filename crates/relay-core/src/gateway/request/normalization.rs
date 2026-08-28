@@ -69,7 +69,16 @@ pub(in crate::gateway) fn normalize_account_request(
                 "context".to_string(),
                 Value::String("all_turns".to_string()),
             );
-        // Native Responses Lite tool fields are provider-owned and pass through unchanged.
+        // Responses Lite has a stricter tool contract than the regular
+        // Responses endpoint.  The upstream currently requires an explicit
+        // boolean and only supports serial tool execution, even when the
+        // client omitted the field.  Keep the client-owned tool definitions
+        // untouched, but pin this transport-level switch to false.  This is
+        // deliberately done for both OAuth and compact Lite routes so HTTP
+        // and WebSocket requests cannot diverge.
+        if !matches!(object.get("parallel_tool_calls"), Some(Value::Bool(false))) {
+            object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+        }
     }
     match object.get("input") {
         Some(Value::String(text)) if text.trim().is_empty() => {
@@ -89,6 +98,14 @@ pub(in crate::gateway) fn normalize_account_request(
         }
         _ => {}
     }
+}
+
+pub(in crate::gateway) fn responses_lite_parallel_tool_calls_valid(
+    object: &Map<String, Value>,
+) -> bool {
+    object
+        .get("parallel_tool_calls")
+        .is_none_or(Value::is_boolean)
 }
 
 fn sanitize_unstored_reasoning_items(object: &mut Map<String, Value>) {

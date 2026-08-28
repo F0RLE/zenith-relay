@@ -2,8 +2,8 @@ use super::super::auth::{invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::now_ms;
 use crate::catalog::{
-    canonicalize_model_ids, normalize_codex_catalog_priorities,
-    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
+    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    normalize_upstream_codex_catalog_entry,
 };
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{valid_codex_client_version, CODEX_MODELS_CLIENT_VERSION};
@@ -99,7 +99,7 @@ async fn codex_models_response(
     } else {
         vec![client_version, CODEX_MODELS_CLIENT_VERSION]
     };
-    let mut live_manifests = Vec::new();
+    let mut live_manifests = Vec::<(String, Value)>::new();
     let mut live_candidate_ids = HashSet::new();
     for (candidate_id, mut url) in routes {
         let mut candidate_manifest = None;
@@ -137,8 +137,8 @@ async fn codex_models_response(
             break;
         }
         if let Some(manifest) = candidate_manifest {
-            live_candidate_ids.insert(candidate_id);
-            live_manifests.push(manifest);
+            live_candidate_ids.insert(candidate_id.clone());
+            live_manifests.push((candidate_id, manifest));
         }
     }
     // A successful manifest supersedes its own cache. If a different account
@@ -158,7 +158,7 @@ async fn codex_models_response(
         &source_metadata.context_windows,
         &source_metadata.image_models,
         &source_metadata.reasoning_catalog_templates,
-        live_manifests.iter().chain(stale.iter()),
+        live_manifests.into_iter().chain(stale),
     )
 }
 
@@ -177,7 +177,10 @@ pub(in crate::gateway) fn build_codex_models_response(
         source_context_windows,
         &Default::default(),
         &Default::default(),
-        upstream,
+        upstream
+            .cloned()
+            .into_iter()
+            .map(|manifest| (String::new(), manifest)),
     )
 }
 
@@ -197,7 +200,10 @@ pub(in crate::gateway) fn build_codex_models_response_with_source_reasoning(
         source_context_windows,
         &Default::default(),
         source_reasoning_templates,
-        upstream,
+        upstream
+            .cloned()
+            .into_iter()
+            .map(|manifest| (String::new(), manifest)),
     )
 }
 
@@ -218,25 +224,24 @@ pub(in crate::gateway) fn build_codex_models_response_with_source_capabilities(
         source_context_windows,
         source_image_models,
         source_reasoning_templates,
-        upstream,
+        upstream
+            .cloned()
+            .into_iter()
+            .map(|manifest| (String::new(), manifest)),
     )
 }
 
-fn build_codex_models_response_from_manifests<'a>(
+fn build_codex_models_response_from_manifests(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
     source_context_windows: &BTreeMap<String, u64>,
     source_image_models: &BTreeSet<String>,
     source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
-    upstreams: impl IntoIterator<Item = &'a Value>,
+    upstreams: impl IntoIterator<Item = (String, Value)>,
 ) -> Option<Value> {
-    let upstream_models = upstreams
-        .into_iter()
-        .filter_map(upstream_codex_models)
-        .flat_map(|models| models.iter())
-        .collect::<Vec<_>>();
-    let mut visible = visible_models
+    let upstream_manifests = upstreams.into_iter().collect::<Vec<_>>();
+    let visible = visible_models
         .iter()
         .filter_map(|display_id| {
             runtime.resolve_model(key, display_id).map(|upstream_id| {
@@ -250,57 +255,48 @@ fn build_codex_models_response_from_manifests<'a>(
     if visible.is_empty() {
         return None;
     }
-    let picker_positions = canonicalize_model_ids(
-        visible
-            .iter()
-            .map(|(_, (_, display_id))| display_id.as_str()),
-    )
-    .into_iter()
-    .enumerate()
-    .map(|(position, id)| (id.to_ascii_lowercase(), position))
-    .collect::<HashMap<_, _>>();
-    visible.sort_by_key(|(_, (_, display_id))| {
-        picker_positions
-            .get(&display_id.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
-
     // Source models remain provider-agnostic in the runtime. The picker is the
     // presentation boundary: it groups familiar model IDs while the upstream
     // catalog only supplies capability templates for those same IDs.
-    let upstream_by_model = upstream_models
-        .iter()
-        .copied()
-        .filter_map(|model| {
-            let object = model.as_object()?;
-            let slug = object.get("slug")?.as_str()?.trim();
-            if !is_valid_model_id(slug) {
-                return None;
-            }
-            let normalized = slug.to_ascii_lowercase();
-            if !codex_model_is_picker_eligible(slug)
+    let mut upstream_by_model = HashMap::<String, Vec<(String, Value)>>::new();
+    for (candidate_id, manifest) in &upstream_manifests {
+        let Some(models) = upstream_codex_models(manifest) else {
+            continue;
+        };
+        for model in models {
+            let Some(object) = model.as_object() else {
+                continue;
+            };
+            let Some(slug) = object.get("slug").and_then(Value::as_str).map(str::trim) else {
+                continue;
+            };
+            if !is_valid_model_id(slug)
+                || !codex_model_is_picker_eligible(slug)
                 || object.get("supported_in_api") == Some(&Value::Bool(false))
                 || object
                     .get("visibility")
                     .and_then(Value::as_str)
                     .is_some_and(|value| value.eq_ignore_ascii_case("hide"))
             {
-                return None;
+                continue;
             }
-            visible
+            let normalized = slug.to_ascii_lowercase();
+            if visible
                 .iter()
                 .any(|(upstream_id, _)| upstream_id == &normalized)
-                .then_some((normalized, object.clone()))
-        })
-        .fold(HashMap::new(), |mut entries, (normalized, object)| {
-            entries.entry(normalized).or_insert(object);
-            entries
-        });
+            {
+                upstream_by_model
+                    .entry(normalized)
+                    .or_default()
+                    .push((candidate_id.clone(), Value::Object(object.clone())));
+            }
+        }
+    }
 
-    let template = upstream_models
+    let template = upstream_manifests
         .iter()
-        .copied()
+        .filter_map(|(_, manifest)| upstream_codex_models(manifest))
+        .flatten()
         .find(|model| codex_catalog_entry_is_compatible(model))
         .and_then(Value::as_object);
     let mut models = Vec::with_capacity(visible.len());
@@ -310,21 +306,30 @@ fn build_codex_models_response_from_manifests<'a>(
         }
         let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
         let native_account_model = runtime.codex_model_has_chatgpt_account(key, &upstream_id);
+        let native_account_ids = runtime.codex_model_chatgpt_account_ids(key, &upstream_id);
+        let native_entry = upstream_by_model.get(&normalized).and_then(|entries| {
+            entries.iter().find(|(candidate_id, _)| {
+                candidate_id.is_empty()
+                    || native_account_ids
+                        .iter()
+                        .any(|account_id| account_id == candidate_id)
+            })
+        });
         let source_context_window = source_context_windows
             .get(&upstream_id.to_ascii_lowercase())
             .copied();
         let mut model = if native_account_model {
-            let native_model_id = upstream_by_model
-                .get(&normalized)
-                .and_then(|entry| entry.get("slug"))
+            let native_model_id = native_entry
+                .and_then(|(_, entry)| entry.get("slug"))
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|slug| is_valid_model_id(slug))
                 .unwrap_or(&display_id);
-            upstream_by_model
-                .get(&normalized)
-                .and_then(|entry| {
-                    normalize_native_codex_catalog_entry(entry, native_model_id, priority, None)
+            native_entry
+                .and_then(|(_, entry)| {
+                    entry.as_object().and_then(|entry| {
+                        normalize_native_codex_catalog_entry(entry, native_model_id, priority, None)
+                    })
                 })
                 .unwrap_or_else(|| {
                     // A missing/invalid account manifest must not borrow
@@ -357,12 +362,17 @@ fn build_codex_models_response_from_manifests<'a>(
                 })
         };
         let uses_responses_lite = native_account_model
-            && upstream_by_model
-                .get(&normalized)
-                .and_then(|entry| entry.get("use_responses_lite"))
+            && native_entry
+                .and_then(|(_, entry)| entry.get("use_responses_lite"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-        runtime.set_codex_model_uses_responses_lite(&upstream_id, uses_responses_lite);
+        for candidate_id in &native_account_ids {
+            runtime.set_codex_model_uses_responses_lite(
+                candidate_id,
+                &upstream_id,
+                uses_responses_lite,
+            );
+        }
         if !native_account_model {
             if let Some(context_window) = source_context_window {
                 model["context_window"] = context_window.into();
@@ -384,7 +394,8 @@ fn build_codex_models_response_from_manifests<'a>(
             .is_some()
             || upstream_by_model
                 .get(&normalized)
-                .and_then(|entry| entry.get("supported_reasoning_levels"))
+                .and_then(|entries| entries.first())
+                .and_then(|(_, entry)| entry.get("supported_reasoning_levels"))
                 .is_some();
         if !native_account_model && !provider_declared_reasoning {
             apply_known_reasoning_fallback(&mut model, &upstream_id);

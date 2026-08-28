@@ -696,6 +696,7 @@
 }
 
 .relay-tooltip {
+  --relay-tooltip-arrow-left: 50%;
   position: fixed;
   z-index: 1000;
   max-width: min(300px, calc(100vw - 16px));
@@ -712,6 +713,46 @@
   pointer-events: none;
   text-align: center;
   opacity: 0;
+}
+
+.relay-tooltip::before,
+.relay-tooltip::after {
+  position: absolute;
+  left: var(--relay-tooltip-arrow-left);
+  width: 0;
+  height: 0;
+  border-style: solid;
+  content: "";
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.pool-header-actions .pool-header-icon {
+  flex: 0 0 34px;
+}
+
+.relay-tooltip[data-placement="bottom"]::before {
+  top: -7px;
+  border-width: 0 7px 7px;
+  border-color: transparent transparent var(--relay-border-strong);
+}
+
+.relay-tooltip[data-placement="bottom"]::after {
+  top: -6px;
+  border-width: 0 6px 6px;
+  border-color: transparent transparent var(--relay-tooltip-bg);
+}
+
+.relay-tooltip[data-placement="top"]::before {
+  bottom: -7px;
+  border-width: 7px 7px 0;
+  border-color: var(--relay-border-strong) transparent transparent;
+}
+
+.relay-tooltip[data-placement="top"]::after {
+  bottom: -6px;
+  border-width: 6px 6px 0;
+  border-color: var(--relay-tooltip-bg) transparent transparent;
 }
 
 .relay-tooltip[data-positioned="true"] {
@@ -822,6 +863,13 @@ textarea:focus-visible {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+}
+
+.relay-page > .relay-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  background: var(--relay-bg);
 }
 
 .relay-tabs::-webkit-scrollbar {

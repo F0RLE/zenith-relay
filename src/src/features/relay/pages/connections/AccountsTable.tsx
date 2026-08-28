@@ -39,23 +39,31 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  AccountValueStrip,
   QuotaStack,
   StatusIcon,
   accountErrorLabel,
   accountPlanOption,
-  compareAccountPlans,
   copyText,
   useConfirm,
 } from "../../components/Ui";
+import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { formatDetailedRemainingTime } from "../../quotaFormatting";
-import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
+import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
+import { routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { NoResults, matchesQuery } from "./connectionHelpers";
+import { NoResults } from "./connectionHelpers";
+import {
+  accountCounts,
+  accountPlanOptions,
+  accountSelectionState,
+  activeAccountPlan,
+  accountParticipates,
+  filterAndSortAccounts,
+  visiblePlanCounts as buildVisiblePlanCounts,
+  type ParticipationFilter,
+} from "./accountTableModel";
 
-type ParticipationFilter = "all" | "included" | "excluded";
-export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
+export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onReauthenticate, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onReauthenticate: (account: AccountSummary) => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible } = useRelayState();
   const confirm = useConfirm();
@@ -85,24 +93,15 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     const timer = window.setTimeout(() => setNowMs(Date.now()), urgent ? 1_000 : 60_000);
     return () => window.clearTimeout(timer);
   }, [allAccounts, nowMs, runtime?.gateway.routingOrder]);
-  const planOptions = new Map<string, { id: string; label: string; count: number }>();
-  for (const account of allAccounts) {
-    const option = accountPlanOption(account.subscription.planType, t("common.unknown"));
-    const current = planOptions.get(option.id);
-    planOptions.set(option.id, { ...option, count: (current?.count ?? 0) + 1 });
-  }
-  const plans = [...planOptions.values()].sort(compareAccountPlans);
-  const errorCount = allAccounts.filter(currentAccountErrorCode).length;
-  const inPoolCount = allAccounts.filter(accountParticipates).length;
-  const disabledCount = allAccounts.filter((account) => !account.enabled).length;
-  const storedPosition = new Map(allAccounts.map((account, index) => [account.id, index]));
+  const plans = accountPlanOptions(allAccounts, t("common.unknown"));
+  const { errorCount, inPoolCount, disabledCount } = accountCounts(allAccounts);
   const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
   const runtimeByAccount = new Map(allAccounts.map((account) => [
     account.id,
     account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
   ]));
-  const activePlan = planFilter === "all" || planOptions.has(planFilter) || (planFilter === "errors" && errorCount > 0) ? planFilter : "all";
+  const activePlan = activeAccountPlan(planFilter, plans, errorCount);
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
   useEffect(() => {
@@ -121,30 +120,22 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
   }
   const canRefreshQuota = mode === "local" || runtime.capabilities.features.includes("quota");
-  const accounts = [...runtime.accounts]
-    .filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models))
-    .filter((account) => activePlan === "all" || (activePlan === "errors" ? Boolean(currentAccountErrorCode(account)) : accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan))
-    .filter((account) => participationFilter === "all" || (participationFilter === "included") === accountParticipates(account))
-    .sort((left, right) => groupByPlan
-      ? compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareRoutingOrder(left.id, right.id, runtimePosition, storedPosition)
-      : compareRoutingOrder(left.id, right.id, runtimePosition, storedPosition));
+  const accounts = filterAndSortAccounts(runtime.accounts, query, activePlan, participationFilter, groupByPlan, runtimePosition, t("common.unknown"));
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
-  const selectedAccounts = accounts.filter((account) => selected.includes(account.id));
-  const selectedIds = selectedAccounts.map((account) => account.id);
-  const selectedCount = selectedAccounts.length;
-  const selectedAccessOnly = selectedAccounts.some((account) => account.authState.state === "degraded_access_only");
-  const selectedSecretsUnavailable = selectedAccounts.some((account) => !account.secretAvailable);
-  const selectedOnServer = selectedAccounts.some((account) => Boolean(account.remoteLocation));
-  const exportIds = selectedCount ? selectedIds : allAccounts.map((account) => account.id);
-  const canIncludeSelected = !selectedOnServer && selectedAccounts.some((account) => !accountParticipates(account));
-  const canExcludeSelected = selectedAccounts.some(accountParticipates);
-  const allSelected = accounts.length > 0 && accounts.every((account) => selected.includes(account.id));
-  const visiblePlanCounts = accounts.reduce((counts, account) => {
-    const id = accountPlanOption(account.subscription.planType, t("common.unknown")).id;
-    counts.set(id, (counts.get(id) ?? 0) + 1);
-    return counts;
-  }, new Map<string, number>());
+  const {
+    selectedAccounts,
+    selectedIds,
+    selectedCount,
+    selectedAccessOnly,
+    selectedSecretsUnavailable,
+    selectedOnServer,
+    exportIds,
+    canIncludeSelected,
+    canExcludeSelected,
+    allSelected,
+  } = accountSelectionState(allAccounts, accounts, selected);
+  const visiblePlanCounts = buildVisiblePlanCounts(accounts, t("common.unknown"));
   const participationOptions = (["all", "included", "excluded"] as const).map((value) => {
     const count = value === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (value === "included")).length;
     const state = t(`accounts.participation.${value}`);
@@ -301,10 +292,10 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
       </div>
     </div>
     <div className="connections-account-summary" aria-label={t("accounts.summary.label")}>
-      <div><span>{t("accounts.summary.total")}</span><strong>{allAccounts.length}</strong></div>
-      <div><span>{t("accounts.summary.inPool")}</span><strong>{inPoolCount}</strong></div>
-      <div><span>{t("accounts.summary.errors")}</span><strong>{errorCount}</strong></div>
-      <div><span>{t("accounts.summary.disabled")}</span><strong>{disabledCount}</strong></div>
+      <div><span>{t("accounts.summary.total")}</span><i aria-hidden="true">—</i><strong>{allAccounts.length}</strong></div>
+      <div><span>{t("accounts.summary.inPool")}</span><i aria-hidden="true">—</i><strong>{inPoolCount}</strong></div>
+      <div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{errorCount}</strong></div>
+      <div><span>{t("accounts.summary.disabled")}</span><i aria-hidden="true">—</i><strong>{disabledCount}</strong></div>
     </div>
     </div>
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><Check aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
@@ -351,7 +342,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           ? t("pool.recoveryProbe")
           : modelRetryHint;
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
-        const poolLabel = participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
+        const poolActionLabel = participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool");
         const quotaStatus = account.quotaRefreshStatus;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
         const indicatorTone = onServer
@@ -382,6 +373,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
             <div className="account-card-header-actions">
               <ActionMenu className="account-row-menu">
                 {errorCode ? <ActionMenuItem icon={<CircleAlert aria-hidden />} onClick={() => setErrorDetails(account)}>{t("accounts.errorDetailsTitle")}</ActionMenuItem> : null}
+                {mode === "local" && account.authState.state === "requires_reauth" ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
@@ -401,7 +393,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           <footer className="account-card-footer"><div className="account-card-actions">
             {onServer
               ? <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />
-              : <IconButton className={participates ? "danger" : ""} label={poolLabel} icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `pool-${account.id}`} onClick={() => void perform(`pool-${account.id}`, () => updateParticipation(account, !participates), "feedback.saved")} />}
+              : <IconButton className={participates ? "danger" : ""} label={poolActionLabel} icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `pool-${account.id}`} onClick={() => void perform(`pool-${account.id}`, () => updateParticipation(account, !participates), "feedback.saved")} />}
             <IconButton label={t("accounts.refreshQuota")} icon={busy === `connection-account-quota-${account.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !account.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(account)} />
             <IconButton label={`${t("proxies.proxy")}: ${proxyLabel}`} icon={<Pencil aria-hidden />} disabled={onServer || !canManageProxies} onClick={() => onProxy(account)} />
             {mode === "local" ? <IconButton label={t("accounts.launchAccount")} icon={<Play aria-hidden />} disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`} title={onServer ? t("accounts.onServerHint") : !account.secretAvailable ? t("accounts.credentialsUnavailable") : t("accounts.launchAccount")} onClick={() => void activateCodexProfile(`launch-account-${account.id}`, () => relayCommands.launchCodexAccount(account.id), true)} /> : null}
@@ -437,7 +429,7 @@ function AccountQuotaRefreshState({ account }: { account: AccountSummary }) {
 }
 
 function accountHasQuotaWindows(account: AccountSummary) {
-  return Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.length);
+  return Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
 }
 
 export function AccountErrorDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
@@ -455,8 +447,4 @@ export function AccountErrorDialog({ account, onClose }: { account: AccountSumma
     subscription_status: account.subscription.status,
   }, null, 2);
   return <Dialog title={t("accounts.errorDetailsTitle")} onClose={onClose} footer={<><Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => void copyText(details)}>{t("common.copy")}</Button><Button variant="primary" onClick={onClose}>{t("common.close")}</Button></>}><div className="config-preview account-error-json"><pre><code>{details}</code></pre></div><p className="form-note">{t("accounts.errorDetailsHint")}</p></Dialog>;
-}
-
-function accountParticipates(account: AccountSummary) {
-  return account.inPool;
 }

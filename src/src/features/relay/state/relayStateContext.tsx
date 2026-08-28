@@ -1,6 +1,5 @@
 import { createContext, useContext } from "react";
 import type {
-  LocalUsage,
   LocalUsagePage,
   PageId,
   ProfileActivation,
@@ -12,9 +11,9 @@ import type {
   RuntimeSnapshot,
 } from "../api/types";
 import type { UiState } from "../api/commands";
-import type { FeedbackError } from "./feedback";
+import type { Feedback, PerformOptions } from "./relayOperationModel";
 
-export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
+export type { Feedback, PerformOptions } from "./relayOperationModel";
 
 export type RelayContextValue = {
   mode: RelayMode;
@@ -31,7 +30,6 @@ export type RelayContextValue = {
   accountValueVisible: boolean;
   setAccountValueVisible: (visible: boolean) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
-  localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;
   loadLocalUsage: (query: RemoteUsageQuery) => Promise<LocalUsagePage>;
   remoteUsage: RemoteUsage[];
@@ -42,7 +40,7 @@ export type RelayContextValue = {
   busy: string | null;
   feedback: Feedback;
   refresh: (force?: boolean) => Promise<void>;
-  perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean>;
+  perform: (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
   activateCodexProfile: (id: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
   launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
   clearFeedback: () => void;

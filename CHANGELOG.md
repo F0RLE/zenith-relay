@@ -6,177 +6,201 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
-No changes are currently queued for the next release.
+## [1.1.1] - 2026-08-28
+
+Zenith Relay 1.1.1 is the maintenance release after 1.1.0. It improves
+multi-protocol reliability, account discovery, cache-aware routing, quota
+visibility, and the everyday desktop workflow without changing the product's
+local-first security boundary.
+
+### 1.1.0 -> 1.1.1 at a glance
+
+| Area | Changes in 1.1.1 |
+| --- | --- |
+| Account access | More reliable ChatGPT subscription discovery, exact-account reauthentication, and preserved catalogs during temporary checks |
+| Routing | Stable source ownership for continuations, safer WebSocket recovery, and cache affinity that survives restarts |
+| Providers | More complete Responses bridges for Anthropic Messages and Gemini, including tools, streaming, images, thinking, and usage |
+| Quotas | Weekly reset-credit automation and clearer separation between provider quota and Standard/Fast request speed |
+| Usage | API-equivalent remaining estimate, request-count and E2E-speed analytics, and safer route diagnostics |
+| Desktop UI | Clearer source tabs, reliable drag-and-drop policy editing, compact model rules, responsive dialogs, and refreshed help/screenshots |
+
+### Account discovery and recovery
+
+- Newly added ChatGPT subscriptions discover their model catalog with the same
+  registered Codex authorization used by the runtime. Accounts that require
+  Agent Identity now show quota and models together, with OAuth Bearer kept as
+  a safe fallback when no Agent Identity is available.
+- A temporary quota or model-discovery failure keeps the last usable catalog
+  instead of making an account appear empty.
+- Reauthentication can target the exact expired ChatGPT account. A fresh OAuth
+  login keeps local routing and settings, and does not invent an expired
+  subscription date without new provider metadata.
+
+### Routing and provider compatibility
+
+- Tool-call continuations from Messages and Gemini sources stay on the exact
+  source route that created the response, preventing rotation from breaking an
+  active task.
+- Native Responses WebSocket requests recover strict provider-owned message
+  identifiers in the same bounded way as HTTP. Parallel account-backed
+  sessions keep their leases and response affinity independent.
+- Relay-owned WebSocket timeouts and stream-size failures are reported as Relay
+  errors instead of being attributed to a provider.
+- Responses Lite follows the provider tool contract with explicit serial tool
+  execution and rejects malformed values before forwarding them.
+- Responses bridges now cover function, namespace, and direct custom tools
+  across Anthropic Messages and Gemini, including tool-choice filtering,
+  JSON/SSE continuations, multimodal input, thinking metadata, and normalized
+  usage.
+
+### Cache, quota, and usage
+
+- Prompt-cache affinity keeps the original account preferred until a real
+  failure, while source priority, exhaustion, health, and bounded spillover
+  still apply. Opaque prompt/session bindings persist across Relay restarts,
+  and rotating headers no longer split one session into separate cache keys.
+- Server pools can automatically redeem an available reset credit when a
+  configured weekly quota reaches zero, with per-account locking and cycle
+  deduplication.
+- The lifetime-based monetary "Potential" estimate is replaced by **API equiv.
+  left**, shown only when Relay has complete priced usage for the current
+  provider quota window. Activity outside Relay is excluded.
+- Overview adds request-count and end-to-end output-speed charts for every
+  selected period.
+- Usage diagnostics show the attempt number, safe route kind, and endpoint
+  route for each request, including failed attempts, without recording hosts,
+  credentials, prompts, cookies, headers, or provider response bodies.
+- Official OpenAI reference prices for GPT-5.6 Sol, Terra, and Luna now include
+  cached-input and cache-write rates.
+- Standard/Fast request speed is no longer presented as a second user-facing
+  quota. Provider priority metadata does not create another quota meter.
+
+### Desktop workflow
+
+- API-source editing separates connection settings, model and format routing,
+  and per-source pricing into focused tabs. Refresh checks only the saved
+  source and stays beside its connection summary.
+- Source policies support pointer-based reordering within roles and direct
+  drops onto API-first, stabilizer, or last-resort roles. Saving closes the
+  editor immediately while Relay persists the policy in the background.
+- Pool model rules support pointer dragging with wheel scrolling, visible drop
+  targets, and collapsible provider groups. Reasoning dialogs remain readable
+  in compact and full-size windows with all backend-provided modes visible.
+- README, localized Help, and Overview, Connections, Pool, and Usage screenshots
+  were refreshed to match the current three-mode product.
 
 ## [1.1.0] - 2026-08-23
 
-Zenith Relay 1.1.0 is the first full Relay release after Zenith Codex 1.0.5.
-It turns the former desktop API client into a local-first personal relay with
-three operating modes, a private local pool, compatible API routing, reversible
-Codex profile management, redacted diagnostics, and an optional user-managed
-server. It is not the production Zenith Gateway, Control API, or account pool.
+Zenith Relay 1.1.0 is the first complete Relay release after Zenith Codex
+1.0.5. It changes the product from a small desktop API client into a
+local-first personal relay for a user's own ChatGPT accounts and compatible API
+sources. Relay is separate from the production Zenith Gateway, Control API, and
+account pool.
 
-### From 1.0.5 to 1.1.0
+### 1.0.5 -> 1.1.0 at a glance
 
-- Replaced the thin Zenith API-key client product with the standalone Zenith
-  Relay desktop/personal-pool product, while keeping the production security
-  and ownership boundary explicit.
-- Added This computer, Choose API, and My server modes with local-first state,
-  a generated loopback key, capability-gated remote management, and an
-  encrypted user-managed server vault.
-- Added ChatGPT OAuth and existing-profile intake, account imports, quota and
-  health state, pool membership, routing order, proxies, response affinity,
-  model rules, and redacted usage history.
-- Added provider-neutral Responses, Messages, Chat Completions, and validated
-  Gemini route contracts, including bounded Responses-to-Messages continuation
-  state and source-specific model/reasoning capabilities.
-- Added model discovery, official/provider/manual price provenance, image
-  pricing, reasoning defaults and manual policies, generation and end-to-end
-  speed diagnostics, and incremental API-equivalent usage totals.
-- Added reversible Codex profile attachment, original and named snapshots,
-  full restore verification, OAuth rotation recovery, portable Windows paths,
-  and history repair with bounded cleanup.
-- Added active-session background policy, startup/every-eight-hour model
-  refresh, quota scheduling, explicit weekly reset automation, and manual-only
-  reasoning probes; tray-only startup does not perform provider checks.
-- Added responsive localized UI, shared confirmation/error dialogs, compact
-  tables and cards, startup state, updater flow, support diagnostics, and
-  release screenshot coverage.
-- Added a standalone Relay Server with append-only migrations, encrypted
-  storage, management API, backup/restore, protocol negotiation, and strict
-  redaction; live server acceptance remains a separate deferred gate.
+| Area | 1.0.5 | 1.1.0 |
+| --- | --- | --- |
+| Product | Desktop client focused on a single API-key workflow | Local-first desktop relay with a private OpenAI-compatible endpoint |
+| Operating modes | One desktop experience | This computer, Choose API, and My server |
+| Accounts | Profile recovery and basic local state | ChatGPT OAuth, profile import, account health, quotas, pool membership, and routing |
+| API sources | Limited source configuration | Responses, Messages, Chat Completions, and explicitly assigned Gemini routes |
+| Models | Basic model presentation | Discovery, semantic ordering, capability-aware reasoning, and price provenance |
+| Quotas | Status display | Provider windows, weekly reset credits, scheduled refresh, and confirmation-safe reset actions |
+| Usage | Basic timing history | Token/cache/reasoning details, generation speed, E2E speed, and incremental totals |
+| Recovery | Configuration repair | Snapshots, verified full restore, OAuth rotation recovery, and portable history repair |
+| Deployment | Desktop release only | Cross-platform installers, signed updates, portable Windows replacement, and an optional user-managed server |
 
-The detailed implementation history is grouped below by behavior.
+### Product and account management
 
-### Added
+- Added the three explicit Relay modes with local-first state, a generated
+  loopback key, and capability-gated management of a server owned by the same
+  user.
+- Added ChatGPT OAuth sign-in, existing-profile import, account identity and
+  availability state, pool membership, configured routing order, proxies, and
+  reliable response continuity.
+- Added provider quota windows in Connections and Pool. Provider quota,
+  direct API-equivalent usage, and optional purchase-cost payback remain
+  separate values; a quota percentage is never treated as money.
+- Added explicit account export in several transfer formats. Account exports
+  contain the OAuth credentials required for the selected import and must be
+  handled as secrets. Diagnostics, snapshots, support bundles, telemetry, and
+  usage history remain redacted: prompts, response bodies, cookies,
+  authorization headers, and raw keys are not recorded there.
 
-- Compatible Messages sources can select a 5-minute or one-hour prompt-cache
-  write lifetime. Usage records retain the lifetime the provider actually used.
-- Usage history now shows protocol and cache-write tokens, refreshes from
-  recorded requests, and lets users choose the visible summary metrics.
-- Provider-reported quota windows are shown in Connections and Pool, with
-  separate visibility controls for the optional account value summary.
-- Regression coverage keeps provider quota, API-equivalent usage, and purchase
-  cost as separate values.
-- Usage history now shows the requested reasoning effort and the normalized
-  effort actually sent to the selected provider.
-- Usage now shows provider generation speed separately from the full-request E2E
-  speed, keeps E2E speed in Overview, and lets the summary include generation speed.
-- Streamed Responses-to-Messages continuation coverage, including tool-context
-  reuse across a follow-up request.
-- Explicit `Responses -> Gemini` source routing for discovered Gemini models;
-  the new bridge starts unassigned and does not advertise a model until it is
-  selected.
+### Sources, models, and routing
 
-### Changed
+- Added support for Responses, Messages, Chat Completions, and validated
+  Responses-to-Gemini compatibility, including tool-call continuations.
+- Added source model discovery, clear price provenance, image generation/edit
+  prices, semantic model ordering, and declared reasoning catalog modes.
+- Catalog refresh runs at startup and every eight hours during an active app
+  session. Catalog failures stay visible after restart; reasoning modes remain
+  catalog metadata and changing a reasoning setting does not probe a provider.
+- Reasoning policies apply only to pooled API sources. Native OAuth models keep
+  their provider capabilities unchanged.
+- Added native WebSocket support and an HTTP/SSE compatibility path for
+  providers that do not expose WebSockets.
+- Routing follows the configured source order while keeping protocol
+  continuations on the correct account.
 
-- Documentation now makes the security boundary explicit: Relay never receives
-  Zenith production secrets, customer keys, backend tokens, account-pool
-  inventory, or internal Gateway/Control API logic. User-owned credentials may
-  move only through an explicit transfer to the user's own Relay Server, while
-  snapshots, telemetry, exports, diagnostics, and usage remain redacted.
-- Source model discovery now runs once after Relay starts and every eight hours
-  while that app session remains active; changing reasoning settings no longer
-  starts a background catalog request, and reasoning probes stay manual.
-- Background quota, model, and wake workers pause with the desktop window and
-  resume only when an active Relay session is open; tray-only startup no longer
-  performs those checks.
-- Model-catalog failures remain visible after a restart, while history-repair
-  backups are cleaned on startup after seven days and capped at one copy.
-- Reasoning policies now apply only to pooled API sources and their API
-  catalog; native OAuth account catalogs and request capabilities remain
-  untouched.
-- The desktop shell now shows a static startup screen immediately while the
-  WebView and first runtime snapshot finish loading, then removes it after the
-  interactive frame with a bounded fallback timeout.
-- Startup runtime snapshots no longer wait for the diagnostic SQLite write;
-  performance telemetry is persisted asynchronously after the state response.
-- WebSocket turn state is now accepted only for a known session/account owner;
-  single-lane WebSocket connections preserve one `stream_id` and reject a
-  second lane instead of silently treating multiplexing as supported.
-- Managed Codex profiles enable Responses WebSocket transport. Relay probes
-  each candidate/model, uses native upstream WebSocket when available, and
-  bridges HTTP/SSE-only providers without removing them from the pool.
-- Image models now show official per-request generation/edit prices, and API
-  image requests keep the selected `gpt-image-*` model instead of forcing
-  `gpt-image-2`; native accounts continue using the Responses image tool.
-- A confirmed native Messages model is now linked into the same pool for
-  Responses clients through Relay's Messages adapter. Explicit native
-  Responses and Gemini assignments still take precedence for that model.
-- Configured API source order now takes precedence over prompt-cache affinity;
-  response-owner affinity remains intact for protocol continuations.
-- Pool cards now retain the configured routing order for API sources with multiple protocol routes.
-- Source discovery keeps the native Responses catalog fallback fresh when
-  other models are assigned to a Messages or Responses-to-Messages route.
-- The Pool reasoning editor now serializes manual changes with an explicit
-  probe and preserves the newest policy when a probe completes.
-- The source-route editor is more compact: formats are added on demand, model
-  assignment columns stay aligned, and upstream API keys appear before routes.
-- The OAuth success page is centered and schedules its browser tab to close ten
-  seconds after the account callback succeeds.
-- Usage request details now open as a compact overview with token, tool, and
-  route sections.
-- Generation speed now uses successful post-first-output intervals and the
-  remaining visible output tokens, excluding separately reported reasoning;
-  the full-request E2E speed remains in Overview.
-- Pool speed controls now use the clearer Standard/Fast terminology and sync
-  Codex's official priority setting with the selected pool tier.
-- Pool member cards fill the available grid width at larger windows while
-  preserving a readable minimum width and responsive layout.
-- Local snapshots preserve the canonical account state and show a sanitized
-  warning when the active gateway has no matching OAuth candidate.
-- Profile recovery now creates one first-launch original snapshot, exposes only
-  full restore with Yes/No confirmation, never saves a hidden pre-restore copy,
-  and guards snapshot deletion with a ten-second confirmation cooldown.
-- Profile recovery now adopts a rotated OAuth token for the same account before
-  restoring the native ChatGPT profile, avoiding false `profile_restore_blocked`
-  errors.
-- History recovery now updates only threads linked to processed rollouts,
-  rewrites every relevant session marker, and keeps recovery paths portable on
-  Windows.
-- Global operation notifications now stay in a bottom-left overlay above the
-  Help controls instead of shifting the page from the upper-right corner;
-  compact sidebar mode uses a small status toast and opens error details in a
-  centered dialog.
-- Model lists and source price editors order familiar model families
-  semantically by company, tier, version, and variant; unknown model IDs keep
-  their upstream order.
-- Connections, Pool, and Usage now show direct token-based API-equivalent and
-  optional purchase-cost payback beside the provider-reported quota window.
-  Relay no longer turns a quota percentage into a monetary potential; legacy
-  calculation state migrates to the direct purchase-cost field.
-- Reasoning defaults now use a verified model whitelist when available (with
-  separate levels per company/model); provider declarations remain the
-  fallback for unknown models. Model Rules still allows a manual override and
-  an optional local Pool probe.
-- Relay writes the selected model's valid reasoning effort into the managed
-  Codex profile on activation. Profile restore removes Relay's own value,
-  while preserving a user-changed `model_reasoning_effort`; provider, base
-  URL, authentication, and model catalog changes still block managed restore.
-- Provider quota presentation ignores expired reset timestamps and selects the
-  next future reset.
-- API-equivalent totals now update incrementally in SQLite instead of regrouping
-  the full request log on every refresh; the 30-day raw-log retention and
-  long-term usage totals remain separate.
+### Quotas, resets, and usage
 
-### Maintenance
+- Added explicit weekly reset-credit status and a simple Yes/No confirmation
+  flow for an available reset. The automation path is weekly-limit aware; it
+  does not confuse a five-hour window with the weekly reset.
+- Background quota, model, and wake workers run only while an active Relay
+  session is open. Tray-only startup does not perform provider checks.
+- Added cache and reasoning token details, requested versus applied reasoning
+  effort, provider generation speed, and full-request response speed.
+- Usage totals remain available even after detailed request history is cleaned
+  up according to its retention policy.
+- Pool service tiers now use Standard/Fast terminology and synchronize Codex's
+  official priority setting with the selected tier.
 
-- Shared Playwright configuration now covers application and documentation
-  runs consistently.
-- Removed redundant build-script passes and documented the release workflow,
-  roadmap, and branch integration state.
+### Profile recovery and persistence
 
-### Release verification
+- Added reversible Codex profile attachment with one first-launch original
+  snapshot, named snapshots, full restore verification, and a visible Yes/No
+  confirmation. Hidden pre-restore copies are not created.
+- OAuth rotation recovery adopts a newer token for the same account before
+  restoring the profile, avoiding false restore failures.
+- History repair updates only affected conversations and keeps recovery paths
+  portable on Windows.
+- Snapshot deletion and history-repair backups use bounded cleanup and explicit
+  confirmation safeguards.
 
-- 79 frontend unit tests passed with `bun run test:unit`.
-- 120 visual Playwright scenarios passed across modes, locales, themes, and
-  compact/desktop viewports.
-- 177 operational Playwright scenarios passed, including quota reset,
-  automation, model availability errors, profile recovery, and background
-  refresh behavior.
-- 354 desktop Rust tests passed with the serialized keyring test command.
-- TypeScript, Rust formatting, diff checks, and the Windows release build
-  passed; the local release executable was replaced and hash-verified.
+### Interface and desktop experience
+
+- Added responsive English and Russian UI coverage for compact and desktop
+  windows, a static startup screen, compact tables/cards, and shared dialogs for
+  confirmations and errors.
+- Model-availability and catalog errors remain visible instead of disappearing
+  after a failed check. Global errors open in a centered details dialog and can
+  be copied in a redacted form.
+- Improved OAuth completion layout, source-route editing, usage request details,
+  model price editing, pool card sizing, and semantic model-family ordering.
+- Added signed in-app updates, in-place replacement and rollback for the
+  portable Windows executable, and release artifacts for Windows, Linux, and
+  macOS on x64 and ARM64.
+
+### Optional Relay Server
+
+- Added a standalone user-managed server with encrypted vault storage, durable
+  state, management API, protocol negotiation, backup/restore, and strict
+  redaction.
+- The server is an optional personal deployment. It is not a connection to
+  Zenith production systems, and live server acceptance remains a separate
+  deferred gate.
+
+### Security boundary
+
+- Relay never receives Zenith production credentials, customer API keys,
+  backend tokens, account-pool inventory, provider cabinet credentials, or
+  internal Gateway/Control API business or routing logic.
+- User-owned credentials can move only after an explicit confirmed transfer to
+  that user's own server. Desktop secrets stay in the operating-system
+  credential store; server secrets stay in the encrypted user-managed vault.
 
 ## [1.1.0-beta.1] - 2026-07-29
 
@@ -218,7 +242,8 @@ The detailed implementation history is grouped below by behavior.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.0...main
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.1...main
+[1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1
 [1.1.0]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0
 [1.1.0-beta.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0-beta.1
 [1.0.5]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.0.5

@@ -6,8 +6,8 @@ use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde_json::{json, Value};
 use std::{collections::HashSet, fs, path::Path};
 use zenith_relay_core::{
-    canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias, normalize_codex_catalog_priorities,
+    codex_catalog_entry_is_compatible, codex_model_display_name, codex_model_is_picker_eligible,
+    decode_codex_model_alias, normalize_codex_catalog_priorities,
     normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
     routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
 };
@@ -35,8 +35,6 @@ pub(super) fn direct_source_model_catalog_with_manifest(
         .map(str::trim)
         .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
         .collect::<Vec<_>>();
-    let selected_models = canonicalize_model_ids(selected_models);
-
     let mut models = Vec::new();
     let mut seen = HashSet::new();
     for (index, model) in selected_models.into_iter().enumerate() {
@@ -46,8 +44,8 @@ pub(super) fn direct_source_model_catalog_with_manifest(
         }
         let entry = direct_source_catalog_entry(
             &template,
-            source_manifest.and_then(|manifest| source_catalog_entry(manifest, &model)),
-            &model,
+            source_manifest.and_then(|manifest| source_catalog_entry(manifest, model)),
+            model,
             DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
         );
         if codex_catalog_entry_is_compatible(&entry) {

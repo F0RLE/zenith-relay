@@ -1,5 +1,5 @@
 use super::*;
-use crate::{NativeResponsesReplayState, RESPONSE_AFFINITY_TTL_MS};
+use crate::{NativeResponsesReplayState, PROMPT_AFFINITY_TTL_MS, RESPONSE_AFFINITY_TTL_MS};
 use sha2::{Digest, Sha256};
 
 const CODEX_TURN_STATE_TTL_MS: u64 = 60 * 60 * 1_000;
@@ -128,16 +128,20 @@ impl GatewayRuntime {
         response: &crate::MessagesBridgeResponse,
         now_ms: u64,
     ) {
-        self.messages_bridge_store
+        let stored = self
+            .messages_bridge_store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
+            .insert_if_stored(
                 local_key_id,
                 &response.response_id,
                 candidate_id,
                 response.continuation.clone(),
                 now_ms,
             );
+        if stored {
+            self.bind_response_affinity(Some(&response.response_id), candidate_id, now_ms);
+        }
     }
 
     pub(crate) fn load_native_responses_replay(
@@ -182,26 +186,54 @@ impl GatewayRuntime {
         local_key_id: &str,
         model: &str,
         prompt_cache_key: Option<&str>,
+        client_context_id: Option<&str>,
     ) -> Option<String> {
-        let prompt_cache_key = prompt_cache_key?.trim();
-        if prompt_cache_key.is_empty() {
-            return None;
-        }
-        Some(hex::encode(Sha256::digest(
+        // Codex normally supplies prompt_cache_key. Older clients do not, but
+        // still send a privacy-safe session/thread fingerprint. Keep that
+        // session on the successful candidate so provider-side prefix caches
+        // survive normal key rotation; explicit cache keys remain stronger.
+        let (material_kind, material) = prompt_cache_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| ("cache", value))
+            .or_else(|| {
+                client_context_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| ("session", value))
+            })?;
+        let digest = hex::encode(Sha256::digest(
             format!(
-                "prompt\0{}\0{}\0{}",
+                "prompt\0{}\0{}\0{}\0{}",
                 local_key_id,
                 model.to_ascii_lowercase(),
-                prompt_cache_key
+                material_kind,
+                material,
             )
             .as_bytes(),
-        )))
+        ));
+        // Keep the material class in the opaque scheduler key so selection
+        // can give explicit provider cache keys a stronger owner preference
+        // without changing normal session-based rotation.
+        Some(format!(
+            "{}{}",
+            if material_kind == "cache" {
+                "cache:"
+            } else {
+                "session:"
+            },
+            digest
+        ))
     }
 
     pub(crate) fn bind_prompt_affinity(&self, key: Option<&str>, candidate_id: &str, now_ms: u64) {
         if let Some(key) = key {
-            self.lock_scheduler()
-                .bind_prompt_affinity(key, candidate_id, now_ms);
+            if self
+                .lock_scheduler()
+                .bind_prompt_affinity_sticky(key, candidate_id, now_ms)
+            {
+                self.persist_prompt_affinity(key, candidate_id, now_ms);
+            }
         }
     }
 
@@ -239,6 +271,16 @@ impl GatewayRuntime {
                 key: key.to_string(),
                 candidate_id: candidate_id.to_string(),
                 expires_at_ms: now_ms.saturating_add(RESPONSE_AFFINITY_TTL_MS),
+            });
+        }
+    }
+
+    pub(crate) fn persist_prompt_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
+        if let Some(store) = self.response_affinity_store.as_ref() {
+            let _ = store.upsert(&ResponseAffinityBinding {
+                key: key.to_string(),
+                candidate_id: candidate_id.to_string(),
+                expires_at_ms: now_ms.saturating_add(PROMPT_AFFINITY_TTL_MS),
             });
         }
     }

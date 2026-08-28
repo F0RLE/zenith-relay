@@ -15,5 +15,5 @@ pub(crate) use selection::CooldownRequest;
 pub use selection::{
     normalize_subscription_plan_order, ActiveModelRuntime, CandidateRuntimeSnapshot,
     ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy, Selection,
-    SelectionReason, SelectionRequest, RESPONSE_AFFINITY_TTL_MS,
+    SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, RESPONSE_AFFINITY_TTL_MS,
 };

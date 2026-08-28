@@ -1,15 +1,44 @@
+#[path = "codex_config_auth.rs"]
+mod codex_config_auth;
+#[path = "codex_config_backup.rs"]
+mod codex_config_backup;
+#[path = "codex_config_text.rs"]
+mod codex_config_text;
+
+pub(crate) use codex_config_auth::load_api_key_for_launch;
+use codex_config_auth::{
+    codex_auth_content, load_zenith_auth_key_if_configured, load_zenith_key_from_codex_config,
+    restore_or_remove_zenith_auth, save_previous_auth_if_needed,
+};
+#[cfg(test)]
+use codex_config_auth::{
+    previous_codex_auth_should_be_saved, zenith_auth_is_owned, zenith_auth_key_if_configured,
+};
+#[cfg(test)]
+use codex_config_backup::redact_config_secrets;
+use codex_config_backup::{backup_config, prune_config_backups};
+use codex_config_text::{
+    backup_paths_from_directories, config_selects_zenith_provider, config_uses_zenith_provider,
+    is_zenith_customer_key, latest_backup_model_provider, remove_zenith_provider,
+    upsert_zenith_provider, with_model_provider,
+};
+#[cfg(test)]
+use codex_config_text::{backup_paths_newest_first, remove_zenith_openai_base_url_override};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Mutex, MutexGuard},
+};
+#[cfg(test)]
+use std::{
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
-    files::{atomic_write, escape_json_string, escape_toml_string, unquote_toml_string},
+    files::atomic_write,
     key_storage::{
-        delete_previous_codex_auth, delete_saved_app_key, load_previous_codex_auth,
-        load_saved_app_key, save_app_key, save_previous_codex_auth,
+        delete_previous_codex_auth, delete_saved_app_key, load_saved_app_key, save_app_key,
     },
     platform::default_codex_home,
 };
@@ -313,436 +342,6 @@ pub fn provider_has_token() -> bool {
     config_selects_zenith_provider(&content)
         && content.contains(&format!("[model_providers.{PROVIDER_ID}]"))
         && load_api_key_for_launch().is_some()
-}
-
-pub fn load_api_key_for_launch() -> Option<String> {
-    load_saved_app_key()
-        .or_else(load_zenith_key_from_codex_config)
-        .or_else(load_zenith_auth_key_if_configured)
-}
-
-fn load_zenith_auth_key_if_configured() -> Option<String> {
-    let config_path = default_codex_home().join(CONFIG_FILE);
-    let config = fs::read_to_string(config_path).ok()?;
-    zenith_auth_key_if_configured(&config, load_codex_auth_key())
-}
-
-fn zenith_auth_key_if_configured(config: &str, key: Option<String>) -> Option<String> {
-    config_uses_zenith_provider(config)
-        .then_some(key)
-        .flatten()
-        .filter(|key| is_zenith_customer_key(key))
-}
-
-fn load_zenith_key_from_codex_config() -> Option<String> {
-    let config_path = default_codex_home().join(CONFIG_FILE);
-    let content = fs::read_to_string(config_path).ok()?;
-    let mut in_zenith = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_zenith = trimmed == format!("[model_providers.{PROVIDER_ID}]")
-                || trimmed == format!("[model_providers.{LEGACY_PROVIDER_ID}]");
-            continue;
-        }
-        if in_zenith {
-            if let Some(value) = trimmed.strip_prefix("experimental_bearer_token = ") {
-                let key = unquote_toml_string(value.trim())?;
-                if !key.is_empty() {
-                    return Some(key);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn load_codex_auth_key() -> Option<String> {
-    let auth_path = default_codex_home().join(AUTH_FILE);
-    let content = fs::read_to_string(auth_path).ok()?;
-    let auth: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let key = auth
-        .get("OPENAI_API_KEY")
-        .and_then(serde_json::Value::as_str)?
-        .trim()
-        .to_string();
-    (!key.is_empty()).then_some(key)
-}
-
-fn codex_auth_content(api_key: &str) -> String {
-    format!(
-        "{{\n  \"OPENAI_API_KEY\": \"{}\",\n  \"auth_mode\": \"apikey\"\n}}\n",
-        escape_json_string(api_key)
-    )
-}
-
-fn save_previous_auth_if_needed(
-    config_before_enable: &str,
-    auth_before_enable: Option<&str>,
-) -> Result<bool, String> {
-    if load_previous_codex_auth().is_some() {
-        return Ok(false);
-    }
-    let Some(content) = auth_before_enable else {
-        return Ok(false);
-    };
-    if content.trim().is_empty() {
-        return Ok(false);
-    }
-    let Ok(auth) = serde_json::from_str::<serde_json::Value>(content) else {
-        return Ok(false);
-    };
-    if !previous_codex_auth_should_be_saved(
-        &auth,
-        load_saved_app_key().as_deref(),
-        config_before_enable,
-    ) {
-        return Ok(false);
-    }
-    save_previous_codex_auth(content)?;
-    Ok(true)
-}
-
-fn previous_codex_auth_should_be_saved(
-    auth: &serde_json::Value,
-    saved_key: Option<&str>,
-    config_before_enable: &str,
-) -> bool {
-    auth.is_object() && !zenith_auth_is_owned(auth, saved_key, config_before_enable)
-}
-
-fn restore_or_remove_zenith_auth(
-    config_before_reset: &str,
-    auth_before_reset: Option<&str>,
-    saved_key: Option<&str>,
-) -> Result<(), String> {
-    let auth_path = default_codex_home().join(AUTH_FILE);
-    if let Some(previous_auth) = load_previous_codex_auth() {
-        replace_if_unchanged(&auth_path, auth_before_reset, &previous_auth)?;
-        if let Err(error) = delete_previous_codex_auth() {
-            return Err(with_cleanup(
-                error,
-                rollback_file(&auth_path, Some(&previous_auth), auth_before_reset),
-            ));
-        }
-        return Ok(());
-    }
-    remove_zenith_auth_if_owned(
-        config_before_reset,
-        auth_before_reset,
-        saved_key,
-        &auth_path,
-    )
-}
-
-fn remove_zenith_auth_if_owned(
-    config_before_reset: &str,
-    auth_before_reset: Option<&str>,
-    saved_key: Option<&str>,
-    auth_path: &Path,
-) -> Result<(), String> {
-    let Some(content) = auth_before_reset else {
-        return Ok(());
-    };
-    let Ok(auth) = serde_json::from_str::<serde_json::Value>(content) else {
-        return Ok(());
-    };
-    if zenith_auth_is_owned(&auth, saved_key, config_before_reset) {
-        remove_if_unchanged(auth_path, Some(content))?;
-    }
-    Ok(())
-}
-
-fn zenith_auth_is_owned(
-    auth: &serde_json::Value,
-    saved_key: Option<&str>,
-    config_before_reset: &str,
-) -> bool {
-    let Some(current_key) = auth
-        .get("OPENAI_API_KEY")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-    else {
-        return false;
-    };
-    let auth_mode_matches = auth
-        .get("auth_mode")
-        .and_then(serde_json::Value::as_str)
-        .map(|mode| mode == "apikey")
-        .unwrap_or(false);
-    if !auth_mode_matches {
-        return false;
-    }
-    let key_matches = auth
-        .get("OPENAI_API_KEY")
-        .and_then(serde_json::Value::as_str)
-        .map(|key| saved_key.is_some_and(|saved_key| key.trim() == saved_key.trim()))
-        .unwrap_or(false);
-    key_matches
-        || (config_uses_zenith_provider(config_before_reset) && is_zenith_customer_key(current_key))
-}
-
-fn config_uses_zenith_provider(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.eq_ignore_ascii_case(&format!("model_provider = \"{PROVIDER_ID}\""))
-            || trimmed.eq_ignore_ascii_case(&format!("model_provider = \"{LEGACY_PROVIDER_ID}\""))
-            || trimmed == format!("[model_providers.{PROVIDER_ID}]")
-            || trimmed == format!("[model_providers.{LEGACY_PROVIDER_ID}]")
-    })
-}
-
-fn config_selects_zenith_provider(content: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.eq_ignore_ascii_case(&format!("model_provider = \"{PROVIDER_ID}\""))
-            || trimmed.eq_ignore_ascii_case(&format!("model_provider = \"{LEGACY_PROVIDER_ID}\""))
-    })
-}
-
-fn is_zenith_customer_key(key: &str) -> bool {
-    key.starts_with("znt_")
-}
-
-fn upsert_zenith_provider(original: &str) -> String {
-    let without_old = remove_zenith_provider(original);
-    let without_model_provider = remove_key_line(&without_old, "model_provider");
-    let mut result = format!("model_provider = \"{PROVIDER_ID}\"");
-    let preserved = without_model_provider.trim();
-    if !preserved.is_empty() {
-        result.push_str("\n\n");
-        result.push_str(preserved);
-    }
-    result.push_str("\n\n");
-    result.push_str(&format!("[model_providers.{PROVIDER_ID}]\n"));
-    result.push_str(&format!("name = \"{PROVIDER_NAME}\"\n"));
-    result.push_str(&format!(
-        "base_url = \"{}\"\n",
-        escape_toml_string(BASE_URL)
-    ));
-    result.push_str("wire_api = \"responses\"\n");
-    result.push_str("requires_openai_auth = true\n");
-    result.push_str("supports_websockets = true\n");
-    result
-}
-
-fn remove_zenith_provider(original: &str) -> String {
-    let without_section = remove_table(original, &format!("[model_providers.{PROVIDER_ID}]"));
-    let without_section = remove_table(
-        &without_section,
-        &format!("[model_providers.{LEGACY_PROVIDER_ID}]"),
-    );
-    let without_model_provider = remove_key_line(&without_section, "model_provider");
-    remove_zenith_openai_base_url_override(&without_model_provider)
-}
-
-fn remove_key_line(content: &str, key: &str) -> String {
-    let prefix = format!("{key} =");
-    content
-        .lines()
-        .filter(|line| !line.trim().starts_with(&prefix))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn with_model_provider(content: String, model_provider: &str) -> String {
-    let without_model_provider = remove_key_line(&content, "model_provider");
-    let preserved = without_model_provider.trim().to_string();
-    let mut next = format!(
-        "model_provider = \"{}\"",
-        escape_toml_string(model_provider)
-    );
-    if !preserved.is_empty() {
-        next.push_str("\n\n");
-        next.push_str(&preserved);
-    }
-    next
-}
-
-fn remove_zenith_openai_base_url_override(content: &str) -> String {
-    content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            let Some(value) = trimmed.strip_prefix("openai_base_url = ") else {
-                return true;
-            };
-            unquote_toml_string(value.trim())
-                .is_none_or(|url| url.trim_end_matches('/') != BASE_URL)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn latest_backup_model_provider(backup_dir: &Path) -> Option<String> {
-    backup_paths_newest_first(backup_dir)
-        .into_iter()
-        .find_map(|path| {
-            let content = fs::read_to_string(path).ok()?;
-            read_model_provider(&content)
-        })
-}
-
-fn backup_paths_newest_first(backup_dir: &Path) -> Vec<PathBuf> {
-    backup_paths_from_directories([backup_dir.to_path_buf()])
-}
-
-fn backup_paths_from_directories(directories: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut backups = directories
-        .into_iter()
-        .flat_map(|directory| {
-            fs::read_dir(directory)
-                .ok()
-                .into_iter()
-                .flat_map(|entries| entries.filter_map(Result::ok))
-        })
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            if !file_type.is_file() || file_type.is_symlink() {
-                return None;
-            }
-            let path = entry.path();
-            let name = path.file_name()?.to_string_lossy();
-            is_zenith_backup_name(&name).then_some((backup_timestamp_from_name(&name), path))
-        })
-        .collect::<Vec<_>>();
-    backups.sort_by(
-        |(left_timestamp, left_path), (right_timestamp, right_path)| {
-            right_timestamp
-                .cmp(left_timestamp)
-                .then_with(|| right_path.cmp(left_path))
-        },
-    );
-    backups.into_iter().map(|(_, path)| path).collect()
-}
-
-fn read_model_provider(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("model_provider = ")?;
-        let provider = unquote_toml_string(value.trim())?;
-        (!provider.eq_ignore_ascii_case(PROVIDER_ID)
-            && !provider.eq_ignore_ascii_case(LEGACY_PROVIDER_ID)
-            && !provider.is_empty())
-        .then_some(provider)
-    })
-}
-
-fn remove_table(content: &str, header: &str) -> String {
-    let mut skipping = false;
-    let mut out = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == header {
-            skipping = true;
-            continue;
-        }
-        if skipping && trimmed.starts_with('[') && trimmed.ends_with(']') {
-            skipping = false;
-        }
-        if !skipping {
-            out.push(line);
-        }
-    }
-
-    out.join("\n")
-}
-
-fn backup_config(backup_dir: &Path, content: &str) -> Result<(), String> {
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-    fs::create_dir_all(backup_dir)
-        .map_err(|err| format!("Не удалось создать {}: {err}", backup_dir.display()))?;
-    let redacted = redact_config_secrets(content);
-    let existing = backup_paths_from_directories([backup_dir.to_path_buf()]);
-    if existing
-        .first()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .as_deref()
-        == Some(redacted.as_str())
-    {
-        return prune_config_backups(backup_dir);
-    }
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| format!("Ошибка времени: {err}"))?
-        .as_secs();
-    let backup_path = next_backup_path(backup_dir, timestamp);
-    fs::write(&backup_path, redacted)
-        .map_err(|err| format!("Не удалось создать backup {}: {err}", backup_path.display()))?;
-    prune_config_backups(backup_dir)
-}
-
-fn prune_config_backups(backup_dir: &Path) -> Result<(), String> {
-    for path in backup_paths_from_directories([backup_dir.to_path_buf()])
-        .into_iter()
-        .skip(MAX_CONFIG_BACKUPS)
-    {
-        fs::remove_file(&path)
-            .map_err(|err| format!("Не удалось удалить старый backup {}: {err}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn is_zenith_backup_name(name: &str) -> bool {
-    name.starts_with(&format!("{CONFIG_FILE}."))
-        && name.ends_with(BACKUP_SUFFIX)
-        && name.len() > CONFIG_FILE.len() + BACKUP_SUFFIX.len() + 1
-}
-
-fn backup_timestamp_from_name(name: &str) -> u64 {
-    name.trim_start_matches(&format!("{CONFIG_FILE}."))
-        .trim_end_matches(BACKUP_SUFFIX)
-        .split('-')
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_default()
-}
-
-fn next_backup_path(backup_dir: &Path, timestamp: u64) -> PathBuf {
-    let first = backup_dir.join(format!("{CONFIG_FILE}.{timestamp}{BACKUP_SUFFIX}"));
-    if !first.exists() {
-        return first;
-    }
-    (1..)
-        .map(|index| backup_dir.join(format!("{CONFIG_FILE}.{timestamp}-{index}{BACKUP_SUFFIX}")))
-        .find(|path| !path.exists())
-        .unwrap_or(first)
-}
-
-fn redact_config_secrets(content: &str) -> String {
-    content
-        .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("experimental_bearer_token =") {
-                "experimental_bearer_token = \"<redacted>\"".to_string()
-            } else {
-                redact_inline_tokens(line)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn redact_inline_tokens(line: &str) -> String {
-    let mut redacted = line.to_string();
-    for marker in ["znt_", "zrk_", "sk-"] {
-        while let Some(start) = redacted.find(marker) {
-            let end = redacted[start..]
-                .find(|ch: char| {
-                    ch.is_whitespace()
-                        || matches!(ch, '"' | '\'' | ',' | ';' | ')' | ']' | '}' | '<' | '>')
-                })
-                .map(|offset| start + offset)
-                .unwrap_or_else(|| redacted.len());
-            redacted.replace_range(start..end, "<redacted>");
-        }
-    }
-    redacted
 }
 
 #[cfg(test)]

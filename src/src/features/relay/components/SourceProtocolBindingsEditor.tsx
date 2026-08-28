@@ -1,36 +1,48 @@
-import { Braces, MessageSquareText, Plus, Route, Sparkles } from "lucide-react";
+import { Route, Sparkles } from "lucide-react";
 import { type CSSProperties, useId } from "react";
 import { useTranslation } from "react-i18next";
-import type {
-  SourceAdapter,
-  CacheWriteTtl,
-  SourceProtocolBinding,
-  SourceWireApi,
-} from "../api/types";
+import type { CacheWriteTtl, SourceAdapter, SourceProtocolBinding, SourceWireApi } from "../api/types";
 import {
   normalizedAdapter,
   normalizedBindings,
-  normalizedModelIds,
   sourceWireApis,
 } from "../sourceProtocolBindings";
 import { OptionMenu } from "./Ui";
-
-const protocolPresentation = {
-  responses: { icon: Sparkles, endpoint: "/responses" },
-  messages: { icon: MessageSquareText, endpoint: "/messages" },
-  chat_completions: { icon: Braces, endpoint: "/chat/completions" },
-} as const;
+import {
+  updateBridgeModel,
+  updateCacheWriteTtl,
+  updateModelRoute,
+  updateNativeProtocol,
+} from "./sourceProtocolBindingsEditorModel";
+import {
+  protocolPresentation,
+  simpleRouteCards,
+  type SimpleRouteCard,
+} from "./sourceProtocolPresentation";
 
 export function SourceProtocolBindingsEditor({
   models,
   value,
   onChange,
   wireApis = sourceWireApis,
+  showSimplePicker = false,
+  autoAssignModels = true,
+  exclusiveSimplePicker = false,
+  routeGroup = "all",
 }: {
   models: string[];
   value: SourceProtocolBinding[];
   onChange: (value: SourceProtocolBinding[]) => void;
   wireApis?: readonly SourceWireApi[];
+  showSimplePicker?: boolean;
+  autoAssignModels?: boolean;
+  /** Keep the setup flow to one adapter for the whole model catalog. */
+  exclusiveSimplePicker?: boolean;
+  /**
+   * Render native provider formats and Relay adapters together, or restrict the
+   * matrix to one of them when the dialog splits them into separate tabs.
+   */
+  routeGroup?: "all" | "native" | "adapters";
 }) {
   const { t } = useTranslation();
   const titleId = useId();
@@ -40,59 +52,115 @@ export function SourceProtocolBindingsEditor({
     bindings.find(
       (binding) => binding.wireApi === wireApi && normalizedAdapter(binding) === adapter,
     );
-  const hasNativeProtocol = (wireApi: SourceWireApi) =>
-    Boolean(routeBinding(wireApi, "native"));
   const nativeResponsesBinding = routeBinding("responses", "native");
   const messagesBridgeBinding = routeBinding("responses", "responses_to_messages");
   const geminiBridgeBinding = routeBinding("responses", "responses_to_gemini");
-  const messagesBinding = routeBinding("messages", "native");
   const cacheBindings = bindings.filter((binding) => (
     binding.wireApi === "messages" || normalizedAdapter(binding) === "responses_to_messages"
   ));
+  const cacheWriteTtl: CacheWriteTtl = cacheBindings.some((binding) => binding.cacheWriteTtl === "1h")
+    ? "1h"
+    : cacheBindings.some((binding) => binding.cacheWriteTtl === "5m")
+      ? "5m"
+      : "provider";
   const hasMultipleRoutes = bindings.length > 1;
   const selectedModels = (binding: SourceProtocolBinding) =>
-    binding.modelIds.length || hasMultipleRoutes || normalizedAdapter(binding) !== "native"
+    binding.modelIds.length || hasMultipleRoutes || normalizedAdapter(binding) !== "native" || !autoAssignModels
       ? binding.modelIds
       : models;
+  const nativeProtocolModels = (wireApi: SourceWireApi) => {
+    const binding = routeBinding(wireApi, "native");
+    return binding ? selectedModels(binding) : [];
+  };
+  const nativeProtocolState = (wireApi: SourceWireApi) => {
+    const assignedCount = nativeProtocolModels(wireApi).length;
+    return {
+      assignedCount,
+      selected: assignedCount > 0,
+      partial: assignedCount > 0 && assignedCount < models.length,
+    };
+  };
   const modelIsSelected = (binding: SourceProtocolBinding | undefined, model: string) =>
     Boolean(binding && selectedModels(binding).some(
       (candidate) => candidate.toLowerCase() === model.toLowerCase(),
     ));
-  const messagesBridgeModels = messagesBridgeBinding ? selectedModels(messagesBridgeBinding) : [];
+  // Bridge routes are explicit. A native Messages route does not silently
+  // become a Responses route and is never rendered as "Auto".
+  const messagesBridgeModels = messagesBridgeBinding
+    ? selectedModels(messagesBridgeBinding)
+    : [];
   const geminiBridgeModels = geminiBridgeBinding ? selectedModels(geminiBridgeBinding) : [];
-  const activeWireApis = wireApis.filter(hasNativeProtocol);
-  const inactiveWireApis = wireApis.filter((wireApi) => !hasNativeProtocol(wireApi));
-  const showsMessagesBridgeColumn = Boolean(messagesBinding || messagesBridgeBinding);
-  const showsGeminiBridgeColumn = Boolean(geminiBridgeBinding);
+  const nativeWireApis = routeGroup === "adapters" ? [] : wireApis;
+  const showsMessagesBridgeColumn = routeGroup !== "native";
+  const showsGeminiBridgeColumn = routeGroup !== "native";
+  const showsGroupHeadings = routeGroup === "all";
+  // The cache control belongs to whichever route group is currently visible:
+  // native Messages on the formats tab, the Messages bridge on the adapters tab.
+  const visibleCacheBindings = cacheBindings.filter((binding) => (
+    normalizedAdapter(binding) === "native"
+      ? nativeWireApis.includes(binding.wireApi)
+      : showsMessagesBridgeColumn
+  ));
   const matrixStyle = {
     "--source-route-column-count": String(
-      activeWireApis.length + Number(showsMessagesBridgeColumn) + Number(showsGeminiBridgeColumn),
+      nativeWireApis.length + Number(showsMessagesBridgeColumn) + Number(showsGeminiBridgeColumn),
     ),
   } as CSSProperties;
 
+  const renderSimplePicker = (cards: readonly SimpleRouteCard[], exclusive = false) => {
+    const selectedCard = cards.find((card) => {
+      const binding = bindings.find((candidate) => candidate.wireApi === card.wireApi);
+      return binding && normalizedAdapter(binding) === card.adapter;
+    });
+    return (
+    <section className={`source-protocol-simple${exclusive ? " exclusive" : ""}`} aria-labelledby={titleId}>
+      <header>
+        <strong id={titleId}>{t("sources.simpleRouteTitle")}</strong>
+      </header>
+      <div className="source-route-simple-options" role="radiogroup" aria-label={t("sources.simpleRouteTitle")}>
+        {cards.map((card) => {
+          const Icon = card.icon;
+          const selected = selectedCard?.id === card.id;
+          return (
+            <button
+              key={card.id}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              className={selected ? "selected" : ""}
+              onClick={() => onChange([{
+                wireApi: card.wireApi,
+                adapter: card.adapter,
+                reasoningMode: "disabled",
+                cacheWriteTtl: card.wireApi === "messages" ? "1h" : "provider",
+                modelIds: autoAssignModels ? [...models] : [],
+              }])}
+            >
+              <Icon aria-hidden />
+              <span>
+                <strong>{t(card.titleKey)}</strong>
+                <small>{t(card.subtitleKey)}</small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+    );
+  };
+  const simplePicker = renderSimplePicker(simpleRouteCards);
+  const exclusivePicker = renderSimplePicker(simpleRouteCards, true);
+
+  if (!models.length) {
+    return <section className="source-protocol-bindings">{exclusiveSimplePicker && showSimplePicker ? exclusivePicker : simplePicker}</section>;
+  }
+
+  if (exclusiveSimplePicker && showSimplePicker) {
+    return <section className="source-protocol-bindings">{exclusivePicker}</section>;
+  }
+
   const setNativeProtocol = (wireApi: SourceWireApi, selected: boolean) => {
-    if (!selected) {
-      onChange(bindings.filter((binding) => (
-        wireApi === "messages"
-          ? binding.wireApi !== "messages"
-            && !(binding.wireApi === "responses" && normalizedAdapter(binding) === "responses_to_messages")
-          : !(binding.wireApi === wireApi && normalizedAdapter(binding) === "native")
-      )));
-      return;
-    }
-    if (routeBinding(wireApi, "native")) return;
-    onChange([
-      ...bindings,
-      {
-        wireApi,
-        // A second route is intentionally unassigned until its documented
-        // capability is verified. Filling it with every discovered model
-        // would advertise a protocol the source may not support.
-        modelIds: bindings.length ? [] : [...models],
-        adapter: "native",
-        reasoningMode: "disabled",
-      },
-    ]);
+    onChange(updateNativeProtocol({ bindings, models, autoAssignModels, wireApi, selected }));
   };
 
   const setModel = (
@@ -101,200 +169,85 @@ export function SourceProtocolBindingsEditor({
     model: string,
     selected: boolean,
   ) => {
-    const nextBindings = bindings.map((binding) => {
-      if (binding.wireApi !== wireApi || normalizedAdapter(binding) !== adapter) return binding;
-      const selectedIds = selectedModels(binding);
-      const modelKey = model.toLowerCase();
-      const nextModelIds = selected
-        ? [...selectedIds, model]
-        : selectedIds.filter((candidate) => candidate.toLowerCase() !== modelKey);
-      // A single legacy binding may use an empty list as its source-wide
-      // fallback. With two routes, however, an empty list means an
-      // intentionally unassigned route so a model can be moved safely.
-      return {
-        ...binding,
-        modelIds: nextModelIds.length || hasMultipleRoutes
-          ? normalizedModelIds(nextModelIds, models)
-          : selectedIds,
-      };
-    });
-    onChange(nextBindings);
+    onChange(updateModelRoute({ bindings, models, autoAssignModels, wireApi, adapter, model, selected }));
   };
 
   const setMessagesBridgeModel = (model: string, selected: boolean) => {
-    if (!selected) {
-      if (!messagesBridgeBinding) return;
-      const nextModelIds = normalizedModelIds(
-        messagesBridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
-        models,
-      );
-      onChange(nextModelIds.length
-        ? bindings.map((binding) => (
-          binding === messagesBridgeBinding
-            ? { ...binding, modelIds: nextModelIds }
-            : binding
-        ))
-        : bindings.filter((binding) => binding !== messagesBridgeBinding));
-      return;
-    }
-
-    // A bridged route is still a native Messages capability upstream. Keeping
-    // the relationship in one operation prevents the UI from advertising a
-    // Responses route whose upstream Messages model was not declared.
-    if (!messagesBinding
-      || modelIsSelected(nativeResponsesBinding, model)
-      || modelIsSelected(geminiBridgeBinding, model)) return;
-    const nextMessageModels = normalizedModelIds(
-      [...selectedModels(messagesBinding), model],
+    onChange(updateBridgeModel({
+      bindings,
       models,
-    );
-    const nextBindings = bindings.map((binding) => (
-      binding === messagesBinding
-        ? { ...binding, modelIds: nextMessageModels }
-        : binding
-    ));
-    if (messagesBridgeBinding) {
-      onChange(nextBindings.map((binding) => (
-        binding === messagesBridgeBinding
-          ? {
-            ...binding,
-            modelIds: normalizedModelIds([...messagesBridgeModels, model], models),
-          }
-          : binding
-      )));
-      return;
-    }
-    onChange([
-      ...nextBindings,
-      {
-        wireApi: "responses",
-        adapter: "responses_to_messages",
-        reasoningMode: "disabled",
-        modelIds: [model],
-      },
-    ]);
+      autoAssignModels,
+      adapter: "responses_to_messages",
+      model,
+      selected,
+      cacheWriteTtl,
+    }));
   };
   const setGeminiBridgeModel = (model: string, selected: boolean) => {
-    if (!selected) {
-      if (!geminiBridgeBinding) return;
-      const nextModelIds = normalizedModelIds(
-        geminiBridgeModels.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
-        models,
-      );
-      onChange(nextModelIds.length
-        ? bindings.map((binding) => (
-          binding === geminiBridgeBinding
-            ? { ...binding, modelIds: nextModelIds }
-            : binding
-        ))
-        : bindings.filter((binding) => binding !== geminiBridgeBinding));
-      return;
-    }
-
-    if (modelIsSelected(nativeResponsesBinding, model)
-      || modelIsSelected(messagesBridgeBinding, model)) return;
-    if (geminiBridgeBinding) {
-      onChange(bindings.map((binding) => (
-        binding === geminiBridgeBinding
-          ? { ...binding, modelIds: normalizedModelIds([...geminiBridgeModels, model], models) }
-          : binding
-      )));
-      return;
-    }
-    onChange([
-      ...bindings,
-      {
-        wireApi: "responses",
-        adapter: "responses_to_gemini",
-        reasoningMode: "disabled",
-        modelIds: [model],
-      },
-    ]);
+    onChange(updateBridgeModel({
+      bindings,
+      models,
+      autoAssignModels,
+      adapter: "responses_to_gemini",
+      model,
+      selected,
+      cacheWriteTtl,
+    }));
   };
-  const addGeminiBridge = () => {
-    if (geminiBridgeBinding) return;
-    onChange([
-      ...bindings,
-      {
-        wireApi: "responses",
-        adapter: "responses_to_gemini",
-        reasoningMode: "disabled",
-        modelIds: [],
-      },
-    ]);
+  const setCacheWriteTtl = (cacheWriteTtl: CacheWriteTtl) => {
+    onChange(updateCacheWriteTtl(bindings, cacheWriteTtl));
   };
-  const cacheBindingLabel = (binding: SourceProtocolBinding) => (
-    binding.wireApi === "messages"
-      ? t("sources.cacheWriteTtlNative")
-      : t("sources.cacheWriteTtlBridge")
-  );
-  const setCacheWriteTtl = (target: SourceProtocolBinding, cacheWriteTtl: CacheWriteTtl) => {
-    onChange(bindings.map((binding) => (
-      binding === target ? { ...binding, cacheWriteTtl } : binding
-    )));
-  };
-
   return (
     <section className="source-protocol-bindings" aria-labelledby={titleId}>
-      <header>
-        <strong id={titleId}>{t("sources.protocolsTitle")}</strong>
-        <p>{t("sources.protocolsHint")}</p>
-      </header>
-      {inactiveWireApis.length || (!geminiBridgeBinding && wireApis.includes("responses")) ? <div className="source-route-add-formats" role="group" aria-label={t("sources.addFormats")}>
-        {inactiveWireApis.map((wireApi) => {
-          const { icon: Icon } = protocolPresentation[wireApi];
-          const label = t(`sources.protocolCards.${wireApi}.title`);
-          return <button key={wireApi} type="button" onClick={() => setNativeProtocol(wireApi, true)}>
-            <Plus aria-hidden />
-            <Icon aria-hidden />
-            {label}
-          </button>;
-        })}
-        {!geminiBridgeBinding && wireApis.includes("responses")
-          ? <button type="button" onClick={addGeminiBridge}>
-            <Plus aria-hidden />
-            <Sparkles aria-hidden />
-            {t("sources.addGeminiBridge")}
-          </button>
-          : null}
-      </div> : null}
-      {cacheBindings.length ? <section className="source-cache-settings" aria-label={t("sources.cacheWriteTtl")}>
+      {showSimplePicker ? simplePicker : null}
+      {visibleCacheBindings.length ? <div className="source-cache-settings">
         <strong>{t("sources.cacheWriteTtl")}</strong>
-        <div className="source-cache-ttl-grid">
-          {cacheBindings.map((binding) => {
-            const label = `${t("sources.cacheWriteTtl")}: ${cacheBindingLabel(binding)}`;
-            return <div key={`${binding.wireApi}:${normalizedAdapter(binding)}`} className="source-cache-ttl">
-              <span>{cacheBindingLabel(binding)}</span>
-              <OptionMenu className="field-option-menu" label={label} value={binding.cacheWriteTtl ?? "provider"} onChange={(value) => setCacheWriteTtl(binding, value as CacheWriteTtl)} options={[
-                { value: "provider", label: t("sources.cacheWriteTtls.provider") },
-                { value: "5m", label: t("sources.cacheWriteTtls.5m") },
-                { value: "1h", label: t("sources.cacheWriteTtls.1h") },
-              ]} />
-            </div>;
-          })}
-        </div>
-      </section> : null}
-      {activeWireApis.length || showsMessagesBridgeColumn || showsGeminiBridgeColumn ? <div className="source-route-matrix" style={matrixStyle}>
+        <OptionMenu
+          className="field-option-menu"
+          label={t("sources.cacheWriteTtl")}
+          value={cacheWriteTtl}
+          onChange={(value) => setCacheWriteTtl(value as CacheWriteTtl)}
+          options={[
+            { value: "provider", label: t("sources.cacheWriteTtls.provider") },
+            { value: "5m", label: t("sources.cacheWriteTtls.5m") },
+            { value: "1h", label: t("sources.cacheWriteTtls.1h") },
+          ]}
+        />
+      </div> : null}
+      <div className={`source-route-matrix${showsGroupHeadings ? " grouped" : ""}`} style={matrixStyle}>
         <div className="source-route-matrix-heading">
           <span>{t("sources.modelColumn")}</span>
           <div className="source-route-format-headings">
-            {activeWireApis.map((wireApi) => {
+            {showsGroupHeadings ? <span
+              className="source-route-group-heading native"
+              style={{ "--source-route-group-span": nativeWireApis.length } as CSSProperties}
+            >
+              {t("sources.nativeRoutesTitle")}
+            </span> : null}
+            {showsGroupHeadings ? <span className="source-route-group-heading adapters">
+              {t("sources.adapterRoutesTitle")}
+            </span> : null}
+            {nativeWireApis.map((wireApi) => {
               const { icon: Icon, endpoint } = protocolPresentation[wireApi];
+              const { selected, partial } = nativeProtocolState(wireApi);
               return (
                 <label
                   key={wireApi}
-                  className="source-route-format-heading selected"
+                  className={`source-route-format-heading ${selected ? "selected" : ""}`}
                   data-wire-api={wireApi}
                   title={`POST ${endpoint}`}
                 >
                   <span className="source-route-format-icon" aria-hidden="true"><Icon /></span>
                   <span>
                     <strong>{t(`sources.protocolCards.${wireApi}.title`)}</strong>
-                    <small>{t(`sources.protocolCards.${wireApi}.hint`)}</small>
                   </span>
                   <input
                     type="checkbox"
-                    checked
+                    checked={selected}
+                    ref={(element) => {
+                      if (element) element.indeterminate = partial;
+                    }}
+                    aria-checked={partial ? "mixed" : selected}
                     aria-label={t("sources.protocolAvailableControl", {
                       protocol: t(`sources.protocolCards.${wireApi}.title`),
                     })}
@@ -303,21 +256,19 @@ export function SourceProtocolBindingsEditor({
                 </label>
               );
             })}
-            {showsMessagesBridgeColumn
-              ? <div className="source-route-bridge-heading">
-                <span className="source-route-format-icon" aria-hidden="true"><Route /></span>
-                <span>
-                  <strong>{t("sources.bridgeColumnTitle")}</strong>
-                  <small>{t("sources.bridgeColumnHint")}</small>
-                </span>
-              </div>
-              : null}
+             {showsMessagesBridgeColumn
+               ? <div className={`source-route-bridge-heading ${messagesBridgeBinding ? "configured" : ""}`}>
+                 <span className="source-route-format-icon" aria-hidden="true"><Route /></span>
+                 <span>
+                   <strong>{t("sources.routeBridgeMessagesTitle")}</strong>
+                  </span>
+               </div>
+               : null}
             {showsGeminiBridgeColumn
               ? <div className="source-route-bridge-heading">
                 <span className="source-route-format-icon" aria-hidden="true"><Sparkles /></span>
                 <span>
-                  <strong>{t("sources.geminiBridgeColumnTitle")}</strong>
-                  <small>{t("sources.geminiBridgeColumnHint")}</small>
+                  <strong>{t("sources.routeBridgeGeminiTitle")}</strong>
                 </span>
               </div>
               : null}
@@ -329,28 +280,15 @@ export function SourceProtocolBindingsEditor({
               const explicitMessagesBridgeChecked = modelIsSelected(messagesBridgeBinding, model);
               const geminiBridgeChecked = modelIsSelected(geminiBridgeBinding, model);
               const directResponsesChecked = modelIsSelected(nativeResponsesBinding, model);
-              const nativeMessagesChecked = modelIsSelected(messagesBinding, model);
-              const messagesBridgeLinkedAutomatically = !explicitMessagesBridgeChecked
-                && nativeMessagesChecked
-                && !directResponsesChecked
-                && !geminiBridgeChecked;
-              const messagesBridgeChecked = explicitMessagesBridgeChecked
-                || messagesBridgeLinkedAutomatically;
+              const messagesBridgeChecked = explicitMessagesBridgeChecked;
               const messagesBridgeIsLastAvailableRoute = explicitMessagesBridgeChecked
                 && messagesBridgeModels.length === 1
                 && bindings.length === 1;
-              const messagesBridgeDisabled = messagesBridgeLinkedAutomatically
-                || messagesBridgeIsLastAvailableRoute
-                || (!messagesBridgeChecked && (!messagesBinding || directResponsesChecked || geminiBridgeChecked));
-              const messagesBridgeTitle = messagesBridgeLinkedAutomatically
-                ? t("sources.bridgeLinkedAutomatically")
-                : messagesBridgeIsLastAvailableRoute
+              const messagesBridgeDisabled = messagesBridgeIsLastAvailableRoute
+                || (!messagesBridgeChecked && (directResponsesChecked || geminiBridgeChecked));
+              const messagesBridgeTitle = messagesBridgeIsLastAvailableRoute
                   ? t("sources.modelRouteRequired")
-                  : !messagesBridgeChecked && !messagesBinding
-                    ? t("sources.bridgeRequiresMessages")
-                    : !messagesBridgeChecked && (directResponsesChecked || geminiBridgeChecked)
-                      ? t("sources.bridgeRouteConflict")
-                      : undefined;
+                  : undefined;
               const geminiBridgeIsLastAvailableRoute = geminiBridgeChecked
                 && geminiBridgeModels.length === 1
                 && bindings.length === 1;
@@ -365,33 +303,27 @@ export function SourceProtocolBindingsEditor({
                 <div key={model} className="source-route-model-row">
                   <code className="source-route-model-name">{model}</code>
                   <div className="source-route-model-controls">
-                    {activeWireApis.map((wireApi) => {
+                    {nativeWireApis.map((wireApi) => {
                       const binding = routeBinding(wireApi, "native");
                       const checked = modelIsSelected(binding, model);
                       const assignedToOtherRoute = Boolean(binding) && bindings.some(
-                        (candidate) =>
-                          candidate.wireApi === wireApi
+                        (candidate) => candidate.wireApi === wireApi
                           && normalizedAdapter(candidate) !== "native"
                           && modelIsSelected(candidate, model),
                       );
-                      const requiredByBridge = wireApi === "messages"
-                        && explicitMessagesBridgeChecked;
                       const lastSelectedModel = binding != null
                         && checked
                         && selectedModels(binding).length === 1
                         && bindings.length === 1;
                       const disabled = !binding
                         || lastSelectedModel
-                        || (checked && requiredByBridge)
                         || (!checked && assignedToOtherRoute);
                       const title = !binding
                         ? t("sources.modelRouteUnavailable")
-                        : lastSelectedModel
-                          ? t("sources.modelRouteRequired")
-                          : checked && requiredByBridge
-                            ? t("sources.bridgeRequiresMessages")
+                          : lastSelectedModel
+                            ? t("sources.modelRouteRequired")
                             : !checked && assignedToOtherRoute
-                              ? t("sources.bridgeRouteConflict")
+                                ? t("sources.bridgeRouteConflict")
                               : undefined;
                       return (
                         <label
@@ -422,20 +354,20 @@ export function SourceProtocolBindingsEditor({
                     })}
                     {showsMessagesBridgeColumn
                       ? <label
-                        className={`source-route-cell source-route-bridge-cell ${messagesBridgeChecked ? "selected" : ""}`}
-                        title={messagesBridgeTitle}
-                      >
-                        <span className="source-route-cell-label" aria-hidden="true">
-                          {t("sources.bridgeColumnTitle")}
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={messagesBridgeChecked}
-                          disabled={messagesBridgeDisabled}
-                          aria-label={t("sources.modelBridgeControl", { model })}
-                          onChange={(event) => setMessagesBridgeModel(model, event.target.checked)}
-                        />
-                      </label>
+                          className={`source-route-cell source-route-bridge-cell ${messagesBridgeChecked ? "selected" : ""}`}
+                          title={messagesBridgeTitle}
+                        >
+                          <span className="source-route-cell-label" aria-hidden="true">
+                            {t("sources.routeBridgeMessagesTitle")}
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={messagesBridgeChecked}
+                            disabled={messagesBridgeDisabled}
+                            aria-label={t("sources.modelBridgeControl", { model })}
+                            onChange={(event) => setMessagesBridgeModel(model, event.target.checked)}
+                          />
+                        </label>
                       : null}
                     {showsGeminiBridgeColumn
                       ? <label
@@ -443,7 +375,7 @@ export function SourceProtocolBindingsEditor({
                         title={geminiBridgeTitle}
                       >
                         <span className="source-route-cell-label" aria-hidden="true">
-                          {t("sources.geminiBridgeColumnTitle")}
+                          {t("sources.routeBridgeGeminiTitle")}
                         </span>
                         <input
                           type="checkbox"
@@ -460,13 +392,7 @@ export function SourceProtocolBindingsEditor({
             })}
           </div>
           : null}
-      </div> : null}
-      {showsMessagesBridgeColumn
-        ? <p className="source-route-bridge-note">{t("sources.bridgeHint")}</p>
-        : null}
-      {showsGeminiBridgeColumn
-        ? <p className="source-route-bridge-note">{t("sources.geminiBridgeHint")}</p>
-        : null}
+      </div>
     </section>
   );
 }

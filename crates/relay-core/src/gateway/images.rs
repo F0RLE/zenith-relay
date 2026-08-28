@@ -3,9 +3,9 @@ use super::errors::{
     api_error, api_error_type, apply_attempt_failure_cooldown, apply_cooldown_for_model,
     apply_failure_cooldown_with_body, apply_failure_cooldown_with_hint, apply_failure_state,
     apply_mandatory_cooldown, canonical_upstream_status, classify_upstream_error_value,
-    cooldown_error, failure_requires_independent_source_endpoint, rate_limit_body_hint_value,
-    retryable_failure, upstream_failure_status, upstream_status_from_value, AttemptFailure,
-    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    cooldown_error, rate_limit_body_hint_value, retryable_failure, upstream_failure_status,
+    upstream_status_from_value, AttemptFailure, CooldownContext, RateLimitBodyHint,
+    TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{client_context_fingerprint, request_id};
@@ -529,9 +529,6 @@ async fn execute_prepared(
                     &cooldown_context,
                     route.half_open_probe,
                 );
-                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
-                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                }
                 let mut event = image_usage_event(
                     &request_id,
                     attempt,
@@ -565,9 +562,6 @@ async fn execute_prepared(
                 &cooldown_context,
                 route.half_open_probe,
             );
-            if failure_requires_independent_source_endpoint(failure.status, failure.category) {
-                runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-            }
             let mut event = image_usage_event(
                 &request_id,
                 attempt,
@@ -610,14 +604,6 @@ async fn execute_prepared(
                         route.half_open_probe,
                     )
                 };
-                if !capability_failure
-                    && failure_requires_independent_source_endpoint(
-                        failure.status,
-                        failure.category,
-                    )
-                {
-                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                }
                 let mut event = image_usage_event(
                     &request_id,
                     attempt,

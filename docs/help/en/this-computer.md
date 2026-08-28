@@ -1,162 +1,95 @@
 # This computer
 
-> Your personal pool runs on this computer. Zenith Relay must remain open while
-> ChatGPT or another client sends requests through the local API.
+> The personal pool and private /v1 endpoint run on this computer. Keep
+> Zenith Relay open while ChatGPT, Codex, or another client sends requests.
 
-**Use it for:** personal work, account checks, and pool setup without a server.
-
-**Do not use it for:** an API that must survive closing Zenith Relay or shutting
-down the computer. Use **My server** instead.
+Use this mode for personal work and pool setup without a server. Use **My
+server** when the endpoint must continue after Relay or the computer closes.
 
 ## Quick navigation
 
-- [How this mode works](#how-this-mode-works)
 - [Before you start](#before-you-start)
 - [First setup](#first-setup)
-- [Verify the setup](#verify-the-setup)
 - [Daily operation](#daily-operation)
-- [If requests fail](#if-requests-fail)
+- [Verify the setup](#verify-the-setup)
+- [If a request fails](#if-a-request-fails)
 - [Recovery and data](#recovery-and-data)
-
-## How this mode works
-
-1. **Connections** stores ChatGPT accounts, API sources, and proxies.
-2. **Pool** selects the participants allowed to receive requests.
-3. **API & ChatGPT** starts a local OpenAI-compatible endpoint and connects
-   ChatGPT to it.
-4. **Usage** shows requests, models, the selected participant, speed, tokens,
-   and estimated API equivalent.
-
-An account outside the pool is still monitored but cannot receive traffic. An
-account in the pool is routed only while its session, requested model, and
-quota are available. A **Free** plan is not excluded automatically.
-
-Relay lets routed models receive image attachments without guessing support
-from their names. The selected model makes the final decision; native ChatGPT
-model capabilities remain unchanged.
-
-## Application tabs
-
-- **Overview** shows runtime state and the **E2E speed** chart. It divides
-  all reported output tokens by the Relay-to-provider request time, so first-output
-  wait and network time are included.
-- **Connections** stores accounts, API sources, and proxies.
-- **Pool** controls who may receive requests, plus model rules, order, and
-  routing weight.
-- **API & ChatGPT** starts the local OpenAI-compatible endpoint and reversibly
-  attaches it to the ChatGPT/Codex profile. The desktop app must stay open in
-  this mode.
-- **Usage** never stores prompt or response text and has four views: **Requests**,
-  **Models**, **Pool members**, and **Errors**. Its **Generation speed** uses the
-  remaining tokens after the first output and excludes separately reported
-  reasoning tokens. **First / total** shows time to first output and the full
-  request duration.
-- **Recovery** restores saved profiles; **Help** explains the selected mode and
-  starts Quick Setup again.
 
 ## Before you start
 
-- Zenith Relay and ChatGPT are installed on the same computer.
-- At least one valid ChatGPT account or compatible API source is available.
-- Any assigned proxy has already been checked.
-- A profile backup may be created before switching ChatGPT.
+- Install Zenith Relay and ChatGPT/Codex on the same computer.
+- Have at least one valid ChatGPT account or compatible API source.
+- Check any proxy before assigning it to an account.
+- Allow Relay to create a profile recovery point before connecting a client.
 
 ## First setup
 
-### 1. Add an account
+1. Open **Connections** and choose **Sign in**, **Import current profile**, or
+   **Import**. Wait until the account says **Updated**. **Pending check** and
+   **Checking** are normal immediately after an import.
+2. Open **Pool**, add the accounts or API sources that may receive requests,
+   and check that they are enabled, healthy, model-compatible, and within
+   quota. An account outside the pool can still be checked but cannot receive
+   traffic.
+3. Open **API & ChatGPT** and choose **Start API**. The default address is:
 
-Open **Connections** and choose one method:
+       http://127.0.0.1:14998/v1
 
-- **Sign in to ChatGPT** opens the OAuth flow in your browser;
-- **Import current profile** uses the existing ChatGPT sign-in;
-- **Import** reads a supported JSON or session file.
-
-After adding it, wait for **Updated**. **Pending check** and **Checking** are
-normal immediately after import. If the account shows **Sign-in required**,
-authenticate again before relying on it in the pool.
-
-### 2. Build the pool
-
-Open **Pool** and add the required accounts and API sources. Check that:
-
-- the participant is enabled;
-- the requested model is available;
-- its proxy has no error;
-- quota is not exhausted;
-- routing order and rules match your intended behavior.
-
-Do not add the same account twice. Import updates an existing record when its
-identity matches.
-
-### 3. Start the local API
-
-Open **API & ChatGPT** and select **Start API**. The endpoint appears in the
-same section. With the default port it looks like this:
-
-```text
-http://127.0.0.1:14998/v1
-```
-
-Change the port in this section instead of editing configuration files by hand.
-
-### 4. Connect ChatGPT
-
-Choose the account used by the ChatGPT interface, or keep automatic selection,
-then select **Connect ChatGPT**. Relay creates a return point before changing
-the profile unless the backup reminder was disabled in Settings.
-
-## Verify the setup
-
-1. Confirm that **API & ChatGPT** shows **API is running**.
-2. Send a short request from ChatGPT.
-3. Open **Usage** and find the new request.
-4. Check its model, pool participant, HTTP status, response time, and **Error
-   source** when it failed.
-5. Return to **Pool** and confirm that the account did not turn red.
-
-> **Ready means:** the request succeeds, Usage names the actual participant,
-> and quota refreshes without restarting the application manually.
+   Change the port in the app, not in a configuration file.
+4. In the same section choose the ChatGPT/Codex account binding and select
+   **Connect ChatGPT**. Relay saves a protected return point before changing
+   the profile.
 
 ## Daily operation
 
-- Keep only participants allowed to receive traffic in the pool.
-- Use the per-account refresh button for a targeted check.
-- A bulk refresh checks every enabled local account, not only pool members.
-- Open request details to inspect why a participant was selected.
-- Stop the local API before changing its port or maintaining local data.
+- Use **Connections → Accounts** to refresh one quota or **Refresh all quotas**
+  for a bulk check.
+- Use **Pool → Model Rules** to hide a model from clients or to set its
+  reasoning allow-list. Reasoning is configured from catalog data; Relay does
+  not probe it with an extra request.
+- Use **Connections → Automations** for quota wake tasks. A weekly-reset task
+  is always automatic and runs only after the provider reports the weekly
+  window at zero and the reset credit available.
+- Keep the endpoint running before changing its port or attaching a profile.
+- The model catalog refreshes at startup and every eight hours while the local
+  background session is active. This is separate from the visible page refresh.
+- In **API & ChatGPT**, Codex background activity summaries and task titles can
+  be allowed or blocked independently of ordinary requests.
 
-## If requests fail
+## Verify the setup
 
-| Symptom | Check | Action |
+1. Confirm **API is running**.
+2. Send a short request from ChatGPT or another OpenAI-compatible client.
+3. Open **Usage → Requests** and inspect the model, pool member, status,
+   First / total timing, and token totals.
+4. If it failed, open the request and read **Error source**. Do not treat a
+   provider error as a local Relay error.
+
+## If a request fails
+
+| Symptom | What it means | What to do |
 | --- | --- | --- |
-| **Sign-in required** | The session may be revoked or invalid | Sign in to that account again |
-| **Unavailable** | The latest quota, model, or proxy error | Open account status and correct the reported cause |
-| **429** | Account quota, model limit, and other participants | Wait for reset or enable an eligible fallback; one 429 must not block the whole pool |
-| Request fails after a participant was selected | **Error source** in Usage | **Provider** rejected the upstream request, **Account** identifies its credential or route, and **Relay** identifies local configuration or protocol translation |
-| Model cannot be selected | Model availability for every participant | Refresh models; do not force-enable a model the account does not support |
-| Request is absent from Usage | Client endpoint and API state | Reconnect ChatGPT and verify the local endpoint |
-| ChatGPT profile changed incorrectly | The latest automatic backup | Open **Recovery** and restore the previous profile |
+| **Sign-in required** | The provider session expired, changed, or was revoked. | Sign in to that account again. |
+| **Unavailable** | The latest health, model, proxy, or quota check failed. | Open the account status and fix the reported cause. |
+| **429 / quota exhausted** | The selected account or model is limited. | Wait for its provider reset or enable an eligible fallback. |
+| Model is missing | No eligible participant reported that model. | In Automatic mode, refresh models and check Pool rules. If the provider has no `/models`, use the source's Manual model mode and verify the entered ID with the provider. |
+| Request is absent from Usage | The client is not using the local endpoint. | Reconnect ChatGPT and verify the base URL. |
+| Model refresh shows an error | The provider rejected discovery or returned unusable metadata. | Fix the account/API source or proxy, then refresh. The old verified catalog remains visible; a Manual catalog is not re-probed in the background. |
+| ChatGPT profile is wrong | A profile change needs to be reversed. | Open **Recovery** and restore the automatic or named snapshot. |
 
 ## Recovery and data
 
-**Sessions and keys** live in the operating system credential store. SQLite
-contains non-secret records, quota state, settings, and request statistics.
+Sessions and API keys are stored in the operating system credential store.
+Local pool records, quota state, settings, and redacted request statistics are
+stored in Relay's data folder.
 
-**Recovery** restores the ChatGPT configuration and available profile files.
-Restoring a named snapshot requires confirmation. By default, Relay offers to
-save the current profile first; you can decline it for one restore or turn off
-that default in Settings. During Relay-managed automatic detach or restore, a
-reasoning effort added or changed by Codex or you is kept. An explicitly
-selected full snapshot restore may restore the snapshot as a whole and is not
-covered by that preservation guarantee. Changes to the managed provider,
-endpoint, credentials, or model catalog block managed recovery for review
-instead of being overwritten.
-Deleting an account from the application also removes its owned local secrets
-and related service data.
+**Recovery** creates a protected automatic return point before a managed
+profile change. A named snapshot restores the full config.toml and auth.json,
+including sign-in, MCP connections, and plugins, after confirmation. Relay
+refuses a managed restore when it detects a newer manual profile change.
+**Settings → Reset local pool data** restores the previous profile first and
+then removes local pool data; named snapshots are kept.
 
-This mode is local-first: it does not upload the account/session secret to
-Zenith production systems, the Zenith Gateway, or the Control API. If you later
-choose **My server**, a user-owned secret can be transferred only to the server
-you explicitly select and confirm. Snapshots, telemetry, exports, diagnostics,
-and local API state remain redacted and must not contain raw credentials,
-cookies, prompts, or provider response bodies.
+This mode never uploads account or provider secrets to Zenith production
+systems. Moving an owned secret to **My server** is a separate, explicit,
+confirmed action.

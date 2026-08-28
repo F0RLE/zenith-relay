@@ -758,7 +758,7 @@ async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy
             expected_tier
         );
         assert_eq!(request.responses_lite.as_deref(), Some("true"));
-        assert_eq!(request.body["parallel_tool_calls"], true);
+        assert_eq!(request.body["parallel_tool_calls"], false);
         assert_eq!(request.body["reasoning"]["effort"], "xhigh");
         assert_eq!(request.body["reasoning"]["summary"], "detailed");
         assert_eq!(request.body["reasoning"]["context"], "all_turns");
@@ -819,6 +819,113 @@ async fn pool_catalog_combines_native_metadata_from_each_available_account() {
     assert_eq!(model["supports_reasoning_summaries"], true);
     assert_eq!(first_state.requests.lock().unwrap().len(), 1);
     assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
+    let mut first_catalog = default_upstream_model_catalog();
+    first_catalog["models"][0]["display_name"] = Value::String("GPT First Account".into());
+    first_catalog["models"][0]["default_reasoning_level"] = Value::String("low".into());
+    first_catalog["models"][0]["supported_reasoning_levels"] = json!([
+        {"effort": "low", "description": "First low"}
+    ]);
+    first_catalog["models"][0]["use_responses_lite"] = false.into();
+    first_catalog["models"][0]["supports_parallel_tool_calls"] = false.into();
+
+    let mut second_catalog = default_upstream_model_catalog();
+    second_catalog["models"][0]["display_name"] = Value::String("GPT Second Account".into());
+    second_catalog["models"][0]["default_reasoning_level"] = Value::String("high".into());
+    second_catalog["models"][0]["supported_reasoning_levels"] = json!([
+        {"effort": "high", "description": "Second high"},
+        {"effort": "xhigh", "description": "Second extra high"}
+    ]);
+    second_catalog["models"][0]["use_responses_lite"] = true.into();
+    second_catalog["models"][0]["supports_parallel_tool_calls"] = true.into();
+
+    let (first_upstream, first_state) =
+        spawn_upstream_with_catalog(Vec::new(), first_catalog).await;
+    let (second_upstream, second_state) =
+        spawn_upstream_with_catalog(Vec::new(), second_catalog).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let url = format!(
+        "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+        gateway.base_url
+    );
+    let client = reqwest::Client::new();
+
+    let first: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let first_model = first["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(first_model["display_name"], "GPT First Account");
+    assert_eq!(first_model["default_reasoning_level"], "low");
+    assert_eq!(
+        first_model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(first_model["use_responses_lite"], false);
+    assert_eq!(first_model["supports_parallel_tool_calls"], false);
+
+    // If the first account is temporarily unreachable, the stale manifest is
+    // retained only for that account and cannot overwrite the live second
+    // account's native metadata.
+    drop(first_upstream);
+    let second: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_model = second["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(second_model["display_name"], "GPT Second Account");
+    assert_eq!(second_model["default_reasoning_level"], "high");
+    assert_eq!(
+        second_model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(second_model["use_responses_lite"], true);
+    assert_eq!(second_model["supports_parallel_tool_calls"], true);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1088,7 +1195,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[0].body["parallel_tool_calls"], true);
+    assert_eq!(requests[0].body["parallel_tool_calls"], false);
     let tools = requests[0].body["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 3);
     assert_eq!(tools[0]["name"], "local_tool");
@@ -1788,8 +1895,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["type"], "response.create");
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
-    assert_eq!(requests[0]["parallel_tool_calls"], true);
-    assert_eq!(requests[0]["service_tier"], "priority");
+    assert_eq!(requests[0]["parallel_tool_calls"], false);
+    // Fast is only synthesized after a route's catalog confirms priority.
+    // This WebSocket-only fixture has no model discovery request, so the
+    // standard tier remains implicit.
+    assert!(requests[0]["service_tier"].is_null());
     assert_eq!(requests[1]["service_tier"], "flex");
     assert_eq!(requests[1]["reasoning"]["effort"], "high");
     assert_eq!(requests[1]["reasoning"]["summary"], "detailed");
@@ -1808,6 +1918,98 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert!(events.iter().all(|event| event.reasoning_tokens == Some(2)));
     assert!(events.iter().all(|event| event.total_tokens == Some(16)));
     assert!(events.iter().all(|event| event.ttft_ms.is_some()));
+}
+
+#[tokio::test]
+async fn account_websocket_retries_foreign_message_item_id_after_native_rejection() {
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(VecDeque::from(vec![
+            vec![json!({
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "message": "Invalid 'input[0].id': 'item_foreign_user_01'. Expected an ID that begins with 'msg'.",
+                    "type": "invalid_request_error"
+                }
+            })],
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "repaired"}),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "ws-message-id-repaired",
+                        "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+                    }
+                }),
+            ],
+        ]))),
+    ))
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": [
+                    {
+                        "type": "message",
+                        "id": "item_foreign_user_01",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Inspect the workspace"}]
+                    },
+                    {
+                        "type": "message",
+                        "id": "msg_native_01",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "Keep changes scoped"}]
+                    },
+                    {
+                        "type": "reasoning",
+                        "id": "item_reasoning_01",
+                        "summary": []
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["response"]["id"],
+        "ws-message-id-repaired"
+    );
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["input"][0]["id"], "item_foreign_user_01");
+    assert!(requests[1]["input"][0].get("id").is_none());
+    assert_eq!(requests[1]["input"][1]["id"], "msg_native_01");
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
 }
 
 #[tokio::test]

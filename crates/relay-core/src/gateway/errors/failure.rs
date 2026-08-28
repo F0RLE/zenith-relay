@@ -164,20 +164,6 @@ pub(crate) fn retryable_failure(
         )
 }
 
-/// A shared endpoint is unlikely to recover by retrying an equivalent API
-/// credential in the same request. Keep that retry budget for an independent
-/// endpoint and avoid cooling credentials that were never attempted.
-pub(crate) fn failure_requires_independent_source_endpoint(
-    status: StatusCode,
-    category: &str,
-) -> bool {
-    status.is_server_error()
-        || matches!(
-            category,
-            "upstream_request_timeout" | "upstream_transport_timeout"
-        )
-}
-
 pub(crate) fn failure_category_requires_cooldown(category: &str) -> bool {
     !matches!(
         category,
@@ -224,7 +210,10 @@ pub(crate) fn recoverable_response_affinity_miss(
 ) -> bool {
     has_previous_response_id
         && previous_response_not_found
-        && matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
+        && matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+        )
 }
 
 pub(crate) fn retry_candidate_limit(
@@ -307,6 +296,16 @@ pub(crate) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> b
     text.contains("input") && text.contains("expected an id that begins with 'fc'")
 }
 
+/// Strict Responses endpoints use `ctc_` for `custom_tool_call.id`.
+pub(crate) fn responses_custom_tool_item_id_requires_ctc_prefix(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("input")
+        && text.contains(".id")
+        && (text.contains("expected an id that begins with 'ctc'")
+            || text.contains("expected an id that begins with 'ctc_'")
+            || text.contains("expected an id that starts with 'ctc'"))
+}
+
 /// Strict Responses endpoints require server-owned `msg_` item identifiers on
 /// message inputs. This only identifies the precise upstream validation error;
 /// the repair still verifies the foreign `item_` identifier before retrying.
@@ -326,6 +325,9 @@ pub(crate) fn previous_response_not_found_value(value: &Value) -> bool {
             value
                 .trim()
                 .eq_ignore_ascii_case("previous_response_not_found")
+                || value
+                    .trim()
+                    .eq_ignore_ascii_case("response_continuation_unavailable")
         })
         || [value.pointer("/error/message"), value.get("message")]
             .into_iter()

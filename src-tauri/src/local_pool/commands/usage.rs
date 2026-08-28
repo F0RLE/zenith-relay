@@ -1,24 +1,11 @@
 use crate::local_pool::{
-    error::CommandError,
-    state::DesktopState,
-    store::telemetry_db::{LocalUsagePage, UsageLog},
+    error::CommandError, state::DesktopState, store::telemetry_db::LocalUsagePage,
 };
 use chrono::{DateTime, Days, Local, Utc};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::protocol::{UsageQuery, UsageRange};
-
-#[tauri::command]
-pub fn get_local_usage(
-    limit: Option<u16>,
-    state: State<'_, DesktopState>,
-) -> Result<Vec<UsageLog>, CommandError> {
-    state
-        .telemetry
-        .list(limit.unwrap_or(100))
-        .map_err(Into::into)
-}
 
 #[tauri::command]
 pub fn get_local_usage_page(

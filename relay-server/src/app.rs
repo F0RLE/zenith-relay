@@ -8,11 +8,12 @@ use std::{collections::BTreeSet, sync::Arc};
 use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::{
     accounts::TokenSet, protocol::RuntimeStateSnapshot, CandidateScope, GatewayRuntime,
-    UsageCallback, WireApi,
+    UsageCallback,
 };
 
 mod account_runtime;
 mod runtime_build;
+mod runtime_records;
 mod snapshot;
 
 pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};
@@ -133,12 +134,7 @@ impl AppState {
     ) -> CandidateScope {
         let source_ids = sources
             .iter()
-            .filter(|source| {
-                source.in_pool
-                    && source
-                        .supports_wire_api(WireApi::Responses)
-                        .unwrap_or(false)
-            })
+            .filter(|source| source.in_pool && source.supports_any_wire_api().unwrap_or(false))
             .map(|source| source.id.clone())
             .collect::<BTreeSet<_>>();
         let account_ids = accounts
@@ -242,6 +238,7 @@ mod tests {
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: vec![model.into()],
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,
@@ -486,6 +483,7 @@ mod tests {
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: vec!["gpt-test".into()],
+            discovered_models: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             priority: 0,
@@ -561,6 +559,7 @@ mod tests {
             ProxyMode::Direct,
             true,
             ApiEquivalentSummary::default(),
+            None,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         );
         assert_eq!(summary.operational_status, OperationalStatus::Rotation);

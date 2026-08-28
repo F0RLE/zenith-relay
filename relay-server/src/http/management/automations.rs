@@ -129,7 +129,7 @@ pub async fn test_wake_task(
     } else {
         selected.retain(|account| {
             account
-                .models
+                .effective_models()
                 .iter()
                 .any(|model| account_supports_model(account, model))
         });
@@ -214,7 +214,7 @@ fn selected_accounts<'a>(
 
 fn account_supports_model(account: &ServerAccountRecord, model: &str) -> bool {
     account
-        .models
+        .effective_models()
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(model))
         && (account.allowed_models.is_empty()
