@@ -12,15 +12,9 @@ import type {
   RuntimeSnapshot,
 } from "../api/types";
 import type { UiState } from "../api/commands";
-import type { FeedbackError } from "./feedback";
+import type { Feedback, PerformOptions } from "./relayOperationModel";
 
-export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
-
-export type PerformOptions = {
-  /** Keep an operation error local to the surface that initiated it. */
-  reportError?: boolean;
-  onError?: (error: FeedbackError, key: string) => void;
-};
+export type { Feedback, PerformOptions } from "./relayOperationModel";
 
 export type RelayContextValue = {
   mode: RelayMode;

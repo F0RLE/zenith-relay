@@ -5,21 +5,19 @@ import { relayCommands, type UiState } from "../api/commands";
 import type { LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
-import { sanitizeFeedbackError } from "./feedback";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
   writeRelayPreference,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
+import { useRelayOperations } from "./useRelayOperations";
 import { useRelayPreferences } from "./useRelayPreferences";
-import { RelayContext, type Feedback, type PerformOptions, type RelayContextValue } from "./relayStateContext";
+import { RelayContext, type PerformOptions, type RelayContextValue } from "./relayStateContext";
 import {
-  ERROR_FEEDBACK_TIMEOUT_MS,
   ROUTING_REFRESH_INTERVAL_MS,
   RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
   RUNTIME_REFRESH_INTERVAL_MS,
-  SUCCESS_FEEDBACK_TIMEOUT_MS,
   USAGE_EVENT_REFRESH_DEBOUNCE_MS,
   isRuntimeRefreshPage,
 } from "./refreshPolicy";
@@ -44,12 +42,17 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
   const [readyState, setReadyState] = useState<UiState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<Feedback>(null);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
-  const operationRevision = useRef(0);
+  const {
+    busy,
+    feedback,
+    performOperation,
+    cancelOperations,
+    clearFeedback,
+    reportErrorFeedback,
+  } = useRelayOperations();
   const modeRef = useRef(mode);
   const pageRef = useRef(page);
   const stateRevision = useRef(1);
@@ -70,7 +73,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
     modeRef.current = next;
     stateRevision.current += 1;
-    operationRevision.current += 1;
     ++localUsageRequest.current;
     ++remoteUsageRequest.current;
     runtimeActivityOverlay.current.clear();
@@ -82,9 +84,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setRemoteUsagePage(null);
     setModeState(next);
     setPage("overview");
-    setBusy(null);
-    setFeedback(null);
-  }, [setPage]);
+    cancelOperations();
+  }, [cancelOperations, setPage]);
   const {
     onboardingComplete,
     finishOnboarding,
@@ -203,7 +204,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     let active = true;
     setLoading(true);
     refresh()
-      .catch((error) => active && setFeedback({ kind: "error", key: "feedback.refreshFailed", error: sanitizeFeedbackError(error, "refresh_failed", t("feedback.refreshFailed")) }))
+      .catch((error) => active && reportErrorFeedback(error, "feedback.refreshFailed", "refresh_failed"))
       .finally(() => {
         if (!active) return;
         setLoading(false);
@@ -218,7 +219,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [refresh, t]);
+  }, [refresh, reportErrorFeedback]);
 
   useEffect(() => {
     if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith") return;
@@ -365,15 +366,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, [theme]);
 
   useEffect(() => {
-    if (!feedback) return;
-    const timeout = window.setTimeout(
-      () => setFeedback(null),
-      feedback.kind === "success" ? SUCCESS_FEEDBACK_TIMEOUT_MS : ERROR_FEEDBACK_TIMEOUT_MS,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [feedback]);
-
-  useEffect(() => {
     const pending = modeSwitchStartedAt.current;
     if (!runtime || !pending || pending.mode !== mode) return;
     let secondFrame = 0;
@@ -408,30 +400,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, [page]);
 
   const perform = useCallback(async (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => {
-    const revision = ++operationRevision.current;
-    setBusy(id);
-    setFeedback(null);
-    try {
-      await work();
-      if (revision !== operationRevision.current) return false;
-      await refresh();
-      if (revision !== operationRevision.current) return false;
-      if (successKey) setFeedback({ kind: "success", key: successKey });
-      return true;
-    } catch (error) {
-      if (revision !== operationRevision.current) return false;
-      const code = typeof error === "object" && error && "code" in error ? String(error.code) : "general";
-      const key = i18n.exists(`errors.${code}`) ? `errors.${code}` : "errors.general";
-      const diagnostic = sanitizeFeedbackError(error, code, t(key));
-      options?.onError?.(diagnostic, key);
-      if (options?.reportError !== false) {
-        setFeedback({ kind: "error", key, error: diagnostic });
-      }
-      return false;
-    } finally {
-      if (revision === operationRevision.current) setBusy(null);
-    }
-  }, [i18n, refresh, t]);
+    return performOperation(id, work, refresh, successKey, options);
+  }, [performOperation, refresh]);
 
   const launchAttachedCodex = useCallback(() => perform(
     "profile-launch",
@@ -506,8 +476,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     () => projectRuntimeAccountLabels(runtime, accountDisplayName),
     [accountDisplayName, runtime],
   );
-  const clearFeedback = useCallback(() => setFeedback(null), []);
-
   const value = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
