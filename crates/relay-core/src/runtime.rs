@@ -39,6 +39,7 @@ mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
+mod source_speed;
 
 use control::RuntimeControl;
 use session_state::CodexTurnStateStore;
