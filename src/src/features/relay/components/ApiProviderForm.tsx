@@ -1,63 +1,31 @@
 import { Cloud, ExternalLink, Route, Settings2, Sparkles, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { SourceProtocolBinding, SourceWireApi } from "../api/types";
 import { openApiKeyPage } from "../../../platform/desktop";
 import { SourceProtocolRoutingDisclosure } from "./SourceProtocolRoutingDisclosure";
-import { normalizedAdapter, normalizedReasoningMode } from "../sourceProtocolBindings";
 import { SecretField } from "./Ui";
+import {
+  addApiProviderModel,
+  clearApiProviderSelection,
+  providerDefaults,
+  providerOrder,
+  removeApiProviderModel,
+  selectApiProvider,
+  setApiProviderAutoAssignModels,
+  setApiProviderModelCatalogMode,
+  type ApiProviderKind,
+  type ApiProviderValue,
+} from "./apiProviderModel";
 
-export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
-export type ApiProviderValue = {
-  kind: ApiProviderKind | null;
-  name: string;
-  baseUrl: string;
-  wireApi: SourceWireApi;
-  protocolBindings: SourceProtocolBinding[];
-  apiKey: string;
-  /** Optional manual catalog for providers that do not expose GET /models. */
-  models?: string[];
-  /** Whether the model catalog comes from discovery or manual entry. */
-  modelCatalogMode?: "automatic" | "manual";
-  /** Automatically attach newly entered models to the selected protocol. */
-  autoAssignModels?: boolean;
-};
+export {
+  apiProviderReady,
+  apiProviderSourceInput,
+  defaultApiProviderValue,
+  type ApiProviderKind,
+  type ApiProviderValue,
+} from "./apiProviderModel";
 
-type ApiProviderDefinition = Omit<ApiProviderValue, "apiKey">;
 type ApiProviderFormVariant = "source" | "onboarding";
-
-const providerOrder: ApiProviderKind[] = ["openai", "openrouter", "zenith", "custom"];
-
-const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = {
-  zenith: {
-    kind: "zenith",
-    name: "Zenith API",
-    baseUrl: "https://api.zenithmarket.dev/v1",
-    wireApi: "responses",
-    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
-  },
-  openai: {
-    kind: "openai",
-    name: "OpenAI",
-    baseUrl: "https://api.openai.com/v1",
-    wireApi: "responses",
-    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
-  },
-  openrouter: {
-    kind: "openrouter",
-    name: "OpenRouter",
-    baseUrl: "https://openrouter.ai/api/v1",
-    wireApi: "responses",
-    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
-  },
-  custom: {
-    kind: "custom",
-    name: "",
-    baseUrl: "",
-    wireApi: "responses",
-    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
-  },
-};
 
 const providerIcons = {
   zenith: Cloud,
@@ -66,76 +34,6 @@ const providerIcons = {
   custom: Settings2,
 };
 
-export function defaultApiProviderValue(): ApiProviderValue {
-  return {
-    kind: null,
-    name: "",
-    baseUrl: "",
-    wireApi: "responses",
-    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
-    apiKey: "",
-    models: [],
-    modelCatalogMode: "automatic",
-    autoAssignModels: true,
-  };
-}
-
-function providerProtocolBindings(value: ApiProviderValue) {
-  return value.protocolBindings.map((binding) => {
-    const adapter = normalizedAdapter(binding);
-    return {
-      wireApi: binding.wireApi,
-      modelIds: [...binding.modelIds],
-      adapter,
-      reasoningMode: normalizedReasoningMode(binding, adapter),
-      ...(binding.cacheWriteTtl ? { cacheWriteTtl: binding.cacheWriteTtl } : {}),
-    };
-  });
-}
-
-export function apiProviderReady(value: ApiProviderValue) {
-  return Boolean(
-    value.kind
-      && value.apiKey.trim()
-      && providerProtocolBindings(value).length
-      && (value.kind === "zenith" || (value.name.trim() && value.baseUrl.trim())),
-  );
-}
-
-export function apiProviderSourceInput(value: ApiProviderValue) {
-  const manualMode = value.modelCatalogMode === "manual"
-    || (value.modelCatalogMode === undefined && (value.models ?? []).length > 0);
-  const models = manualMode ? (value.models ?? []).map((model) => model.trim()).filter(Boolean) : [];
-  const autoAssignModels = manualMode && value.autoAssignModels !== false;
-  let manualCatalogAssigned = false;
-  const protocolBindings = providerProtocolBindings(value).map((binding) => {
-    const assignManualCatalog = autoAssignModels && models.length > 0
-      && binding.modelIds.length === 0
-      && !manualCatalogAssigned;
-    if (assignManualCatalog) manualCatalogAssigned = true;
-    return {
-      ...binding,
-      // The simple setup picker has one selected route. Assigning the optional
-      // manual catalog to only the first empty route keeps later routes
-      // intentionally unassigned instead of creating an overlap.
-      modelIds: assignManualCatalog ? models : binding.modelIds,
-    };
-  });
-  return {
-    name: value.name.trim(),
-    baseUrl: value.baseUrl.trim(),
-    apiKey: value.apiKey.trim(),
-    wireApi: protocolBindings[0]?.wireApi ?? value.wireApi,
-    protocolBindings,
-    models,
-    allowedModels: [],
-    excludedModels: [],
-    draining: false,
-    priority: 0,
-    weight: 1,
-    recoveryDelaySeconds: 0,
-  };
-}
 
 export function ApiProviderForm({
   value,
@@ -163,81 +61,20 @@ export function ApiProviderForm({
   const { t } = useTranslation();
   const [modelDraft, setModelDraft] = useState("");
   const onboarding = variant === "onboarding";
-  const select = (kind: ApiProviderKind) => onChange({
-    ...providerDefaults[kind],
-    protocolBindings: providerDefaults[kind].protocolBindings.map((binding) => ({
-      wireApi: binding.wireApi,
-      modelIds: [...binding.modelIds],
-      adapter: binding.adapter ?? "native",
-      reasoningMode: binding.reasoningMode ?? "disabled",
-    })),
-    apiKey: value.apiKey,
-    models: value.models ?? [],
-    modelCatalogMode: value.modelCatalogMode ?? "automatic",
-    autoAssignModels: value.autoAssignModels !== false,
-  });
-  const clearSelection = () => onChange({
-    ...defaultApiProviderValue(),
-    // Changing the provider should not make the user retype an API key they
-    // have already entered. The key is still never rendered in the selector.
-    apiKey: value.apiKey,
-    models: value.models ?? [],
-    modelCatalogMode: value.modelCatalogMode ?? "automatic",
-    autoAssignModels: value.autoAssignModels !== false,
-  });
+  const select = (kind: ApiProviderKind) => onChange(selectApiProvider(value, kind));
+  const clearSelection = () => onChange(clearApiProviderSelection(value));
   const modelCatalogMode = value.modelCatalogMode ?? ((value.models ?? []).length ? "manual" : "automatic");
   const setModelCatalogMode = (mode: "automatic" | "manual") => {
     setModelDraft("");
-    onChange({
-      ...value,
-      modelCatalogMode: mode,
-      protocolBindings: mode === "manual"
-        ? value.protocolBindings
-        : value.protocolBindings.map((binding) => ({ ...binding, modelIds: [] })),
-    });
+    onChange(setApiProviderModelCatalogMode(value, mode));
   };
   const addModel = () => {
-    if (modelCatalogMode !== "manual") return;
-    const model = modelDraft.trim();
-    if (!model) return;
-    const models = value.models ?? [];
-    if (models.some((candidate) => candidate.toLowerCase() === model.toLowerCase())) {
-      setModelDraft("");
-      return;
-    }
-    const nextModels = [...models, model];
-    const autoAssignModels = value.autoAssignModels !== false;
-    const protocolBindings = autoAssignModels && value.protocolBindings.length
-      ? value.protocolBindings.map((binding, index) => index === 0 && !binding.modelIds.some((candidate) => candidate.toLowerCase() === model.toLowerCase())
-        ? { ...binding, modelIds: [...binding.modelIds, model] }
-        : binding)
-      : value.protocolBindings;
-    onChange({ ...value, models: nextModels, protocolBindings });
-    setModelDraft("");
+    const next = addApiProviderModel(value, modelDraft);
+    if (next) onChange(next);
+    if (next || modelDraft.trim() && (value.models ?? []).some((model) => model.toLowerCase() === modelDraft.trim().toLowerCase())) setModelDraft("");
   };
-  const removeModel = (model: string) => onChange({
-    ...value,
-    models: (value.models ?? []).filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
-    protocolBindings: value.protocolBindings.map((binding) => ({
-      ...binding,
-      modelIds: binding.modelIds.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase()),
-    })),
-  });
-  const setAutoAssignModels = (autoAssignModels: boolean) => {
-    if (!autoAssignModels || !value.protocolBindings.length) {
-      onChange({ ...value, autoAssignModels });
-      return;
-    }
-    const models = value.models ?? [];
-    const assigned = new Set(value.protocolBindings.flatMap((binding) => binding.modelIds.map((model) => model.toLowerCase())));
-    onChange({
-      ...value,
-      autoAssignModels,
-      protocolBindings: value.protocolBindings.map((binding, index) => index === 0
-        ? { ...binding, modelIds: [...binding.modelIds, ...models.filter((model) => !assigned.has(model.toLowerCase()))] }
-        : binding),
-    });
-  };
+  const removeModel = (model: string) => onChange(removeApiProviderModel(value, model));
+  const setAutoAssignModels = (autoAssignModels: boolean) => onChange(setApiProviderAutoAssignModels(value, autoAssignModels));
   const selectedProvider = value.kind ? providerDefaults[value.kind] : null;
   const SelectedProviderIcon = value.kind ? providerIcons[value.kind] : null;
 
