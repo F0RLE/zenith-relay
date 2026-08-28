@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { ArrowDown, ArrowRight, ArrowUp, GripVertical, Power } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -18,6 +18,7 @@ import {
   moveSourceOrder,
   sourcePrioritiesForOrder,
 } from "./poolMemberEditorModel";
+import { useSourceOrderDrag } from "./useSourceOrderDrag";
 
 export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onClose: () => void }) {
   const { t } = useTranslation();
@@ -25,11 +26,6 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
   const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
   const [sourceOrder, setSourceOrder] = useState<string[]>(() => member.kind === "source" ? sourceOrderForRole(runtime?.sources ?? [], apiSourceRole(member.priority), member.id) : []);
-  const [draggedSource, setDraggedSource] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
-  const [dropAfter, setDropAfter] = useState(false);
-  const [dropRole, setDropRole] = useState<ApiSourceRole | null>(null);
-  const sourceDragRef = useRef<{ pointerId: number; sourceId: string; clientX: number; clientY: number } | null>(null);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
   const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
   const [enabledModels, setEnabledModels] = useState(initialEnabledModels);
@@ -44,107 +40,28 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
   const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole) : [];
   const orderedSources = sourceOrder.map((sourceId) => runtime?.sources.find((source) => source.id === sourceId)).filter((source): source is SourceSummary => Boolean(source));
-  const clearSourceDrag = useCallback(() => {
-    sourceDragRef.current = null;
-    setDraggedSource(null);
-    setDropTarget(null);
-    setDropAfter(false);
-    setDropRole(null);
-  }, []);
   const chooseSourceRole = useCallback((role: ApiSourceRole) => {
     setSourceRole(role);
     setSourceOrder(sourceOrderForRole(runtime?.sources ?? [], role, member.id));
-    clearSourceDrag();
-  }, [clearSourceDrag, member.id, runtime?.sources]);
+  }, [member.id, runtime?.sources]);
   const moveSource = useCallback((sourceId: string, targetId: string, after = false) => {
     setSourceOrder((current) => moveSourceOrder(current, sourceId, targetId, after));
   }, []);
   const moveSourceBy = (sourceId: string, offset: number) => {
     setSourceOrder((current) => moveSourceByOrder(current, sourceId, offset));
   };
-  const updateSourceDragAt = useCallback((clientX: number, clientY: number) => {
-    const sourceId = sourceDragRef.current?.sourceId;
-    if (!sourceId) return;
-    const target = document.elementFromPoint(clientX, clientY);
-    const role = sourceId === member.id ? sourceRoleAt(target) : null;
-    if (role) {
-      setDropRole(role);
-      setDropTarget(null);
-      setDropAfter(false);
-      return;
-    }
-    const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId ?? null;
-    setDropRole(null);
-    setDropTarget(targetId && targetId !== sourceId ? targetId : null);
-    if (targetId && targetId !== sourceId && row) {
-      const bounds = row.getBoundingClientRect();
-      setDropAfter(clientY >= bounds.top + bounds.height / 2);
-    } else {
-    setDropAfter(false);
-    }
-  }, [member.id]);
-  const finishSourceDragAt = useCallback((clientX: number, clientY: number) => {
-    const sourceId = sourceDragRef.current?.sourceId;
-    if (!sourceId) return;
-    const target = document.elementFromPoint(clientX, clientY);
-    const role = sourceId === member.id ? sourceRoleAt(target) : null;
-    if (role) {
-      chooseSourceRole(role);
-      return;
-    }
-    const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId;
-    if (targetId && targetId !== sourceId && row) {
-      const bounds = row.getBoundingClientRect();
-      moveSource(sourceId, targetId, clientY >= bounds.top + bounds.height / 2);
-    }
-    clearSourceDrag();
-  }, [clearSourceDrag, member.id, moveSource, chooseSourceRole]);
-  useEffect(() => {
-    const drag = sourceDragRef.current;
-    if (!drag || draggedSource !== drag.sourceId) return;
-    const onPointerMove = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      drag.clientX = event.clientX;
-      drag.clientY = event.clientY;
-      updateSourceDragAt(event.clientX, event.clientY);
-    };
-    const onPointerUp = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      finishSourceDragAt(event.clientX, event.clientY);
-    };
-    const onPointerCancel = (event: globalThis.PointerEvent) => {
-      if (event.pointerId === drag.pointerId) clearSourceDrag();
-    };
-    const onWheel = () => {
-      // Let the dialog's scroll container handle the wheel normally. Re-check
-      // the target after scrolling so the drop indicator follows the row.
-      requestAnimationFrame(() => {
-        if (sourceDragRef.current !== drag) return;
-        updateSourceDragAt(drag.clientX, drag.clientY);
-      });
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
-    window.addEventListener("wheel", onWheel, { passive: true });
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      window.removeEventListener("wheel", onWheel);
-    };
-  }, [clearSourceDrag, draggedSource, finishSourceDragAt, updateSourceDragAt]);
-  const startSourceDrag = (event: PointerEvent<HTMLButtonElement>, sourceId: string) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    sourceDragRef.current = { pointerId: event.pointerId, sourceId, clientX: event.clientX, clientY: event.clientY };
-    setDraggedSource(sourceId);
-    setDropTarget(null);
-    setDropAfter(false);
-    setDropRole(null);
-  };
+  const {
+    draggedSource,
+    dropTarget,
+    dropAfter,
+    dropRole,
+    startSourceDrag,
+  } = useSourceOrderDrag({
+    memberId: member.id,
+    sourceRole,
+    onRoleDrop: chooseSourceRole,
+    onSourceDrop: moveSource,
+  });
   const save = () => {
     if (member.kind === "source" && !sourcePriceOverrides) return;
     const { allowedModels, excludedModels } = modelSelectionPayload(modelIds, enabledModels);
@@ -216,9 +133,4 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
 
 function formatRecoveryDelay(seconds: number, t: TFunction) {
   return seconds < 60 ? t("sources.recoverySeconds", { count: seconds }) : t("sources.recoveryMinutes", { count: seconds / 60 });
-}
-
-function sourceRoleAt(target: Element | null): ApiSourceRole | null {
-  const role = target?.closest<HTMLElement>("[data-source-role]")?.dataset.sourceRole;
-  return role === "primary" || role === "stabilizer" || role === "reserve" ? role : null;
 }
