@@ -117,6 +117,20 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+#[cfg(unix)]
+async fn shutdown_signal() {
+    let Ok(mut terminate) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MaintenanceCommand;
@@ -144,19 +158,5 @@ mod tests {
                 "supported commands are --backup <dir> and --restore <dir>"
             );
         }
-    }
-}
-
-#[cfg(unix)]
-async fn shutdown_signal() {
-    let Ok(mut terminate) =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    else {
-        let _ = tokio::signal::ctrl_c().await;
-        return;
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = terminate.recv() => {}
     }
 }
