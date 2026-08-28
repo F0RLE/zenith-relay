@@ -1,4 +1,5 @@
 use super::*;
+use crate::local_pool::models::LocalGatewayKeyRecord;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use url::Url;

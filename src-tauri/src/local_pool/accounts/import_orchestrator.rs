@@ -1,7 +1,4 @@
-use super::mutations::{
-    current_account_records, repair_gateway_after_item_restore, restore_credential_item,
-    UpdateAccountInput,
-};
+use super::mutations::UpdateAccountInput;
 use super::quota_refresh::{
     AccountQuotaOutcome, ConfirmAccountImportResponse, ImportItemResult,
     QUOTA_COMMAND_TIMEOUT_OVERHEAD, TOKEN_REFRESH_SKEW_MS,
@@ -13,11 +10,9 @@ use crate::local_pool::accounts::proxy::{
 };
 use crate::local_pool::accounts::quota_service::apply_quota_failure;
 use crate::local_pool::accounts::{records, NativeSecretBackend};
-use crate::local_pool::commands::{
-    current_time_ms, sync_accounts_or_rollback, sync_records_or_rollback,
-};
+use crate::local_pool::commands::{current_time_ms, sync_records_or_rollback};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
-use crate::local_pool::models::{LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord};
+use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
 use crate::local_pool::profiles::codex;
 use crate::local_pool::state::DesktopState;
 use crate::local_pool::store::secret_store;
@@ -28,11 +23,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
+use zenith_relay_core::accounts::MAX_PURCHASE_COST_MICRO_USD;
 use zenith_relay_core::accounts::{
     parse_import, ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview, ImportPreviewStatus,
     ImportQuotaStatus, ParsedImport, ParsedImportItem, MAX_IMPORT_ITEMS,
 };
-use zenith_relay_core::accounts::{AccountAuthState, MAX_PURCHASE_COST_MICRO_USD};
 use zenith_relay_core::providers::chatgpt::{
     CodexModelsClient, CodexQuotaClient, QuotaRefreshOutcome,
 };
@@ -47,6 +42,7 @@ mod credential_material;
 mod documents;
 mod errors;
 mod identity;
+mod persistence;
 mod policy;
 mod refresh_state;
 mod sources;
@@ -70,6 +66,7 @@ pub(super) use identity::{
     account_id_from_check_response, masked_account_identity, provider_identity_key,
     timestamp_from_ms,
 };
+pub(in crate::local_pool::accounts) use persistence::persist_imported_account;
 pub(super) use policy::{
     account_auth_mode, account_model_state_is_valid, ensure_account_import_item,
     merge_existing_account, normalize_models, normalize_selected_item_ids,
@@ -1253,156 +1250,6 @@ pub(super) async fn probe_import_quota(
         },
     };
     apply_quota_outcome(account, outcome, now_ms)
-}
-
-pub(super) async fn persist_imported_account(
-    state: &DesktopState,
-    credential_store: &CredentialStore<NativeSecretBackend>,
-    credentials: &StoredCodexCredentials,
-    old_credential: Option<&StoredCodexCredentials>,
-    account: LocalAccountRecord,
-) -> ItemResult<()> {
-    let (old_accounts, old_keys) = current_account_records(state).map_err(|_| {
-        ImportItemError::new("account_store_failed", "account store is unavailable")
-    })?;
-    let sync_gateway = !account.effective_models().is_empty();
-    credential_store
-        .save(credentials)
-        .map_err(credential_item_error)?;
-    if state
-        .store()
-        .and_then(|mut store| store.upsert_account(account.clone()))
-        .is_err()
-    {
-        restore_credential_item(
-            credential_store,
-            credentials.local_account_id(),
-            old_credential,
-        )?;
-        return Err(ImportItemError::new(
-            "account_store_failed",
-            "failed to save account record",
-        ));
-    }
-    if sync_gateway
-        && sync_accounts_or_rollback(state, old_accounts.clone(), old_keys.clone())
-            .await
-            .is_err()
-    {
-        restore_credential_item(
-            credential_store,
-            credentials.local_account_id(),
-            old_credential,
-        )?;
-        repair_gateway_after_item_restore(state, old_accounts, old_keys).await?;
-        return Err(ImportItemError::new(
-            "gateway_sync_failed",
-            "failed to apply account to the local gateway",
-        ));
-    }
-    if credentials.has_oauth()
-        && state
-            .token_authority()
-            .register(
-                credentials.local_account_id(),
-                credentials.to_token_set().map_err(credential_item_error)?,
-                account.account.auth_state,
-            )
-            .await
-            .is_err()
-    {
-        rollback_after_authority_failure(
-            state,
-            credential_store,
-            credentials.local_account_id(),
-            old_credential,
-            old_accounts,
-            old_keys,
-        )
-        .await?;
-        return Err(ImportItemError::new(
-            "token_authority_failed",
-            "failed to register account token state",
-        ));
-    }
-    if state
-        .sync_account_quota_refresh(credentials.local_account_id(), current_time_ms())
-        .is_err()
-    {
-        rollback_after_authority_failure(
-            state,
-            credential_store,
-            credentials.local_account_id(),
-            old_credential,
-            old_accounts,
-            old_keys,
-        )
-        .await?;
-        return Err(ImportItemError::new(
-            "quota_queue_failed",
-            "failed to schedule account quota refresh",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) async fn rollback_after_authority_failure(
-    state: &DesktopState,
-    credential_store: &CredentialStore<NativeSecretBackend>,
-    account_id: &str,
-    old_credential: Option<&StoredCodexCredentials>,
-    old_accounts: Vec<LocalAccountRecord>,
-    old_keys: Vec<LocalGatewayKeyRecord>,
-) -> ItemResult<()> {
-    let (new_accounts, new_keys) = current_account_records(state)
-        .map_err(|_| ImportItemError::recovery("failed to read account state during rollback"))?;
-    restore_credential_item(credential_store, account_id, old_credential)?;
-    state
-        .store()
-        .and_then(|mut store| {
-            store.replace_accounts_and_keys(old_accounts.clone(), old_keys.clone())
-        })
-        .map_err(|_| {
-            ImportItemError::recovery("failed to restore account records after registration error")
-        })?;
-    sync_accounts_or_rollback(state, new_accounts, new_keys)
-        .await
-        .map_err(|_| {
-            ImportItemError::recovery("failed to restore gateway after registration error")
-        })?;
-    restore_authority(state, account_id, old_credential, &old_accounts).await?;
-    Ok(())
-}
-
-pub(super) async fn restore_authority(
-    state: &DesktopState,
-    account_id: &str,
-    old_credential: Option<&StoredCodexCredentials>,
-    old_accounts: &[LocalAccountRecord],
-) -> ItemResult<()> {
-    let Some(credentials) = old_credential else {
-        state.token_authority().remove(account_id);
-        return Ok(());
-    };
-    if !credentials.has_oauth() {
-        state.token_authority().remove(account_id);
-        return Ok(());
-    }
-    let auth_state = old_accounts
-        .iter()
-        .find(|account| account.account.id == account_id)
-        .map_or(AccountAuthState::Unknown, |account| {
-            account.account.auth_state
-        });
-    state
-        .token_authority()
-        .register(
-            account_id,
-            credentials.to_token_set().map_err(credential_item_error)?,
-            auth_state,
-        )
-        .await
-        .map_err(|_| ImportItemError::recovery("failed to restore previous token authority state"))
 }
 
 pub(super) fn apply_account_patch(
