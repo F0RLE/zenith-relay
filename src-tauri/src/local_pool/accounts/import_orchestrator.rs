@@ -2,23 +2,12 @@ use super::quota_refresh::ConfirmAccountImportResponse;
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::import_session::{ImportSession, ImportSessionStore};
 use crate::local_pool::accounts::NativeSecretBackend;
-use crate::local_pool::commands::sync_records_or_rollback;
 use crate::local_pool::error::CommandError;
-use crate::local_pool::models::ProviderSourceRecord;
 use crate::local_pool::state::DesktopState;
-use crate::local_pool::store::secret_store;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
-use uuid::Uuid;
-use zenith_relay_core::accounts::{
-    ImportAuthMode, ImportPreview, ParsedImportItem, MAX_IMPORT_ITEMS,
-};
-use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, ApiModelPriceOverride, ProviderSource,
-    SourceProtocolBinding, WireApi,
-};
+use zenith_relay_core::accounts::{ImportAuthMode, ImportPreview, MAX_IMPORT_ITEMS};
 
 mod account_import;
 mod account_lookup;

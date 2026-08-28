@@ -1,8 +1,18 @@
-use super::*;
-use crate::local_pool::models::LocalGatewayKeyRecord;
+use super::{ImportItemError, ItemResult, DEFAULT_OPENAI_SOURCE_URL};
+use crate::local_pool::commands::sync_records_or_rollback;
+use crate::local_pool::models::{LocalGatewayKeyRecord, ProviderSourceRecord};
+use crate::local_pool::state::DesktopState;
+use crate::local_pool::store::secret_store;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use url::Url;
+use uuid::Uuid;
+use zenith_relay_core::accounts::ParsedImportItem;
+use zenith_relay_core::{
+    discover_source_models_and_protocol_bindings, ApiModelPriceOverride, ProviderSource,
+    SourceProtocolBinding, WireApi,
+};
 
 pub(crate) async fn import_source_item(
     state: &DesktopState,
