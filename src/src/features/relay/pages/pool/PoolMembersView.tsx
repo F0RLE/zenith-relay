@@ -2,19 +2,27 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, LogIn, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
+import type { AccountSummary, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
 import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { AccountPlanBadge, Button, EmptyState, IconButton, QuotaStack, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
-import { activeModelCounts, activeRequestCount, apiSourceRole, routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
-import { comparePoolMembers, memberName, type PoolMember } from "../../poolHelpers";
+import { activeRequestCount, apiSourceRole } from "../../routingOrder";
+import { memberName, type PoolMember } from "../../poolHelpers";
 import { formatApiEquivalent, formatProviderMicroUsd } from "../../poolFormatting";
 import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountErrorDialog } from "../connections/AccountsTable";
+import {
+  orderedPoolMembers,
+  poolActivityState,
+  poolMemberRuntimeStates,
+  poolMembersFromRuntime,
+  poolMemberSourceIds,
+  poolMemberStatusCounts,
+} from "./poolMembersModel";
 
 type Member = PoolMember;
 type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: boolean };
@@ -35,24 +43,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
   const sourceStatsGeneration = useRef(0);
-  const poolMembers: Member[] = [
-    ...(runtime?.accounts ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "account" as const })),
-    ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const })),
-  ];
+  const poolMembers: Member[] = poolMembersFromRuntime(runtime);
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
-  const runtimeByMember = new Map(poolMembers.map((member) => [
-    member.id,
-    runtimeCandidateForMember(
-      member.id,
-      member.kind === "source" ? "api_source" : "oauth_account",
-      runtimeOrder,
-      "all",
-      member.kind === "source" ? member.wireApi : undefined,
-    ),
-  ]));
-  const orderByMember = routingOrderPositions(runtimeOrder);
-  const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, orderByMember));
-  const sourceIds = members.filter((member) => member.kind === "source").map((member) => member.id).sort().join("\n");
+  const runtimeByMember = poolMemberRuntimeStates(poolMembers, runtimeOrder);
+  const members = orderedPoolMembers(poolMembers, runtimeOrder);
+  const sourceIds = poolMemberSourceIds(members);
   const refreshSourceStats = useCallback(async (sourceId: string) => {
     if (mode === "zenith") return;
     const generation = sourceStatsGeneration.current;
@@ -88,13 +83,14 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     const timer = window.setTimeout(() => setNowMs(Date.now()), showSeconds ? 1_000 : 60_000);
     return () => window.clearTimeout(timer);
   }, [nowMs, showSeconds]);
-  const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
-  const activeRuntime = activeMembers.flatMap((member) => {
-    const candidate = runtimeByMember.get(member.id);
-    return candidate ? [candidate] : [];
-  });
-  const activeRequestTotal = activeRuntime.reduce((total, candidate) => total + activeRequestCount(candidate), 0);
-  const activeModels = activeModelCounts(activeRuntime);
+  const {
+    activeMembers,
+    activeRequestTotal,
+    activeModels,
+    lastUsedRuntime,
+    lastUsedMember,
+    nextMember,
+  } = poolActivityState(members, runtimeByMember, runtimeOrder);
   const activeModelList = activeModels
     .map(({ model, requestCount }) => requestCount > 1 ? t("pool.activeModelCount", { model, count: requestCount }) : model)
     .join(" · ");
@@ -103,15 +99,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       ? t("pool.activeRequests", { count: activeRequestTotal, models: activeModelList })
       : t("pool.activeRequestsUnknown", { count: activeRequestTotal })
     : null;
-  const lastUsedRuntime = runtimeOrder.reduce<CandidateRuntimeSnapshot | null>((latest, candidate) => candidate.lastUsedAtMs != null && (latest?.lastUsedAtMs == null || candidate.lastUsedAtMs > latest.lastUsedAtMs) ? candidate : latest, null);
-  const lastUsedMember = lastUsedRuntime ? members.find((member) => runtimeCandidateForMember(
-    member.id,
-    member.kind === "source" ? "api_source" : "oauth_account",
-    runtimeOrder,
-    "all",
-    member.kind === "source" ? member.wireApi : undefined,
-  )?.lastUsedAtMs === lastUsedRuntime.lastUsedAtMs) ?? null : null;
-  const nextMember = members.find((member) => runtimeByMember.get(member.id)?.available) ?? null;
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
@@ -176,13 +163,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     }
   };
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
-  const statuses = members.map((member) => member.operationalStatus);
-  const counts = {
-    rotation: statuses.filter((status) => status === "rotation").length,
-    quotaWait: statuses.filter((status) => status === "quotaWait").length,
-    errors: members.filter((member) => member.kind === "account" ? Boolean(currentAccountErrorCode(member)) : member.operationalStatus === "unavailable" || Boolean(member.lastErrorCode?.trim())).length,
-    disabled: statuses.filter((status) => status === "disabled").length,
-  };
+  const counts = poolMemberStatusCounts(members);
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
