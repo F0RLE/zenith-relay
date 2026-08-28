@@ -3,11 +3,12 @@ use super::mutations::{
     UpdateAccountInput,
 };
 use super::quota_refresh::{
-    account_bearer_authorization, AccountQuotaOutcome, ConfirmAccountImportResponse,
-    ImportItemResult, QUOTA_COMMAND_TIMEOUT_OVERHEAD, TOKEN_REFRESH_SKEW_MS,
+    AccountQuotaOutcome, ConfirmAccountImportResponse, ImportItemResult,
+    QUOTA_COMMAND_TIMEOUT_OVERHEAD, TOKEN_REFRESH_SKEW_MS,
 };
 use crate::local_pool::accounts::credentials::{
-    CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
+    bearer_authorization, CredentialError, CredentialErrorCode, CredentialStore,
+    StoredCodexCredentials,
 };
 use crate::local_pool::accounts::import_session::{
     ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
@@ -218,19 +219,16 @@ impl ImportedCredentialMaterial {
                 )
             });
         }
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.access_token))
-            .map_err(|_| {
-                ImportItemError::new("access_token_rejected", "imported access token is invalid")
-            })?;
-        authorization.set_sensitive(true);
-        Ok(authorization)
+        bearer_authorization(&self.access_token).map_err(|_| {
+            ImportItemError::new("access_token_rejected", "imported access token is invalid")
+        })
     }
 
     pub(super) fn subscription_authorization(&self) -> ItemResult<Option<HeaderValue>> {
         if self.access_token.is_empty() {
             return Ok(None);
         }
-        account_bearer_authorization(&self.access_token)
+        bearer_authorization(&self.access_token)
             .map(Some)
             .map_err(|_| {
                 ImportItemError::new("access_token_rejected", "imported access token is invalid")

@@ -3,7 +3,9 @@ use super::import_orchestrator::{
     imported_identity, preserve_newer_account_state, ImportItemError, ImportItemStatus,
 };
 use crate::local_pool::accounts::authority::{CredentialPersistence, StoredRefreshAdapter};
-use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
+use crate::local_pool::accounts::credentials::{
+    bearer_authorization, CredentialStore, StoredCodexCredentials,
+};
 use crate::local_pool::accounts::oauth::CodexOAuthClient;
 use crate::local_pool::accounts::proxy::effective_proxy_config;
 use crate::local_pool::accounts::quota_service::apply_quota_failure;
@@ -149,7 +151,9 @@ pub(super) struct PreparedAccountAuthorization {
 
 impl PreparedAccountAuthorization {
     pub(super) fn from_tokens(value: PreparedAccountCredentials) -> LocalResult<Self> {
-        let authorization = account_bearer_authorization(value.tokens.access_token())?;
+        let authorization = bearer_authorization(value.tokens.access_token()).map_err(|_| {
+            LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
+        })?;
         Ok(Self {
             subscription_authorization: Some(authorization.clone()),
             authorization,
@@ -159,13 +163,6 @@ impl PreparedAccountAuthorization {
             proxy: value.proxy,
         })
     }
-}
-
-pub(super) fn account_bearer_authorization(access_token: &str) -> LocalResult<HeaderValue> {
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {access_token}"))
-        .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid"))?;
-    authorization.set_sensitive(true);
-    Ok(authorization)
 }
 
 impl PreparedAccountCredentials {
@@ -941,7 +938,11 @@ pub(super) async fn prepare_account_request_authorization(
         .map_err(|error| LocalPoolError::new(ErrorCode::GatewayUnavailable, error.message))?;
     let subscription_authorization = if stored.has_oauth() {
         let oauth = prepare_account_credentials(state, account_id).await?;
-        Some(account_bearer_authorization(oauth.tokens().access_token())?)
+        Some(
+            bearer_authorization(oauth.tokens().access_token()).map_err(|_| {
+                LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
+            })?,
+        )
     } else {
         None
     };
