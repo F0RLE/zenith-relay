@@ -7,11 +7,11 @@ const IMPORT_TTL_MS: u64 = 30 * 60 * 1_000;
 
 pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     super::start_periodic(state, shutdown, INTERVAL, |state| async move {
-        let _ = run(&state).await;
+        let _ = run(&state);
     })
 }
 
-async fn run(state: &AppState) -> Result<(), String> {
+fn run(state: &AppState) -> Result<(), String> {
     let now_ms = now_ms();
     state.store.prune_usage_history(now_ms)?;
     for secret_ref in state
@@ -32,8 +32,8 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn retention_removes_expired_import_payload_and_secret() {
+    #[test]
+    fn retention_removes_expired_import_payload_and_secret() {
         let root = TempDir::new().unwrap();
         let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
         let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
@@ -49,7 +49,7 @@ mod tests {
             .unwrap();
         let state = AppState::new(config, store.clone(), vault.clone()).unwrap();
 
-        run(&state).await.unwrap();
+        run(&state).unwrap();
 
         assert!(store.pending_import("expired").unwrap().is_none());
         assert!(vault.load("import:expired").unwrap().is_none());

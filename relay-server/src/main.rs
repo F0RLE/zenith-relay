@@ -34,9 +34,6 @@ async fn run() -> Result<(), String> {
             _ => Err("supported commands are --backup <dir> and --restore <dir>".to_string()),
         };
     }
-    if !command.is_empty() {
-        return Err("supported commands are --backup <dir> and --restore <dir>".to_string());
-    }
     let store = Arc::new(Store::open(config.data_dir.join("relay.sqlite"))?);
     let vault = Arc::new(Vault::open(
         &config.data_dir.join("vault"),
@@ -57,7 +54,7 @@ async fn run() -> Result<(), String> {
     tokio::pin!(server);
     let server_result = tokio::select! {
         result = server.as_mut() => result.map_err(|error| format!("server failed: {error}")),
-        _ = shutdown_signal() => {
+        () = shutdown_signal() => {
             let _ = shutdown_sender.send(true);
             tokio::time::timeout(SHUTDOWN_GRACE, server.as_mut())
                 .await

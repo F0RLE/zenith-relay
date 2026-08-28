@@ -315,7 +315,7 @@ fn parse_windows_start_apps_output(output: &str) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_hidden_command(program: impl AsRef<OsStr>) -> Command {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(program);
     command.creation_flags(CREATE_NO_WINDOW);
     command

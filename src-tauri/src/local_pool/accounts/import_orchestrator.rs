@@ -1152,7 +1152,7 @@ pub(crate) async fn stage_returned_remote_account(
         .account(local_account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local account not found"))?;
-    let context = ImportRowContext {
+    let row_context = ImportRowContext {
         label: row.label,
         auth_mode: row.auth_mode,
         selectable: row.selectable,
@@ -1168,7 +1168,7 @@ pub(crate) async fn stage_returned_remote_account(
         state,
         &credentials,
         item,
-        &context,
+        &row_context,
         false,
         true,
         true,
