@@ -1,6 +1,6 @@
 use crate::{
     codex_config::load_api_key_for_launch,
-    launcher::{is_codex_running, launch_codex_with_profile, stop_codex_and_wait},
+    launcher::{is_codex_running, launch_codex_with_profile},
     local_pool::{
         accounts::{
             credentials::CredentialStore,
@@ -31,6 +31,7 @@ use zenith_relay_core::{
 mod catalog;
 mod history;
 mod policy;
+mod process;
 
 use catalog::{
     fetch_codex_model_catalog, fetch_direct_source_model_manifest, load_direct_source_api_key,
@@ -44,6 +45,10 @@ use history::{rollback_history_on_error, synchronize_history_for_command};
 use policy::{
     gateway_oauth_binding_request, prioritize_account_candidates, profile_quota_rank,
     GatewayOAuthBindingRequest,
+};
+use process::{
+    restart_codex_after_failed_change, restart_codex_after_restore, stop_codex_and_sync_account,
+    stop_codex_and_sync_account_at, stop_codex_for_profile_change,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -832,76 +837,6 @@ fn profile_rotation_commit_state(
     }
 }
 
-fn stop_codex_for_profile_change() -> Result<bool, CommandError> {
-    stop_codex_and_wait().map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::Io,
-            format!("failed to stop ChatGPT before changing its profile: {error}"),
-        )
-        .into()
-    })
-}
-
-async fn stop_codex_and_sync_account(state: &DesktopState) -> Result<bool, CommandError> {
-    stop_codex_and_sync_account_at(state, &default_codex_home()).await
-}
-
-async fn stop_codex_and_sync_account_at(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-) -> Result<bool, CommandError> {
-    let stopped = stop_codex_for_profile_change()?;
-    let result: Result<(), CommandError> = async {
-        if let Some(account_id) =
-            codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
-        {
-            if state.store()?.account(&account_id).is_some() {
-                sync_managed_account_profile(state, &account_id).await?;
-            }
-        }
-        Ok(())
-    }
-    .await;
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)?;
-    Ok(stopped)
-}
-
-fn restart_codex_after_failed_change<T>(
-    stopped: bool,
-    result: Result<T, CommandError>,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<T, CommandError> {
-    match result {
-        Err(mut error) if stopped => {
-            if let Err(launch_error) = launch() {
-                error.message = format!(
-                    "{}; failed to restart ChatGPT: {launch_error}",
-                    error.message
-                );
-            }
-            Err(error)
-        }
-        result => result,
-    }
-}
-
-fn restart_codex_after_restore<T>(
-    stopped: bool,
-    result: Result<T, CommandError>,
-    launch: impl FnOnce() -> Result<(), String>,
-) -> Result<T, CommandError> {
-    match result {
-        Ok(value) if stopped => launch().map(|()| value).map_err(|error| {
-            LocalPoolError::new(
-                ErrorCode::Io,
-                format!("profile restored, but ChatGPT failed to restart: {error}"),
-            )
-            .into()
-        }),
-        result => restart_codex_after_failed_change(stopped, result, launch),
-    }
-}
-
 fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandError> {
     let Some(profile_dir) = profile_dir else {
         return Ok(default_codex_home());
@@ -936,7 +871,7 @@ fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandEr
 mod tests {
     use super::*;
     use crate::local_pool::models::{LocalGatewayKeyRecord, ProviderSourceRecord};
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use zenith_relay_core::{MessagesReasoningMode, SourceAdapter, SourceProtocolBinding, WireApi};
 
@@ -1065,35 +1000,6 @@ mod tests {
             profile_rotation_commit_state(None, &current, &rotation),
             ProfileRotationCommitState::Unknown
         );
-    }
-
-    #[test]
-    fn failed_profile_change_restarts_a_previously_running_codex() {
-        let launched = Cell::new(false);
-        let error = restart_codex_after_failed_change::<()>(
-            true,
-            Err(LocalPoolError::new(ErrorCode::Conflict, "profile conflict").into()),
-            || {
-                launched.set(true);
-                Ok(())
-            },
-        )
-        .unwrap_err();
-
-        assert!(launched.get());
-        assert!(matches!(error.code, ErrorCode::Conflict));
-    }
-
-    #[test]
-    fn successful_restore_restarts_a_previously_running_codex() {
-        let launched = Cell::new(false);
-        restart_codex_after_restore(true, Ok(()), || {
-            launched.set(true);
-            Ok(())
-        })
-        .unwrap();
-
-        assert!(launched.get());
     }
 
     #[test]
