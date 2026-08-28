@@ -7,12 +7,9 @@ use super::quota_refresh::{
     QUOTA_COMMAND_TIMEOUT_OVERHEAD, TOKEN_REFRESH_SKEW_MS,
 };
 use crate::local_pool::accounts::credentials::{
-    bearer_authorization, CredentialError, CredentialErrorCode, CredentialStore,
-    StoredCodexCredentials,
+    bearer_authorization, CredentialStore, StoredCodexCredentials,
 };
-use crate::local_pool::accounts::import_session::{
-    ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
-};
+use crate::local_pool::accounts::import_session::{ImportSession, ImportSessionStore};
 use crate::local_pool::accounts::proxy::{
     common_proxy_config, effective_proxy_config, ensure_account_proxy,
 };
@@ -48,20 +45,25 @@ use zenith_relay_core::accounts::{
 };
 use zenith_relay_core::providers::chatgpt::{
     AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
-    ModelDiscoveryFailureCode, QuotaRefreshOutcome,
+    QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition};
 use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, normalize_error_code, ApiModelPriceOverride,
-    ProviderSource, ProxyConfig, SourceProtocolBinding, WireApi,
+    discover_source_models_and_protocol_bindings, ApiModelPriceOverride, ProviderSource,
+    ProxyConfig, SourceProtocolBinding, WireApi,
 };
 
 mod claims;
+mod errors;
 mod identity;
 mod policy;
 mod sources;
 
 pub(super) use claims::{imported_identity, parse_subscription_timestamp_ms};
+pub(in crate::local_pool::accounts) use errors::{
+    credential_item_error, credential_local_error, import_item_command_error, import_session_error,
+    model_failure_code, model_item_error, proxy_item_error, ImportItemError, ItemResult,
+};
 #[cfg(test)]
 pub(super) use identity::normalized_profile_account_id;
 pub(super) use identity::{
@@ -77,7 +79,6 @@ pub(super) use policy::{
 pub(super) use sources::*;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
-type ItemResult<T> = std::result::Result<T, ImportItemError>;
 
 pub(super) const MAX_ACCOUNT_LABEL_BYTES: usize = 128;
 
@@ -151,26 +152,6 @@ impl From<ImportSession> for ImportSessionResponse {
 pub enum ImportItemStatus {
     Succeeded,
     Failed,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportItemError {
-    pub code: String,
-    pub message: String,
-}
-
-impl ImportItemError {
-    pub(super) fn new(code: &str, message: &str) -> Self {
-        Self {
-            code: normalize_error_code(code).unwrap_or_else(|| "operation_failed".to_string()),
-            message: message.to_string(),
-        }
-    }
-
-    pub(super) fn recovery(message: &str) -> Self {
-        Self::new("recovery_required", message)
-    }
 }
 
 #[derive(Clone)]
@@ -2181,76 +2162,6 @@ pub(super) fn find_existing_account(
         ));
     }
     Ok(matching.pop())
-}
-
-pub(super) fn credential_item_error(error: CredentialError) -> ImportItemError {
-    let code = match error.code {
-        CredentialErrorCode::InvalidIdentity => "invalid_account_identity",
-        CredentialErrorCode::InvalidSecret | CredentialErrorCode::InvalidVersion => {
-            "invalid_credentials"
-        }
-        CredentialErrorCode::SecretMissing => "credentials_missing",
-        CredentialErrorCode::SecretStoreUnavailable => "credential_store_unavailable",
-    };
-    ImportItemError::new(code, &error.message)
-}
-
-pub(super) fn import_item_command_error(error: ImportItemError) -> CommandError {
-    let code = if error.code == "recovery_required" {
-        ErrorCode::RecoveryRequired
-    } else {
-        ErrorCode::InvalidState
-    };
-    LocalPoolError::new(code, error.message).into()
-}
-
-pub(super) fn credential_local_error(error: CredentialError) -> LocalPoolError {
-    let code = match error.code {
-        CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
-        CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
-        _ => ErrorCode::InvalidState,
-    };
-    LocalPoolError::new(code, error.message)
-}
-
-pub(super) fn proxy_item_error(error: LocalPoolError) -> ImportItemError {
-    ImportItemError::new("proxy_unavailable", &error.message)
-}
-
-pub(super) fn model_item_error(error: ModelDiscoveryFailure) -> ImportItemError {
-    ImportItemError::new(model_failure_code(&error), &error.to_string())
-}
-
-pub(super) fn model_failure_code(error: &ModelDiscoveryFailure) -> &'static str {
-    match error.code {
-        ModelDiscoveryFailureCode::AgentTaskInvalid => "models_agent_task_invalid",
-        ModelDiscoveryFailureCode::Forbidden => "models_forbidden",
-        ModelDiscoveryFailureCode::HttpStatus => "models_http_status",
-        ModelDiscoveryFailureCode::InvalidAccessToken => "models_invalid_access_token",
-        ModelDiscoveryFailureCode::InvalidAccountId => "models_invalid_account_id",
-        ModelDiscoveryFailureCode::InvalidClientVersion => "models_invalid_client_version",
-        ModelDiscoveryFailureCode::InvalidEndpoint => "models_invalid_endpoint",
-        ModelDiscoveryFailureCode::InvalidResponse => "models_invalid_response",
-        ModelDiscoveryFailureCode::RateLimited => "models_rate_limited",
-        ModelDiscoveryFailureCode::ResponseTooLarge => "models_response_too_large",
-        ModelDiscoveryFailureCode::Transport => "models_transport",
-        ModelDiscoveryFailureCode::Unauthorized => "models_unauthorized",
-        ModelDiscoveryFailureCode::Upstream => "models_upstream",
-    }
-}
-
-pub(super) fn import_session_error(error: ImportSessionError) -> CommandError {
-    let code = match error.code {
-        ImportSessionErrorCode::SessionNotFound => ErrorCode::NotFound,
-        ImportSessionErrorCode::SecretMissing => ErrorCode::RecoveryRequired,
-        ImportSessionErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
-        ImportSessionErrorCode::CleanupIncomplete | ImportSessionErrorCode::RecoveryRequired => {
-            ErrorCode::RecoveryRequired
-        }
-        ImportSessionErrorCode::SnapshotIo => ErrorCode::Io,
-        _ => ErrorCode::InvalidState,
-    };
-    LocalPoolError::new(code, error.message).into()
 }
 
 pub(super) fn default_true() -> bool {
