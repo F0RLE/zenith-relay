@@ -32,13 +32,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_dialog::DialogExt;
 use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::accounts::{
-    combine_import_documents, parse_import, ImportAuthMode, ImportIssue, ImportIssueCode,
-    ImportPreview, ImportPreviewStatus, ImportQuotaStatus, ParsedImport, ParsedImportItem,
-    MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS,
+    parse_import, ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview, ImportPreviewStatus,
+    ImportQuotaStatus, ParsedImport, ParsedImportItem, MAX_IMPORT_ITEMS,
 };
 use zenith_relay_core::accounts::{
     AccountAuthState, AccountHealthState, MAX_PURCHASE_COST_MICRO_USD,
@@ -54,12 +52,16 @@ use zenith_relay_core::{
 };
 
 mod claims;
+mod documents;
 mod errors;
 mod identity;
 mod policy;
 mod sources;
 
 pub(super) use claims::{imported_identity, parse_subscription_timestamp_ms};
+pub(super) use documents::normalize_import_input;
+pub use documents::StartAccountImportInput;
+pub(crate) use documents::{pick_account_import_documents, read_import_documents};
 pub(in crate::local_pool::accounts) use errors::{
     credential_item_error, credential_local_error, import_item_command_error, import_session_error,
     model_failure_code, model_item_error, proxy_item_error, ImportItemError, ItemResult,
@@ -92,17 +94,6 @@ pub(super) const CODEX_ACCOUNT_CHECK_ENDPOINT: &str =
 pub(super) const MAX_ACCOUNT_PROFILE_RESPONSE_BYTES: usize = 256 * 1024;
 
 pub(super) const ACCOUNT_IMPORT_PROGRESS_EVENT: &str = "relay-account-import-progress";
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StartAccountImportInput {
-    #[serde(default)]
-    pub(super) content: Option<String>,
-    #[serde(default)]
-    pub(super) documents: Vec<String>,
-    #[serde(default)]
-    pub(super) source_file: Option<String>,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -427,108 +418,6 @@ pub(super) fn is_usable_current_chatgpt_profile(parsed: &ParsedImport, now_ms: u
         && !row.existing
         && refreshable
         && (item.account_id.is_some() || identity.provider_account_id.is_some())
-}
-
-pub(crate) fn pick_account_import_documents(app: &AppHandle) -> CommandResult<Option<Vec<String>>> {
-    let Some(files) = app
-        .dialog()
-        .file()
-        .add_filter("Account files", &["json", "txt"])
-        .blocking_pick_files()
-    else {
-        return Ok(None);
-    };
-    let paths = files
-        .into_iter()
-        .map(|file| {
-            file.into_path().map_err(|_| {
-                LocalPoolError::new(ErrorCode::InvalidState, "selected file path is invalid")
-            })
-        })
-        .collect::<LocalResult<Vec<_>>>()?;
-    read_import_documents(paths).map(Some).map_err(Into::into)
-}
-
-pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<String>> {
-    if paths.is_empty() || paths.len() > MAX_IMPORT_ITEMS {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            format!("select between 1 and {MAX_IMPORT_ITEMS} import files"),
-        ));
-    }
-    let mut total_bytes = 0usize;
-    let mut documents = Vec::with_capacity(paths.len());
-    for path in paths {
-        if !path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| {
-                value.eq_ignore_ascii_case("json") || value.eq_ignore_ascii_case("txt")
-            })
-        {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import file must use the .json or .txt extension",
-            ));
-        }
-        let metadata = std::fs::metadata(&path).map_err(|_| {
-            LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
-        })?;
-        if !metadata.is_file() {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import path is not a file",
-            ));
-        }
-        let length = usize::try_from(metadata.len()).map_err(|_| {
-            LocalPoolError::new(ErrorCode::InvalidState, "selected import file is too large")
-        })?;
-        total_bytes = total_bytes.checked_add(length).ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import files are too large",
-            )
-        })?;
-        if total_bytes > MAX_IMPORT_BYTES {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import files are too large",
-            ));
-        }
-        documents.push(std::fs::read_to_string(path).map_err(|_| {
-            LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
-        })?);
-    }
-    Ok(documents)
-}
-
-pub(super) fn normalize_import_input(
-    input: StartAccountImportInput,
-) -> CommandResult<(String, Option<String>)> {
-    let content = input.content.filter(|value| !value.trim().is_empty());
-    if !input.documents.is_empty() {
-        if content.is_some() || input.source_file.is_some() {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "paste content and file documents cannot be imported together",
-            )
-            .into());
-        }
-        if input.documents.len() == 1 {
-            return Ok((
-                input
-                    .documents
-                    .into_iter()
-                    .next()
-                    .expect("one document exists"),
-                None,
-            ));
-        }
-        let content = combine_import_documents(&input.documents)
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.message))?;
-        return Ok((content, None));
-    }
-    Ok((content.unwrap_or_default(), input.source_file))
 }
 
 #[tauri::command]
