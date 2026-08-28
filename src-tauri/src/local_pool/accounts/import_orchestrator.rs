@@ -44,6 +44,7 @@ mod errors;
 mod identity;
 mod persistence;
 mod policy;
+mod prepared_items;
 mod refresh_state;
 mod sources;
 
@@ -78,6 +79,7 @@ pub(super) use policy::{
     merge_existing_account, normalize_models, normalize_selected_item_ids,
     preserve_newer_account_state, should_probe_import_quota, validate_label,
 };
+use prepared_items::{parsed_item_value, parsed_item_value_from_material};
 pub(in crate::local_pool::accounts) use refresh_state::{
     apply_model_discovery, apply_model_discovery_failure, apply_quota_outcome,
     apply_quota_outcome_with_transitions,
@@ -614,7 +616,7 @@ pub(super) async fn prepare_import_preview(
         .into_iter()
         .zip(preview.rows.iter_mut().filter(|row| row.selectable))
     {
-        let original = parsed_item_value(&item, row.auth_mode, None);
+        let original = parsed_item_value(&item, row.auth_mode);
         if row.auth_mode == ImportAuthMode::ApiKey {
             if let (Some(base_url), Some(api_key)) =
                 (item.base_url.as_deref(), item.secrets().api_key())
@@ -783,129 +785,6 @@ pub(super) fn mark_preview_quota_failed(
         code: ImportIssueCode::QuotaProbeFailed,
         message: message.into(),
     });
-}
-
-pub(super) fn parsed_item_value(
-    item: &ParsedImportItem,
-    auth_mode: ImportAuthMode,
-    material: Option<&ImportedCredentialMaterial>,
-) -> serde_json::Value {
-    let mut value = serde_json::Map::new();
-    value.insert(
-        "label".into(),
-        serde_json::Value::String(item.label.clone()),
-    );
-    value.insert(
-        "auth_mode".into(),
-        serde_json::Value::String(
-            match auth_mode {
-                ImportAuthMode::OAuth => "oauth",
-                ImportAuthMode::AgentIdentity => "agent_identity",
-                ImportAuthMode::ApiKey => "api_key",
-                ImportAuthMode::ImportedToken => "imported_token",
-                ImportAuthMode::Unknown => "unknown",
-            }
-            .into(),
-        ),
-    );
-    insert_optional_string(&mut value, "account_id", item.account_id.as_deref());
-    insert_optional_string(&mut value, "user_id", item.chatgpt_user_id.as_deref());
-    insert_optional_string(
-        &mut value,
-        "organization_id",
-        item.organization_id.as_deref(),
-    );
-    insert_optional_string(&mut value, "base_url", item.base_url.as_deref());
-    insert_optional_string(&mut value, "protocol", item.protocol.as_deref());
-    insert_optional_string(&mut value, "email", item.email());
-    if let Some(priority) = item.priority {
-        value.insert("priority".into(), priority.into());
-    }
-    let secrets = item.secrets();
-    insert_optional_string(&mut value, "access_token", secrets.access_token());
-    insert_optional_string(&mut value, "refresh_token", secrets.refresh_token());
-    insert_optional_string(&mut value, "id_token", secrets.id_token());
-    insert_optional_string(&mut value, "api_key", secrets.api_key());
-    insert_optional_string(&mut value, "agent_private_key", secrets.agent_private_key());
-    insert_optional_string(&mut value, "agent_runtime_id", secrets.agent_runtime_id());
-    insert_optional_string(&mut value, "task_id", secrets.agent_task_id());
-    if let Some(material) = material {
-        insert_optional_string(
-            &mut value,
-            "account_id",
-            material.provider_account_id.as_deref(),
-        );
-        insert_optional_string(&mut value, "user_id", material.provider_user_id.as_deref());
-        insert_optional_string(
-            &mut value,
-            "organization_id",
-            material.organization_id.as_deref(),
-        );
-        insert_optional_string(&mut value, "email", material.email.as_deref());
-        insert_optional_string(&mut value, "access_token", Some(&material.access_token));
-        if let Some(agent) = material.agent_identity.as_ref() {
-            insert_optional_string(&mut value, "agent_private_key", Some(agent.private_key()));
-            insert_optional_string(&mut value, "agent_runtime_id", Some(agent.runtime_id()));
-            insert_optional_string(&mut value, "task_id", agent.task_id());
-        }
-        insert_optional_string(
-            &mut value,
-            "refresh_token",
-            material.refresh_token.as_deref(),
-        );
-        insert_optional_string(&mut value, "id_token", material.id_token.as_deref());
-        insert_optional_string(&mut value, "plan_type", material.plan_type.as_deref());
-        if let Some(expires_at_ms) = material.expires_at_ms {
-            value.insert("expires_at_ms".into(), expires_at_ms.into());
-        }
-    }
-    serde_json::Value::Object(value)
-}
-
-pub(super) fn parsed_item_value_from_material(
-    original: serde_json::Value,
-    material: &ImportedCredentialMaterial,
-) -> serde_json::Value {
-    let mut value = original.as_object().cloned().unwrap_or_default();
-    insert_optional_string(
-        &mut value,
-        "account_id",
-        material.provider_account_id.as_deref(),
-    );
-    insert_optional_string(&mut value, "user_id", material.provider_user_id.as_deref());
-    insert_optional_string(
-        &mut value,
-        "organization_id",
-        material.organization_id.as_deref(),
-    );
-    insert_optional_string(&mut value, "email", material.email.as_deref());
-    insert_optional_string(&mut value, "access_token", Some(&material.access_token));
-    if let Some(agent) = material.agent_identity.as_ref() {
-        insert_optional_string(&mut value, "agent_private_key", Some(agent.private_key()));
-        insert_optional_string(&mut value, "agent_runtime_id", Some(agent.runtime_id()));
-        insert_optional_string(&mut value, "task_id", agent.task_id());
-    }
-    insert_optional_string(
-        &mut value,
-        "refresh_token",
-        material.refresh_token.as_deref(),
-    );
-    insert_optional_string(&mut value, "id_token", material.id_token.as_deref());
-    insert_optional_string(&mut value, "plan_type", material.plan_type.as_deref());
-    if let Some(expires_at_ms) = material.expires_at_ms {
-        value.insert("expires_at_ms".into(), expires_at_ms.into());
-    }
-    serde_json::Value::Object(value)
-}
-
-pub(super) fn insert_optional_string(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    value: Option<&str>,
-) {
-    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-        object.insert(key.into(), serde_json::Value::String(value.to_string()));
-    }
 }
 
 pub(crate) async fn stage_returned_remote_account(
