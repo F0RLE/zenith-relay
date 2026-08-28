@@ -34,6 +34,7 @@ use url::Url;
 mod authorization;
 mod build;
 mod candidates;
+mod codex_metadata;
 mod control;
 mod images;
 mod selection;
