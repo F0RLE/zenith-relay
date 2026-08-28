@@ -49,7 +49,7 @@ pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinH
 }
 
 async fn run(state: &Arc<AppState>, refresh_models: bool) -> Result<(), String> {
-    super::refresh_automatic_accounts_now(state, refresh_models)
+    super::account_refresh::refresh_automatic_accounts_now(state, refresh_models)
         .await
         .map(|_| ())
 }

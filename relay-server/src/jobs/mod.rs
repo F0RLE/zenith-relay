@@ -1,15 +1,14 @@
+mod account_refresh;
 mod health_probe;
 pub(crate) mod quota_refresh;
 mod retention;
 mod wake_automation;
 
-use crate::state::{AppState, ServerAccountRecord};
-use futures_util::{stream, StreamExt};
+use crate::state::AppState;
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
-use zenith_relay_core::accounts::automatic_quota_monitoring_eligible;
 
-const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
+pub(crate) use account_refresh::{refresh_account_now, refresh_all_accounts_now};
 
 pub struct BackgroundJobs {
     handles: Vec<JoinHandle<()>>,
@@ -64,106 +63,6 @@ pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> Backgroun
             wake_automation::start(state, shutdown),
         ],
     }
-}
-
-pub(crate) async fn refresh_account_now(
-    state: &Arc<AppState>,
-    account: ServerAccountRecord,
-) -> Result<ServerAccountRecord, String> {
-    let (mut updated, transitions) =
-        quota_refresh::refresh_account_metadata(state, account, true, true).await?;
-    if !transitions.is_empty()
-        && quota_refresh::try_auto_reset_weekly(state, &updated, &transitions)
-            .await
-            .unwrap_or(false)
-    {
-        updated = quota_refresh::refresh_one(state, updated, false)
-            .await
-            .map(|(account, _)| account)?;
-    }
-    if !transitions.is_empty() {
-        wake_automation::schedule_transitions(state, &updated, &transitions).await?;
-    }
-    let _ = state.rebuild_runtime().await;
-    Ok(updated)
-}
-
-pub(crate) async fn refresh_all_accounts_now(
-    state: &Arc<AppState>,
-) -> Result<(usize, usize), String> {
-    let accounts = state.store.accounts()?;
-    refresh_accounts_now(state, accounts, true, true).await
-}
-
-pub(crate) async fn refresh_automatic_accounts_now(
-    state: &Arc<AppState>,
-    refresh_models: bool,
-) -> Result<(usize, usize), String> {
-    let accounts = state
-        .store
-        .accounts()?
-        .into_iter()
-        .filter(|account| automatic_quota_monitoring_eligible(account.enabled, account.auth_state))
-        .collect::<Vec<_>>();
-    refresh_accounts_now(state, accounts, false, refresh_models).await
-}
-
-async fn refresh_accounts_now(
-    state: &Arc<AppState>,
-    accounts: Vec<ServerAccountRecord>,
-    force_subscription_refresh: bool,
-    refresh_models: bool,
-) -> Result<(usize, usize), String> {
-    let results = stream::iter(accounts.into_iter().map(|account| {
-        let state = Arc::clone(state);
-        async move {
-            quota_refresh::refresh_account_metadata(
-                &state,
-                account,
-                force_subscription_refresh,
-                refresh_models,
-            )
-            .await
-        }
-    }))
-    .buffer_unordered(QUOTA_REFRESH_BATCH_SIZE)
-    .collect::<Vec<_>>()
-    .await;
-
-    let mut refreshed = 0;
-    let mut failed = 0;
-    for result in results {
-        let Ok((mut updated, transitions)) = result else {
-            failed += 1;
-            continue;
-        };
-        if !transitions.is_empty()
-            && quota_refresh::try_auto_reset_weekly(state, &updated, &transitions)
-                .await
-                .unwrap_or(false)
-        {
-            if let Ok((refreshed, _)) =
-                quota_refresh::refresh_one(state, updated.clone(), false).await
-            {
-                updated = refreshed;
-            }
-        }
-        if updated.quota.error.is_some() {
-            failed += 1;
-            continue;
-        }
-        if !transitions.is_empty()
-            && wake_automation::schedule_transitions(state, &updated, &transitions)
-                .await
-                .is_err()
-        {
-            failed += 1;
-            continue;
-        }
-        refreshed += 1;
-    }
-    state.rebuild_runtime().await?;
-    Ok((refreshed, failed))
 }
 
 #[cfg(test)]
