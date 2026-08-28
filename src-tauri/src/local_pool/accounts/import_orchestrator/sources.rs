@@ -1,6 +1,7 @@
 use super::*;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 pub(crate) async fn import_source_item(
     state: &DesktopState,
