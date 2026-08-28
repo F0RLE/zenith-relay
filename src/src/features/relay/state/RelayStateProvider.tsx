@@ -8,14 +8,11 @@ import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIden
 import { sanitizeFeedbackError } from "./feedback";
 import {
   RELAY_STORAGE_KEYS,
-  readAccountValueVisibility,
-  readCodexPoolOauthSelection,
   readRelayPreference,
-  removeRelayPreference,
-  writeAccountValueVisibility,
   writeRelayPreference,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
+import { useRelayPreferences } from "./useRelayPreferences";
 import { RelayContext, type Feedback, type PerformOptions, type RelayContextValue } from "./relayStateContext";
 import {
   ERROR_FEEDBACK_TIMEOUT_MS,
@@ -49,12 +46,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
-  const [onboardingComplete, setOnboardingComplete] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.onboarding, "0") === "1");
-  const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => readRelayPreference(RELAY_STORAGE_KEYS.theme, "system") as "system" | "light" | "dark");
-  const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, "1") !== "0");
-  const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
-  const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
-  const [accountValueVisible, setAccountValueVisibleState] = useState(readAccountValueVisibility);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
@@ -68,6 +59,51 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
+  const setPage = useCallback((next: PageId) => {
+    if (pageRef.current === next) return;
+    pageRef.current = next;
+    pageOpenStartedAt.current = { page: next, startedAt: performance.now() };
+    setPageState(next);
+  }, []);
+  const setMode = useCallback((next: RelayMode) => {
+    if (modeRef.current === next) return;
+    modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
+    modeRef.current = next;
+    stateRevision.current += 1;
+    operationRevision.current += 1;
+    ++localUsageRequest.current;
+    ++remoteUsageRequest.current;
+    runtimeActivityOverlay.current.clear();
+    writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
+    setRuntime(null);
+    setLocalUsage([]);
+    setLocalUsagePage(null);
+    setRemoteUsage([]);
+    setRemoteUsagePage(null);
+    setModeState(next);
+    setPage("overview");
+    setBusy(null);
+    setFeedback(null);
+  }, [setPage]);
+  const {
+    onboardingComplete,
+    finishOnboarding,
+    resetOnboarding,
+    theme,
+    setTheme,
+    profileSwitchBackupPrompt,
+    setProfileSwitchBackupPrompt,
+    codexPoolOauthSelection,
+    setCodexPoolOauthSelection,
+    accountIdentitiesVisible,
+    setAccountIdentitiesVisible,
+    accountValueVisible,
+    setAccountValueVisible,
+  } = useRelayPreferences({
+    setMode,
+    setPage,
+    setRevealedAccountIdentities,
+  });
   const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
   const accountIdentitiesBusy = useAccountIdentityReveal({
     accounts: runtime?.accounts ?? [],
@@ -337,34 +373,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timeout);
   }, [feedback]);
 
-  const setPage = useCallback((next: PageId) => {
-    if (pageRef.current === next) return;
-    pageRef.current = next;
-    pageOpenStartedAt.current = { page: next, startedAt: performance.now() };
-    setPageState(next);
-  }, []);
-
-  const setMode = useCallback((next: RelayMode) => {
-    if (modeRef.current === next) return;
-    modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
-    modeRef.current = next;
-    stateRevision.current += 1;
-    operationRevision.current += 1;
-    ++localUsageRequest.current;
-    ++remoteUsageRequest.current;
-    runtimeActivityOverlay.current.clear();
-    writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
-    setRuntime(null);
-    setLocalUsage([]);
-    setLocalUsagePage(null);
-    setRemoteUsage([]);
-    setRemoteUsagePage(null);
-    setModeState(next);
-    setPage("overview");
-    setBusy(null);
-    setFeedback(null);
-  }, [setPage]);
-
   useEffect(() => {
     const pending = modeSwitchStartedAt.current;
     if (!runtime || !pending || pending.mode !== mode) return;
@@ -449,34 +457,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     return stopped && launchAttachedCodex();
   }, [launchAttachedCodex, perform]);
 
-  const finishOnboarding = useCallback((nextMode: RelayMode) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.onboarding, "1");
-    setOnboardingComplete(true);
-    setMode(nextMode);
-  }, [setMode]);
-
-  const resetOnboarding = useCallback(() => {
-    removeRelayPreference(RELAY_STORAGE_KEYS.onboarding);
-    setOnboardingComplete(false);
-    setPage("overview");
-  }, []);
-
-  const setTheme = useCallback((next: "system" | "light" | "dark") => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.theme, next);
-    setThemeState(next);
-  }, []);
-
-  const setProfileSwitchBackupPrompt = useCallback((enabled: boolean) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, enabled ? "1" : "0");
-    setProfileSwitchBackupPromptState(enabled);
-  }, []);
-
-  const setCodexPoolOauthSelection = useCallback((selection: string) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection);
-    removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection);
-    setCodexPoolOauthSelectionState(selection);
-  }, []);
-
   const setCodexBackgroundTasksEnabled = useCallback((enabled: boolean) => perform(
     "codex-background-tasks",
     mode === "local"
@@ -509,17 +489,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         : () => Promise.reject(new Error("Codex WebSockets are not available in hosted mode")),
     "feedback.saved",
   ), [codexWebsocketsEnabled, mode, perform]);
-
-  const setAccountIdentitiesVisible = useCallback((visible: boolean) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, visible ? "1" : "0");
-    setAccountIdentitiesVisibleState(visible);
-    if (!visible) setRevealedAccountIdentities({});
-  }, []);
-
-  const setAccountValueVisible = useCallback((visible: boolean) => {
-    writeAccountValueVisibility(visible);
-    setAccountValueVisibleState(visible);
-  }, []);
 
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
     return displayAccountIdentity({
