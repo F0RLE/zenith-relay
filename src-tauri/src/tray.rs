@@ -250,8 +250,13 @@ mod tests {
 
     #[test]
     fn tray_toggle_label_tracks_pool_state() {
-        assert_eq!(toggle_text(true), "Остановить пул");
-        assert_eq!(toggle_text(false), "Запустить пул");
+        let (running, stopped) = if crate::platform::system_language_is_russian() {
+            ("Остановить пул", "Запустить пул")
+        } else {
+            ("Stop pool", "Start pool")
+        };
+        assert_eq!(toggle_text(true), running);
+        assert_eq!(toggle_text(false), stopped);
     }
 
     #[test]
