@@ -3,21 +3,23 @@ use rusqlite::{params, params_from_iter, types::Value as SqlValue, TransactionBe
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use zenith_relay_core::{
+    candidate_model_price_sources, estimate_candidate_api_equivalent,
+    normalize_observed_service_tier,
     protocol::{UsagePage, UsageQuery, UsageSummary},
-    ApiEquivalentSummary, DefaultServiceTier, UsageEvent,
+    ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier, UsageEvent, WireApi,
 };
 
 mod query;
 
 use query::{
-    configured_model_price, estimate_candidate_equivalent, parse_wire_api, usage_buckets,
-    usage_filter, usage_groups, usage_model_equivalents, usage_totals, USAGE_TOTAL_COLUMNS,
+    usage_buckets, usage_filter, usage_groups, usage_model_equivalents, usage_totals,
+    USAGE_TOTAL_COLUMNS,
 };
 
 #[cfg(test)]
 use std::collections::BTreeMap;
 #[cfg(test)]
-use zenith_relay_core::{ApiModelPriceOverride, ToolUseDiagnostics, WireApi};
+use zenith_relay_core::{ApiModelPriceOverride, ToolUseDiagnostics};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 
@@ -167,7 +169,7 @@ impl Store {
                         *created_at_ms as i64,
                         routing_json,
                         event.service_tier.as_str(),
-                        event.applied_service_tier.map(DefaultServiceTier::as_str),
+                        event.applied_service_tier.as_deref(),
                         tool_use_json,
                         event.error_origin().map(|origin| origin.as_str()),
                         event
@@ -266,14 +268,14 @@ impl Store {
                         .get::<_, Option<String>>(27)?
                         .as_deref()
                         .and_then(zenith_relay_core::normalize_reasoning_effort),
-                    wire_api: parse_wire_api(&wire_api),
+                    wire_api: WireApi::from_storage_value(&wire_api).unwrap_or(WireApi::Responses),
                     service_tier: DefaultServiceTier::from_storage_value(
                         &row.get::<_, String>(22)?,
                     ),
                     applied_service_tier: row
                         .get::<_, Option<String>>(23)?
                         .as_deref()
-                        .map(DefaultServiceTier::from_storage_value),
+                        .and_then(normalize_observed_service_tier),
                     tool_use: row
                         .get::<_, Option<String>>(24)?
                         .as_deref()
@@ -319,17 +321,19 @@ impl Store {
                 }
                 _ => (Some(0), Some(0), event.cache_write_input_tokens),
             };
-            event.api_equivalent = estimate_candidate_equivalent(
+            event.api_equivalent = estimate_candidate_api_equivalent(
                 &event.candidate_kind,
                 model,
-                event.input_tokens,
-                event.cached_input_tokens,
-                cache_write_5m,
-                cache_write_1h,
-                unknown_cache_write,
-                event.output_tokens,
-                event.total_tokens,
-                configured_model_price(
+                ApiEquivalentUsage {
+                    input_tokens: event.input_tokens,
+                    cached_input_tokens: event.cached_input_tokens,
+                    cache_write_5m_tokens: cache_write_5m,
+                    cache_write_1h_tokens: cache_write_1h,
+                    unknown_cache_write_tokens: unknown_cache_write,
+                    output_tokens: event.output_tokens,
+                    total_tokens: event.total_tokens,
+                },
+                candidate_model_price_sources(
                     &price_overrides,
                     &source_price_overrides,
                     &event.candidate_kind,
@@ -406,22 +410,26 @@ impl Store {
                 let cached_samples: i64 = row.get(12)?;
                 let cache_write_samples: i64 = row.get(13)?;
                 Ok((candidate_id.clone(), {
-                    estimate_candidate_equivalent(
+                    estimate_candidate_api_equivalent(
                         &kind,
                         model.as_deref(),
-                        optional_u64(input_tokens),
-                        (input_samples > 0 && cached_samples == input_samples)
-                            .then(|| optional_u64(cached_input_tokens))
-                            .flatten(),
-                        (cache_write_samples > 0)
-                            .then(|| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
-                        (cache_write_samples > 0)
-                            .then(|| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
-                        (cache_write_samples > 0)
-                            .then(|| optional_u64(unknown_cache_write_tokens).unwrap_or_default()),
-                        optional_u64(output_tokens),
-                        optional_u64(total_tokens),
-                        configured_model_price(
+                        ApiEquivalentUsage {
+                            input_tokens: optional_u64(input_tokens),
+                            cached_input_tokens: (input_samples > 0
+                                && cached_samples == input_samples)
+                                .then(|| optional_u64(cached_input_tokens))
+                                .flatten(),
+                            cache_write_5m_tokens: (cache_write_samples > 0)
+                                .then(|| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
+                            cache_write_1h_tokens: (cache_write_samples > 0)
+                                .then(|| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
+                            unknown_cache_write_tokens: (cache_write_samples > 0).then(|| {
+                                optional_u64(unknown_cache_write_tokens).unwrap_or_default()
+                            }),
+                            output_tokens: optional_u64(output_tokens),
+                            total_tokens: optional_u64(total_tokens),
+                        },
+                        candidate_model_price_sources(
                             &price_overrides,
                             &source_price_overrides,
                             &kind,
@@ -660,7 +668,7 @@ mod tests {
         event.cooldown_scope = None;
         event.retry_at_ms = None;
         event.consecutive_failures = Some(0);
-        event.applied_service_tier = Some(DefaultServiceTier::Standard);
+        event.applied_service_tier = Some("flex".into());
         event.total_tokens = Some(10);
         store.record_usage(&event, 2_000).unwrap();
 
@@ -690,10 +698,7 @@ mod tests {
         assert!(fallback.success);
         assert_eq!(fallback.http_status, 200);
         assert_eq!(fallback.service_tier, DefaultServiceTier::Fast);
-        assert_eq!(
-            fallback.applied_service_tier,
-            Some(DefaultServiceTier::Standard)
-        );
+        assert_eq!(fallback.applied_service_tier, Some("flex".into()));
         assert_eq!(fallback.requested_reasoning_effort.as_deref(), Some("max"));
         assert_eq!(fallback.effective_reasoning_effort.as_deref(), Some("low"));
         assert_eq!(
@@ -767,7 +772,7 @@ mod tests {
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
-            applied_service_tier: Some(DefaultServiceTier::Standard),
+            applied_service_tier: Some("default".into()),
             success: true,
             http_status: 200,
             error_category: None,
@@ -848,7 +853,7 @@ mod tests {
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
-            applied_service_tier: Some(DefaultServiceTier::Fast),
+            applied_service_tier: Some("priority".into()),
             success: true,
             http_status: 200,
             error_category: None,

@@ -26,7 +26,7 @@ pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 
-pub(super) type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
+pub(super) type SourcePriceOverrides = zenith_relay_core::SourceModelPriceOverrides;
 
 #[derive(Debug)]
 pub enum ConfigurationReplaceError {

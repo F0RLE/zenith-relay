@@ -1,7 +1,41 @@
 use super::sqlite::{db_error, parse_json, to_json, Store};
 use crate::state::{GatewayKeyRecord, ServerAccountRecord, ServerProxyRecord, SourceRecord};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+trait BatchRecord: Serialize {
+    const UPSERT_SQL: &'static str;
+
+    fn id(&self) -> &str;
+    fn secret_ref(&self) -> &str;
+}
+
+impl BatchRecord for SourceRecord {
+    const UPSERT_SQL: &'static str =
+        "INSERT INTO sources(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn secret_ref(&self) -> &str {
+        &self.secret_ref
+    }
+}
+
+impl BatchRecord for ServerAccountRecord {
+    const UPSERT_SQL: &'static str =
+        "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn secret_ref(&self) -> &str {
+        &self.secret_ref
+    }
+}
 
 impl Store {
     pub fn weekly_reset_was_applied(
@@ -67,27 +101,7 @@ impl Store {
     }
 
     pub fn save_sources(&self, records: &[SourceRecord]) -> Result<(), String> {
-        let encoded = records
-            .iter()
-            .map(|record| Ok((record, to_json(record)?)))
-            .collect::<Result<Vec<_>, String>>()?;
-        let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(db_error)?;
-        {
-            let mut statement = transaction
-                .prepare(
-                    "INSERT INTO sources(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref",
-                )
-                .map_err(db_error)?;
-            for (record, data_json) in encoded {
-                statement
-                    .execute(params![record.id, data_json, record.secret_ref])
-                    .map_err(db_error)?;
-            }
-        }
-        transaction.commit().map_err(db_error)
+        self.save_batch_records(records)
     }
 
     pub fn delete_source(&self, id: &str) -> Result<Option<SourceRecord>, String> {
@@ -209,6 +223,10 @@ impl Store {
     }
 
     pub fn save_accounts(&self, records: &[ServerAccountRecord]) -> Result<(), String> {
+        self.save_batch_records(records)
+    }
+
+    fn save_batch_records<T: BatchRecord>(&self, records: &[T]) -> Result<(), String> {
         let encoded = records
             .iter()
             .map(|record| Ok((record, to_json(record)?)))
@@ -218,14 +236,10 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         {
-            let mut statement = transaction
-                .prepare(
-                    "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref",
-                )
-                .map_err(db_error)?;
+            let mut statement = transaction.prepare(T::UPSERT_SQL).map_err(db_error)?;
             for (record, data_json) in encoded {
                 statement
-                    .execute(params![record.id, data_json, record.secret_ref])
+                    .execute(params![record.id(), data_json, record.secret_ref()])
                     .map_err(db_error)?;
             }
         }

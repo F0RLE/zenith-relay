@@ -17,8 +17,10 @@ use zenith_relay_core::{
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
-    runtime_source_models_for_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot,
-    GatewayRuntime, SourceProtocolBinding, WireApi,
+    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
+    runtime_source_supports_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot,
+    GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
+    SourceProtocolBinding, WireApi,
 };
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
@@ -78,16 +80,35 @@ impl SourceRecord {
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
-        Ok(!self.models_for_wire_api(wire_api)?.is_empty())
+        runtime_source_supports_wire_api(
+            &self.protocol_bindings,
+            self.wire_api,
+            &self.models,
+            wire_api,
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        for wire_api in WireApi::ALL {
-            if self.supports_wire_api(wire_api)? {
-                return Ok(true);
-            }
+        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl RuntimeSourcePolicyRecord for SourceRecord {
+    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate {
+        RuntimeSourcePolicyUpdate {
+            source_id: self.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: self.enabled,
+                draining: self.draining,
+                priority: self.priority,
+                weight: self.weight,
+                allowed_models: self.allowed_models.clone(),
+                excluded_models: self.excluded_models.clone(),
+            },
+            recovery_delay_seconds: self.recovery_delay_seconds,
         }
-        Ok(false)
     }
 }
 

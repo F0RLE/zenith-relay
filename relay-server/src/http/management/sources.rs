@@ -376,6 +376,9 @@ pub async fn test_source(
         })
         .await
         .map_err(runtime_error)?;
+    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+        runtime.refresh_source_model_metadata_for_source(&id).await;
+    }
     Ok(Json(source_summary(&state, &record)?))
 }
 
@@ -391,6 +394,7 @@ pub async fn source_stats(
         .ok_or_else(|| {
             ManagementError::not_found("source_secret_missing", "source secret is missing")
         })?;
+    ensure_not_server_self_source(&state, &record.base_url)?;
     fetch_source_provider_stats(&record.base_url, &api_key)
         .await
         .map(Json)
@@ -519,15 +523,7 @@ async fn discover_models(
     let discovery =
         discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings)
             .await
-            .map_err(|_| {
-                ManagementError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "source_test_failed",
-                    "source model discovery failed",
-                    "upstream",
-                    true,
-                )
-            })?;
+            .map_err(source_discovery_error)?;
     if discovery.models.is_empty() {
         return Err(ManagementError::validation(
             "source_models_empty",
@@ -535,6 +531,28 @@ async fn discover_models(
         ));
     }
     Ok(discovery)
+}
+
+fn source_discovery_error(error: zenith_relay_core::Error) -> ManagementError {
+    let (status, retryable) = match &error {
+        zenith_relay_core::Error::Validation(_) | zenith_relay_core::Error::UnsupportedWireApi => {
+            (StatusCode::BAD_REQUEST, false)
+        }
+        zenith_relay_core::Error::UpstreamStatus(status) => (
+            StatusCode::BAD_GATEWAY,
+            *status == 408 || *status == 429 || *status >= 500,
+        ),
+        zenith_relay_core::Error::Upstream(_)
+        | zenith_relay_core::Error::UpstreamBodyTooLarge
+        | zenith_relay_core::Error::InvalidUpstreamResponse(_) => (StatusCode::BAD_GATEWAY, true),
+    };
+    ManagementError::new(
+        status,
+        "source_test_failed",
+        error.to_string(),
+        "upstream",
+        retryable,
+    )
 }
 
 fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementError> {
@@ -575,4 +593,87 @@ fn ensure_not_server_self_source(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::store::{Store, Vault};
+    use axum::extract::{Path, State};
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
+    use zenith_relay_core::Error;
+
+    fn test_state(root: &TempDir, port: u16) -> Arc<AppState> {
+        let config = Config::for_test(
+            root.path().to_path_buf(),
+            format!("127.0.0.1:{port}").parse().unwrap(),
+        );
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        AppState::new(config, store, vault).unwrap()
+    }
+
+    #[test]
+    fn upstream_404_is_a_non_retryable_bad_gateway_error() {
+        let error = source_discovery_error(Error::UpstreamStatus(404));
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.code, "source_test_failed");
+        assert_eq!(error.stage, "upstream");
+        assert!(!error.retryable);
+        assert!(error.message.contains("404"));
+    }
+
+    #[test]
+    fn upstream_server_failures_remain_retryable() {
+        let error = source_discovery_error(Error::UpstreamStatus(503));
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn source_stats_rejects_a_self_route_before_contacting_gateway() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root, 45_678);
+        let record = SourceRecord {
+            id: "self-source".to_string(),
+            name: "Self source".to_string(),
+            enabled: true,
+            in_pool: false,
+            draining: false,
+            base_url: format!(
+                "{}/v1",
+                state.config.public_base_url.as_str().trim_end_matches('/')
+            ),
+            secret_ref: "source:self-source".to_string(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["provider/model".to_string()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            last_error_code: None,
+        };
+        state.store.save_source(&record).unwrap();
+        state
+            .vault
+            .save(&record.secret_ref, "source-secret")
+            .unwrap();
+
+        let error = source_stats(State(state), Path(record.id))
+            .await
+            .expect_err("a source pointing at this Relay must be rejected");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "source_self_route");
+        assert_eq!(error.stage, "validation");
+        assert!(!error.retryable);
+    }
 }

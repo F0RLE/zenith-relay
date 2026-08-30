@@ -5,11 +5,9 @@ use super::super::{
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
-    estimate_api_equivalent_with_cache_ttl,
-    estimate_api_equivalent_with_cache_ttl_and_price_sources,
+    candidate_model_price_sources, estimate_candidate_api_equivalent,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, ApiModelPriceSources,
-    WireApi,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
 };
 
 pub(super) const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
@@ -153,19 +151,24 @@ pub(super) fn usage_model_equivalents(
             let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 model.clone(),
-                estimate_candidate_equivalent(
+                estimate_candidate_api_equivalent(
                     &kind,
                     (!model.is_empty()).then_some(model.as_str()),
-                    (input_samples > 0).then_some(input_tokens).flatten(),
-                    (input_samples > 0 && cached_samples == input_samples)
-                        .then_some(cached_input_tokens)
-                        .flatten(),
-                    cache_writes.map(|_| cache_write_5m_tokens.unwrap_or_default()),
-                    cache_writes.map(|_| cache_write_1h_tokens.unwrap_or_default()),
-                    cache_writes.map(|_| unknown_cache_write_tokens.unwrap_or_default()),
-                    (output_samples > 0).then_some(output_tokens).flatten(),
-                    (total_samples > 0).then_some(total_tokens).flatten(),
-                    configured_model_price(
+                    ApiEquivalentUsage {
+                        input_tokens: (input_samples > 0).then_some(input_tokens).flatten(),
+                        cached_input_tokens: (input_samples > 0 && cached_samples == input_samples)
+                            .then_some(cached_input_tokens)
+                            .flatten(),
+                        cache_write_5m_tokens: cache_writes
+                            .map(|_| cache_write_5m_tokens.unwrap_or_default()),
+                        cache_write_1h_tokens: cache_writes
+                            .map(|_| cache_write_1h_tokens.unwrap_or_default()),
+                        unknown_cache_write_tokens: cache_writes
+                            .map(|_| unknown_cache_write_tokens.unwrap_or_default()),
+                        output_tokens: (output_samples > 0).then_some(output_tokens).flatten(),
+                        total_tokens: (total_samples > 0).then_some(total_tokens).flatten(),
+                    },
+                    candidate_model_price_sources(
                         price_overrides,
                         source_price_overrides,
                         &kind,
@@ -182,44 +185,6 @@ pub(super) fn usage_model_equivalents(
         equivalents.entry(model).or_default().merge(estimate);
     }
     Ok(equivalents)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn estimate_candidate_equivalent(
-    candidate_kind: &str,
-    model: Option<&str>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_5m_tokens: Option<u64>,
-    cache_write_1h_tokens: Option<u64>,
-    unknown_cache_write_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-    price_sources: Option<ApiModelPriceSources>,
-) -> ApiEquivalentSummary {
-    if candidate_kind == "account" {
-        return estimate_api_equivalent_with_cache_ttl(
-            model,
-            input_tokens,
-            cached_input_tokens,
-            cache_write_5m_tokens,
-            cache_write_1h_tokens,
-            unknown_cache_write_tokens,
-            output_tokens,
-            total_tokens,
-        );
-    }
-    estimate_api_equivalent_with_cache_ttl_and_price_sources(
-        model,
-        input_tokens,
-        cached_input_tokens,
-        cache_write_5m_tokens,
-        cache_write_1h_tokens,
-        unknown_cache_write_tokens,
-        output_tokens,
-        total_tokens,
-        price_sources,
-    )
 }
 
 pub(super) fn usage_buckets(
@@ -295,22 +260,26 @@ pub(super) fn usage_buckets(
             let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 start_ms,
-                estimate_candidate_equivalent(
+                estimate_candidate_api_equivalent(
                     &kind,
                     model.as_deref(),
-                    input_tokens,
-                    cached_input_tokens,
-                    cache_writes.map(|_| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
-                    cache_writes.map(|_| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
-                    cache_writes
-                        .map(|_| optional_u64(unknown_cache_write_tokens).unwrap_or_default()),
-                    (output_samples > 0)
-                        .then(|| optional_u64(output_tokens))
-                        .flatten(),
-                    (total_samples > 0)
-                        .then(|| optional_u64(total_tokens))
-                        .flatten(),
-                    configured_model_price(
+                    ApiEquivalentUsage {
+                        input_tokens,
+                        cached_input_tokens,
+                        cache_write_5m_tokens: cache_writes
+                            .map(|_| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
+                        cache_write_1h_tokens: cache_writes
+                            .map(|_| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
+                        unknown_cache_write_tokens: cache_writes
+                            .map(|_| optional_u64(unknown_cache_write_tokens).unwrap_or_default()),
+                        output_tokens: (output_samples > 0)
+                            .then(|| optional_u64(output_tokens))
+                            .flatten(),
+                        total_tokens: (total_samples > 0)
+                            .then(|| optional_u64(total_tokens))
+                            .flatten(),
+                    },
+                    candidate_model_price_sources(
                         price_overrides,
                         source_price_overrides,
                         &kind,
@@ -358,38 +327,4 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
 
 fn nonnegative_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
-}
-
-pub(super) fn parse_wire_api(value: &str) -> WireApi {
-    match value {
-        "chat_completions" => WireApi::ChatCompletions,
-        "messages" => WireApi::Messages,
-        "gemini" => WireApi::Gemini,
-        _ => WireApi::Responses,
-    }
-}
-
-pub(super) fn configured_model_price(
-    overrides: &BTreeMap<String, ApiModelPriceOverride>,
-    source_overrides: &SourcePriceOverrides,
-    candidate_kind: &str,
-    candidate_id: &str,
-    model: Option<&str>,
-) -> Option<ApiModelPriceSources> {
-    let model = model?.to_ascii_lowercase();
-    if candidate_kind != "source" {
-        return None;
-    }
-    source_overrides
-        .get(candidate_id)
-        .and_then(|prices| prices.get(&model).copied())
-        .or_else(|| {
-            overrides
-                .get(&model)
-                .copied()
-                .map(|manual| ApiModelPriceSources {
-                    provider: None,
-                    manual: Some(manual),
-                })
-        })
 }
