@@ -23,10 +23,10 @@ pub use import::{
 pub use jwt::decode_unverified_jwt_payload;
 pub use quota_state::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpdate};
 pub use record::{
-    automatic_quota_monitoring_eligible, provider_account_failure, reduce_account_usage,
-    AccountAccessState, AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity,
-    AccountRecord, AccountUsageObservation, AccountUsageState, AccountUsageUpdate,
-    ProviderAccountFailure, ReauthReason,
+    apply_model_discovery_failure, automatic_quota_monitoring_eligible, provider_account_failure,
+    recover_model_discovery_state, reduce_account_usage, AccountAccessState, AccountAuthMode,
+    AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord, AccountUsageObservation,
+    AccountUsageState, AccountUsageUpdate, ProviderAccountFailure, ReauthReason,
 };
 pub use token_authority::{
     access_token_is_usable, PrepareStatus, PreparedToken, TokenAuthority, TokenAuthorityError,

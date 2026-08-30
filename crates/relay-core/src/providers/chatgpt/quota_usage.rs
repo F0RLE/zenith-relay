@@ -1,6 +1,6 @@
 use super::{
     agent_identity::is_agent_identity_task_invalid_response,
-    collect_response_body,
+    bearer_authorization as shared_bearer_authorization, collect_response_body,
     quota_subscription::{merge_subscription_metadata_at, CodexSubscriptionClient},
     valid_access_token, ResponseBodyError,
 };
@@ -342,10 +342,8 @@ fn bearer_authorization(access_token: &str) -> Result<HeaderValue, QuotaRefreshF
     if !valid_access_token(access_token) {
         return Err(QuotaRefreshFailure::new("invalid_access_token", false));
     }
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {access_token}"))
-        .map_err(|_| QuotaRefreshFailure::new("invalid_access_token", false))?;
-    authorization.set_sensitive(true);
-    Ok(authorization)
+    shared_bearer_authorization(access_token)
+        .map_err(|_| QuotaRefreshFailure::new("invalid_access_token", false))
 }
 
 #[derive(Clone, Debug, PartialEq)]

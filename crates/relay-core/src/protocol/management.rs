@@ -17,8 +17,8 @@ pub use account::{
 };
 pub use model::{
     apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
-    model_has_api_source_route, pooled_source_runtime_available, source_runtime_available,
-    GatewaySummary, ModelSummary,
+    apply_pool_model_configuration, model_has_api_source_route, pool_candidate_count,
+    pooled_source_runtime_available, source_runtime_available, GatewaySummary, ModelSummary,
 };
 pub use routing::{
     account_candidate_enabled, account_operational_state, operational_status, quota_refresh_status,
@@ -803,6 +803,70 @@ mod tests {
         assert!(models[1].output_micro_usd_per_million.is_some());
         assert!(models[2].catalog_rank.is_none());
         assert!(models[2].output_micro_usd_per_million.is_none());
+    }
+
+    #[test]
+    fn pool_snapshot_configuration_uses_one_shared_policy() {
+        let source = SourceSummary {
+            id: "source_1".into(),
+            name: "Synthetic".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        };
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        let price_overrides = BTreeMap::from([(
+            "gpt-test".to_string(),
+            ApiModelPriceOverride {
+                input_micro_usd_per_million: 12,
+                cached_input_micro_usd_per_million: None,
+                cache_write_5m_micro_usd_per_million: Some(18),
+                cache_write_1h_micro_usd_per_million: Some(9),
+                output_micro_usd_per_million: 34,
+            },
+        )]);
+        let reasoning_allowed_levels =
+            BTreeMap::from([("gpt-test".to_string(), vec!["high".to_string()])]);
+        let service_tier_overrides =
+            BTreeMap::from([("gpt-test".to_string(), DefaultServiceTier::Fast)]);
+
+        apply_pool_model_configuration(
+            &mut models,
+            std::slice::from_ref(&source),
+            &[],
+            &price_overrides,
+            &reasoning_allowed_levels,
+            &service_tier_overrides,
+            None,
+        );
+
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert!(model.custom_price);
+        assert_eq!(model.input_micro_usd_per_million, Some(12));
+        assert_eq!(model.cached_input_micro_usd_per_million, Some(12));
+        assert_eq!(model.cache_write_5m_micro_usd_per_million, Some(18));
+        assert_eq!(model.cache_write_1h_micro_usd_per_million, Some(9));
+        assert_eq!(model.output_micro_usd_per_million, Some(34));
+        assert_eq!(model.reasoning_levels, ["high"]);
+        assert_eq!(model.speed_tier, DefaultServiceTier::Fast);
+        assert!(model.speed_supported);
+        assert_eq!(pool_candidate_count(&[source], &[]), 1);
     }
 
     #[test]

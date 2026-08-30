@@ -204,28 +204,12 @@ impl GatewayRuntime {
         }
 
         match category {
-            "upstream_quota_exhausted" => {
-                let reset_at_ms = {
-                    let mut quotas = self
-                        .passive_quotas
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    quotas.get_mut(candidate_id).and_then(|state| {
-                        state.snapshot.limit_reached = true;
-                        state.snapshot.updated_at_ms = Some(observed_at_ms);
-                        state.snapshot.error = None;
-                        state.dirty = true;
-                        state.force_persist = true;
-                        state.snapshot.limiting_reset_at_ms()
-                    })
-                };
-                self.lock_scheduler().update_candidate_quota_at(
-                    candidate_id,
-                    CandidateQuota::Exhausted,
-                    Some(observed_at_ms),
-                    reset_at_ms,
-                );
-            }
+            // The gateway already applied a candidate-scoped cooldown before
+            // emitting this event. A bare 429 is not a durable quota snapshot:
+            // treating it as `Exhausted` keeps an otherwise healthy slot out
+            // of rotation until a separate refresh happens to run. Only an
+            // actual quota snapshot above may mark the candidate exhausted.
+            "upstream_quota_exhausted" => {}
             "upstream_unauthorized" | "account_auth" => {
                 self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
             }

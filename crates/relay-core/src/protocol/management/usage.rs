@@ -1,6 +1,6 @@
 use crate::{
-    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, RoutingDiagnostics,
-    ToolUseDiagnostics, WireApi,
+    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
+    RoutingDiagnostics, ToolUseDiagnostics, WireApi,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,7 @@ pub struct UsageSummary {
     #[serde(default)]
     pub service_tier: DefaultServiceTier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_service_tier: Option<DefaultServiceTier>,
+    pub applied_service_tier: Option<ObservedServiceTier>,
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,

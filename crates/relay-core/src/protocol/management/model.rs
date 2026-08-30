@@ -1,6 +1,7 @@
-use super::SourceSummary;
+use super::{AccountSummary, OperationalStatus, SourceSummary};
 use crate::{
-    CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier, ImageRequestPrice, RoutingStrategy,
+    ApiModelPriceOverride, CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier,
+    GatewayRuntime, ImageRequestPrice, RoutingStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,8 +84,8 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
-    /// Whether a current upstream catalog explicitly permits Fast/priority for
-    /// this model. It is deliberately false until such evidence exists.
+    /// Compatibility flag for older management clients. The current pool
+    /// exposes the same Normal/Fast policy for every listed model.
     #[serde(default)]
     pub speed_supported: bool,
     #[serde(default)]
@@ -95,12 +96,74 @@ pub struct ModelSummary {
 
 pub fn apply_model_speed_summary(
     model: &mut ModelSummary,
-    fast_supported: bool,
     configured_tier: Option<DefaultServiceTier>,
 ) {
-    model.speed_supported = fast_supported;
-    model.speed_configurable = fast_supported;
+    model.speed_supported = true;
+    model.speed_configurable = true;
     model.speed_tier = configured_tier.unwrap_or(DefaultServiceTier::Standard);
+}
+
+/// Applies the same configured pool policy to every runtime snapshot. Local
+/// desktop and user-managed server snapshots share this projection, while
+/// their storage and runtime lifecycle remain separate.
+pub fn apply_pool_model_configuration(
+    models: &mut [ModelSummary],
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    model_price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    model_reasoning_allowed_levels: &BTreeMap<String, Vec<String>>,
+    model_service_tier_overrides: &BTreeMap<String, DefaultServiceTier>,
+    runtime: Option<&GatewayRuntime>,
+) {
+    for model in models {
+        let model_id = model.id.clone();
+        if let Some(price) = model_price_overrides.get(&model_id.to_ascii_lowercase()) {
+            model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
+            model.cached_input_micro_usd_per_million = Some(
+                price
+                    .cached_input_micro_usd_per_million
+                    .unwrap_or(price.input_micro_usd_per_million),
+            );
+            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
+            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
+            model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
+            model.custom_price = true;
+        }
+        let has_api_source_route = model_has_api_source_route(sources, &model_id);
+        let has_pool_route =
+            has_api_source_route || super::model_has_native_account_route(accounts, &model_id);
+        apply_model_reasoning_summary(
+            model,
+            runtime.and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
+            crate::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
+            has_pool_route,
+        );
+        apply_model_speed_summary(
+            model,
+            model_service_tier_overrides
+                .get(&model_id.to_ascii_lowercase())
+                .copied(),
+        );
+    }
+}
+
+/// Counts pooled source and account candidates that are currently eligible
+/// for rotation. This is a snapshot statistic, not scheduler admission.
+pub fn pool_candidate_count(sources: &[SourceSummary], accounts: &[AccountSummary]) -> usize {
+    sources
+        .iter()
+        .filter(|source| {
+            source.in_pool
+                && source.supports_any_wire_api()
+                && source.operational_status == OperationalStatus::Rotation
+        })
+        .count()
+        + accounts
+            .iter()
+            .filter(|account| {
+                account.in_pool && account.operational_status == OperationalStatus::Rotation
+            })
+            .count()
 }
 
 /// Applies the operator's explicit presentation order without dropping a

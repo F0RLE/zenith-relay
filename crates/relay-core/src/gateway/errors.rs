@@ -246,6 +246,11 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         ],
     ) {
         "response_affinity_miss"
+    } else if text_has_any(text, &["refresh_token_reused"]) {
+        // A refresh-token race is transient. The token authority retries it
+        // without changing account authentication state, and a proxied
+        // upstream response must follow the same rule.
+        "upstream_refresh_token_reused"
     } else if text_has_any(
         text,
         &[
@@ -376,7 +381,6 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
             "token_expired",
             "token_invalidated",
             "token_revoked",
-            "refresh_token_reused",
             "invalid or expired token",
             "invalid_grant",
         ],

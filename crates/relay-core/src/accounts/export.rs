@@ -25,6 +25,19 @@ pub enum AccountExportFormat {
 }
 
 impl AccountExportFormat {
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::Zenith,
+            Self::Cpa,
+            Self::Sub2api,
+            Self::Cockpit,
+            Self::NineRouter,
+            Self::Codex,
+            Self::AxonHub,
+            Self::CodexManager,
+        ]
+    }
+
     pub const fn slug(self) -> &'static str {
         match self {
             Self::Zenith => "zenith",
@@ -573,7 +586,7 @@ mod tests {
 
     #[test]
     fn all_supported_formats_are_valid_json_and_never_include_proxy_fields() {
-        for format in formats() {
+        for format in AccountExportFormat::all() {
             let document =
                 build_account_export(format, &[fixture()], 1_788_000_000_000, None).unwrap();
             document.validate().unwrap();
@@ -609,7 +622,7 @@ mod tests {
 
     #[test]
     fn single_exports_are_objects_and_bulk_exports_are_arrays() {
-        for format in formats().into_iter().filter(|format| {
+        for format in AccountExportFormat::all().into_iter().filter(|format| {
             !matches!(
                 format,
                 AccountExportFormat::Zenith | AccountExportFormat::Sub2api
@@ -665,7 +678,7 @@ mod tests {
         account.account_id = None;
         account.user_id = None;
         account.organization_id = None;
-        for format in formats() {
+        for format in AccountExportFormat::all() {
             let document = build_account_export(
                 format,
                 std::slice::from_ref(&account),
@@ -774,19 +787,6 @@ mod tests {
             .validate()
             .is_err());
         }
-    }
-
-    fn formats() -> [AccountExportFormat; 8] {
-        [
-            AccountExportFormat::Zenith,
-            AccountExportFormat::Cpa,
-            AccountExportFormat::Sub2api,
-            AccountExportFormat::Cockpit,
-            AccountExportFormat::NineRouter,
-            AccountExportFormat::Codex,
-            AccountExportFormat::AxonHub,
-            AccountExportFormat::CodexManager,
-        ]
     }
 
     fn fixture() -> AccountExportCredential {

@@ -6,7 +6,8 @@ use super::errors::{
 use super::execution::execute_client_request;
 use super::now_ms;
 use super::request::{
-    client_context_fingerprint, forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
+    apply_codex_routing_hint, client_context_fingerprint, forwarded_codex_headers,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event};
 use super::streaming::{has_output_delta, parse_sse_event};
@@ -437,6 +438,7 @@ async fn connect_upstream(
                 request.responses_lite_for(&route),
                 &request.request_id,
             );
+            apply_codex_routing_hint(&mut headers, &route.source_model, route.service_tier);
             if let Some(account_id) = route.account_id.as_deref() {
                 guard_account_request(runtime, &key.id, &mut headers, account_id, now_ms());
             } else {
@@ -1674,19 +1676,20 @@ fn finish_terminal(
     let Some(mut in_flight) = state.in_flight.take() else {
         return true;
     };
-    let delivered = matches!(
-        outcome,
-        EventTerminalOutcome::Success | EventTerminalOutcome::Incomplete
-    );
-    let success = matches!(outcome, EventTerminalOutcome::Success);
+    // `response.incomplete` is a terminal event for this request, so the
+    // client WebSocket may carry its next independent request. It is not a
+    // successful response: do not retain response/session affinity or reset
+    // slot health from a partially completed stream.
+    let terminal_success = matches!(outcome, EventTerminalOutcome::Success);
+    let keep_client_socket = !matches!(outcome, EventTerminalOutcome::Failure);
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     in_flight.event.generation_ms = in_flight
         .event
         .ttft_ms
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
-    in_flight.event.success = success;
-    if success {
+    in_flight.event.success = terminal_success;
+    if terminal_success {
         in_flight.event.tool_use.finish();
     }
     if matches!(outcome, EventTerminalOutcome::Incomplete) {
@@ -1708,8 +1711,16 @@ fn finish_terminal(
         &terminal.headers,
         now_ms(),
     );
-    if delivered {
+    // A continuation may legitimately reference an incomplete response (for
+    // example after max_output_tokens). Keep that id only for this live
+    // WebSocket; durable response/prompt affinity still requires success.
+    if matches!(
+        outcome,
+        EventTerminalOutcome::Success | EventTerminalOutcome::Incomplete
+    ) {
         state.last_response_id = in_flight.response_id.clone();
+    }
+    if terminal_success {
         let recovered = runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
@@ -1731,7 +1742,7 @@ fn finish_terminal(
             now_ms(),
         );
         in_flight.event.consecutive_failures = recovered.then_some(0);
-    } else {
+    } else if matches!(outcome, EventTerminalOutcome::Failure) {
         let category = terminal.error_category.unwrap_or_else(|| {
             super::errors::classify_upstream_error(terminal_failure_status(terminal.status), None)
                 .category
@@ -1764,7 +1775,7 @@ fn finish_terminal(
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();
-    delivered
+    keep_client_socket
 }
 
 fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category: &str) {
@@ -1783,10 +1794,10 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
         .ttft_ms
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
-    // A direct API source can serve independent requests concurrently. A
-    // failed WebSocket stream must not cool the whole source and make an
-    // unrelated response-affinity continuation fail with 409.
-    if incomplete_requires_cooldown(category) && in_flight.route.account_id.is_some() {
+    // Cool only this physical slot and model. A stream failure on one
+    // credential must not make unrelated routes unavailable, regardless of
+    // whether the selected route is an OAuth account or a direct API source.
+    if incomplete_requires_cooldown(category) {
         let cooldown_context = CooldownContext {
             scope: &in_flight.route.scope,
             allowed_protocols: &in_flight.route.allowed_protocols,
@@ -1856,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn response_incomplete_is_delivered_without_failure_outcome() {
+    fn response_incomplete_is_terminal_but_not_slot_success() {
         let terminal = event_terminal(&json!({
             "type": "response.incomplete",
             "response": {

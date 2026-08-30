@@ -40,10 +40,11 @@ pub use protocol::{
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
 pub use runtime::{
-    normalize_image_base_model, normalize_model_service_tier_overrides, DefaultServiceTier,
-    GatewayRuntime, GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore,
-    RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey,
-    RuntimeSource, RuntimeSourcePolicyUpdate,
+    changed_runtime_source_policy_updates, normalize_image_base_model,
+    normalize_model_service_tier_overrides, DefaultServiceTier, GatewayRuntime,
+    GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore, RuntimeActivitySnapshot,
+    RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
@@ -55,21 +56,24 @@ pub use scheduler::{
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,
     discover_source_models_for_protocol_bindings, fetch_source_provider_stats, is_loopback_url,
-    normalize_source_protocol_bindings, runtime_source_models_for_wire_api,
-    runtime_source_protocol_bindings, source_models_for_wire_api, source_points_to_gateway,
-    CacheWriteTtl, LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery,
-    SourceProtocolBinding, SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider,
-    WireApi,
+    normalize_source_protocol_bindings, runtime_source_models_for_any_wire_api,
+    runtime_source_models_for_wire_api, runtime_source_protocol_bindings,
+    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api,
+    source_models_for_wire_api, source_points_to_gateway, CacheWriteTtl, LocalGatewayKey,
+    ProviderSource, SourceConnector, SourceDiscovery, SourceProtocolBinding,
+    SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
 };
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{
-    api_model_price, api_pricing_revision, estimate_api_equivalent,
+    api_model_price, api_pricing_revision, candidate_model_price_sources, estimate_api_equivalent,
     estimate_api_equivalent_with_cache_ttl,
     estimate_api_equivalent_with_cache_ttl_and_price_override,
     estimate_api_equivalent_with_cache_ttl_and_price_sources,
-    estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
-    normalize_reasoning_effort, official_image_request_prices, sql_like_contains_pattern,
-    ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin,
-    ImageRequestPrice, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics, UsageCallback,
-    UsageEvent, UsageValue, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    estimate_api_equivalent_with_price_override, estimate_candidate_api_equivalent,
+    normalize_model_price_overrides, normalize_observed_service_tier, normalize_reasoning_effort,
+    official_image_request_prices, sql_like_contains_pattern, ApiEquivalentSummary,
+    ApiEquivalentUsage, ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin,
+    ImageRequestPrice, ObservedServiceTier, SourceModelPriceOverrides, TerminalOutputKind,
+    ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };

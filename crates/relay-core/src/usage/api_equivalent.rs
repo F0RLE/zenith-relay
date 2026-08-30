@@ -99,6 +99,24 @@ pub struct ApiModelPriceSources {
     pub manual: Option<ApiModelPriceOverride>,
 }
 
+/// Per-source price provenance indexed by source id and normalized model id.
+///
+/// This remains a storage-neutral representation so desktop telemetry and the
+/// user-managed server apply the same pricing policy without sharing a schema.
+pub type SourceModelPriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
+
+/// Token measurements required to estimate an API-equivalent value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ApiEquivalentUsage {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_5m_tokens: Option<u64>,
+    pub cache_write_1h_tokens: Option<u64>,
+    pub unknown_cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
 impl ApiModelPriceOverride {
     pub fn from_optional_fields(
         input: Option<u64>,
@@ -396,6 +414,80 @@ pub fn estimate_api_equivalent_with_cache_ttl_and_price_sources(
         output_tokens,
         total_tokens,
         price_override,
+    )
+}
+
+/// Resolves price provenance for a persisted usage candidate.
+///
+/// Account usage is always measured against the official API catalog. A
+/// compatible source uses its discovered price first and falls back to a
+/// manual source price only when the source has no discovered value.
+pub fn candidate_model_price_sources(
+    manual_price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    source_price_overrides: &SourceModelPriceOverrides,
+    candidate_kind: &str,
+    candidate_id: &str,
+    model: Option<&str>,
+) -> Option<ApiModelPriceSources> {
+    let model = model?.to_ascii_lowercase();
+    if candidate_kind != "source" {
+        return None;
+    }
+    source_price_overrides
+        .get(candidate_id)
+        .and_then(|prices| prices.get(&model).copied())
+        .or_else(|| {
+            manual_price_overrides
+                .get(&model)
+                .copied()
+                .map(|manual| ApiModelPriceSources {
+                    provider: None,
+                    manual: Some(manual),
+                })
+        })
+}
+
+/// Estimates a candidate's API-equivalent value under Relay's price policy.
+///
+/// Account candidates deliberately ignore provider/manual source pricing;
+/// source candidates retain the provider -> official -> manual precedence.
+pub fn estimate_candidate_api_equivalent(
+    candidate_kind: &str,
+    model: Option<&str>,
+    usage: ApiEquivalentUsage,
+    price_sources: Option<ApiModelPriceSources>,
+) -> ApiEquivalentSummary {
+    let ApiEquivalentUsage {
+        input_tokens,
+        cached_input_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        unknown_cache_write_tokens,
+        output_tokens,
+        total_tokens,
+    } = usage;
+    if candidate_kind == "account" {
+        return estimate_api_equivalent_with_cache_ttl(
+            model,
+            input_tokens,
+            cached_input_tokens,
+            cache_write_5m_tokens,
+            cache_write_1h_tokens,
+            unknown_cache_write_tokens,
+            output_tokens,
+            total_tokens,
+        );
+    }
+    estimate_api_equivalent_with_cache_ttl_and_price_sources(
+        model,
+        input_tokens,
+        cached_input_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        unknown_cache_write_tokens,
+        output_tokens,
+        total_tokens,
+        price_sources,
     )
 }
 
@@ -745,6 +837,100 @@ mod pricing_tests {
             )
             .micro_usd,
             18_000_000
+        );
+    }
+
+    #[test]
+    fn candidate_pricing_keeps_account_and_source_rules_separate() {
+        let provider = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_000_000,
+            cached_input_micro_usd_per_million: Some(100_000),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 2_000_000,
+        };
+        let manual = ApiModelPriceOverride {
+            input_micro_usd_per_million: 9_000_000,
+            cached_input_micro_usd_per_million: Some(900_000),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 9_000_000,
+        };
+        let manual_prices = BTreeMap::from([("private-model".to_string(), manual)]);
+        let source_prices = SourceModelPriceOverrides::from([(
+            "source-1".to_string(),
+            BTreeMap::from([(
+                "private-model".to_string(),
+                ApiModelPriceSources {
+                    provider: Some(provider),
+                    manual: None,
+                },
+            )]),
+        )]);
+        let usage = ApiEquivalentUsage {
+            input_tokens: Some(1_000_000),
+            cached_input_tokens: Some(0),
+            output_tokens: Some(1_000_000),
+            total_tokens: Some(2_000_000),
+            ..Default::default()
+        };
+
+        let source_price = candidate_model_price_sources(
+            &manual_prices,
+            &source_prices,
+            "source",
+            "source-1",
+            Some("PRIVATE-MODEL"),
+        );
+        assert_eq!(
+            source_price.and_then(|price| price.provider),
+            Some(provider)
+        );
+        assert_eq!(
+            candidate_model_price_sources(
+                &manual_prices,
+                &source_prices,
+                "source",
+                "missing-source",
+                Some("private-model"),
+            )
+            .and_then(|price| price.manual),
+            Some(manual)
+        );
+        assert_eq!(
+            candidate_model_price_sources(
+                &manual_prices,
+                &source_prices,
+                "account",
+                "account-1",
+                Some("private-model"),
+            ),
+            None
+        );
+
+        assert_eq!(
+            estimate_candidate_api_equivalent("source", Some("private-model"), usage, source_price),
+            ApiEquivalentSummary {
+                micro_usd: 3_000_000,
+                priced_tokens: 2_000_000,
+                unpriced_tokens: 0,
+            }
+        );
+        assert_eq!(
+            estimate_candidate_api_equivalent(
+                "account",
+                Some("private-model"),
+                usage,
+                Some(ApiModelPriceSources {
+                    provider: Some(provider),
+                    manual: Some(manual),
+                }),
+            ),
+            ApiEquivalentSummary {
+                micro_usd: 0,
+                priced_tokens: 0,
+                unpriced_tokens: 2_000_000,
+            }
         );
     }
 

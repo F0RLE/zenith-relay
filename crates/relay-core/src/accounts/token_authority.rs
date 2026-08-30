@@ -218,7 +218,9 @@ impl TokenRefreshFailure {
     fn reauth_reason(&self) -> Option<ReauthReason> {
         match self.kind {
             TokenRefreshFailureKind::InvalidGrant => Some(ReauthReason::InvalidGrant),
-            TokenRefreshFailureKind::ReusedRefreshToken => Some(ReauthReason::ReusedRefreshToken),
+            // Another concurrent refresh can rotate the token first. Preserve
+            // the current state and retry normally instead of forcing login.
+            TokenRefreshFailureKind::ReusedRefreshToken => None,
             TokenRefreshFailureKind::ExpiredRefreshToken => Some(ReauthReason::ExpiredRefreshToken),
             TokenRefreshFailureKind::InvalidatedRefreshToken => {
                 Some(ReauthReason::InvalidatedRefreshToken)
@@ -491,6 +493,16 @@ impl TokenAuthority {
                 .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
             slot.auth_state_persistence_pending = false;
         }
+        if matches!(
+            slot.auth_state,
+            AccountAuthState::RequiresReauth(ReauthReason::ReusedRefreshToken)
+        ) {
+            // Older Relay versions persisted this transient OAuth race as a
+            // hard reauthentication state. Heal the record before selecting a
+            // token so an update can retry or use the still-valid access token.
+            slot.auth_state = AccountAuthState::Active;
+            persist_auth_state(account_id, &mut slot, persistence).await?;
+        }
         if let AccountAuthState::RequiresReauth(reason) = slot.auth_state {
             return Err(TokenAuthorityError::RequiresReauth(reason));
         }
@@ -506,6 +518,7 @@ impl TokenAuthority {
             return Err(TokenAuthorityError::AccessTokenExpired);
         };
 
+        let previous_auth_state = slot.auth_state;
         slot.auth_state = AccountAuthState::Refreshing;
         match adapter.refresh(account_id, &refresh_token, now_ms).await {
             Ok(refreshed) => {
@@ -539,8 +552,11 @@ impl TokenAuthority {
                     persist_auth_state(account_id, &mut slot, persistence).await?;
                     Err(TokenAuthorityError::RequiresReauth(reason))
                 } else {
-                    slot.auth_state = AccountAuthState::Error;
-                    persist_auth_state(account_id, &mut slot, persistence).await?;
+                    // Network, timeout, lock, and temporary storage failures do
+                    // not change whether the account credentials are valid.
+                    // Keep the last durable auth state so an offline launch
+                    // cannot turn a usable account into a permanent auth error.
+                    slot.auth_state = previous_auth_state;
                     Err(TokenAuthorityError::RefreshFailed(failure.code))
                 }
             }
@@ -787,6 +803,167 @@ mod tests {
                 "local-account".to_string(),
                 AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant)
             )]
+        );
+    }
+
+    struct TransientRefreshFailure;
+
+    impl TokenRefreshAdapter for TransientRefreshFailure {
+        fn refresh<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _refresh_token: &'a str,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+            Box::pin(async {
+                Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "transport",
+                ))
+            })
+        }
+    }
+
+    struct ReusedRefreshFailure;
+
+    impl TokenRefreshAdapter for ReusedRefreshFailure {
+        fn refresh<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _refresh_token: &'a str,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+            Box::pin(async {
+                Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::ReusedRefreshToken,
+                    "refresh_token_reused",
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_preserves_auth_state_and_tokens() {
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "local-account",
+                TokenSet::new(
+                    "access",
+                    Some("refresh".into()),
+                    Some("identity".into()),
+                    Some(1),
+                    0,
+                    7,
+                )
+                .unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let persistence = CapturePersistence::default();
+
+        assert_eq!(
+            authority
+                .prepare_and_persist(
+                    "local-account",
+                    2,
+                    0,
+                    &TransientRefreshFailure,
+                    &persistence,
+                )
+                .await
+                .unwrap_err(),
+            TokenAuthorityError::RefreshFailed("transport".into())
+        );
+        assert_eq!(
+            authority.auth_state("local-account").await,
+            Some(AccountAuthState::Active)
+        );
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+        assert!(persistence.auth_states.lock().unwrap().is_empty());
+
+        let tokens = authority.tokens("local-account").await.unwrap();
+        assert_eq!(tokens.access_token(), "access");
+        assert_eq!(tokens.refresh_token(), Some("refresh"));
+        assert_eq!(tokens.id_token(), Some("identity"));
+        assert_eq!(tokens.expires_at_ms(), Some(1));
+        assert_eq!(tokens.issued_at_ms(), 0);
+        assert_eq!(tokens.generation(), 7);
+    }
+
+    #[tokio::test]
+    async fn reused_refresh_token_preserves_auth_state_and_tokens() {
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "local-account",
+                TokenSet::new(
+                    "access",
+                    Some("refresh".into()),
+                    Some("identity".into()),
+                    Some(1),
+                    0,
+                    7,
+                )
+                .unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let persistence = CapturePersistence::default();
+
+        assert_eq!(
+            authority
+                .prepare_and_persist("local-account", 2, 0, &ReusedRefreshFailure, &persistence,)
+                .await
+                .unwrap_err(),
+            TokenAuthorityError::RefreshFailed("refresh_token_reused".into())
+        );
+        assert_eq!(
+            authority.auth_state("local-account").await,
+            Some(AccountAuthState::Active)
+        );
+        assert!(persistence.auth_states.lock().unwrap().is_empty());
+        assert_eq!(
+            authority
+                .tokens("local-account")
+                .await
+                .unwrap()
+                .generation(),
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_reused_refresh_token_reauth_state_is_healed_before_prepare() {
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "local-account",
+                TokenSet::new(
+                    "access",
+                    Some("refresh".into()),
+                    Some("identity".into()),
+                    Some(10_000),
+                    0,
+                    7,
+                )
+                .unwrap(),
+                AccountAuthState::RequiresReauth(ReauthReason::ReusedRefreshToken),
+            )
+            .await
+            .unwrap();
+
+        let prepared = authority
+            .prepare("local-account", 1, 0, &TransientRefreshFailure)
+            .await
+            .expect("a legacy transient state must not force login");
+
+        assert_eq!(prepared.status, PrepareStatus::Ready);
+        assert_eq!(
+            authority.auth_state("local-account").await,
+            Some(AccountAuthState::Active)
         );
     }
 

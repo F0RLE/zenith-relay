@@ -5,7 +5,9 @@ use serde_json::Value;
 pub fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
     match code.trim().to_ascii_lowercase().as_str() {
         "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
-        "refresh_token_reused" => TokenRefreshFailureKind::ReusedRefreshToken,
+        // This may be emitted after another concurrent refresh already
+        // rotated the token. It is retriable, not a fresh-login condition.
+        "refresh_token_reused" => TokenRefreshFailureKind::Transient,
         "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
         "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
             TokenRefreshFailureKind::InvalidatedRefreshToken
@@ -35,14 +37,14 @@ mod tests {
     use crate::normalize_error_code;
 
     #[test]
-    fn refresh_errors_keep_distinct_reauthentication_reasons() {
+    fn refresh_errors_only_mark_irrecoverable_tokens_for_reauthentication() {
         assert_eq!(
             token_refresh_failure_kind("invalid_grant"),
             TokenRefreshFailureKind::InvalidGrant
         );
         assert_eq!(
             token_refresh_failure_kind("refresh_token_reused"),
-            TokenRefreshFailureKind::ReusedRefreshToken
+            TokenRefreshFailureKind::Transient
         );
         assert_eq!(
             token_refresh_failure_kind("refresh_token_expired"),

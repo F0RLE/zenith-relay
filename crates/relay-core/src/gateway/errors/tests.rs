@@ -328,6 +328,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
             ),
             (
                 StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"refresh_token_reused"}}"#.as_slice(),
+                "upstream_refresh_token_reused",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
                 br#"{"error":{"message":"An error occurred while processing your request"}}"#.as_slice(),
                 "upstream_server_error",
             ),
@@ -495,13 +500,15 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         "upstream_content_policy",
         false
     ));
+    assert!(!failure_category_requires_cooldown(
+        "upstream_invalid_request"
+    ));
     for category in [
         "upstream_stream",
         "stream_incomplete",
         "stream_idle_timeout",
-        "upstream_invalid_request",
     ] {
-        assert!(!failure_category_requires_cooldown(category));
+        assert!(failure_category_requires_cooldown(category));
     }
     assert_eq!(
         AttemptFailure::status_with_body(

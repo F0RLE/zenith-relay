@@ -72,7 +72,7 @@ pub(in crate::gateway) struct TerminalEvent {
     pub(in crate::gateway) preserved_error: Option<PreservedUpstreamError>,
     pub(in crate::gateway) cooldown_hint: RateLimitBodyHint,
     pub(in crate::gateway) usage: Option<Value>,
-    pub(in crate::gateway) applied_service_tier: Option<DefaultServiceTier>,
+    pub(in crate::gateway) applied_service_tier: Option<crate::ObservedServiceTier>,
     pub(in crate::gateway) response_id: Option<String>,
     pub(in crate::gateway) response: Option<Value>,
     pub(in crate::gateway) output_item: Option<Value>,

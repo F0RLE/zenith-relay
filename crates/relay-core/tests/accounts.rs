@@ -1163,13 +1163,17 @@ async fn codex_catalog_prefers_a_usable_account_token() {
 async fn account_requests_preserve_responses_lite_compatibility() {
     let (upstream, state) = spawn_upstream(vec![success_reply("lite-response")]).await;
     let authority = ready_authority("relay-account", "account-access").await;
-    let (gateway, _, _, _) = spawn_mixed_gateway(
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![account("relay-account", "provider-account", &upstream, 10)],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            default_service_tier: DefaultServiceTier::Fast,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -1180,6 +1184,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
         .json(&json!({
             "model": MODEL,
             "input": "hello",
+            "service_tier": "flex",
             "parallel_tool_calls": true,
             "reasoning": {"effort": "high"},
             "tools": [
@@ -1195,6 +1200,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
+    assert_eq!(requests[0].body["service_tier"], "priority");
     assert_eq!(requests[0].body["parallel_tool_calls"], false);
     let tools = requests[0].body["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 3);
@@ -1896,11 +1902,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
     assert_eq!(requests[0]["parallel_tool_calls"], false);
-    // Fast is only synthesized after a route's catalog confirms priority.
-    // This WebSocket-only fixture has no model discovery request, so the
-    // standard tier remains implicit.
-    assert!(requests[0]["service_tier"].is_null());
-    assert_eq!(requests[1]["service_tier"], "flex");
+    // Managed Codex traffic is governed by the pool's two-speed setting.
+    // The fixture selects Fast, so the upstream always receives OpenAI's
+    // `priority` spelling instead of a client-provided tier.
+    assert_eq!(requests[0]["service_tier"], "priority");
+    assert_eq!(requests[1]["service_tier"], "priority");
     assert_eq!(requests[1]["reasoning"]["effort"], "high");
     assert_eq!(requests[1]["reasoning"]["summary"], "detailed");
     assert_eq!(requests[1]["reasoning"]["context"], "all_turns");

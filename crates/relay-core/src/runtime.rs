@@ -1,6 +1,4 @@
-use crate::accounts::{
-    AccountAuthState, TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter,
-};
+use crate::accounts::{TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities};
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
@@ -40,7 +38,6 @@ mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
-mod source_speed;
 
 use control::RuntimeControl;
 use session_state::CodexTurnStateStore;
@@ -222,6 +219,40 @@ pub struct RuntimeSourcePolicyUpdate {
     pub source_id: String,
     pub policy: RuntimeCandidatePolicy,
     pub recovery_delay_seconds: u64,
+}
+
+/// Supplies the mutable portion of a configured source route. Storage
+/// records stay owned by desktop and server, while their live-update policy is
+/// deliberately one shared contract.
+pub trait RuntimeSourcePolicyRecord {
+    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate;
+}
+
+/// Selects source policy changes that can be applied to an existing runtime.
+/// Connection, secret, protocol, and model-route changes are intentionally
+/// outside this function because their executors are immutable and require a
+/// rebuild.
+pub fn changed_runtime_source_policy_updates<T: RuntimeSourcePolicyRecord>(
+    previous: &[T],
+    next: &[T],
+) -> Vec<RuntimeSourcePolicyUpdate> {
+    let previous_updates = previous
+        .iter()
+        .map(RuntimeSourcePolicyRecord::runtime_source_policy_update)
+        .collect::<Vec<_>>();
+    next.iter()
+        .filter_map(|record| {
+            let update = record.runtime_source_policy_update();
+            let changed = previous_updates
+                .iter()
+                .find(|previous| previous.source_id == update.source_id)
+                .is_none_or(|previous| {
+                    previous.policy != update.policy
+                        || previous.recovery_delay_seconds != update.recovery_delay_seconds
+                });
+            changed.then_some(update)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1154,7 +1185,8 @@ impl GatewayRuntime {
             };
             let auth_state = account.token_authority.auth_state(&account_id).await;
             let tokens = account.token_authority.tokens(&account_id).await;
-            let can_prepare = !matches!(auth_state, Some(AccountAuthState::RequiresReauth(_)));
+            let can_prepare =
+                auth_state.is_none_or(|auth_state| !auth_state.requires_fresh_login());
             let token_rank = match tokens {
                 Some(tokens)
                     if can_prepare && tokens.is_access_usable(now_ms, account.refresh_skew_ms) =>
@@ -1393,9 +1425,8 @@ impl GatewayRuntime {
         }
     }
 
-    /// Applies only operator-selected Fast overrides. A client-supplied tier
-    /// still wins at the request boundary, and an unconfirmed upstream model
-    /// never receives a synthetic priority request.
+    /// Applies the operator-selected two-speed policy. Client-owned API
+    /// requests retain an explicit tier at the gateway boundary.
     pub fn set_model_service_tier_overrides(
         &self,
         overrides: BTreeMap<String, DefaultServiceTier>,
@@ -1409,24 +1440,13 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    pub(crate) fn model_service_tier_for_candidate(
-        &self,
-        candidate_id: &str,
-        model: &str,
-    ) -> DefaultServiceTier {
-        let requested_tier = self
-            .model_service_tier_overrides
+    pub(crate) fn model_service_tier(&self, model: &str) -> DefaultServiceTier {
+        self.model_service_tier_overrides
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&model.trim().to_ascii_lowercase())
             .copied()
-            .unwrap_or_else(|| self.default_service_tier());
-        let requested_fast = requested_tier == DefaultServiceTier::Fast;
-        if requested_fast && self.candidate_supports_fast_service_tier(candidate_id, model) {
-            DefaultServiceTier::Fast
-        } else {
-            DefaultServiceTier::Standard
-        }
+            .unwrap_or_else(|| self.default_service_tier())
     }
 
     pub fn set_model_display_order(&self, models: Vec<String>) {

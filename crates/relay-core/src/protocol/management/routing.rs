@@ -89,7 +89,7 @@ pub fn quota_refresh_status(
     quota: &QuotaSnapshot,
     refreshing: bool,
 ) -> QuotaRefreshStatus {
-    if matches!(auth_state, AccountAuthState::RequiresReauth(_)) {
+    if auth_state.requires_fresh_login() {
         QuotaRefreshStatus::RequiresReauth
     } else if refreshing {
         QuotaRefreshStatus::Refreshing
@@ -180,12 +180,11 @@ fn account_routing_block_reason(
     if !input.proxy_available {
         return Some(AccountRoutingBlockReason::ProxyUnavailable);
     }
-    match input.auth_state {
-        AccountAuthState::RequiresReauth(_) => {
-            return Some(AccountRoutingBlockReason::ReauthRequired)
-        }
-        AccountAuthState::Error => return Some(AccountRoutingBlockReason::AuthError),
-        _ => {}
+    if input.auth_state.requires_fresh_login() {
+        return Some(AccountRoutingBlockReason::ReauthRequired);
+    }
+    if input.auth_state == AccountAuthState::Error {
+        return Some(AccountRoutingBlockReason::AuthError);
     }
     match input.last_error_code {
         Some("checkpoint" | "upstream_account_verification_required") => {
@@ -209,4 +208,39 @@ fn account_routing_block_reason(
         return Some(AccountRoutingBlockReason::AccountUnhealthy);
     }
     (quota == CandidateQuota::Exhausted).then_some(AccountRoutingBlockReason::QuotaExhausted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::ReauthReason;
+
+    #[test]
+    fn legacy_reused_refresh_token_does_not_request_login_or_block_routing() {
+        let auth_state = AccountAuthState::RequiresReauth(ReauthReason::ReusedRefreshToken);
+        let quota = QuotaSnapshot::default();
+        let subscription = Subscription::default();
+
+        assert_eq!(
+            quota_refresh_status(auth_state, &quota, false),
+            QuotaRefreshStatus::Pending
+        );
+
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &quota,
+            last_error_code: None,
+            now_ms: 0,
+            quota_stale_after_ms: 60_000,
+        });
+        assert!(state.routing_eligible);
+        assert_eq!(state.routing_block_reason, None);
+    }
 }

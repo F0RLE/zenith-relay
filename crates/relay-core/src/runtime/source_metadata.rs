@@ -22,6 +22,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
+const MANAGEMENT_SOURCE_METADATA_PROTOCOLS: &[WireApi] = &[
+    WireApi::Responses,
+    WireApi::ChatCompletions,
+    WireApi::Messages,
+    WireApi::Gemini,
+];
+
 struct SourceMetadataRoute {
     candidate_id: String,
     models_url: Url,
@@ -39,6 +46,21 @@ struct SourceMetadataManifest {
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
     manifest: Option<Value>,
+}
+
+/// Discovery callers either accept a fresh cached manifest or explicitly ask
+/// to bypass the normal prefetch throttle. Keeping this mode explicit avoids
+/// accidentally inverting a boolean at a catalog call site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceMetadataRefresh {
+    Cached,
+    Forced,
+}
+
+impl SourceMetadataRefresh {
+    const fn is_forced(self) -> bool {
+        matches!(self, Self::Forced)
+    }
 }
 
 impl GatewayRuntime {
@@ -73,12 +95,7 @@ impl GatewayRuntime {
                 .source_model_metadata(
                     &rules,
                     &scope,
-                    &[
-                        WireApi::Responses,
-                        WireApi::ChatCompletions,
-                        WireApi::Messages,
-                        WireApi::Gemini,
-                    ],
+                    MANAGEMENT_SOURCE_METADATA_PROTOCOLS,
                     runtime_now_ms(),
                 )
                 .await;
@@ -87,6 +104,41 @@ impl GatewayRuntime {
                 Ordering::Release,
             );
         });
+    }
+
+    /// Forces a source metadata refresh for an explicit management action.
+    /// Unlike the background prefetch, this bypasses the normal eight-hour
+    /// throttle while retaining the previous manifest as a fallback when the
+    /// provider is temporarily unavailable.
+    pub async fn refresh_source_model_metadata(self: &Arc<Self>) {
+        let scope = self.management_source_metadata_scope();
+        self.refresh_source_model_metadata_in_scope(scope).await;
+    }
+
+    /// Forces metadata discovery for one management source after its catalog
+    /// was explicitly refreshed. Other sources retain their cached metadata,
+    /// so a bulk source refresh scales with the number of changed sources
+    /// instead of repeatedly rediscovering the complete pool.
+    pub async fn refresh_source_model_metadata_for_source(self: &Arc<Self>, source_id: &str) {
+        let mut scope = self.management_source_metadata_scope();
+        scope.source_ids = Some(match scope.source_ids {
+            Some(source_ids) if source_ids.contains(source_id) => [source_id.to_string()].into(),
+            Some(_) => BTreeSet::new(),
+            None => [source_id.to_string()].into(),
+        });
+        self.refresh_source_model_metadata_in_scope(scope).await;
+    }
+
+    async fn refresh_source_model_metadata_in_scope(self: &Arc<Self>, scope: CandidateScope) {
+        let rules = ModelRules::default();
+        self.source_model_metadata_with_refresh(
+            &rules,
+            &scope,
+            MANAGEMENT_SOURCE_METADATA_PROTOCOLS,
+            runtime_now_ms(),
+            SourceMetadataRefresh::Forced,
+        )
+        .await;
     }
 
     /// Builds the source portion of the scope represented by active gateway
@@ -119,8 +171,28 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> CodexSourceModelMetadata {
+        self.source_model_metadata_with_refresh(
+            model_rules,
+            scope,
+            allowed_protocols,
+            now_ms,
+            SourceMetadataRefresh::Cached,
+        )
+        .await
+    }
+
+    async fn source_model_metadata_with_refresh(
+        &self,
+        model_rules: &ModelRules,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+        refresh: SourceMetadataRefresh,
+    ) -> CodexSourceModelMetadata {
         let routes = self.source_metadata_routes(model_rules, scope, allowed_protocols);
-        let manifests = self.source_metadata_manifests(routes, now_ms).await;
+        let manifests = self
+            .source_metadata_manifests(routes, now_ms, refresh)
+            .await;
 
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
@@ -330,21 +402,24 @@ impl GatewayRuntime {
         &self,
         routes: Vec<SourceMetadataRoute>,
         now_ms: u64,
+        refresh: SourceMetadataRefresh,
     ) -> Vec<SourceMetadataManifest> {
-        let refresh_allowed = now_ms
-            >= self
-                .model_metadata
-                .prefetch_not_before_ms
-                .load(Ordering::Acquire);
+        let forced = refresh.is_forced();
+        let initial_not_before_ms = self
+            .model_metadata
+            .prefetch_not_before_ms
+            .load(Ordering::Acquire);
+        let mut refresh_allowed = forced || now_ms >= initial_not_before_ms;
         // A catalog request with fresh manifests must not queue behind an
         // unrelated best-effort refresh. Stale callers still serialize their
         // upstream discovery so they coalesce onto one cache refill.
-        let refresh_required = refresh_allowed
+        let refresh_required = (forced || refresh_allowed)
             && routes.iter().any(|route| {
                 self.cached_source_model_manifest(&route.candidate_id)
                     .is_none_or(|manifest| {
-                        now_ms.saturating_sub(manifest.observed_at_ms)
-                            > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+                        forced
+                            || now_ms.saturating_sub(manifest.observed_at_ms)
+                                > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
                     })
             });
         let refresh_guard = if refresh_required {
@@ -352,11 +427,27 @@ impl GatewayRuntime {
         } else {
             None
         };
-        let manifests = join_all(
-            routes
-                .into_iter()
-                .map(|route| self.source_metadata_manifest(route, now_ms, refresh_allowed)),
-        )
+        // An explicit refresh bypasses the throttle for the caller that wins
+        // the lock. If another explicit refresh was already waiting, the
+        // winner's throttle update tells that waiter to use the newly cached
+        // manifest instead of issuing a duplicate upstream request.
+        let effective_refresh = if forced && refresh_guard.is_some() {
+            let current_not_before_ms = self
+                .model_metadata
+                .prefetch_not_before_ms
+                .load(Ordering::Acquire);
+            if current_not_before_ms != initial_not_before_ms {
+                refresh_allowed = now_ms >= current_not_before_ms;
+                SourceMetadataRefresh::Cached
+            } else {
+                SourceMetadataRefresh::Forced
+            }
+        } else {
+            refresh
+        };
+        let manifests = join_all(routes.into_iter().map(|route| {
+            self.source_metadata_manifest(route, now_ms, refresh_allowed, effective_refresh)
+        }))
         .await;
         drop(refresh_guard);
         if refresh_required {
@@ -373,6 +464,7 @@ impl GatewayRuntime {
         route: SourceMetadataRoute,
         now_ms: u64,
         refresh_allowed: bool,
+        refresh: SourceMetadataRefresh,
     ) -> SourceMetadataManifest {
         let SourceMetadataRoute {
             candidate_id,
@@ -386,9 +478,11 @@ impl GatewayRuntime {
         } = route;
         let cached_manifest = self.cached_source_model_manifest(&candidate_id);
         let manifest = if !refresh_allowed
-            || cached_manifest.as_ref().is_some_and(|manifest| {
-                now_ms.saturating_sub(manifest.observed_at_ms) <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
-            }) {
+            || (!refresh.is_forced()
+                && cached_manifest.as_ref().is_some_and(|manifest| {
+                    now_ms.saturating_sub(manifest.observed_at_ms)
+                        <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+                })) {
             cached_manifest.map(|manifest| manifest.value)
         } else {
             let fetched_manifest = async {

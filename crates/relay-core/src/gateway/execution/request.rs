@@ -14,10 +14,10 @@ use super::super::now_ms;
 #[cfg(test)]
 use super::super::request::requested_reasoning_effort;
 use super::super::request::{
-    apply_default_service_tier_if_missing, candidate_protocols, contains_tool_call_output,
+    apply_codex_routing_hint, candidate_protocols, contains_tool_call_output,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
-    request_service_tier, responses_lite_parallel_tool_calls_valid, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
+    responses_lite_parallel_tool_calls_valid, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_error_response,
@@ -32,7 +32,7 @@ use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids, AdapterError, AdapterRequestContext,
 };
-use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
+use crate::runtime::AuthenticatedKey;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{Error, GatewayRuntime, SourceAdapter, WireApi};
 use axum::body::Body;
@@ -43,29 +43,42 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[allow(clippy::too_many_arguments)]
-pub(in crate::gateway::execution) async fn execute_request(
-    runtime: Arc<GatewayRuntime>,
-    key: AuthenticatedKey,
-    mut request: Value,
-    requested_model: String,
-    resolved_model: String,
-    stream: bool,
-    request_id: String,
-    forwarded_headers: HeaderMap,
-    client_context_id: Option<String>,
-    response_affinity_key: Option<String>,
-    wire_api: WireApi,
-    responses_lite: Option<HeaderValue>,
-    allow_previous_response_reset: bool,
-    attempt_offset: u16,
-) -> Response<Body> {
-    let client_supplied_service_tier = request.get("service_tier").is_some();
-    let service_tier = if wire_api != WireApi::Messages {
-        request_service_tier(&request)
-    } else {
-        DefaultServiceTier::Standard
-    };
+pub(super) struct RequestExecution {
+    pub(super) runtime: Arc<GatewayRuntime>,
+    pub(super) key: AuthenticatedKey,
+    pub(super) request: Value,
+    pub(super) service_tier_policy: ServiceTierPolicy,
+    pub(super) requested_model: String,
+    pub(super) resolved_model: String,
+    pub(super) stream: bool,
+    pub(super) request_id: String,
+    pub(super) forwarded_headers: HeaderMap,
+    pub(super) client_context_id: Option<String>,
+    pub(super) response_affinity_key: Option<String>,
+    pub(super) wire_api: WireApi,
+    pub(super) responses_lite: Option<HeaderValue>,
+    pub(super) allow_previous_response_reset: bool,
+    pub(super) attempt_offset: u16,
+}
+
+pub(super) async fn execute_request(context: RequestExecution) -> Response<Body> {
+    let RequestExecution {
+        runtime,
+        key,
+        mut request,
+        service_tier_policy,
+        requested_model,
+        resolved_model,
+        stream,
+        request_id,
+        forwarded_headers,
+        client_context_id,
+        response_affinity_key,
+        wire_api,
+        responses_lite,
+        allow_previous_response_reset,
+        attempt_offset,
+    } = context;
     let client_tool_use = tool_use_diagnostics(&request);
     let mut tried = Default::default();
     let mut attempt = attempt_offset;
@@ -147,22 +160,13 @@ pub(in crate::gateway::execution) async fn execute_request(
         ) else {
             continue;
         };
-        if !client_supplied_service_tier {
-            request
-                .as_object_mut()
-                .expect("request object was validated before routing")
-                .remove("service_tier");
-        }
-        if wire_api != WireApi::Messages {
-            apply_default_service_tier_if_missing(
-                &mut request,
-                runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
-            );
-        }
+        let selected_service_tier = runtime.model_service_tier(&route.source_model);
+        service_tier_policy.prepare_for_candidate(&mut request, selected_service_tier, wire_api);
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_id.clone();
-        route.service_tier = service_tier;
+        route.service_tier =
+            service_tier_policy.effective_tier(&request, selected_service_tier, wire_api);
         let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
@@ -288,6 +292,13 @@ pub(in crate::gateway::execution) async fn execute_request(
             );
         } else {
             upstream_headers.remove(CODEX_TURN_STATE_HEADER);
+        }
+        if account_route && wire_api == WireApi::Responses {
+            apply_codex_routing_hint(
+                &mut upstream_headers,
+                &route.source_model,
+                route.service_tier,
+            );
         }
         let mut upstream_request = client
             .post(route.upstream_url.clone())
@@ -965,22 +976,23 @@ pub(in crate::gateway::execution) async fn execute_request(
         let mut reset_request = request;
         if let Some(object) = reset_request.as_object_mut() {
             object.remove("previous_response_id");
-            return Box::pin(execute_request(
+            return Box::pin(execute_request(RequestExecution {
                 runtime,
                 key,
-                reset_request,
+                request: reset_request,
+                service_tier_policy,
                 requested_model,
                 resolved_model,
                 stream,
                 request_id,
                 forwarded_headers,
                 client_context_id,
-                None,
+                response_affinity_key: None,
                 wire_api,
                 responses_lite,
-                false,
-                attempt,
-            ))
+                allow_previous_response_reset: false,
+                attempt_offset: attempt,
+            }))
             .await;
         }
     }

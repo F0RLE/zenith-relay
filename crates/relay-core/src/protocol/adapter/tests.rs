@@ -87,6 +87,73 @@ fn native_responses_request_keeps_image_input_opaque() {
 }
 
 #[test]
+fn response_bridges_share_the_complete_client_tool_catalog() {
+    let request = json!({
+        "model": "bridge-test",
+        "tools": [{
+            "type": "function",
+            "name": "root_tool",
+            "parameters": {"type": "object"}
+        }],
+        "input": [
+            {
+                "type": "additional_tools",
+                "tools": [{
+                    "type": "function",
+                    "name": "deferred_tool",
+                    "parameters": {"type": "object"}
+                }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "inspect"}]
+            }
+        ]
+    });
+    let messages = SourceAdapter::ResponsesToMessages
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &request,
+            model: "claude-test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            previous: None,
+            response_scope: "messages-route",
+            response_id_seed: "messages-tools",
+        })
+        .unwrap();
+    assert_eq!(messages.upstream_body()["tools"][0]["name"], "root_tool");
+    assert_eq!(
+        messages.upstream_body()["tools"][1]["name"],
+        "deferred_tool"
+    );
+
+    let gemini = SourceAdapter::ResponsesToGemini
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &request,
+            model: "gemini-test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            previous: None,
+            response_scope: "gemini-route",
+            response_id_seed: "gemini-tools",
+        })
+        .unwrap();
+    assert_eq!(
+        gemini.upstream_body()["tools"][0]["functionDeclarations"][0]["name"],
+        "root_tool"
+    );
+    assert_eq!(
+        gemini.upstream_body()["tools"][0]["functionDeclarations"][1]["name"],
+        "deferred_tool"
+    );
+}
+
+#[test]
 fn messages_cache_write_lifetime_overrides_existing_markers() {
     let mut request = json!({
         "system": [{"type": "text", "text": "system"}],

@@ -8,6 +8,7 @@ mod runtime;
 mod token_errors;
 
 use futures_util::StreamExt;
+use reqwest::header::{HeaderValue, InvalidHeaderValue};
 
 pub use agent_identity::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
@@ -39,6 +40,13 @@ pub(super) fn valid_access_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_ACCESS_TOKEN_BYTES
         && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+/// Creates a sensitive bearer header without exposing the token in logs.
+pub fn bearer_authorization(access_token: &str) -> Result<HeaderValue, InvalidHeaderValue> {
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {access_token}"))?;
+    authorization.set_sensitive(true);
+    Ok(authorization)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,5 +81,16 @@ mod tests {
         assert!(!valid_access_token(""));
         assert!(!valid_access_token("token\nvalue"));
         assert!(!valid_access_token(&"x".repeat(MAX_ACCESS_TOKEN_BYTES + 1)));
+    }
+
+    #[test]
+    fn bearer_authorization_is_sensitive_and_rejects_invalid_header_values() {
+        let authorization = bearer_authorization("synthetic-access-token").unwrap();
+        assert_eq!(
+            authorization.to_str().unwrap(),
+            "Bearer synthetic-access-token"
+        );
+        assert!(authorization.is_sensitive());
+        assert!(bearer_authorization("invalid\nvalue").is_err());
     }
 }

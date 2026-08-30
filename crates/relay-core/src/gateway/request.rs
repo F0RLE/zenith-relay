@@ -13,12 +13,15 @@ use codex_models::{
     build_codex_models_response_with_source_reasoning,
 };
 pub(super) use headers::{
-    client_context_fingerprint, forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers,
-    forwarded_codex_headers, forwarded_messages_headers,
+    apply_codex_routing_hint, client_context_fingerprint, forwarded_bridge_gemini_headers,
+    forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
+    is_managed_codex_client,
 };
+#[cfg(test)]
+pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
 pub(super) use normalization::{
-    apply_default_service_tier_if_missing, normalize_account_request, request_service_tier,
-    responses_lite_parallel_tool_calls_valid, try_recover_encrypted_content,
+    normalize_account_request, responses_lite_parallel_tool_calls_valid,
+    try_recover_encrypted_content, ServiceTierPolicy,
 };
 
 use super::execution::execute_client_request;

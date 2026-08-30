@@ -60,6 +60,43 @@ fn select_image(scheduler: &mut PoolScheduler, tried: &HashSet<String>) -> Optio
 }
 
 #[test]
+fn namespaced_api_model_never_falls_back_to_a_bare_oauth_model() {
+    let mut scheduler = PoolScheduler::new();
+    let mut api = candidate("api-slot");
+    api.models = ["cpa/gpt-5.5".to_string()].into();
+    api.cooldowns.insert("*".to_string(), 200);
+    scheduler.upsert(api);
+
+    let mut oauth = oauth_candidate("oauth-slot");
+    oauth.models = ["gpt-5.5".to_string()].into();
+    scheduler.upsert(oauth);
+
+    let namespaced = scheduler.select(SelectionRequest {
+        model: "cpa/gpt-5.5",
+        allowed_protocols: &[WireApi::Responses],
+        scope: &CandidateScope::default(),
+        tried: &HashSet::new(),
+        response_affinity_key: None,
+        prompt_affinity_key: None,
+        now_ms: 100,
+    });
+    assert!(namespaced.is_none());
+
+    let bare = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5.5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: 100,
+        })
+        .unwrap();
+    assert_eq!(bare.candidate_id, "oauth-slot");
+}
+
+#[test]
 fn runtime_snapshot_keeps_the_management_wire_shape() {
     let snapshot = CandidateRuntimeSnapshot {
         candidate_id: "source".into(),
