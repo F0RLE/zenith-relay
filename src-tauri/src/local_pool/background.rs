@@ -2,8 +2,8 @@ use super::{
     accounts::{
         quota_refresh::{
             next_quota_refresh_at, prepare_account_credentials, record_model_refresh_error,
-            record_quota_refresh_error, refresh_account_quota_once, AccountQuotaOutcome,
-            AccountQuotaRefreshResponse,
+            record_quota_refresh_error, refresh_account_models_once, refresh_account_quota_once,
+            AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
         reset_credits::consume_local_reset_credit_for_account,
         wake::{completion_from_execution, CodexWakeClient},
@@ -11,7 +11,10 @@ use super::{
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
@@ -60,6 +63,39 @@ pub(crate) fn start(app: AppHandle) {
     });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_loop(app).await;
+    });
+}
+
+/// Start a one-shot model discovery for accounts that have just become local
+/// pool members.
+///
+/// Quota refreshes and model discovery intentionally have separate periodic
+/// lifecycles. A membership change is the exception: the account must be
+/// discoverable immediately, otherwise the UI shows a fresh quota together
+/// with an empty model list until the user manually refreshes it. Keep the
+/// network work off the command path and reuse the per-account lock shared by
+/// the regular quota/model workers.
+pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: Vec<String>) {
+    let account_ids = account_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if account_ids.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<DesktopState>();
+        for account_id in account_ids {
+            let result = refresh_account_models_once(&state, &account_id).await;
+            if let Err(error) = result {
+                let _ = record_model_refresh_error(&state, &account_id, &error);
+            }
+            // The model list and any persisted discovery error are both part
+            // of the runtime snapshot, so notify the frontend after each
+            // account rather than waiting for a bulk operation to finish.
+            let _ = app.emit("zenith-state-changed", ());
+        }
     });
 }
 

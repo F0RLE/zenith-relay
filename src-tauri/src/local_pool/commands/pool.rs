@@ -929,6 +929,15 @@ pub async fn set_local_pool_membership(
 
     let mut sources = old_sources.clone();
     let mut accounts = old_accounts.clone();
+    let model_refresh_account_ids = if input.in_pool {
+        old_accounts
+            .iter()
+            .filter(|account| account_ids.contains(&account.account.id) && !account.account.in_pool)
+            .map(|account| account.account.id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     for source in &mut sources {
         if source_ids.contains(&source.id) {
             source.in_pool = input.in_pool;
@@ -977,13 +986,18 @@ pub async fn set_local_pool_membership(
     let snapshot = state.snapshot().await?;
     drop(_mutation);
     if updated_in_place {
+        let catalog_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let state = app.state::<DesktopState>();
+            let state = catalog_app.state::<DesktopState>();
             let result = super::profiles::refresh_active_codex_catalog(&state).await;
             super::record_catalog_refresh_result(&state, &result);
-            let _ = app.emit("zenith-state-changed", ());
+            let _ = catalog_app.emit("zenith-state-changed", ());
         });
     }
+    crate::local_pool::background::refresh_account_models_in_background(
+        app,
+        model_refresh_account_ids,
+    );
     Ok(snapshot)
 }
 

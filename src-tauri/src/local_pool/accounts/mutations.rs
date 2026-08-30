@@ -72,6 +72,8 @@ pub async fn update_local_account(
     validate_account_record(&account)?;
     let (old_accounts, old_keys) = current_account_records(&state)?;
     let catalog_changed = account_catalog_visibility_changed(&previous, &account);
+    let model_refresh_account =
+        (!previous.account.in_pool && account.account.in_pool).then(|| account.account.id.clone());
     state.store()?.upsert_account(account.clone())?;
     let membership_changed = previous.account.in_pool != account.account.in_pool;
     let updated_in_place = if apply_account_policy_if_running(&state, &account).await {
@@ -89,7 +91,10 @@ pub async fn update_local_account(
     let snapshot = state.snapshot().await?;
     drop(_mutation);
     if updated_in_place && catalog_changed {
-        refresh_active_codex_catalog_in_background(app);
+        refresh_active_codex_catalog_in_background(app.clone());
+    }
+    if let Some(account_id) = model_refresh_account {
+        crate::local_pool::background::refresh_account_models_in_background(app, vec![account_id]);
     }
     Ok(snapshot)
 }
