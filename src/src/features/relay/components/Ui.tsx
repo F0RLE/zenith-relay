@@ -584,6 +584,7 @@ export async function copyText(value: string) {
 }
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
-  return <IconButton label={copied ? `${label}: copied` : label} icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />} onClick={async () => { await copyText(value); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }} />;
+  return <IconButton label={copied ? `${label}: ${t("feedback.copied")}` : label} icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />} onClick={async () => { await copyText(value); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }} />;
 }

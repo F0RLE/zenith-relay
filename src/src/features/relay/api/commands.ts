@@ -55,6 +55,8 @@ export const relayCommands = {
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
   remoteRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[] | null>("get_remote_runtime_order"),
   remoteUsage: (input: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input }),
+  revealRemoteGatewayApiKey: () => invoke<string>("reveal_remote_gateway_api_key"),
+  rotateRemoteGatewayApiKey: () => invoke<string>("rotate_remote_gateway_api_key"),
   localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
   clearLocalUsage: () => invoke("clear_local_usage"),
 
@@ -121,6 +123,8 @@ export const relayCommands = {
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),
   updateGatewayPort: (port: number) => invoke("update_local_gateway_port", { port }),
+  revealLocalGatewayApiKey: () => invoke<string>("reveal_local_gateway_api_key"),
+  rotateLocalGatewayApiKey: () => invoke<string>("rotate_local_gateway_api_key"),
   updateChatgptQuotaReserve: (reserveBasisPoints: number) => invoke("update_chatgpt_interface_quota_reserve", { input: { reserveBasisPoints } }),
   setCommonProxy: (proxyUrl: string | null) => invoke("set_local_common_proxy", { input: { proxyUrl } }),
   setAccountProxyRequired: (required: boolean) => invoke("set_local_account_proxy_required", { input: { required } }),

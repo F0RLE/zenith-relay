@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CircleAlert, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, Server, SkipForward, Upload, UserRoundCheck, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { setI18nLanguage } from "../../../i18n";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
@@ -321,7 +322,7 @@ function LanguageSelect() {
     icon={<Languages aria-hidden />}
     label={t("settings.language")}
     value={i18n.language.startsWith("ru") ? "ru" : "en"}
-    onChange={(value) => void i18n.changeLanguage(value)}
+    onChange={(value) => void setI18nLanguage(value)}
     options={[{ value: "ru", label: "Русский", shortLabel: "RU" }, { value: "en", label: "English", shortLabel: "EN" }]}
   />;
 }

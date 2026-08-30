@@ -19,6 +19,12 @@ export type AccountValueProjection = {
   approximate: boolean;
 };
 
+export function formatAccountPayback(payback: number | null, locale: string, approximate = false) {
+  if (payback == null) return "—";
+  const formatted = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback);
+  return `${approximate ? "≈" : ""}${formatted}`;
+}
+
 /**
  * Builds the shared display projection for account usage cards.
  *

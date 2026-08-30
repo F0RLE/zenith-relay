@@ -29,7 +29,13 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, AccountTransferProgress, ProfileBinding } from "../../api/types";
-import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, requiresAccountReauthentication, transientCandidateTone } from "../../accountStatus";
+import {
+  refreshAllAccountQuotas,
+  refreshOneAccountQuota,
+  type AccountQuotaRefreshReport,
+} from "../../accountQuotaRefresh";
+import { subscriptionExpiryFormatter, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import {
   AccountPlanBadge,
   ActionMenu,
@@ -49,7 +55,8 @@ import {
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
-import { routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
+import { routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
+import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults } from "./connectionHelpers";
 import {
@@ -75,28 +82,20 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const allAccounts = runtime?.accounts ?? [];
-  const [nowMs, setNowMs] = useState(Date.now());
-  const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
-  useEffect(() => {
-    const runtimeOrder = runtime?.gateway.routingOrder ?? [];
-    const upcomingTimes = allAccounts.flatMap((account) => [
-      account.subscription.activeUntilMs,
-      account.quota.primary?.resetAtMs,
-      account.quota.secondary?.resetAtMs,
-      ...(account.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
-      ...(account.inPool
-        ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
-        : []),
-    ]).filter((value): value is number => value != null && value > nowMs);
-    if (!upcomingTimes.length) return;
-    const urgent = upcomingTimes.some((value) => value - nowMs < 60 * 60_000);
-    const timer = window.setTimeout(() => setNowMs(Date.now()), urgent ? 1_000 : 60_000);
-    return () => window.clearTimeout(timer);
-  }, [allAccounts, nowMs, runtime?.gateway.routingOrder]);
+  const runtimeOrder = runtime?.gateway.routingOrder ?? [];
+  const nowMs = useRelativeTimeClock(allAccounts.flatMap((account) => [
+    account.subscription.activeUntilMs,
+    account.quota.primary?.resetAtMs,
+    account.quota.secondary?.resetAtMs,
+    ...(account.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
+    ...(account.inPool
+      ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
+      : []),
+  ]));
+  const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
   const plans = accountPlanOptions(allAccounts, t("common.unknown"));
   const { errorCount, inPoolCount, disabledCount } = accountCounts(allAccounts);
   const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
-  const runtimeOrder = runtime?.gateway.routingOrder ?? [];
   const runtimeByAccount = new Map(allAccounts.map((account) => [
     account.id,
     account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
@@ -153,20 +152,12 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     return !current;
   });
   const updateParticipation = async (account: AccountSummary, participate: boolean) => {
-    if (mode === "local") {
-      await relayCommands.setPoolMembership([account.id], [], participate);
-      return;
-    }
-    await relayCommands.remoteAction(
-      { type: "set_pool_membership" },
-      { accountIds: [account.id], sourceIds: [], inPool: participate },
-    );
+    await updatePoolMembership(mode, { accountIds: [account.id], sourceIds: [], inPool: participate });
   };
   const updateSelectedParticipation = async (participate: boolean) => {
     const ok = await perform("pool-membership-bulk", async () => {
       const accountIds = selectedAccounts.map((account) => account.id);
-      if (mode === "local") await relayCommands.setPoolMembership(accountIds, [], participate);
-      else await relayCommands.remoteAction({ type: "set_pool_membership" }, { accountIds, sourceIds: [], inPool: participate });
+      await updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate });
     }, "feedback.saved");
     if (ok) setSelected([]);
   };
@@ -241,22 +232,15 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     await perform(`recover-account-${account.id}`, () => relayCommands.forceActivateRemoteAccountLocally(account.id), "feedback.accountRecoveredLocally");
   };
   const refreshAllQuotas = async () => {
-    let results: Awaited<ReturnType<typeof relayCommands.refreshAllAccountQuotas>> = [];
+    let report: AccountQuotaRefreshReport | null = null;
     const ok = await perform("quota-all", async () => {
-      results = await relayCommands.refreshAllAccountQuotas();
+      report = await refreshAllAccountQuotas(mode);
     });
-    if (ok) {
-      setQuotaReport({
-        succeeded: results.filter((result) => result.status === "succeeded").length,
-        failed: results.filter((result) => result.status === "failed").length,
-      });
-    }
+    if (ok && report) setQuotaReport(report);
   };
   const refreshAccountQuota = (account: AccountSummary) => perform(
     `connection-account-quota-${account.id}`,
-    () => mode === "local"
-      ? relayCommands.refreshAccountQuota(account.id)
-      : relayCommands.remoteAction({ type: "refresh_account", id: account.id }),
+    () => refreshOneAccountQuota(mode, account.id),
     "feedback.refreshed",
   );
   return (
@@ -326,9 +310,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         const operationalStatus = account.operationalStatus;
         const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : t(`connections.status.${operationalStatus}`);
         const runtimeState = account.inPool ? runtimeByAccount.get(account.id) : undefined;
-        const modelRetries = [...(runtimeState?.modelRetries ?? [])]
-          .filter((retry) => retry.retryAtMs > nowMs)
-          .sort((left, right) => left.retryAtMs - right.retryAtMs);
+        const modelRetries = upcomingModelRetries(runtimeState, nowMs);
         const modelRetryHint = modelRetries.length
           ? t("pool.modelRetryAt", {
             models: modelRetries.map((retry) => retry.model).join(", "),
@@ -343,7 +325,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           : modelRetryHint;
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
         const poolActionLabel = participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool");
-        const quotaStatus = account.quotaRefreshStatus;
+        const quotaStatus = accountQuotaRefreshState(account);
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
         const indicatorTone = onServer
           ? "info"
@@ -373,7 +355,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
             <div className="account-card-header-actions">
               <ActionMenu className="account-row-menu">
                 {errorCode ? <ActionMenuItem icon={<CircleAlert aria-hidden />} onClick={() => setErrorDetails(account)}>{t("accounts.errorDetailsTitle")}</ActionMenuItem> : null}
-                {mode === "local" && account.authState.state === "requires_reauth" ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
+                {mode === "local" && requiresAccountReauthentication(account) ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
@@ -409,13 +391,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
 
 function AccountQuotaRefreshState({ account }: { account: AccountSummary }) {
   const { t } = useTranslation();
-  const status = account.quotaRefreshStatus ?? (account.authState.state === "requires_reauth"
-    ? "requires_reauth"
-    : account.quota.error
-      ? "failed"
-      : account.quota.updatedAtMs != null
-        ? "updated"
-        : "pending");
+  const status = accountQuotaRefreshState(account);
   const icon = status === "refreshing"
     ? <Loader2 className="spin" aria-hidden />
     : status === "updated"

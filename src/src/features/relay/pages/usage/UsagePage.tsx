@@ -10,7 +10,7 @@ import { formatTokenSpeed } from "../../usageSpeed";
 import { AggregateView, CompactNumber, ErrorsView, RequestDetails, RequestsView } from "./UsageReportViews";
 import { AccountUsageSummary } from "./AccountUsageSummary";
 import { UsageMetric } from "./UsageMetric";
-import { codexRequestOriginFromErrorCategory, totalsFromRows, type UsageRow } from "./usageData";
+import { totalsFromRows, usageRowsFromLocal, usageRowsFromRemote, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
@@ -36,7 +36,7 @@ export function UsagePage() {
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
-  const [range, setRange] = useState<Range>("weekly");
+  const [range, setRange] = useState<Range>("all");
   const [modelQuery, setModelQuery] = useState("");
   const [connectionQuery, setConnectionQuery] = useState("");
   const [wireApi, setWireApi] = useState("");
@@ -92,8 +92,22 @@ export function UsagePage() {
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
     if (mode === "zenith") return [];
-    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, attempt: item.attempt ?? 1, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, requestedReasoningEffort: item.requestedReasoningEffort ?? null, effectiveReasoningEffort: item.effectiveReasoningEffort ?? null, connection: codexRequestOriginFromErrorCategory(item.errorCategory) ? t("codex.backgroundConnection") : item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs ?? null, generationMs: item.generationMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, cacheWriteTtl: item.cacheWriteTtl ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, errorOrigin: item.errorOrigin ?? null, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: null, candidateKind: item.candidateKind, apiEquivalent: item.apiEquivalent ?? null, requestOrigin: codexRequestOriginFromErrorCategory(item.errorCategory) }));
-    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, attempt: item.attempt, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, requestedReasoningEffort: item.requestedReasoningEffort ?? null, effectiveReasoningEffort: item.effectiveReasoningEffort ?? null, connection: codexRequestOriginFromErrorCategory(item.errorCategory) ? t("codex.backgroundConnection") : item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs, generationMs: item.generationMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, cacheWriteTtl: item.cacheWriteTtl ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, errorOrigin: item.errorOrigin ?? null, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: item.accountId ?? null, candidateKind: item.accountId ? ("account" as const) : ("source" as const), apiEquivalent: item.apiEquivalent ?? null, requestOrigin: codexRequestOriginFromErrorCategory(item.errorCategory) }));
+    const labels = {
+      backgroundConnection: t("codex.backgroundConnection"),
+      unknownAccount: t("accounts.importUnknownAccount"),
+      unknownConnection: t("common.unknown"),
+    };
+    if (mode === "remote") {
+      return usageRowsFromRemote(remoteUsage, {
+        ...labels,
+        accountDisplayName: (candidateLabel) => accountDisplayName(null, candidateLabel),
+      });
+    }
+    return usageRowsFromLocal(localUsagePage?.events ?? [], {
+      ...labels,
+      accountLabels,
+      sourceLabels,
+    });
   }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   useEffect(() => {
     if (!selected) return;

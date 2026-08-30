@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
   codexRequestOriginFromErrorCategory,
+  normalizeObservedServiceTier,
   totalsFromRows,
+  usageRowsFromLocal,
+  usageRowsFromRemote,
   type UsageRow,
 } from "../src/features/relay/pages/usage/usageData";
+import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
 
 const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   id: "request",
+  attempt: 1,
   time: "2026-08-23T00:00:00.000Z",
   success: true,
   model: "gpt-5.4",
@@ -44,6 +49,104 @@ describe("usage data", () => {
   test("normalizes known Codex background categories", () => {
     expect(codexRequestOriginFromErrorCategory("codex_activity_summary")).toBe("activity_summary");
     expect(codexRequestOriginFromErrorCategory("other")).toBeNull();
+  });
+
+  test("keeps safe provider tier diagnostics without changing their meaning", () => {
+    expect(normalizeObservedServiceTier("default")).toBe("default");
+    expect(normalizeObservedServiceTier("standard")).toBe("standard");
+    expect(normalizeObservedServiceTier("priority")).toBe("priority");
+    expect(normalizeObservedServiceTier("fast")).toBe("fast");
+    expect(normalizeObservedServiceTier("flex")).toBe("flex");
+    expect(normalizeObservedServiceTier("ultrafast")).toBe("ultrafast");
+    expect(normalizeObservedServiceTier("not a tier")).toBeNull();
+    expect(normalizeObservedServiceTier(null)).toBeNull();
+  });
+
+  test("uses one field projection for local and remote usage rows", () => {
+    const local: LocalUsage = {
+      id: 1,
+      createdAt: "2026-08-23T00:00:00.000Z",
+      requestId: "local-request",
+      attempt: 2,
+      sourceId: "source-1",
+      accountId: "account-1",
+      requestedModel: "gpt-5.4",
+      resolvedModel: "gpt-5.4",
+      wireApi: "responses",
+      serviceTier: "fast",
+      appliedServiceTier: "priority",
+      success: true,
+      httpStatus: 200,
+      errorCategory: "codex_activity_summary",
+      latencyMs: 900,
+      ttftMs: 120,
+      generationMs: 600,
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      reasoningTokens: 30,
+      outputTokens: 40,
+      totalTokens: 140,
+    };
+    const remote: RemoteUsage = {
+      id: 2,
+      requestId: "remote-request",
+      attempt: 3,
+      candidateKind: "account",
+      candidateHint: "remote-account",
+      candidateLabel: "Remote account",
+      requestedModel: "gpt-5.4",
+      resolvedModel: "gpt-5.4",
+      wireApi: "responses",
+      serviceTier: "standard",
+      appliedServiceTier: "flex",
+      success: true,
+      httpStatus: 200,
+      errorCategory: null,
+      latencyMs: 800,
+      ttftMs: 100,
+      generationMs: 500,
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      reasoningTokens: 20,
+      outputTokens: 30,
+      totalTokens: 120,
+      createdAtMs: Date.parse("2026-08-23T01:00:00.000Z"),
+    };
+    const labels = {
+      backgroundConnection: "ChatGPT",
+      unknownAccount: "Unknown account",
+      unknownConnection: "Unknown connection",
+    };
+
+    expect(usageRowsFromLocal([local], {
+      ...labels,
+      accountLabels: new Map([["account-1", "Primary account"]]),
+      sourceLabels: new Map([["source-1", "Primary source"]]),
+    })[0]).toMatchObject({
+      id: 1,
+      attempt: 2,
+      connection: "ChatGPT",
+      accountId: "account-1",
+      candidateKind: "account",
+      appliedServiceTier: "priority",
+      requestOrigin: "activity_summary",
+      ttft: 120,
+      generationMs: 600,
+    });
+    expect(usageRowsFromRemote([remote], {
+      ...labels,
+      accountDisplayName: (label) => label ? `Named ${label}` : null,
+    })[0]).toMatchObject({
+      id: 2,
+      attempt: 3,
+      connection: "Named Remote account",
+      accountId: null,
+      candidateKind: "account",
+      appliedServiceTier: "flex",
+      requestOrigin: null,
+      ttft: 100,
+      generationMs: 500,
+    });
   });
 
   test("aggregates usage and marks rows without a price as unpriced", () => {

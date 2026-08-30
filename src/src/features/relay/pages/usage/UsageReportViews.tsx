@@ -24,7 +24,7 @@ import {
   type RequestColumnId,
   type RequestTableLayout,
 } from "./useColumnLayout";
-import { totalsFromRows, usageSpeedSample, type CodexRequestOrigin, type UsageRow } from "./usageData";
+import { normalizeObservedServiceTier, totalsFromRows, usageSpeedSample, type CodexRequestOrigin, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 
 export function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setModelQuery, connectionQuery, poolMemberOptions, setConnectionQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; modelOptions: Array<{ value: string; label: string }>; setModelQuery: (value: string) => void; connectionQuery: string; poolMemberOptions: Array<{ value: string; label: string }>; setConnectionQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
@@ -231,6 +231,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
         <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
         <div><dt>{t("usage.protocol")}</dt><dd><code>{formatWireApi(row.wireApi, t)}</code></dd></div>
         <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
+        {formatObservedServiceTier(row) ? <div><dt>{t("usage.upstreamTier")}</dt><dd><code>{formatObservedServiceTier(row)}</code></dd></div> : null}
         <div><dt>{t("usage.reasoning")}</dt><dd>{formatReasoningSummary(row, t)}</dd></div>
         {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd title={t("codex.backgroundRequestHint")}>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
       </dl>
@@ -326,13 +327,11 @@ function formatReasoningSummary(row: Pick<UsageRow, "requestedReasoningEffort" |
 }
 
 function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction, fallback = "—") {
-  if (!row.serviceTier) return fallback;
-  const requested = t(`pool.serviceTiers.${row.serviceTier}`);
-  if (!row.appliedServiceTier || row.appliedServiceTier === row.serviceTier) return requested;
-  return t("usage.serviceTierChanged", {
-    requested,
-    applied: t(`pool.serviceTiers.${row.appliedServiceTier}`),
-  });
+  return row.serviceTier ? t(`pool.serviceTiers.${row.serviceTier}`) : fallback;
+}
+
+function formatObservedServiceTier(row: Pick<UsageRow, "appliedServiceTier">): string | null {
+  return normalizeObservedServiceTier(row.appliedServiceTier);
 }
 
 function formatWireApi(value: string | null, t: TFunction): string {

@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { AccountSummary } from "../api/types";
-import { buildAccountValueProjection } from "../accountEconomics";
+import { buildAccountValueProjection, formatAccountPayback } from "../accountEconomics";
 import { formatAccountValueMicroUsd } from "../poolFormatting";
 
 export function AccountValueStrip({ account }: { account: AccountSummary }) {
@@ -30,7 +30,7 @@ export function AccountValueStrip({ account }: { account: AccountSummary }) {
     </div> : null}
     <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}>
       <dt>{t("accounts.accountValue.payback")}</dt>
-      <dd>{payback == null ? "—" : `${approximate ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd>
+      <dd>{formatAccountPayback(payback, locale, approximate)}</dd>
     </div>
   </dl>;
 }

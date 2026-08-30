@@ -9,6 +9,7 @@ import {
   totalsFromSamples,
   type UsageSample,
 } from "../src/features/relay/pages/overview/overviewAnalyticsModel";
+import { sourceHost } from "../src/features/relay/sourceUrl";
 
 const sample = (overrides: Partial<UsageSample> = {}): UsageSample => ({
   createdAtMs: 1_000,
@@ -83,5 +84,10 @@ describe("overview analytics model", () => {
       "M12.50 66.67 L37.50 33.33",
       "M87.50 0.00",
     ]);
+  });
+
+  test("uses a readable source host without rejecting manual addresses", () => {
+    expect(sourceHost("https://api.example.test/v1")).toBe("api.example.test");
+    expect(sourceHost("manual source")).toBe("manual source");
   });
 });

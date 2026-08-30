@@ -93,6 +93,13 @@ export function activeRequestCount(candidate: CandidateRuntimeSnapshot | undefin
   return candidate?.activeRequestCount ?? candidate?.inFlight ?? 0;
 }
 
+/** Returns only currently active per-model cooldowns in their display order. */
+export function upcomingModelRetries(candidate: CandidateRuntimeSnapshot | undefined, nowMs: number) {
+  return [...(candidate?.modelRetries ?? [])]
+    .filter((retry) => retry.retryAtMs > nowMs)
+    .sort((left, right) => left.retryAtMs - right.retryAtMs);
+}
+
 /** Apply a host activity event without waiting for the next full snapshot. */
 export function applyRuntimeActivity(
   order: CandidateRuntimeSnapshot[],

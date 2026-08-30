@@ -5,6 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, SourceSummary, WakeTask } from "../../api/types";
 import { Button, PageHeader, Tabs } from "../../components/Ui";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
+import { useSourceRefresh } from "../../hooks/useSourceRefresh";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountProxyDialog, BulkProxyDialog, ProxyImportDialog, ProxyStorageView } from "./ProxyDialogs";
 import { connectionInitialView, connectionViews, reconcileRemoteConnectionView, type ConnectionView } from "./connectionViewState";
@@ -119,6 +120,12 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
             : "remote",
     );
   };
+  const { report: sourceRefreshReport, refresh: refreshSourceData, refreshOne: refreshSingleSource } = useSourceRefresh({
+    mode,
+    sources: runtime?.sources ?? [],
+    resetKey: `${mode}:${view}`,
+    perform,
+  });
 
   return (
     <section className="relay-page" data-view={view}>
@@ -145,10 +152,13 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
         </label>
         {view === "automations" && mode === "local" ? <Button variant="secondary" icon={<Play aria-hidden />} busy={busy === "wake-due"} onClick={() => perform("wake-due", relayCommands.runWakeConfirmations, "feedback.checked")}>{t("automations.runDue")}</Button> : null}
-        <Button variant="secondary" icon={<RefreshCw aria-hidden />} onClick={() => void refresh()}>{t("common.refresh")}</Button>
+        {view === "sources" ? <>
+          {sourceRefreshReport ? <span className="table-toolbar-result" role="status">{t("sources.refreshResult", sourceRefreshReport)}</span> : null}
+          <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={refreshSourceData}>{t("sources.refreshData")}</Button>
+        </> : <Button variant="secondary" icon={<RefreshCw aria-hidden />} onClick={() => void refresh()}>{t("common.refresh")}</Button>}
       </div> : null}
 
-      {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
+      {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} /> : null}
       {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} onImport={onImport} onSignIn={startOAuth} onReauthenticate={reauthenticateAccount} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
       {view === "proxies" ? <ProxyStorageView revision={proxyRevision} onImport={() => setDialog("proxyImport")} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}

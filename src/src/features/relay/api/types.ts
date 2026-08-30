@@ -1,6 +1,7 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
 export type DefaultServiceTier = "standard" | "fast";
+export type ObservedServiceTier = string;
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
 export type QuotaWindow = {
@@ -421,14 +422,11 @@ export type ToolUseDiagnostics = {
 export type ErrorOrigin = "provider" | "account" | "relay";
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
-export type LocalUsage = {
+/** Fields shared by local SQLite and remote Relay usage events. */
+type UsageEventRecord = {
   id: number;
-  createdAt: string;
   requestId: string;
   attempt: number;
-  sourceId: string;
-  accountId?: string | null;
-  clientContextId?: string | null;
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
@@ -436,15 +434,15 @@ export type LocalUsage = {
   effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages" | "gemini";
   serviceTier?: DefaultServiceTier;
-  appliedServiceTier?: DefaultServiceTier | null;
+  appliedServiceTier?: ObservedServiceTier | null;
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
   errorOrigin?: ErrorOrigin | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
-  ttftMs: number | null;
-  generationMs: number | null;
+  ttftMs?: number | null;
+  generationMs?: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
@@ -453,6 +451,15 @@ export type LocalUsage = {
   outputTokens: number | null;
   totalTokens: number | null;
   apiEquivalent?: ApiEquivalentSummary;
+};
+
+export type LocalUsage = UsageEventRecord & {
+  createdAt: string;
+  sourceId: string;
+  accountId?: string | null;
+  clientContextId?: string | null;
+  ttftMs: number | null;
+  generationMs: number | null;
 };
 
 export type UsageTotals = {
@@ -521,7 +528,7 @@ export type UsageExportRow = {
   errorCategory: string | null;
   errorOrigin?: ErrorOrigin | null;
   serviceTier?: DefaultServiceTier;
-  appliedServiceTier?: DefaultServiceTier | null;
+  appliedServiceTier?: ObservedServiceTier | null;
 };
 
 export type SupportExportContext = {
@@ -535,37 +542,10 @@ export type SupportExportContext = {
   warningCount: number;
 };
 
-export type RemoteUsage = {
-  id: number;
-  requestId: string;
-  attempt: number;
+export type RemoteUsage = UsageEventRecord & {
   candidateKind: "account" | "source";
   candidateHint: string;
   candidateLabel?: string | null;
-  routing?: RoutingDiagnostics | null;
-  requestedModel: string | null;
-  resolvedModel: string | null;
-  requestedReasoningEffort?: ReasoningEffort | null;
-  effectiveReasoningEffort?: ReasoningEffort | null;
-  wireApi: "responses" | "chat_completions" | "messages" | "gemini";
-  serviceTier?: DefaultServiceTier;
-  appliedServiceTier?: DefaultServiceTier | null;
-  success: boolean;
-  httpStatus: number;
-  errorCategory: string | null;
-  errorOrigin?: ErrorOrigin | null;
-  toolUse?: ToolUseDiagnostics;
-  latencyMs: number;
-  ttftMs?: number | null;
-  generationMs?: number | null;
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  cacheWriteInputTokens?: number | null;
-  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
-  reasoningTokens: number | null;
-  outputTokens: number | null;
-  totalTokens: number | null;
-  apiEquivalent?: ApiEquivalentSummary;
   createdAtMs: number;
 };
 

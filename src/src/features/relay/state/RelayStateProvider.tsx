@@ -121,9 +121,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       ? () => relayCommands.setCodexBackgroundTasks(enabled)
       : mode === "remote"
         ? () => relayCommands.setRemoteCodexBackgroundTasks(enabled)
-        : () => Promise.reject(new Error("Codex background tasks are not available in hosted mode")),
+        : () => Promise.reject(new Error(t("errors.chatgpt_background_tasks_unavailable"))),
     "feedback.saved",
-  ), [mode, perform]);
+  ), [mode, perform, t]);
 
   const setCodexWebsocketsEnabled = useCallback((enabled: boolean) => perform(
     "codex-websockets",
@@ -144,9 +144,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       }
       : mode === "local"
         ? () => relayCommands.setCodexWebsockets(enabled)
-        : () => Promise.reject(new Error("Codex WebSockets are not available in hosted mode")),
+        : () => Promise.reject(new Error(t("errors.chatgpt_websockets_unavailable"))),
     "feedback.saved",
-  ), [codexWebsocketsEnabled, mode, perform]);
+  ), [codexWebsocketsEnabled, mode, perform, t]);
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");

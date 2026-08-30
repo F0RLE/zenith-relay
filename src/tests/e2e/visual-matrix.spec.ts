@@ -8,16 +8,20 @@ const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as
 const TITLE_BAR_HEIGHT = 36;
 
 async function expectTopLevelEmptyCentered(page: Page) {
-  const [pageBox, headerBox, emptyBox, paddingBottom] = await Promise.all([
+  const tabs = page.locator(".relay-page > .relay-tabs");
+  const [pageBox, headerBox, tabCount, emptyBox, paddingBottom] = await Promise.all([
     page.locator(".relay-page").boundingBox(),
     page.locator(".relay-page-header").boundingBox(),
-    page.locator(".relay-page > .relay-empty").boundingBox(),
+    tabs.count(),
+    page.locator(".gateway-empty-tab-panel > .relay-empty, .relay-page > .relay-empty").boundingBox(),
     page.locator(".relay-page").evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingBottom)),
   ]);
+  const tabsBox = tabCount ? await tabs.boundingBox() : null;
   expect(pageBox).not.toBeNull();
   expect(headerBox).not.toBeNull();
   expect(emptyBox).not.toBeNull();
-  const availableCenter = (headerBox!.y + headerBox!.height + pageBox!.y + pageBox!.height - paddingBottom) / 2;
+  const contentTop = tabsBox ? tabsBox.y + tabsBox.height : headerBox!.y + headerBox!.height;
+  const availableCenter = (contentTop + pageBox!.y + pageBox!.height - paddingBottom) / 2;
   expect(Math.abs(emptyBox!.y + emptyBox!.height / 2 - availableCenter)).toBeLessThanOrEqual(2);
 }
 
@@ -377,7 +381,7 @@ test("overview header keeps ChatGPT launch beside the API control", async ({ pag
   await page.goto("/");
 
   const stop = page.getByRole("button", { name: "Остановить API", exact: true });
-  const launch = page.getByRole("button", { name: "Запустить ChatGPT", exact: true });
+  const launch = page.getByRole("button", { name: "Открыть ChatGPT", exact: true });
   await expect(stop).toBeVisible();
   await expect(launch).toBeVisible();
   const [stopBox, launchBox] = await Promise.all([stop.boundingBox(), launch.boundingBox()]);
@@ -790,7 +794,7 @@ for (const viewport of viewports) {
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
-    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Скорость запросов" })).toBeVisible();
+    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Скорость запроса" })).toBeVisible();
     await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения"]);
     await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
@@ -814,12 +818,12 @@ for (const viewport of viewports) {
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
-    const speed = page.getByRole("switch", { name: "Скорость запросов" });
+    const speed = page.getByRole("switch", { name: "Скорость запроса" });
     await speed.check();
     await expect(speed).toBeChecked();
     await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Распределение" });
-    await expect(distribution).not.toContainText("Скорость запросов");
+    await expect(distribution).not.toContainText("Скорость запроса");
     await distribution.getByRole("button", { name: /^Стратегия распределения:/ }).click();
     await page.locator('[role="option"][data-value="subscription_plan"]').click();
     await expect(distribution.locator("[data-subscription-plan]")).toHaveCount(4);
@@ -1163,7 +1167,7 @@ for (const viewport of viewports) {
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
-      await expect(dialog).not.toContainText("Скорость запросов");
+      await expect(dialog).not.toContainText("Скорость запроса");
       await expect(dialog).toContainText("Выбирает наибольший доступный остаток, а при равных значениях распределяет запросы равномерно.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -1626,17 +1630,30 @@ for (const theme of themes) {
       await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 4 });
       await page.setViewportSize(viewport);
       await page.goto("/");
-      await page.getByRole("button", { name: "API и ChatGPT", exact: true }).click();
-      await expect(page.locator(".gateway-settings-panel")).toBeVisible();
+      await page.getByRole("button", { name: "API", exact: true }).click();
+      const connectionPanel = page.locator(".gateway-api-connection-panel");
+      const endpointValue = connectionPanel.locator(".gateway-endpoint-value");
+      const portControl = connectionPanel.locator(".gateway-api-port-control");
+      await expect(connectionPanel).toBeVisible();
       await expect(page.getByText("В сети", { exact: true })).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Остановить API" })).toHaveClass(/secondary/);
       const portInput = page.getByRole("spinbutton", { name: "Порт" });
       const portSave = page.getByRole("button", { name: "Сохранить и перезапустить" });
-      const [portBox, saveBox] = await Promise.all([portInput.boundingBox(), portSave.boundingBox()]);
+      const [endpointBox, portControlBox, portBox, saveBox] = await Promise.all([
+        endpointValue.boundingBox(),
+        portControl.boundingBox(),
+        portInput.boundingBox(),
+        portSave.boundingBox(),
+      ]);
+      expect(endpointBox).not.toBeNull();
+      expect(portControlBox).not.toBeNull();
       expect(portBox).not.toBeNull();
       expect(saveBox).not.toBeNull();
+      expect(Math.abs((endpointBox!.y + endpointBox!.height / 2) - (portControlBox!.y + portControlBox!.height / 2))).toBeLessThanOrEqual(2);
       expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
+      await page.screenshot({ path: `output/playwright/gateway-api-connection-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
+      await page.getByRole("tab", { name: "Приложение", exact: true }).click();
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Аккаунт ChatGPT" })).toBeVisible();
       await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "auto");
@@ -1696,7 +1713,7 @@ test("unconfigured API empty state uses the available page center", async ({ pag
   await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
-  await page.getByRole("button", { name: "API и ChatGPT", exact: true }).click();
+  await page.getByRole("button", { name: "API", exact: true }).click();
   await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
   await expectTopLevelEmptyCentered(page);
   await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });

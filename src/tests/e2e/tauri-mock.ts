@@ -64,6 +64,7 @@ export type MockOptions = {
   updateDate?: string;
   portableUpdateTargetMissing?: boolean;
   updateCheckError?: boolean;
+  updateCheckDelayMs?: number;
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
   distinctAccountIdentityHints?: boolean;
@@ -348,6 +349,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }));
     refreshGatewayModels(localRuntime);
     const remoteRuntime = structuredClone(localRuntime);
+    let localGatewayApiKey = "zlr_synthetic_local_gateway_key";
+    let remoteGatewayApiKey = "zrs_synthetic_remote_gateway_key";
     remoteRuntime.schemaVersion = 15;
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.1.0" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
@@ -899,6 +902,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "start_local_gateway": localRuntime.gateway.running = true; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "stop_local_gateway": localRuntime.gateway.running = false; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "restart_local_gateway": refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
+          case "reveal_local_gateway_api_key": return localGatewayApiKey;
+          case "rotate_local_gateway_api_key": localGatewayApiKey = "zlr_synthetic_rotated_gateway_key"; return localGatewayApiKey;
+          case "reveal_remote_gateway_api_key": return remoteGatewayApiKey;
+          case "rotate_remote_gateway_api_key": remoteGatewayApiKey = "zrs_synthetic_rotated_gateway_key"; return remoteGatewayApiKey;
           case "update_local_gateway_port": {
             const port = Number(args.port);
             localRuntime.gateway.baseUrl = `http://127.0.0.1:${port}/v1`;
@@ -975,6 +982,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "plugin:app|bundle_type": return input.bundleType === null ? null : input.bundleType ?? "nsis";
           case "get_portable_update_target": return input.bundleType === null ? "windows-x86_64-portable" : null;
           case "plugin:updater|check":
+            if (input.updateCheckDelayMs) await new Promise((resolve) => setTimeout(resolve, input.updateCheckDelayMs));
             if (input.updateCheckError || (input.portableUpdateTargetMissing && args.target === "windows-x86_64-portable")) {
               throw new Error(input.updateCheckError ? "updater signature validation failed" : "portable update target is unavailable");
             }

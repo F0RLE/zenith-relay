@@ -3,17 +3,25 @@ import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Load
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
-import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import {
+  refreshAllAccountQuotas,
+  refreshOneAccountQuota,
+  type AccountQuotaRefreshReport,
+} from "../../accountQuotaRefresh";
+import { subscriptionExpiryFormatter, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { AccountPlanBadge, Button, EmptyState, IconButton, QuotaStack, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
-import { activeRequestCount, apiSourceRole } from "../../routingOrder";
+import { activeRequestCount, apiSourceRole, upcomingModelRetries } from "../../routingOrder";
 import { memberName, type PoolMember } from "../../poolHelpers";
+import { updatePoolMembership } from "../../poolMembership";
 import { formatApiEquivalent, formatProviderMicroUsd } from "../../poolFormatting";
 import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { formatFullNumber } from "../../usageTotals";
 import { AccountErrorDialog } from "../connections/AccountsTable";
 import {
   orderedPoolMembers,
@@ -36,10 +44,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const [pendingServiceTier, setPendingServiceTier] = useState<DefaultServiceTier | null>(null);
   const serviceTier = pendingServiceTier ?? runtime?.gateway.defaultServiceTier ?? "standard";
   const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
-  const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
-  const [nowMs, setNowMs] = useState(Date.now());
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
   const sourceStatsGeneration = useRef(0);
@@ -48,6 +54,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const runtimeByMember = poolMemberRuntimeStates(poolMembers, runtimeOrder);
   const members = orderedPoolMembers(poolMembers, runtimeOrder);
   const sourceIds = poolMemberSourceIds(members);
+  const nowMs = useRelativeTimeClock(members.flatMap((member) => [
+    ...(member.kind === "account" ? [
+      member.subscription.activeUntilMs,
+      member.quota.primary?.resetAtMs,
+      member.quota.secondary?.resetAtMs,
+      ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
+    ] : []),
+    runtimeByMember.get(member.id)?.nextRetryAtMs,
+  ]));
+  const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
   const refreshSourceStats = useCallback(async (sourceId: string) => {
     if (mode === "zenith") return;
     const generation = sourceStatsGeneration.current;
@@ -74,15 +90,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     for (const sourceId of sourceIds.split("\n")) void refreshSourceStats(sourceId);
     return () => { sourceStatsGeneration.current += 1; };
   }, [mode, refreshSourceStats, sourceIds]);
-  const upcomingTimes = members.flatMap((member) => [
-    ...(member.kind === "account" ? [member.subscription.activeUntilMs, member.quota.primary?.resetAtMs, member.quota.secondary?.resetAtMs, ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs)] : []),
-    runtimeByMember.get(member.id)?.nextRetryAtMs,
-  ].filter((value): value is number => value != null && value > nowMs));
-  const showSeconds = upcomingTimes.some((value) => value - nowMs < 60 * 60_000);
-  useEffect(() => {
-    const timer = window.setTimeout(() => setNowMs(Date.now()), showSeconds ? 1_000 : 60_000);
-    return () => window.clearTimeout(timer);
-  }, [nowMs, showSeconds]);
   const {
     activeMembers,
     activeRequestTotal,
@@ -110,9 +117,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           : t("pool.priorityEmpty");
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   const remove = async (member: Member) => {
-    const ok = await perform(`pool-remove-${member.id}`, () => mode === "local"
-      ? relayCommands.setPoolMembership(member.kind === "account" ? [member.id] : [], member.kind === "source" ? [member.id] : [], false)
-      : relayCommands.remoteAction({ type: "set_pool_membership" }, { accountIds: member.kind === "account" ? [member.id] : [], sourceIds: member.kind === "source" ? [member.id] : [], inPool: false }), "feedback.saved");
+    const ok = await perform(`pool-remove-${member.id}`, () => updatePoolMembership(mode, {
+      accountIds: member.kind === "account" ? [member.id] : [],
+      sourceIds: member.kind === "source" ? [member.id] : [],
+      inPool: false,
+    }), "feedback.saved");
     if (ok) setSelectedId(null);
   };
   const confirmRemove = async (member: Member) => {
@@ -123,26 +132,15 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const quotaAccountCount = members.filter((member) => member.kind === "account" && member.enabled).length;
   const hasAccountMembers = members.some((member) => member.kind === "account");
   const refreshQuotas = async () => {
-    let report = { succeeded: 0, failed: 0 };
+    let report: AccountQuotaRefreshReport | null = null;
     const ok = await perform("pool-quota-refresh", async () => {
-      if (mode === "local") {
-        const results = await relayCommands.refreshAllAccountQuotas();
-        report = {
-          succeeded: results.filter((result) => result.status === "succeeded").length,
-          failed: results.filter((result) => result.status === "failed").length,
-        };
-      } else {
-        const result = await relayCommands.remoteAction({ type: "refresh_all_quotas" }) as { refreshed?: number; failed?: number };
-        report = { succeeded: result.refreshed ?? 0, failed: result.failed ?? 0 };
-      }
+      report = await refreshAllAccountQuotas(mode);
     });
-    if (ok) setQuotaReport(report);
+    if (ok && report) setQuotaReport(report);
   };
   const refreshAccountQuota = (account: AccountSummary) => perform(
     `pool-account-quota-${account.id}`,
-    () => mode === "local"
-      ? relayCommands.refreshAccountQuota(account.id)
-      : relayCommands.remoteAction({ type: "refresh_account", id: account.id }),
+    () => refreshOneAccountQuota(mode, account.id),
     "feedback.refreshed",
   );
   const updateServiceTier = async (fast: boolean) => {
@@ -193,7 +191,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         const runtimeState = runtimeByMember.get(member.id);
         const statusKey = member.operationalStatus;
         const statusTone = operationalStatusTone(statusKey);
-        const quotaStatus = member.kind === "account" ? member.quotaRefreshStatus : "updated";
+        const quotaStatus = member.kind === "account" ? accountQuotaRefreshState(member) : "updated";
         const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
         const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
@@ -208,7 +206,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           : null;
         const isCurrent = activeRequestCount(runtimeState) > 0;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.lastUsedAtMs != null && runtimeState.lastUsedAtMs === lastUsedRuntime?.lastUsedAtMs;
-        const modelRetries = [...(runtimeState?.modelRetries ?? [])].filter((retry) => retry.retryAtMs > nowMs).sort((left, right) => left.retryAtMs - right.retryAtMs);
+        const modelRetries = upcomingModelRetries(runtimeState, nowMs);
         const modelRetryHint = modelRetries.length
           ? t("pool.modelRetryAt", {
             models: modelRetries.map((retry) => retry.model).join(", "),
@@ -298,9 +296,7 @@ function PoolAccountQuota({ account, nowMs, onReauthenticate }: { account: Accou
   const hasQuota = Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
   // A signed-out account must ask for sign-in even when the last quota refresh
   // still reports a successful snapshot.
-  const status = account.authState.state === "requires_reauth"
-    ? "requires_reauth"
-    : account.quotaRefreshStatus ?? (account.quota.error ? "failed" : account.quota.updatedAtMs != null ? "updated" : "pending");
+  const status = accountQuotaRefreshState(account);
   return <>{status === "requires_reauth" ? <button type="button" className={`account-quota-refresh-state ${status} is-action`} onClick={() => onReauthenticate(account)}><LogIn aria-hidden /><span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></button> : !hasQuota ? <div className={`account-quota-refresh-state ${status}`} role="status">{status === "refreshing" ? <Loader2 className="spin" aria-hidden /> : status === "updated" ? <CheckCheck aria-hidden /> : status === "failed" ? <RefreshCw aria-hidden /> : <Clock3 aria-hidden />}<span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></div> : <QuotaStack snapshot={account.quota} nowMs={nowMs} concise />}</>;
 }
 
@@ -320,12 +316,12 @@ function PoolSourceStats({ source, state }: { source: SourceSummary; state?: Sou
     ? formatProviderMicroUsd(stats.spentMicroUsd, locale)
     : formatApiEquivalent(source.apiEquivalent.microUsd, locale);
   const requests = providerStats
-    ? stats.requests == null ? "—" : new Intl.NumberFormat(locale).format(stats.requests)
+    ? stats.requests == null ? "—" : formatFullNumber(stats.requests, locale)
     : "—";
   return <dl className="pool-source-stats">
     <div title={state?.failed ? t("overview.sourceStatsUnavailable") : !providerStats && !state?.loading ? t("overview.sourceStatsUnsupported") : undefined}><dt>{t("overview.balance")}</dt><dd data-muted={!providerStats ? "true" : undefined}>{balance}</dd></div>
     <div title={!providerStats ? t("pool.apiEquivalentHint", { count: source.apiEquivalent.unpricedTokens }) : undefined}><dt>{providerStats ? t("overview.spent") : t("pool.apiEquivalent")}</dt><dd>{spent}</dd></div>
     <div><dt>{t("usage.requests")}</dt><dd>{requests}</dd></div>
-    <div><dt>{t("common.models")}</dt><dd>{new Intl.NumberFormat(locale).format(source.models.length)}</dd></div>
+    <div><dt>{t("common.models")}</dt><dd>{formatFullNumber(source.models.length, locale)}</dd></div>
   </dl>;
 }

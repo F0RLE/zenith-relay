@@ -6,8 +6,9 @@ import type { SourceStats, SourceSummary } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
-import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, sourceHost, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
+import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
+import { sourceHost } from "../../sourceUrl";
+import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
 
 const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
 
@@ -177,8 +178,8 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const display = (value: string | null | undefined) => value || (statsLoading ? "…" : "—");
   const money = (value: number | null | undefined) => value == null ? null : formatProviderMicroUsd(value, locale);
-  const requests = stats?.requests == null ? null : new Intl.NumberFormat(locale).format(stats.requests);
-  const totalTokens = stats?.totalTokens == null ? null : new Intl.NumberFormat(locale).format(stats.totalTokens);
+  const requests = stats?.requests == null ? null : formatFullNumber(stats.requests, locale);
+  const totalTokens = stats?.totalTokens == null ? null : formatFullNumber(stats.totalTokens, locale);
   const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={statsLoading} disabled={!source} onClick={() => setStatsRevision((value) => value + 1)}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />

@@ -11,7 +11,7 @@ import {
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
-import { applyRuntimeActivity, routingOrderPositions, runtimeCandidateForMember } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivity, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -204,6 +204,31 @@ describe("pool helpers", () => {
     expect(state).toMatchObject({ candidateId: "zenith-api", available: true, inFlight: 3, activeRequestCount: 3, lastUsedAtMs: 20, nextRetryAtMs: 500, halfOpen: true, dispatches: 5 });
     expect(state?.activeModels).toEqual([{ model: "gpt-test", requestCount: 3 }]);
     expect(state?.modelRetries).toEqual([{ model: "gpt-test", retryAtMs: 500 }, { model: "gpt-other", retryAtMs: 700 }]);
+  });
+
+  test("keeps only future model retries in runtime display order", () => {
+    const candidate = {
+      candidateId: "account-a",
+      kind: "oauth_account" as const,
+      available: true,
+      inFlight: 0,
+      modelRetries: [
+        { model: "later", retryAtMs: 900 },
+        { model: "expired", retryAtMs: 100 },
+        { model: "first", retryAtMs: 500 },
+        { model: "second", retryAtMs: 500 },
+      ],
+      lastUsedAtMs: null,
+      nextRetryAtMs: 500,
+      halfOpen: false,
+      dispatches: 0,
+    };
+
+    expect(upcomingModelRetries(candidate, 499)).toEqual([
+      { model: "first", retryAtMs: 500 },
+      { model: "second", retryAtMs: 500 },
+      { model: "later", retryAtMs: 900 },
+    ]);
   });
 
   test("applies an activity snapshot without mutating the previous order", () => {

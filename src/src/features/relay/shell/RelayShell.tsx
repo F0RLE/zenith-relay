@@ -2,15 +2,13 @@ import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, Circ
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../../../platform/desktop";
+import { APP_VERSION } from "../../../platform/desktop";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
 import { useRelayState, type Feedback } from "../state/RelayStateProvider";
-import { Button, Dialog, ErrorDetailsDialog, IconButton } from "../components/Ui";
-
-const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
-type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
-type UpdateInstallError = "write" | "install" | null;
+import { ErrorDetailsDialog, IconButton } from "../components/Ui";
+import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
+import { UpdateDialog } from "./UpdateDialog";
 
 const ConnectionsPage = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ConnectionsPage }));
 const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ImportDialog")).ImportDialog }));
@@ -38,16 +36,22 @@ export function RelayShell() {
   const [modeOpen, setModeOpen] = useState(false);
   const [importRequest, setImportRequest] = useState<{ id: number; paths?: string[] } | null>(null);
   const [importDragActive, setImportDragActive] = useState(false);
-  const [availableUpdate, setAvailableUpdate] = useState<AppUpdate | null>(null);
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  const [updateCheckState, setUpdateCheckState] = useState<UpdateCheckState>("idle");
-  const [installingUpdate, setInstallingUpdate] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total?: number } | null>(null);
-  const [updateInstallError, setUpdateInstallError] = useState<UpdateInstallError>(null);
   const nextImportRequest = useRef(0);
-  const initialUpdateCheck = useRef(false);
   const modePickerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const {
+    availableUpdate,
+    updateDialogOpen,
+    updateCheckState,
+    installingUpdate,
+    updateProgress,
+    updateInstallError,
+    checkUpdates,
+    applyUpdate,
+    skipUpdate,
+    openUpdateDialog,
+    closeUpdateDialog,
+  } = useAppUpdates();
   const visiblePages = pages.filter((item) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(item.id));
   const focusModePicker = useCallback(() => {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
@@ -57,65 +61,6 @@ export function RelayShell() {
     setPage("connections");
     setImportRequest({ id: ++nextImportRequest.current, paths });
   }, [mode, setMode, setPage]);
-  const checkUpdates = useCallback(async (openWhenAvailable = false, includeSkipped = false): Promise<UpdateCheckState> => {
-    setUpdateCheckState("checking");
-    try {
-      const update = await checkForUpdate();
-      if (!update) {
-        setAvailableUpdate(null);
-        setUpdateCheckState("current");
-        return "current";
-      }
-      if (!includeSkipped && localStorage.getItem(SKIPPED_UPDATE_KEY) === update.version) {
-        setAvailableUpdate(null);
-        setUpdateCheckState("skipped");
-        return "skipped";
-      }
-      setAvailableUpdate(update);
-      setUpdateCheckState("available");
-      if (openWhenAvailable) setUpdateDialogOpen(true);
-      return "available";
-    } catch {
-      setUpdateCheckState("error");
-      return "error";
-    }
-  }, []);
-
-  const applyUpdate = useCallback(async () => {
-    if (!availableUpdate) return;
-    setInstallingUpdate(true);
-    setUpdateInstallError(null);
-    setUpdateProgress({ downloaded: 0 });
-    try {
-      const result = await installUpdate(availableUpdate, (downloaded, total) => setUpdateProgress({ downloaded, total }));
-      if (result === "unavailable") {
-        setAvailableUpdate(null);
-        setUpdateCheckState("current");
-        setUpdateInstallError("install");
-      }
-    } catch (error) {
-      setUpdateInstallError(String(error).includes("portable_not_writable") ? "write" : "install");
-    } finally {
-      setInstallingUpdate(false);
-    }
-  }, [availableUpdate]);
-
-  const skipUpdate = useCallback(() => {
-    if (availableUpdate) localStorage.setItem(SKIPPED_UPDATE_KEY, availableUpdate.version);
-    setAvailableUpdate(null);
-    setUpdateDialogOpen(false);
-    setUpdateCheckState("skipped");
-  }, [availableUpdate]);
-
-  useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      if (initialUpdateCheck.current) return;
-      initialUpdateCheck.current = true;
-      void checkUpdates();
-    }, 1_500);
-    return () => window.clearTimeout(timeout);
-  }, [checkUpdates]);
-
   useEffect(() => {
     if (contentRef.current) {
       contentRef.current.scrollTop = 0;
@@ -226,7 +171,7 @@ export function RelayShell() {
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
           <div className="sidebar-footer">
-            {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
+            {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={openUpdateDialog}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
             <div className="sidebar-footer-row">
               <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
                 <CircleHelp aria-hidden />
@@ -242,11 +187,11 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
-        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} /></Suspense>}
+        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates({ openWhenAvailable: true, includeSkipped: true })} /></Suspense>}
       </div>
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
       {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /></Suspense> : null}
-      {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={() => { if (!installingUpdate) setUpdateDialogOpen(false); }} /> : null}
+      {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={closeUpdateDialog} /> : null}
     </div>
   );
 }
@@ -307,29 +252,4 @@ function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates 
   if (page === "profiles") return <ProfilesPage />;
   if (page === "help") return <HelpCenter />;
   return <SettingsPage updateCheckState={updateCheckState} updateVersion={updateVersion} onCheckUpdates={onCheckUpdates} />;
-}
-
-function UpdateDialog({ update, installing, progress, installError, onInstall, onSkip, onClose }: { update: AppUpdate; installing: boolean; progress: { downloaded: number; total?: number } | null; installError: UpdateInstallError; onInstall: () => void; onSkip: () => void; onClose: () => void }) {
-  const { i18n, t } = useTranslation();
-  const percent = progress?.total ? Math.min(100, Math.round(progress.downloaded / progress.total * 100)) : null;
-  const date = update.date ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "long" }).format(new Date(update.date)) : null;
-  const notes = localizeReleaseNotes(update.body, i18n.language);
-  return <Dialog title={t("updates.title", { version: update.version })} onClose={onClose} footer={<div className="update-actions"><Button variant="secondary" disabled={installing} onClick={onSkip}>{t("updates.skipVersion", { version: update.version })}</Button><Button variant="primary" icon={<Download aria-hidden />} busy={installing} onClick={onInstall}>{t("updates.install")}</Button></div>}>
-    <div className="update-release"><div><span>{t("updates.versionChange", { current: update.currentVersion, next: update.version })}</span>{date ? <small>{date}</small> : null}</div></div>
-    <section className="update-notes"><h3>{t("updates.changelog")}</h3><p>{notes || t("updates.noChangelog")}</p></section>
-    {installing ? <div className="update-progress" role="status"><div><strong>{t("updates.downloading")}</strong><span>{percent === null ? t("updates.preparing") : `${percent}%`}</span></div><progress max={100} value={percent ?? undefined} /></div> : null}
-    {installError ? <p className="warning-box" role="alert">{t(installError === "write" ? "updates.portableWriteFailed" : "updates.installFailed")}</p> : null}
-  </Dialog>;
-}
-
-function localizeReleaseNotes(body: string | undefined, language: string) {
-  if (!body?.trim()) return "";
-  const markers = [...body.matchAll(/<!--\s*relay-notes:([a-z0-9-]+)\s*-->/gi)];
-  if (!markers.length) return body.trim();
-  const sections = new Map(markers.map((marker, index) => [
-    marker[1].toLowerCase(),
-    body.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index).trim(),
-  ]));
-  const locale = language.toLowerCase();
-  return sections.get(locale) ?? sections.get(locale.split("-")[0]) ?? sections.get("en") ?? sections.values().next().value ?? "";
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildAccountValueProjection, estimateRemainingApiEquivalent } from "../src/features/relay/accountEconomics";
+import { buildAccountValueProjection, estimateRemainingApiEquivalent, formatAccountPayback } from "../src/features/relay/accountEconomics";
 
 describe("account value projection", () => {
   test("keeps the same display projection for Connections and Usage", () => {
@@ -22,6 +22,12 @@ describe("account value projection", () => {
       payback: 2,
       approximate: true,
     });
+  });
+
+  test("formats the shared payback display without changing its approximation marker", () => {
+    expect(formatAccountPayback(null, "en-US")).toBe("—");
+    expect(formatAccountPayback(1.25, "en-US")).toBe("125%");
+    expect(formatAccountPayback(1.25, "en-US", true)).toBe("≈125%");
   });
 
   test("preserves missing and zero purchase-cost behavior", () => {

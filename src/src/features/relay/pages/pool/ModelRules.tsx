@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical, Loader2, Pencil, Power, RotateCcw, Zap } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical, Loader2, Pencil, Power, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ModelSummary } from "../../api/types";
@@ -24,6 +24,8 @@ import {
   supportedReasoningLevels,
 } from "./modelRulesModel";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { requiresAccountReauthentication } from "../../accountStatus";
+import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
 
 type ModelDragState = {
   kind: "group" | "model";
@@ -59,7 +61,7 @@ export function ModelRulesView() {
       && account.inPool
       && account.secretAvailable
       && account.models.length > 0
-      && account.authState.state !== "requires_reauth"
+      && !requiresAccountReauthentication(account)
   ) ?? false;
   const discoveryErrors = runtime
     ? [...new Set([
@@ -141,39 +143,13 @@ export function ModelRulesView() {
     }
     clearModelDrag();
   };
-  useEffect(() => {
-    const drag = modelDragRef.current;
-    if (!drag) return;
-    const onPointerMove = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      drag.clientX = event.clientX;
-      drag.clientY = event.clientY;
-      updateModelDragAt(event.clientX, event.clientY);
-    };
-    const onPointerUp = (event: globalThis.PointerEvent) => {
-      if (event.pointerId === drag.pointerId) finishModelDragAt(event.clientX, event.clientY);
-    };
-    const onPointerCancel = (event: globalThis.PointerEvent) => {
-      if (event.pointerId === drag.pointerId) clearModelDrag();
-    };
-    const onWheel = () => {
-      // Keep normal table/dialog scrolling and refresh the target after it.
-      requestAnimationFrame(() => {
-        if (modelDragRef.current !== drag) return;
-        updateModelDragAt(drag.clientX, drag.clientY);
-      });
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
-    window.addEventListener("wheel", onWheel, { passive: true });
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      window.removeEventListener("wheel", onWheel);
-    };
-  }, [dragModelId, dragGroupId]);
+  usePointerDragListeners({
+    dragRef: modelDragRef,
+    activeKey: dragModelId ? `model:${dragModelId}` : dragGroupId ? `group:${dragGroupId}` : null,
+    onMove: (_drag, clientX, clientY) => updateModelDragAt(clientX, clientY),
+    onDrop: (_drag, clientX, clientY) => finishModelDragAt(clientX, clientY),
+    onCancel: clearModelDrag,
+  });
   const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], id: string) => {
     const target = event.target as HTMLElement;
     if (event.button !== 0 || (target.closest("button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
@@ -235,7 +211,7 @@ export function ModelRulesView() {
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"} data-drop-target={dropModelId === model.id ? "true" : undefined} className={dragModelId === model.id ? "model-dragging" : undefined} draggable onPointerDown={(event) => startPointerDrag(event, "model", model.id)} onDragStart={(event) => startModelDrag(event, model.id)} onDragEnd={() => { setDragModelId(null); setDropModelId(null); }} onDragOver={(event) => { event.preventDefault(); setDropModelId(dragModelId && dragModelId !== model.id ? model.id : null); }} onDrop={() => { if (dragModelId) reorderModels(dragModelId, model.id); setDragModelId(null); setDropModelId(null); }}>
         <td data-column="model"><button className="model-rule-drag-handle" type="button" aria-label={t("models.dragModel", { model: displayName })} title={t("models.dragModel", { model: displayName })} onPointerDown={(event) => startPointerDrag(event, "model", model.id)}><GripVertical aria-hidden /></button><div className="model-rule-identity"><strong title={displayName}>{displayName}</strong>{displayName !== model.id ? <code title={model.id}>{model.id}</code> : null}</div></td>
         <td data-column="price"><div className="model-price">{isImageModel ? <div className="model-image-price-summary"><span className="model-image-price-heading"><strong>{t("models.imageOperation.generation")}</strong><small>{t("models.imagePriceUnit")}</small></span><div className="model-image-price-list">{imagePrices.filter((price) => price.operation === "generation").slice(0, 3).map((price) => <span className="model-image-price-item" key={`${price.quality}-${price.size}`}><small>{t(`models.imageQuality.${price.quality}`, { defaultValue: price.quality })} · {price.size}</small><strong>{formatModelPrice(price.microUsd, i18n.language)}</strong></span>)}</div></div> : hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
-        <td data-column="speed">{model.speedSupported ? <OptionMenu className="model-speed-menu" label={t("models.speedColumn")} value={model.speedTier ?? "standard"} disabled={!model.speedConfigurable || busy === `model-speed-${model.id}`} onChange={(value) => { const serviceTier = value as "standard" | "fast"; void perform(`model-speed-${model.id}`, () => mode === "local" ? relayCommands.setModelServiceTier(model.id, serviceTier) : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier }), "feedback.saved"); }} options={[{ value: "standard", label: t("pool.serviceTiers.standard") }, { value: "fast", label: t("pool.serviceTiers.fast") }]} /> : <span className="model-speed-unavailable"><Zap aria-hidden />—</span>}</td>
+        <td data-column="speed"><OptionMenu className="model-speed-menu" label={t("models.speedColumn")} value={model.speedTier ?? "standard"} disabled={busy === `model-speed-${model.id}`} onChange={(value) => { const serviceTier = value as "standard" | "fast"; void perform(`model-speed-${model.id}`, () => mode === "local" ? relayCommands.setModelServiceTier(model.id, serviceTier) : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier }), "feedback.saved"); }} options={[{ value: "standard", label: t("pool.serviceTiers.standard") }, { value: "fast", label: t("pool.serviceTiers.fast") }]} /></td>
         <td data-column="actions"><div className="model-rule-actions"><span className="model-rule-secondary-actions">{(canEditPrice || isImageModel) ? <IconButton data-model-price-edit={model.id} label={t(isImageModel ? "models.viewImagePrice" : "models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}{canEditReasoning || hasReasoningModes ? <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} onClick={() => setReasoningModel(model)} /> : null}</span><IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
       </tr>;
       })}</tbody>;
