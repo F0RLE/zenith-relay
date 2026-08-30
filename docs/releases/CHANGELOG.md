@@ -6,6 +6,30 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+### Security
+
+- Local and user-managed server API keys are fetched only after an explicit
+  **Copy API key** action. Relay does not render or retain them in the desktop
+  interface.
+- API keys can be reissued from the API page. The replacement is copied
+  directly, and the previous key is invalidated only after the new one is ready.
+
+### Routing, availability, and usage
+
+- Relay preserves a Codex session's preferred healthy route to retain upstream
+  prompt-cache affinity, while still allowing bounded fallback when capacity,
+  quota, or health requires it.
+- A confirmed quota exhaustion cools down only the affected account/source and
+  model route instead of taking the whole provider out of rotation.
+- Namespaced API models stay on their declared API source; Relay no longer
+  silently falls back to a ChatGPT subscription route for those requests.
+- Source capability refreshes use the live upstream catalog. OAuth refresh-token
+  reuse is treated as a temporary recovery state rather than forcing an
+  unnecessary sign-in.
+- The pool now exposes one request-speed choice: Standard or Fast. Managed
+  ChatGPT/Codex requests follow it directly, while external API clients retain
+  their explicit tier; the upstream-reported tier remains a diagnostic value.
+
 ## [1.1.1] - 2026-08-28
 
 Zenith Relay 1.1.1 is the maintenance release after 1.1.0. It improves

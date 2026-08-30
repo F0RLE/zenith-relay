@@ -25,7 +25,8 @@ The product implementation gate is closed for the 1.1.0 release: the local
 desktop surface, provider-neutral routing contracts, profile recovery, quota
 automation, model availability handling, redaction rules, and responsive UI
 are covered by the implementation checks and review required by the release
-process. The user-visible scope is recorded in [CHANGELOG.md](CHANGELOG.md);
+process. The user-visible scope is recorded in
+[CHANGELOG.md](../releases/CHANGELOG.md);
 test counts and CI evidence are deliberately kept out of that document.
 
 This does not turn mocked or local checks into a production claim. Live P0
@@ -386,11 +387,12 @@ multi-user billing gateway. Convergence proceeds only through explicit gates:
 
 ## P9 - Localization, documentation, and release evidence
 
-1. For every new UI locale, add the localized overview and three mode-specific
-   Help documents, then register the mode documents in Help Center.
+1. For every new UI locale, add one sequential Help guide at
+   `docs/help/<locale>/README.md`, register it in Help Center, and keep its
+   section order aligned with the application.
 2. Regenerate screenshots from Playwright after a material layout or
    terminology change.
-3. Keep [CHANGELOG.md](CHANGELOG.md) current: describe review-ready work under
+3. Keep [CHANGELOG.md](../releases/CHANGELOG.md) current: describe review-ready work under
    `Unreleased`, then move only shipped behavior into a dated tag section.
 4. Run all relevant checks, review generated assets, and perform the P0 live
    acceptance before a release claim.

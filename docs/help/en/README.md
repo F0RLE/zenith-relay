@@ -1,129 +1,166 @@
-<div align="center">
-  <img src="../../../src-tauri/icons/128x128.png" width="96" alt="Zenith Relay">
-  <h1>Zenith Relay Help</h1>
-  <p>English · <a href="../ru/README.md">Русский</a> · <a href="../../../README.md">Repository home</a></p>
-</div>
+# Zenith Relay
 
-Zenith Relay is a desktop app for your own ChatGPT accounts and compatible API
-connections. It can place selected connections behind one private
-OpenAI-compatible endpoint and connect that endpoint to ChatGPT or Codex with
-a reversible profile change.
+Zenith Relay is a personal desktop relay for ChatGPT accounts and compatible
+API connections. It puts the connections you choose behind one private
+OpenAI-compatible endpoint, then lets the ChatGPT client or another client use the
+pool.
 
-## Start here
+This guide follows the application from left to right. The same guide is shown
+inside **Help**. The [Russian version](../ru/README.md) is also available.
 
-| Mode | Choose it when | Guide |
+## 1. Overview
+
+**Overview** is the place to check whether the relay is ready before sending a
+request. It shows the current runtime, active endpoint, healthy pool capacity,
+models, errors, request count, and speed. Its charts can be viewed by day, week,
+or month; the selected window is explicit and never silently changes.
+
+Use the scope control to compare the whole pool, one account, or one API source.
+When a provider exposes spend or balance data, Relay displays it as provider
+data. When it does not, the connection can still work; absence of statistics is
+not a failed connection.
+
+## 2. Connections
+
+**Connections** is where credentials and upstream endpoints are added. You can
+sign in to ChatGPT, import an existing account file, add a compatible API
+source, configure a proxy, or connect to a Relay Server that you operate.
+
+After adding a connection, wait for its status and model list to settle. A
+provider may expose models automatically, or you can enter model IDs manually
+when its discovery endpoint is unavailable. A manual list is a local assertion:
+the provider still decides whether a request is accepted.
+
+Quota windows, expiry dates, reset times, and reset credits come from the
+provider. Relay does not replace them with a fixed five-hour or weekly formula.
+If a weekly reset credit is reported as available, the account shows **Reset
+weekly quota** and asks for a simple Yes/No confirmation. In local mode,
+**Connections → Automations** can perform that reset automatically when the
+weekly window reaches zero.
+
+If you bought an account, enter its purchase price in the account settings.
+Relay compares completed, priced requests with that cost and shows:
+
+- **API equiv. used** — the value of requests already observed by Relay at API
+  prices;
+- **API equiv. left** — an approximate value only when the provider window,
+  prices, and Relay usage are complete enough to estimate it;
+- **Payback** — the used API-equivalent value compared with the purchase cost.
+
+These are estimates for comparison, not money held by Relay and not a provider
+invoice. Activity outside Relay is not included.
+
+## 3. Pool
+
+**Pool** decides which connections may receive traffic. Add or remove accounts
+and API sources, enable or disable individual models, and arrange the order in
+which eligible members are tried. A disabled, expired, unhealthy, out-of-quota,
+or excluded member remains visible for repair but is not selected.
+
+The **Model Rules** table is also where model behavior is controlled:
+
+- **Reasoning** lists the modes supplied by the backend catalog. Relay passes
+  the selected mode through; it does not invent a mode or send a separate probe
+  request for each one.
+- **Request speed** is the standard/fast service-tier choice for a route. Fast
+  is shown only when that route confirms `fast` or `priority`; it is a speed
+  request, not another quota or another model.
+- **Price** is the provider or verified catalog price, with an explicit local
+  override when needed. It is used for API-equivalent estimates and does not
+  alter the provider invoice.
+
+The table preserves the provider's model order. Relay applies pool rules and
+health checks around that order; it does not silently alphabetize or replace
+the provider catalog.
+
+Adapters are explicit. A native route keeps its original request format. A
+Responses source may be assigned to a Messages or Gemini bridge when that
+route is configured. The bridge translates the request and response; it does
+not make an unsupported upstream protocol native. A model is sent only through
+the format assigned to it.
+
+## 4. API
+
+The **API** tab controls the endpoint that clients use. In local mode, start
+the API and copy the displayed address, normally:
+
+    http://127.0.0.1:14998/v1
+
+Keep Relay open while the local pool is serving requests. If you use a
+Relay Server that you operate, the server keeps the endpoint running after the
+desktop app closes.
+
+Use **Copy API key** when a compatible application needs the credential. Relay
+fetches it only for that action and copies it directly to the clipboard; it is
+never rendered in the application.
+
+Use the reissue action next to it only when the key may have been exposed. The
+previous key stops working after the replacement is copied.
+
+The **Application** tab configures ChatGPT separately from the API. Its
+connection creates a protected recovery point before changing the selected
+profile, and can be returned from **Recovery**. The ChatGPT client can
+use every enabled, compatible model in the pool through the endpoint, not only
+models from the ChatGPT family. Reasoning, request speed, price rules, and pool
+order still come from **Pool**.
+
+The ChatGPT application's WebSocket preference is separate from the provider transport.
+If WebSocket is unavailable, Relay can use its supported HTTP route; a client
+flag does not turn an upstream HTTP provider into a WebSocket provider.
+
+## 5. Usage
+
+**Usage** is the request history for the current runtime. It opens on the
+complete available period; shorter daily, weekly, or monthly views are filters,
+not data deletion. The request table records status, model, selected pool
+member, protocol, reasoning mode, service tier, first/total timing, generation
+speed, token totals, cache reads/writes, and API-equivalent value.
+
+Open a row for its route and error source. **Provider** means the upstream
+service rejected or failed the request. **Account** means sign-in, quota, or
+account state needs attention. **Relay** means local configuration or protocol
+handling needs attention. Request and response text, raw headers, cookies, and
+secrets are not stored.
+
+## 6. Recovery
+
+**Recovery** keeps local ChatGPT profile snapshots. Relay creates an automatic
+return point before a managed profile switch. You can also create a named
+snapshot before a risky change and restore it after confirmation.
+
+A snapshot restores the profile files that it contains, including sign-in and
+client settings. Relay refuses to overwrite a newer manual sign-in. The local
+pool reset first attempts to restore the previous profile, then removes local
+accounts, sources, settings, and usage; named snapshots stay available.
+
+Account export is different from a snapshot: it is a credential-bearing transfer
+file. Treat it as a secret, use it only for the intended import, and delete it
+afterwards.
+
+## 7. Errors
+
+Start with the **Error source** and the status on the affected card or request.
+The following groups cover the normal failures.
+
+| Area | Typical message | What to do |
 | --- | --- | --- |
-| **This computer** | The pool should run on this PC. | [Open guide](this-computer.md) |
-| **Choose API** | You already have a hosted API key. | [Open guide](choose-api.md) |
-| **My server** | You operate a Relay Server for continuous access. | [Open guide](my-server.md) |
+| Account | Sign-in required, token expired/revoked, invalid grant | Sign in to that account again; do not delete a healthy fallback. |
+| Account | Subscription expired, workspace disabled, forbidden | Check the account plan or provider access and remove it from the pool until fixed. |
+| Account | Quota exhausted or reset pending | Wait for the provider reset, use an available reset credit, or let the weekly automation run. |
+| Account | Checkpoint, captcha, verification, or proxy unavailable | Complete the provider check or repair the proxy, then refresh the account. |
+| Account | Credentials unavailable, malformed response, connection timeout | Restore the protected credential or network path and refresh; the pool will not select it while unavailable. |
+| Provider | 401/403 unauthorized or forbidden | Check the API key, endpoint, permissions, and provider plan. |
+| Provider | 404, no models, or model not found | Check the API root and protocol. Remove a model-specific path; use a verified manual model ID only when discovery is unavailable. |
+| Provider | 429, overloaded, unavailable, or 5xx | Wait for recovery or enable another eligible source; repeated failures cool down that exact route. |
+| Provider | Timeout, incomplete stream, invalid request, unsupported tools or region | Check the provider's supported request shape, model, region, and limits. |
+| Pool | No eligible pool member | Enable a member, add the model to its rules, repair its account/source, or add a compatible fallback. |
+| Pool | All members cooling down or out of quota | Wait for retry/reset or change the pool membership/order. |
+| Pool | No compatible adapter or route | Assign the model to the correct native or bridge format in **Model Rules**. |
+| Relay | API stopped, wrong address, profile switch failed, local data unavailable | Start the endpoint, reconnect the displayed address, restore a recovery point, or inspect the local error details. |
 
-Use **This computer** for the first personal-pool test. Use **My server** only
-when the server is yours and the local flow is understood. **Choose API** is a
-direct provider connection; it does not create a pool.
+Relay can retry a different eligible member only before response data reaches the
+client. Once a response has started, its owner stays fixed so the client does
+not receive two different answers in one stream.
 
-## Install and start
-
-Download the current package from
-[GitHub Releases](https://github.com/F0RLE/zenith-relay/releases/latest).
-Windows normally uses **Setup**; the portable EXE needs a writable folder for
-in-place updates. Linux packages are AppImage, DEB, and RPM. macOS packages
-are DMGs for Intel and Apple Silicon.
-
-Quick Setup asks for a mode, a connection, and a client. **Import current
-profile** reuses an existing ChatGPT sign-in on this computer. You can run the
-wizard again from **Help**.
-
-## Sections
-
-- **Overview**: current runtime, healthy capacity, provider statistics when
-  available, usage charts, and recent activity.
-- **Connections**: ChatGPT sign-ins, imported sessions, API sources, proxies,
-  quota automations, and the server management connection.
-- **Pool**: which connections may receive requests, model visibility, order,
-  weights, and routing policy.
-- **API & ChatGPT**: start or stop the private endpoint and attach ChatGPT or
-  Codex to it.
-- **Usage**: request status, model, selected connection, timing, token totals,
-  output speed, and the source of an error. Prompt and response text are not
-  stored.
-- **Recovery**: create and restore local ChatGPT profile snapshots.
-- **Settings**: language, theme, update check, data folder, backup reminder,
-  and local data reset.
-
-## Availability and quota
-
-Relay only treats an automatically discovered model as provider/account
-availability. A manual source catalog is an explicit local assertion for a
-provider that does not expose `/models`; it is not independent proof that the
-provider accepts the model. A failed model check remains visible in the
-source/account status and, when there is no valid account catalog fallback, in
-Model Rules. It does not silently publish a guessed automatic model list.
-Quota windows and reset times also come from the provider; there is no
-universal five-hour or weekly formula.
-
-During an active local session, model catalogs are checked at startup and every
-eight hours. Quota refreshes are scheduled from provider reset times. Relay
-does not send separate requests to probe reasoning modes: the modes in Model
-Rules are catalog metadata or a manual allow-list.
-
-If a provider exposes a weekly reset credit, the account card shows
-**Reset weekly quota** and asks for Yes/No confirmation. Local
-**Connections → Automations** can run that reset automatically when the weekly
-window reaches zero. The provider must still report the credit as available.
-
-Account cards show **API equiv. used** for priced Relay usage and optional
-purchase cost payback. If Relay has complete priced usage from the start of the
-current provider quota window, the card also shows **API equiv. left**: an
-approximate remaining amount based on that window's Relay usage and the
-provider-reported percentage. It excludes activity outside Relay and is hidden
-when the window, pricing, or usage record is incomplete. Provider quota itself
-is still a percentage and reset time, not money or a billing value.
-
-**Pool → Request speed** controls the provider service tier. **Standard** keeps
-the client/provider choice. **Fast** is shown only when the current upstream
-catalog explicitly confirms `fast` or `priority` for that model. It requests
-the `priority` tier on that concrete route; a dash means that the tier is not
-confirmed, not that the model is unavailable. Fast does not select a different
-model or change pool order. The provider may still apply the standard tier.
-Fast is a request-speed mode, not a second user-facing quota, so account cards
-show the primary windows and feature-specific limits rather than a separate
-Fast meter.
-
-### Protocols and adapters
-
-`Native` keeps the selected client and provider wire contracts unchanged.
-Responses clients can use the explicit `Responses → Messages` or
-`Responses → Gemini` bridges when the source is configured for those routes.
-Messages uses the provider's `/v1/messages` contract; Gemini uses its native
-`generateContent`/`streamGenerateContent` contract. A bridge converts the
-request and response, while a native route passes them through. The source's
-model-to-format assignments decide which route can receive a model; a
-`/models` response alone does not prove every protocol.
-
-## Privacy
-
-This is a personal product, separate from Zenith Gateway and Control API. Relay
-does not receive production credentials, customer keys, backend tokens,
-production account inventory, or internal billing/routing logic.
-
-Desktop secrets stay in the operating system credential store. A secret moves
-to a server only after you explicitly select and confirm a server you operate.
-Operational diagnostics, snapshots, screenshots, support bundles, and usage
-records are redacted: they do not contain raw credentials, cookies,
-authorization headers, prompts, or provider response bodies.
-
-**Account export is intentionally different.** It is a credential-bearing file
-for an explicit account transfer and may contain OAuth access, refresh, and
-identity tokens. Treat it as a secret, use it only for the intended import, and
-delete it afterwards.
-
-## Before asking for help
-
-Open the affected card or request and read the status and **Error source**.
-**Provider** means the upstream service rejected the request; **Account** means
-the sign-in or route needs attention; **Relay** means local configuration or
-protocol handling needs attention. Copy only the sanitized error details from
-the error dialog.
-
-The complete product boundary and unfinished acceptance work are in
-[PLANNING.md](../../../PLANNING.md) and [ROADMAP.md](../../../ROADMAP.md).
+When asking for help, copy the sanitized status, HTTP code, model, and **Error
+source**. Never include API keys, cookies, tokens, prompts, or provider bodies.
