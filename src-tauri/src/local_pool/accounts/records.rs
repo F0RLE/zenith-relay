@@ -1,4 +1,7 @@
-use super::credentials::{credential_secret_ref, StoredCodexCredentials};
+use super::credentials::{
+    credential_invalid_state_error as credential_error, credential_secret_ref,
+    StoredCodexCredentials,
+};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
@@ -150,10 +153,6 @@ pub fn candidate_quota_with_stale_after(
 
 fn hash(value: &[u8]) -> String {
     hex::encode(Sha256::digest(value))
-}
-
-fn credential_error(error: super::credentials::CredentialError) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
 #[cfg(test)]

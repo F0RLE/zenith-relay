@@ -175,10 +175,8 @@ fn local_configuration_diff(
     before: &ConfigurationPreset,
     after: &ConfigurationPreset,
 ) -> CommandResult<Vec<ConfigurationPresetChange>> {
-    let before = serde_json::to_value(before)
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    let after = serde_json::to_value(after)
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    let before = serde_json::to_value(before).map_err(LocalPoolError::invalid_state)?;
+    let after = serde_json::to_value(after).map_err(LocalPoolError::invalid_state)?;
     let mut changes = Vec::new();
     diff_json("".into(), &before, &after, &mut changes);
     Ok(changes)
@@ -454,11 +452,15 @@ pub(super) fn write_configuration_preset(
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+pub(super) fn new_local_gateway_api_key() -> String {
+    format!("zlr_{}", Uuid::new_v4().simple())
+}
+
 pub(super) fn ensure_local_gateway_key_secret(key: &LocalGatewayKeyRecord) -> LocalResult<String> {
     if let Some(secret) = secret_store::load(&key.secret_ref)? {
         return Ok(secret);
     }
-    let secret = format!("zlr_{}", Uuid::new_v4().simple());
+    let secret = new_local_gateway_api_key();
     secret_store::save(&key.secret_ref, &secret)?;
     Ok(secret)
 }
@@ -771,18 +773,6 @@ pub async fn set_local_model_service_tier(
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
     let snapshot = state.snapshot().await?;
-    let supported = state
-        .gateway
-        .runtime()
-        .await
-        .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical));
-    if input.service_tier == DefaultServiceTier::Fast && !supported {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "Fast is not confirmed for this model by the current upstream catalog",
-        )
-        .into());
-    }
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
     let key = canonical.to_ascii_lowercase();
@@ -798,7 +788,7 @@ pub async fn set_local_model_service_tier(
             runtime.set_model_service_tier_overrides(gateway.model_service_tier_overrides)
         {
             state.store()?.replace_gateway(old_gateway)?;
-            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
+            return Err(LocalPoolError::invalid_state(error).into());
         }
     }
     state.snapshot().await.map_err(Into::into)

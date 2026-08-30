@@ -1,12 +1,14 @@
 use super::super::{
     accounts::{
         authority::{CredentialPersistence, StoredRefreshAdapter},
-        credentials::CredentialStore,
+        credentials::{
+            credential_invalid_state_error as account_credential_error, CredentialStore,
+        },
         proxy::{effective_proxy_config, ProxyRefreshClient},
         records::CODEX_RESPONSES_URL,
         NativeSecretBackend,
     },
-    error::{ErrorCode, LocalPoolError, Result},
+    error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
     profiles::codex,
     state::{DesktopState, LocalRuntimeInputs},
@@ -17,13 +19,14 @@ use std::{collections::HashMap, sync::Arc};
 use tauri::{AppHandle, Emitter, Manager};
 use zenith_relay_core::{
     accounts::AccountRecord,
+    changed_runtime_source_policy_updates,
     protocol::{
         account_candidate_enabled, account_operational_state, AccountOperationalInput,
         AccountOperationalState, ClientWireApi,
     },
     GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeCandidatePolicy,
     RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource,
-    RuntimeSourcePolicyUpdate, QUOTA_STALE_AFTER_MS,
+    QUOTA_STALE_AFTER_MS,
 };
 #[cfg(test)]
 use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
@@ -123,7 +126,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
                     account.account.auth_state,
                 )
                 .await
-                .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+                .map_err(LocalPoolError::invalid_state)?;
         }
         let operational = runtime_account_operational_state(&account.account, current_time_ms());
         let models = account.effective_models().to_vec();
@@ -250,12 +253,6 @@ fn timestamp_ms(value: &str) -> Option<u64> {
         .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
 }
 
-fn account_credential_error(
-    error: super::super::accounts::credentials::CredentialError,
-) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
-}
-
 pub(in crate::local_pool) fn runtime_account_operational_state(
     account: &AccountRecord,
     now_ms: u64,
@@ -292,41 +289,8 @@ pub(in crate::local_pool) async fn apply_source_policies_if_running(
     let Some(runtime) = state.gateway.runtime().await else {
         return true;
     };
-    let updates = sources
-        .iter()
-        .filter(|source| {
-            previous
-                .iter()
-                .find(|previous| previous.id == source.id)
-                .is_none_or(|previous| source_runtime_policy_changed(previous, source))
-        })
-        .map(|source| RuntimeSourcePolicyUpdate {
-            source_id: source.id.clone(),
-            policy: RuntimeCandidatePolicy {
-                enabled: source.enabled,
-                draining: source.draining,
-                priority: source.priority,
-                weight: source.weight,
-                allowed_models: source.allowed_models.clone(),
-                excluded_models: source.excluded_models.clone(),
-            },
-            recovery_delay_seconds: source.recovery_delay_seconds,
-        })
-        .collect::<Vec<_>>();
+    let updates = changed_runtime_source_policy_updates(previous, sources);
     updates.is_empty() || runtime.update_source_policies(&updates)
-}
-
-fn source_runtime_policy_changed(
-    previous: &ProviderSourceRecord,
-    next: &ProviderSourceRecord,
-) -> bool {
-    previous.enabled != next.enabled
-        || previous.draining != next.draining
-        || previous.priority != next.priority
-        || previous.weight != next.weight
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
-        || previous.recovery_delay_seconds != next.recovery_delay_seconds
 }
 
 /// Applies the configured Responses pool to an existing runtime. The live
@@ -570,7 +534,15 @@ pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> Loca
             ErrorCode::InvalidState
         }
     };
-    LocalPoolError::new(code, message)
+    let mut local_error = LocalPoolError::new(code, message);
+    if let zenith_relay_core::Error::UpstreamStatus(status) = error {
+        local_error = local_error.with_diagnostic(ErrorDiagnostics {
+            status: Some(status),
+            retryable: Some(status == 408 || status == 429 || status >= 500),
+            ..Default::default()
+        });
+    }
+    local_error
 }
 
 #[cfg(test)]

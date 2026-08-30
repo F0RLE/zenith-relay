@@ -15,7 +15,9 @@ use std::{fs, path::Path};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use zenith_relay_core::{accounts::AccountExportDocument, DefaultServiceTier, ErrorOrigin};
+use zenith_relay_core::{
+    accounts::AccountExportDocument, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
+};
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
@@ -54,7 +56,7 @@ pub struct UsageExportRow {
     #[serde(default)]
     error_origin: Option<ErrorOrigin>,
     service_tier: Option<DefaultServiceTier>,
-    applied_service_tier: Option<DefaultServiceTier>,
+    applied_service_tier: Option<ObservedServiceTier>,
 }
 
 #[derive(Clone, Serialize)]
@@ -269,9 +271,7 @@ pub(crate) fn write_account_export(
     document: &AccountExportDocument,
     app: &AppHandle,
 ) -> Result<Option<String>, CommandError> {
-    document
-        .validate()
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    document.validate().map_err(LocalPoolError::invalid_state)?;
     let filename = format!(
         "{}-{}-{}.json",
         if document.account_count == 1 {
@@ -366,7 +366,7 @@ mod tests {
             error_category: None,
             error_origin: None,
             service_tier: Some(DefaultServiceTier::Fast),
-            applied_service_tier: Some(DefaultServiceTier::Standard),
+            applied_service_tier: Some("default".into()),
         };
         assert!(!invalid_export_row(&row));
         row.connection = "bad\nvalue".into();

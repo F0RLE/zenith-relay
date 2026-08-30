@@ -123,7 +123,7 @@ pub(crate) fn build_local_account_export_document(
         })
         .collect::<LocalResult<Vec<_>>>()?;
     let document = build_account_export(format, &accounts, current_time_ms(), description)
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+        .map_err(LocalPoolError::invalid_state)?;
     Ok(document)
 }
 

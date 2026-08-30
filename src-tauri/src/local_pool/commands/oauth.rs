@@ -2,7 +2,8 @@ use super::sync_accounts_or_rollback;
 use crate::local_pool::{
     accounts::{
         credentials::{
-            CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
+            credential_local_error as credential_error, CredentialError, CredentialStore,
+            StoredCodexCredentials,
         },
         import_session::SecretBackend,
         oauth::{
@@ -33,7 +34,6 @@ use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
     providers::chatgpt::{
         AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
-        ModelDiscoveryFailureCode,
     },
     quota::{QuotaRefreshFailure, SubscriptionStatus},
     ProxyConfig,
@@ -978,43 +978,15 @@ fn flow_error(error: OAuthFlowError) -> LocalPoolError {
 }
 
 fn oauth_error(error: OAuthError) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
-}
-
-fn credential_error(error: CredentialError) -> LocalPoolError {
-    let code = match error.code {
-        CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
-        CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
-        _ => ErrorCode::InvalidState,
-    };
-    LocalPoolError::new(code, error.to_string())
+    LocalPoolError::invalid_state(error)
 }
 
 fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModelIssue {
-    let (code, auth_error, blocked) = match error.code {
-        ModelDiscoveryFailureCode::AgentTaskInvalid => ("models_agent_task_invalid", false, false),
-        ModelDiscoveryFailureCode::Forbidden => ("models_forbidden", false, true),
-        ModelDiscoveryFailureCode::HttpStatus => ("models_http_status", false, false),
-        ModelDiscoveryFailureCode::InvalidAccessToken => {
-            ("models_invalid_access_token", true, false)
-        }
-        ModelDiscoveryFailureCode::InvalidAccountId => ("models_invalid_account_id", true, false),
-        ModelDiscoveryFailureCode::InvalidClientVersion => {
-            ("models_invalid_client_version", false, false)
-        }
-        ModelDiscoveryFailureCode::InvalidEndpoint => ("models_invalid_endpoint", false, false),
-        ModelDiscoveryFailureCode::InvalidResponse => ("models_invalid_response", false, false),
-        ModelDiscoveryFailureCode::RateLimited => ("models_rate_limited", false, false),
-        ModelDiscoveryFailureCode::ResponseTooLarge => ("models_response_too_large", false, false),
-        ModelDiscoveryFailureCode::Transport => ("models_transport", false, false),
-        ModelDiscoveryFailureCode::Unauthorized => ("models_unauthorized", true, false),
-        ModelDiscoveryFailureCode::Upstream => ("models_upstream", false, false),
-    };
     InitialModelIssue {
-        code,
+        code: error.code.management_code(),
         retryable: error.retryable,
-        auth_error,
-        blocked,
+        auth_error: error.code.is_authentication_failure(),
+        blocked: error.code.blocks_account(),
     }
 }
 
@@ -1040,6 +1012,7 @@ fn apply_initial_model_issue(record: &mut LocalAccountRecord, issue: InitialMode
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zenith_relay_core::providers::chatgpt::ModelDiscoveryFailureCode;
 
     // Synthetic PKCS#8 bytes used only to exercise Agent Identity formatting.
     // This is not a credential and is never registered with a provider.

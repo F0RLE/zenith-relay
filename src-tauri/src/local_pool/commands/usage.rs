@@ -1,8 +1,8 @@
+use super::source_model_price_overrides;
 use crate::local_pool::{
     error::CommandError, state::DesktopState, store::telemetry_db::LocalUsagePage,
 };
 use chrono::{DateTime, Days, Local, Utc};
-use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::protocol::{UsageQuery, UsageRange};
@@ -16,26 +16,7 @@ pub fn get_local_usage_page(
         let store = state.store()?;
         (
             store.gateway().model_price_overrides.clone(),
-            store
-                .sources()
-                .iter()
-                .map(|source| {
-                    let mut prices = BTreeMap::new();
-                    for model in source
-                        .model_price_overrides
-                        .keys()
-                        .chain(source.detected_model_prices.keys())
-                    {
-                        prices.entry(model.clone()).or_insert_with(|| {
-                            zenith_relay_core::ApiModelPriceSources {
-                                provider: source.detected_model_prices.get(model).copied(),
-                                manual: source.model_price_overrides.get(model).copied(),
-                            }
-                        });
-                    }
-                    (source.id.clone(), prices)
-                })
-                .collect::<BTreeMap<_, _>>(),
+            source_model_price_overrides(store.sources()),
         )
     };
     state

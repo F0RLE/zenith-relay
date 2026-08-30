@@ -9,9 +9,10 @@ use zenith_relay_core::{
     normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
-    runtime_source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
-    SourceProtocolBinding, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, RuntimeCandidatePolicy,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding, WireApi,
+    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
@@ -515,17 +516,26 @@ impl ProviderSourceRecord {
         .map_err(|error| error.to_string())
     }
 
-    pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
-        Ok(!self.models_for_wire_api(wire_api)?.is_empty())
-    }
-
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        for wire_api in WireApi::ALL {
-            if self.supports_wire_api(wire_api)? {
-                return Ok(true);
-            }
+        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl RuntimeSourcePolicyRecord for ProviderSourceRecord {
+    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate {
+        RuntimeSourcePolicyUpdate {
+            source_id: self.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: self.enabled,
+                draining: self.draining,
+                priority: self.priority,
+                weight: self.weight,
+                allowed_models: self.allowed_models.clone(),
+                excluded_models: self.excluded_models.clone(),
+            },
+            recovery_delay_seconds: self.recovery_delay_seconds,
         }
-        Ok(false)
     }
 }
 

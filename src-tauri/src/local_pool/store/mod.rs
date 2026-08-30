@@ -374,7 +374,7 @@ impl LocalPoolStore {
             normalize_subscription_plan_order(gateway.subscription_plan_order)
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+            .map_err(LocalPoolError::invalid_state)?;
         if gateway == self.gateway {
             return Ok(());
         }

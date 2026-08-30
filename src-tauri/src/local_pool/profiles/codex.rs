@@ -1286,7 +1286,7 @@ fn account_auth_content(tokens: &TokenSet, provider_account_id: &str) -> Result<
         "last_refresh": last_refresh,
         "tokens": token_values,
     }))
-    .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    .map_err(LocalPoolError::invalid_state)?;
     Ok(format!("{content}\n"))
 }
 
@@ -1436,8 +1436,7 @@ fn parse_account_backup(content: &str, path: &Path) -> Result<AccountProfileBack
 }
 
 fn serialize_account_backup(backup: &AccountProfileBackup) -> Result<String> {
-    let content = serde_json::to_string_pretty(backup)
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    let content = serde_json::to_string_pretty(backup).map_err(LocalPoolError::invalid_state)?;
     Ok(format!("{content}\n"))
 }
 
@@ -1490,8 +1489,7 @@ fn parse_backup_snapshot(snapshot: &Option<Vec<u8>>, path: &Path) -> Result<Opti
 }
 
 fn serialize_backup(backup: &ProfileBackup) -> Result<String> {
-    let content = serde_json::to_string_pretty(backup)
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    let content = serde_json::to_string_pretty(backup).map_err(LocalPoolError::invalid_state)?;
     Ok(format!("{content}\n"))
 }
 

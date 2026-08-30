@@ -23,7 +23,6 @@ pub struct AppState {
 }
 
 struct TrayUi {
-    status: MenuItem<tauri::Wry>,
     toggle: MenuItem<tauri::Wry>,
     tray: TrayIcon<tauri::Wry>,
 }
@@ -61,7 +60,6 @@ impl AppState {
 }
 
 pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()> {
-    let status = MenuItem::with_id(app, "status", status_text(false, 0), false, None::<&str>)?;
     let show = MenuItem::with_id(
         app,
         "show",
@@ -72,7 +70,7 @@ pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()
     let toggle = MenuItem::with_id(app, "toggle", toggle_text(false), true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", ui_text("Quit", "Выйти"), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&status, &show, &toggle, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &toggle, &separator, &quit])?;
 
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
     let tray = TrayIconBuilder::with_id(TRAY_ID)
@@ -119,11 +117,7 @@ pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()
         })
         .build(app)?;
 
-    app.manage(TrayUi {
-        status,
-        toggle,
-        tray,
-    });
+    app.manage(TrayUi { toggle, tray });
 
     Ok(())
 }
@@ -131,11 +125,7 @@ pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()
 pub async fn refresh_tray(app: &AppHandle) {
     let runtime = app.state::<DesktopState>().gateway.runtime().await;
     let running = runtime.is_some();
-    let participants = runtime
-        .map(|runtime| runtime.candidate_runtime_order().len())
-        .unwrap_or_default();
     let ui = app.state::<TrayUi>();
-    let _ = ui.status.set_text(status_text(running, participants));
     let _ = ui.toggle.set_text(toggle_text(running));
     let _ = ui.toggle.set_enabled(true);
     let _ = ui.tray.set_tooltip(Some(tooltip_text(running)));
@@ -155,24 +145,7 @@ async fn toggle_pool(app: AppHandle) {
     };
     let _ = app.emit("zenith-state-changed", ());
     if result.is_err() {
-        let ui = app.state::<TrayUi>();
-        let _ = ui.status.set_text(ui_text(
-            "Could not change pool state",
-            "Не удалось изменить состояние пула",
-        ));
-        let _ = ui.toggle.set_enabled(true);
         show_main_window(&app);
-    }
-}
-
-fn status_text(running: bool, participants: usize) -> String {
-    if running {
-        format!(
-            "{} {participants}",
-            ui_text("Pool running · members:", "Пул работает · участников:")
-        )
-    } else {
-        ui_text("Pool stopped", "Пул остановлен").to_string()
     }
 }
 
@@ -276,9 +249,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_status_counts_only_running_pool_members() {
-        assert!(status_text(true, 3).ends_with('3'));
-        assert!(!status_text(false, 3).contains('3'));
+    fn tray_toggle_label_tracks_pool_state() {
+        assert_eq!(toggle_text(true), "Остановить пул");
+        assert_eq!(toggle_text(false), "Запустить пул");
     }
 
     #[test]

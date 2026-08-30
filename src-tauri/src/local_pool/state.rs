@@ -71,8 +71,8 @@ impl DesktopState {
             });
         let mut store = LocalPoolStore::open(root.clone())?;
         let telemetry = store.database();
-        let mut quota_refresh =
-            QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES).map_err(invalid_core_state)?;
+        let mut quota_refresh = QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES)
+            .map_err(LocalPoolError::invalid_state)?;
         let startup_due_at_ms = now_ms();
         for account in store.accounts().iter().filter(|account| {
             account.remote_location.is_none()
@@ -80,7 +80,7 @@ impl DesktopState {
         }) {
             quota_refresh
                 .upsert(&account.account.id, startup_due_at_ms)
-                .map_err(invalid_core_state)?;
+                .map_err(LocalPoolError::invalid_state)?;
         }
         let wake = wake_coordinator(store.automations())?;
         if &store.automations().state != wake.state() {
@@ -95,7 +95,7 @@ impl DesktopState {
         let (background_session_active, _) = watch::channel(false);
         let token_authority = Arc::new(
             TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
-                .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
+                .map_err(LocalPoolError::invalid_state)?,
         );
         let oauth_events = DesktopOAuthEvents::default();
         let oauth_flow = OAuthFlowManager::new(
@@ -247,10 +247,6 @@ impl DesktopState {
             }
         }
     }
-}
-
-fn invalid_core_state(error: impl std::fmt::Display) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
 #[cfg(test)]

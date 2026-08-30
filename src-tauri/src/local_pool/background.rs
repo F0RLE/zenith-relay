@@ -15,7 +15,6 @@ use std::{collections::HashMap, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
-    accounts::AccountAuthState,
     automations::{
         verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
         WakeVerificationOutcome,
@@ -160,7 +159,9 @@ async fn source_model_loop(app: AppHandle) {
                     break;
                 }
                 let _ = super::commands::connections::refresh_local_source_models(
-                    &state, &source_id, false,
+                    &state,
+                    &source_id,
+                    super::commands::connections::SourceRefreshMode::Background,
                 )
                 .await;
                 let _ = app.emit("zenith-state-changed", ());
@@ -389,12 +390,10 @@ fn terminal_quota_refresh_error(
     if matches!(error.code, ErrorCode::NotFound) {
         return Ok(true);
     }
-    Ok(state.store()?.account(account_id).is_none_or(|account| {
-        matches!(
-            account.account.auth_state,
-            AccountAuthState::RequiresReauth(_)
-        )
-    }))
+    Ok(state
+        .store()?
+        .account(account_id)
+        .is_none_or(|account| account.account.auth_state.requires_fresh_login()))
 }
 
 fn evaluate_updated_transitions(

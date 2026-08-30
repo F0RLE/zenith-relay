@@ -1,6 +1,6 @@
 use super::{
     apply_source_policies_if_running, apply_source_policy_if_running, cleanup_created_secret,
-    core_error, refresh_active_codex_catalog_in_background,
+    core_error, record_catalog_refresh_result, refresh_active_codex_catalog_in_background,
     refresh_local_gateway_key_scope_if_running, restart_after_secret_change,
     sync_records_or_rollback,
 };
@@ -114,7 +114,7 @@ pub async fn create_local_source(
             runtime_source.wire_api,
             &manual_models,
         )
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+        .map_err(LocalPoolError::invalid_state)?;
         SourceDiscovery {
             models: manual_models,
             protocol_bindings,
@@ -390,20 +390,38 @@ pub async fn test_local_source(
     source_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
-    refresh_local_source_models(&state, &source_id, true).await
+    refresh_local_source_models(&state, &source_id, SourceRefreshMode::Manual).await
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SourceRefreshMode {
+    Background,
+    Manual,
+}
+
+impl SourceRefreshMode {
+    fn replaces_manual_catalog(self) -> bool {
+        matches!(self, Self::Manual)
+    }
+
+    fn refreshes_active_catalog(self) -> bool {
+        matches!(self, Self::Manual)
+    }
 }
 
 pub(crate) async fn refresh_local_source_models(
     state: &DesktopState,
     source_id: &str,
-    force_manual_refresh: bool,
+    refresh_mode: SourceRefreshMode,
 ) -> CommandResult<ProviderSourceRecord> {
     let source = state
         .store()?
         .source(source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    if !force_manual_refresh && source.last_test_status.as_deref() == Some("manual") {
+    if !refresh_mode.replaces_manual_catalog()
+        && source.last_test_status.as_deref() == Some("manual")
+    {
         // Manual catalogs are intentionally not re-probed by the background
         // scheduler. An explicit "Refresh models" action can still opt back
         // into discovery and replace the operator's list when supported.
@@ -462,7 +480,8 @@ pub(crate) async fn refresh_local_source_models(
         .as_deref()
         .is_some_and(|base_url| current.base_url != base_url)
         || current.models != discovery.models
-        || current.protocol_bindings != discovery.protocol_bindings;
+        || current.protocol_bindings != discovery.protocol_bindings
+        || current.detected_model_prices != discovery.detected_model_prices;
     let mut updated = current;
     if let Some(base_url) = resolved_base_url {
         updated.base_url = base_url;
@@ -481,6 +500,15 @@ pub(crate) async fn refresh_local_source_models(
     state.store()?.upsert_source(updated.clone())?;
     if runtime_changed {
         sync_records_or_rollback(state, old_sources, old_keys).await?;
+    }
+    if refresh_mode.refreshes_active_catalog() {
+        if let Some(runtime) = state.gateway.runtime().await {
+            runtime
+                .refresh_source_model_metadata_for_source(source_id)
+                .await;
+        }
+        let catalog_result = super::profiles::refresh_active_codex_catalog(state).await;
+        record_catalog_refresh_result(state, &catalog_result);
     }
     Ok(updated)
 }
@@ -550,6 +578,7 @@ pub async fn get_local_source_stats(
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    ensure_not_gateway_self_source(&state, &source.base_url)?;
     fetch_source_provider_stats(&source.base_url, &api_key)
         .await
         .map_err(|message| LocalPoolError::new(ErrorCode::GatewayUnavailable, message).into())
@@ -792,8 +821,14 @@ mod tests {
         source.normalize_protocol_bindings().unwrap();
 
         assert_eq!(source.wire_api, WireApi::Responses);
-        assert!(source.supports_wire_api(WireApi::Responses).unwrap());
-        assert!(source.supports_wire_api(WireApi::Messages).unwrap());
+        assert!(!source
+            .models_for_wire_api(WireApi::Responses)
+            .unwrap()
+            .is_empty());
+        assert!(!source
+            .models_for_wire_api(WireApi::Messages)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

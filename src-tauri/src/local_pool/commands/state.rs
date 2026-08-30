@@ -12,11 +12,10 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    account_operational_state, apply_model_display_order, apply_model_reasoning_summary,
-    apply_model_speed_summary, model_has_api_source_route, model_has_native_account_route,
-    operational_status, pool_model_summaries, pooled_source_runtime_available,
-    source_runtime_available, AccountOperationalInput, AccountSummary, Capabilities,
-    GatewaySummary, OperationalStatus, QuotaWindowUsage, RuntimeStateSnapshot,
+    account_operational_state, apply_model_display_order, apply_pool_model_configuration,
+    operational_status, pool_candidate_count, pool_model_summaries,
+    pooled_source_runtime_available, source_runtime_available, AccountOperationalInput,
+    AccountSummary, Capabilities, GatewaySummary, QuotaWindowUsage, RuntimeStateSnapshot,
     RuntimeTargetSummary, SourceSummary, UsageQuery,
 };
 use zenith_relay_core::{
@@ -45,26 +44,7 @@ pub async fn get_local_runtime_state(
         .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
-    let source_price_overrides = inputs
-        .sources
-        .iter()
-        .map(|source| {
-            let mut prices = BTreeMap::new();
-            for model in source
-                .model_price_overrides
-                .keys()
-                .chain(source.detected_model_prices.keys())
-            {
-                prices.entry(model.clone()).or_insert_with(|| {
-                    zenith_relay_core::ApiModelPriceSources {
-                        provider: source.detected_model_prices.get(model).copied(),
-                        manual: source.model_price_overrides.get(model).copied(),
-                    }
-                });
-            }
-            (source.id.clone(), prices)
-        })
-        .collect::<BTreeMap<_, _>>();
+    let source_price_overrides = super::source_model_price_overrides(&inputs.sources);
     let equivalents = state.telemetry.api_equivalents_with_price_overrides(
         &inputs.gateway.model_price_overrides,
         &source_price_overrides,
@@ -177,70 +157,22 @@ pub async fn get_local_runtime_state(
         &account_summaries,
         &inputs.gateway.hidden_models,
     );
-    for model in &mut models {
-        let model_id = model.id.clone();
-        if let Some(price) = inputs
-            .gateway
-            .model_price_overrides
-            .get(&model_id.to_ascii_lowercase())
-        {
-            model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
-            model.cached_input_micro_usd_per_million = Some(
-                price
-                    .cached_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-            );
-            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
-            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
-            model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
-            model.custom_price = true;
-        }
-        let has_api_source_route = model_has_api_source_route(&source_summaries, &model_id);
-        let has_pool_route =
-            has_api_source_route || model_has_native_account_route(&account_summaries, &model_id);
-        apply_model_reasoning_summary(
-            model,
-            runtime
-                .as_ref()
-                .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
-            zenith_relay_core::reasoning_policy_levels(
-                &inputs.gateway.model_reasoning_allowed_levels,
-                &model_id,
-            ),
-            has_pool_route,
-        );
-        apply_model_speed_summary(
-            model,
-            runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model_id)),
-            inputs
-                .gateway
-                .model_service_tier_overrides
-                .get(&model_id.to_ascii_lowercase())
-                .copied(),
-        );
-    }
+    apply_pool_model_configuration(
+        &mut models,
+        &source_summaries,
+        &account_summaries,
+        &inputs.gateway.model_price_overrides,
+        &inputs.gateway.model_reasoning_allowed_levels,
+        &inputs.gateway.model_service_tier_overrides,
+        runtime.as_deref(),
+    );
     apply_model_display_order(&mut models, &inputs.gateway.model_display_order);
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
         .map(|model| model.id.clone())
         .collect();
-    let candidate_count = source_summaries
-        .iter()
-        .filter(|record| {
-            record.in_pool
-                && record.supports_any_wire_api()
-                && record.operational_status == OperationalStatus::Rotation
-        })
-        .count()
-        + account_summaries
-            .iter()
-            .filter(|record| {
-                record.in_pool && record.operational_status == OperationalStatus::Rotation
-            })
-            .count();
+    let candidate_count = pool_candidate_count(&source_summaries, &account_summaries);
     let base_url = format!(
         "http://{}:{}/v1",
         inputs.gateway.client_host, inputs.gateway.port

@@ -1,8 +1,10 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 use serde::Serialize;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     path::Path,
     sync::{atomic::AtomicU64, Mutex},
     time::Instant,
@@ -12,8 +14,8 @@ use zenith_relay_core::ResponseAffinityBinding;
 use zenith_relay_core::{
     api_pricing_revision,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, ApiModelPriceSources, CacheWriteTtl,
-    DefaultServiceTier, ErrorOrigin, RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, DefaultServiceTier, ErrorOrigin,
+    ObservedServiceTier, RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
 };
 
 mod affinity;
@@ -25,11 +27,11 @@ mod usage;
 
 use migrations::*;
 use usage::{
-    configured_model_price, rust_u64, sql_u64, usage_buckets, usage_filter, usage_groups,
-    usage_log_from_row, usage_model_equivalents, usage_totals,
+    rust_u64, sql_u64, usage_buckets, usage_filter, usage_groups, usage_log_from_row,
+    usage_model_equivalents, usage_totals,
 };
 
-pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
+pub type SourcePriceOverrides = zenith_relay_core::SourceModelPriceOverrides;
 
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
@@ -63,7 +65,7 @@ pub struct UsageLog {
     pub effective_reasoning_effort: Option<String>,
     pub wire_api: String,
     pub service_tier: DefaultServiceTier,
-    pub applied_service_tier: Option<DefaultServiceTier>,
+    pub applied_service_tier: Option<ObservedServiceTier>,
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,
@@ -371,7 +373,7 @@ mod tests {
             effective_reasoning_effort: Some("low".into()),
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
-            applied_service_tier: Some(DefaultServiceTier::Standard),
+            applied_service_tier: Some("flex".into()),
             success: true,
             http_status: 200,
             error_category: None,
@@ -422,10 +424,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(logs[0].service_tier, DefaultServiceTier::Fast);
-        assert_eq!(
-            logs[0].applied_service_tier,
-            Some(DefaultServiceTier::Standard)
-        );
+        assert_eq!(logs[0].applied_service_tier, Some("flex".into()));
         assert_eq!(
             logs[0].routing.as_ref().map(|routing| routing.reason),
             Some(SelectionReason::QuotaHeadroom)

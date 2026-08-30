@@ -14,8 +14,11 @@ mod runtime;
 
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
-    store::secret_store,
+    models::ProviderSourceRecord,
+    store::{secret_store, telemetry_db::SourcePriceOverrides},
 };
+use std::collections::BTreeMap;
+use zenith_relay_core::ApiModelPriceSources;
 
 pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
     secret_store::delete(secret_ref).map_err(|cleanup| {
@@ -27,6 +30,30 @@ pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -
             ),
         )
     })
+}
+
+pub(super) fn source_model_price_overrides(
+    sources: &[ProviderSourceRecord],
+) -> SourcePriceOverrides {
+    sources
+        .iter()
+        .map(|source| {
+            let mut prices = BTreeMap::new();
+            for model in source
+                .model_price_overrides
+                .keys()
+                .chain(source.detected_model_prices.keys())
+            {
+                prices
+                    .entry(model.clone())
+                    .or_insert_with(|| ApiModelPriceSources {
+                        provider: source.detected_model_prices.get(model).copied(),
+                        manual: source.model_price_overrides.get(model).copied(),
+                    });
+            }
+            (source.id.clone(), prices)
+        })
+        .collect()
 }
 
 pub(in crate::local_pool) use runtime::{

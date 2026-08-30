@@ -1,6 +1,6 @@
 use super::{
-    db_error, sql_u64, DefaultServiceTier, ErrorCode, LocalPoolError, Result, TelemetryDb,
-    UsageEvent, ARCHIVE_USAGE_SQL,
+    db_error, sql_u64, ErrorCode, LocalPoolError, Result, TelemetryDb, UsageEvent,
+    ARCHIVE_USAGE_SQL,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::atomic::Ordering;
@@ -301,7 +301,7 @@ impl TelemetryDb {
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
                     event.service_tier.as_str(),
-                    event.applied_service_tier.map(DefaultServiceTier::as_str),
+                    event.applied_service_tier.as_deref(),
                     routing_json,
                     tool_use_json,
                     event.error_origin().map(|origin| origin.as_str()),

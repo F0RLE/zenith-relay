@@ -1,6 +1,8 @@
-use super::usage::estimate_candidate_equivalent;
 use super::*;
-use std::sync::atomic::Ordering;
+use std::{collections::BTreeMap, sync::atomic::Ordering};
+use zenith_relay_core::{
+    candidate_model_price_sources, estimate_candidate_api_equivalent, ApiEquivalentUsage,
+};
 
 impl TelemetryDb {
     #[cfg(test)]
@@ -127,17 +129,19 @@ impl TelemetryDb {
                 }
                 _ => (Some(0), Some(0), event.cache_write_input_tokens),
             };
-            event.api_equivalent = estimate_candidate_equivalent(
+            event.api_equivalent = estimate_candidate_api_equivalent(
                 candidate_kind,
                 model,
-                event.input_tokens,
-                event.cached_input_tokens,
-                cache_write_5m,
-                cache_write_1h,
-                unknown_cache_write,
-                event.output_tokens,
-                event.total_tokens,
-                configured_model_price(
+                ApiEquivalentUsage {
+                    input_tokens: event.input_tokens,
+                    cached_input_tokens: event.cached_input_tokens,
+                    cache_write_5m_tokens: cache_write_5m,
+                    cache_write_1h_tokens: cache_write_1h,
+                    unknown_cache_write_tokens: unknown_cache_write,
+                    output_tokens: event.output_tokens,
+                    total_tokens: event.total_tokens,
+                },
+                candidate_model_price_sources(
                     price_overrides,
                     source_price_overrides,
                     candidate_kind,
@@ -230,22 +234,26 @@ impl TelemetryDb {
                 Ok((
                     kind.clone(),
                     id.clone(),
-                    estimate_candidate_equivalent(
+                    estimate_candidate_api_equivalent(
                         &kind,
                         model.as_deref(),
-                        input_tokens.map(rust_u64),
-                        (input_samples > 0 && cached_samples == input_samples)
-                            .then(|| cached_input_tokens.map(rust_u64))
-                            .flatten(),
-                        (cache_write_samples > 0)
-                            .then(|| cache_write_5m_tokens.map(rust_u64).unwrap_or_default()),
-                        (cache_write_samples > 0)
-                            .then(|| cache_write_1h_tokens.map(rust_u64).unwrap_or_default()),
-                        (cache_write_samples > 0)
-                            .then(|| unknown_cache_write_tokens.map(rust_u64).unwrap_or_default()),
-                        output_tokens.map(rust_u64),
-                        total_tokens.map(rust_u64),
-                        configured_model_price(
+                        ApiEquivalentUsage {
+                            input_tokens: input_tokens.map(rust_u64),
+                            cached_input_tokens: (input_samples > 0
+                                && cached_samples == input_samples)
+                                .then(|| cached_input_tokens.map(rust_u64))
+                                .flatten(),
+                            cache_write_5m_tokens: (cache_write_samples > 0)
+                                .then(|| cache_write_5m_tokens.map(rust_u64).unwrap_or_default()),
+                            cache_write_1h_tokens: (cache_write_samples > 0)
+                                .then(|| cache_write_1h_tokens.map(rust_u64).unwrap_or_default()),
+                            unknown_cache_write_tokens: (cache_write_samples > 0).then(|| {
+                                unknown_cache_write_tokens.map(rust_u64).unwrap_or_default()
+                            }),
+                            output_tokens: output_tokens.map(rust_u64),
+                            total_tokens: total_tokens.map(rust_u64),
+                        },
+                        candidate_model_price_sources(
                             price_overrides,
                             source_price_overrides,
                             &kind,

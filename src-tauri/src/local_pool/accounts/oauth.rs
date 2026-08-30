@@ -843,7 +843,7 @@ mod tests {
             .exchange_refresh_token("refresh-secret", 5_000)
             .await
             .unwrap_err();
-        assert_eq!(failure.kind, TokenRefreshFailureKind::ReusedRefreshToken);
+        assert_eq!(failure.kind, TokenRefreshFailureKind::Transient);
         assert_eq!(failure.code, "refresh_token_reused");
         let rendered = format!("{failure:?}");
         assert!(!rendered.contains("refresh-secret"));
