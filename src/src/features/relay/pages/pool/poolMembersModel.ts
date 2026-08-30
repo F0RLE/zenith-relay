@@ -1,4 +1,4 @@
-import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeSnapshot } from "../../api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
 import { currentAccountErrorCode } from "../../accountStatus";
 import {
   activeModelCounts,
@@ -22,7 +22,7 @@ export type PoolActivityState = {
   activeModels: ReturnType<typeof activeModelCounts>;
   lastUsedRuntime: CandidateRuntimeSnapshot | null;
   lastUsedMember: PoolMember | null;
-  nextMember: PoolMember | null;
+  lastActivityMember: PoolMember | null;
 };
 
 export function poolMembersFromRuntime(runtime: RuntimeSnapshot | null): PoolMember[] {
@@ -73,6 +73,7 @@ export function poolActivityState(
   members: readonly PoolMember[],
   runtimeByMember: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined>,
   runtimeOrder: readonly CandidateRuntimeSnapshot[],
+  activity?: RuntimeActivityState,
 ): PoolActivityState {
   const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
   const activeRuntime = activeMembers.flatMap((member) => {
@@ -90,7 +91,9 @@ export function poolActivityState(
   const lastUsedMember = lastUsedRuntime
     ? members.find((member) => runtimeByMember.get(member.id)?.lastUsedAtMs === lastUsedRuntime.lastUsedAtMs) ?? null
     : null;
-  const nextMember = members.find((member) => runtimeByMember.get(member.id)?.available) ?? null;
+  const lastActivityMember = activity?.lastCandidateId
+    ? members.find((member) => candidateBelongsToMember(member, activity.lastCandidateId!)) ?? null
+    : null;
   return {
     activeMembers,
     activeRuntime,
@@ -98,8 +101,13 @@ export function poolActivityState(
     activeModels,
     lastUsedRuntime,
     lastUsedMember,
-    nextMember,
+    lastActivityMember,
   };
+}
+
+function candidateBelongsToMember(member: PoolMember, candidateId: string) {
+  if (member.kind === "account") return candidateId === member.id;
+  return candidateId === member.id || candidateId.startsWith(`${member.id}::`);
 }
 
 export function poolMemberStatusCounts(members: readonly PoolMember[]): PoolMemberStatusCounts {

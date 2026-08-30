@@ -19,6 +19,9 @@ release entries are kept concise and link to the corresponding tag.
 - Relay preserves a Codex session's preferred healthy route to retain upstream
   prompt-cache affinity, while still allowing bounded fallback when capacity,
   quota, or health requires it.
+- Pool activity now follows the runtime's reported candidate, including a
+  lower-priority stabilizer, and remains visible across concurrent state
+  refreshes instead of predicting a «next choice» from the card order.
 - A confirmed quota exhaustion cools down only the affected account/source and
   model route instead of taking the whole provider out of rotation.
 - Namespaced API models stay on their declared API source; Relay no longer

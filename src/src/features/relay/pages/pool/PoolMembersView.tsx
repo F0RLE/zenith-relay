@@ -37,7 +37,7 @@ type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: b
 
 export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; onReauthenticate: (account: AccountSummary) => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
+  const { mode, runtime, runtimeActivity, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
@@ -96,8 +96,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     activeModels,
     lastUsedRuntime,
     lastUsedMember,
-    nextMember,
-  } = poolActivityState(members, runtimeByMember, runtimeOrder);
+    lastActivityMember,
+  } = poolActivityState(members, runtimeByMember, runtimeOrder, runtimeActivity);
   const activeModelList = activeModels
     .map(({ model, requestCount }) => requestCount > 1 ? t("pool.activeModelCount", { model, count: requestCount }) : model)
     .join(" · ");
@@ -106,15 +106,14 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       ? t("pool.activeRequests", { count: activeRequestTotal, models: activeModelList })
       : t("pool.activeRequestsUnknown", { count: activeRequestTotal })
     : null;
+  const hasAvailableRoute = runtimeOrder.some((candidate) => candidate.available);
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
-      : lastUsedMember
-        ? `${t("pool.lastRoute")}: ${memberName(lastUsedMember)}`
-        : nextMember
-          ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
-          : t("pool.priorityEmpty");
+      : (lastActivityMember ?? lastUsedMember)
+        ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
+        : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   const remove = async (member: Member) => {
     const ok = await perform(`pool-remove-${member.id}`, () => updatePoolMembership(mode, {

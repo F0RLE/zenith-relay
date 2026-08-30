@@ -245,9 +245,48 @@ describe("pool helpers", () => {
     });
 
     expect(next).not.toBe(order);
-    expect(next[1]).toMatchObject({ inFlight: 2, activeRequestCount: 2, activeModels: [{ model: "claude-opus", requestCount: 2 }] });
+    expect(next[0]).toMatchObject({ candidateId: "source-b::messages", inFlight: 2, activeRequestCount: 2, activeModels: [{ model: "claude-opus", requestCount: 2 }] });
+    expect(next[1]).toMatchObject({ candidateId: "account-a", inFlight: 0, activeRequestCount: 0, activeModels: [] });
     expect(order[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0, activeModels: [] });
     expect(applyRuntimeActivity(order, { revision: 2, candidateId: "missing", inFlight: 1, activeRequestCount: 1, activeModels: [] })).toBe(order);
+  });
+
+  test("positions a multi-protocol source by its active binding", () => {
+    const order = routingOrderPositions([
+      { candidateId: "source-a::responses", kind: "api_source", available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "source-b", kind: "api_source", available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "source-a::messages", kind: "api_source", available: true, inFlight: 1, activeRequestCount: 1, activeModels: [{ model: "claude-opus", requestCount: 1 }], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 1 },
+    ]);
+
+    expect(order.get("source-a")).toBe(2);
+  });
+
+  test("applies a release event to a stale base order", () => {
+    const base = [
+      { candidateId: "account-a", kind: "oauth_account" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "source-b", kind: "api_source" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+    ];
+    const active = applyRuntimeActivity(base, {
+      revision: 1,
+      candidateId: "source-b",
+      inFlight: 1,
+      activeRequestCount: 1,
+      activeModels: [{ model: "claude-opus", requestCount: 1 }],
+    });
+    expect(active[0].candidateId).toBe("source-b");
+
+    // The base order can still contain the in-flight state when the release
+    // event wins the race with the lightweight runtime poll. Replaying the
+    // tombstone against the raw base must clear both the count and the move.
+    const released = applyRuntimeActivity(base, {
+      revision: 2,
+      candidateId: "source-b",
+      inFlight: 0,
+      activeRequestCount: 0,
+      activeModels: [],
+    });
+    expect(released.map((candidate) => candidate.candidateId)).toEqual(["account-a", "source-b"]);
+    expect(released[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0, activeModels: [] });
   });
 
   test("uses only the Responses route for a pooled source", () => {

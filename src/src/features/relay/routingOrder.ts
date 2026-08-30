@@ -10,18 +10,26 @@ const API_SOURCE_RESERVE_PRIORITY = -1_000_000;
 
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   const positions = new Map<string, number>();
+  const sourcePositions = new Map<string, { index: number; active: boolean }>();
   for (const [index, candidate] of order.entries()) {
     positions.set(candidate.candidateId, index);
     if (candidate.kind !== "api_source") continue;
     const separator = candidate.candidateId.indexOf("::");
     if (separator > 0) {
       const sourceId = candidate.candidateId.slice(0, separator);
-      // A source card represents all of its protocol candidates. Use the
-      // first live route as its stable position; request admission still
-      // filters the selected candidate by the caller's wire API.
-      if (!positions.has(sourceId)) positions.set(sourceId, index);
+      // A source card represents all of its protocol candidates. Prefer the
+      // protocol route that is actually carrying traffic, then fall back to
+      // the first route supplied by the scheduler. This keeps a multi-
+      // protocol source card aligned with the active route instead of pinning
+      // it to whichever binding happened to be serialized first.
+      const active = activeRequestCount(candidate) > 0;
+      const previous = sourcePositions.get(sourceId);
+      if (!previous || (active && !previous.active) || (active === previous.active && index < previous.index)) {
+        sourcePositions.set(sourceId, { index, active });
+      }
     }
   }
+  for (const [sourceId, { index }] of sourcePositions) positions.set(sourceId, index);
   return positions;
 }
 
@@ -116,7 +124,20 @@ export function applyRuntimeActivity(
       activeModels: activity.activeModels,
     };
   });
-  return changed ? next : order;
+  if (!changed) return order;
+
+  // `PoolScheduler::runtime_order` puts leased candidates first. Mirror that
+  // invariant as soon as the event arrives, rather than waiting for the
+  // lightweight order poll. The sort is stable, so the scheduler's policy
+  // order remains intact for candidates in the same activity state.
+  return next
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => {
+      const leftActive = activeRequestCount(left.candidate) > 0;
+      const rightActive = activeRequestCount(right.candidate) > 0;
+      return Number(rightActive) - Number(leftActive) || left.index - right.index;
+    })
+    .map(({ candidate }) => candidate);
 }
 
 export function applyRuntimeActivities(

@@ -1039,6 +1039,7 @@ const relayRu = {
     parallelism: "Параллельность",
     parallelRequests: "Параллельно: {{count}}",
     priorityEmpty: "Нет доступного маршрута",
+    awaitingRoute: "Ожидает первого запроса",
     readyModels: "Доступно сейчас через {{member}}: {{models}}",
     memberStatus: {
       rotation: "В ротации",

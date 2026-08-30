@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
-import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, applyRuntimeActivity } from "../routingOrder";
+import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
+import { applyRuntimeActivities } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
@@ -24,6 +24,8 @@ type RelayRuntimeDependencies = {
   reportErrorFeedback: (cause: unknown, key: string, fallbackCode: string) => void;
 };
 
+type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"]>;
+
 /** Own mode navigation, runtime snapshots, event synchronization, and refresh timing. */
 export function useRelayRuntime({
   cancelOperations,
@@ -37,6 +39,10 @@ export function useRelayRuntime({
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [usageRevision, setUsageRevision] = useState(0);
   const [readyState, setReadyState] = useState<UiState | null>(null);
+  const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivityState>({
+    revision: 0,
+    lastCandidateId: null,
+  });
   const [loading, setLoading] = useState(true);
   const modeRef = useRef(mode);
   const pageRef = useRef(page);
@@ -47,6 +53,11 @@ export function useRelayRuntime({
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
+  // Keep the scheduler order separate from the activity facts. The map also
+  // retains the latest zero-count event: a routing poll can finish while a
+  // request is in flight, and that stale snapshot must not resurrect the
+  // candidate after its release event arrives.
+  const runtimeRoutingOrderBase = useRef<RuntimeRoutingOrder>([]);
 
   const setPage = useCallback((next: PageId) => {
     if (pageRef.current === next) return;
@@ -61,6 +72,8 @@ export function useRelayRuntime({
     modeRef.current = next;
     stateRevision.current += 1;
     runtimeActivityOverlay.current.clear();
+    runtimeRoutingOrderBase.current = [];
+    setRuntimeActivity({ revision: 0, lastCandidateId: null });
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
     resetUsage();
@@ -82,12 +95,15 @@ export function useRelayRuntime({
     void recordPerformance("full_snapshot", performance.now() - startedAt, requestedMode);
     if (modeRef.current !== requestedMode) return;
     if (requestedMode === "zenith") setReadyState(loaded.readyState);
+    if (requestedMode === "local") {
+      runtimeRoutingOrderBase.current = loaded.snapshot?.gateway.routingOrder ?? [];
+    }
     const snapshot = loaded.snapshot && requestedMode === "local"
       ? {
         ...loaded.snapshot,
         gateway: {
           ...loaded.snapshot.gateway,
-          routingOrder: applyRuntimeActivities(loaded.snapshot.gateway.routingOrder ?? [], runtimeActivityOverlay.current.values()),
+          routingOrder: visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current),
         },
       }
       : loaded.snapshot;
@@ -157,8 +173,9 @@ export function useRelayRuntime({
           ? await relayCommands.localRuntimeOrder()
           : await relayCommands.remoteRuntimeOrder();
         if (!active || routingOrder == null) return;
+        if (mode === "local") runtimeRoutingOrderBase.current = routingOrder;
         const visibleRoutingOrder = mode === "local"
-          ? applyRuntimeActivities(routingOrder, runtimeActivityOverlay.current.values())
+          ? visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current)
           : routingOrder;
         setRuntime((snapshot) => snapshot ? {
           ...snapshot,
@@ -219,7 +236,6 @@ export function useRelayRuntime({
     };
     void relayCommands.onStateChanged(() => {
       stateRevision.current += 1;
-      runtimeActivityOverlay.current.clear();
       if (!active || document.visibilityState !== "visible") return;
       if (pageRef.current === "usage") {
         scheduleUsageRefresh();
@@ -242,13 +258,22 @@ export function useRelayRuntime({
       if (!active || modeRef.current !== "local") return;
       const previous = runtimeActivityOverlay.current.get(activity.candidateId);
       if (previous && activity.revision <= previous.revision) return;
+      // Keep both active and zero-count snapshots. A zero-count snapshot is a
+      // tombstone for an older live poll state and must be applied to the next
+      // base order as well as the current one.
       runtimeActivityOverlay.current.set(activity.candidateId, activity);
+      setRuntimeActivity((current) => activity.revision > current.revision
+        ? { revision: activity.revision, lastCandidateId: activity.candidateId }
+        : current);
       if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
       setRuntime((snapshot) => snapshot ? {
         ...snapshot,
         gateway: {
           ...snapshot.gateway,
-          routingOrder: applyRuntimeActivity(snapshot.gateway.routingOrder ?? [], activity),
+          routingOrder: visibleLocalRoutingOrder(
+            runtimeRoutingOrderBase.current.length ? runtimeRoutingOrderBase.current : snapshot.gateway.routingOrder ?? [],
+            runtimeActivityOverlay.current,
+          ),
         },
       } : snapshot);
     }).then((stop) => {
@@ -319,6 +344,17 @@ export function useRelayRuntime({
     usageRevision,
     readyState,
     loading,
+    runtimeActivity,
     refresh,
   };
+}
+
+function visibleLocalRoutingOrder(
+  base: RuntimeRoutingOrder,
+  overlay: ReadonlyMap<string, RuntimeActivitySnapshot>,
+) {
+  return applyRuntimeActivities(
+    base,
+    overlay.values(),
+  );
 }

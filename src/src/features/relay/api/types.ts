@@ -206,6 +206,19 @@ export type RuntimeActivitySnapshot = {
   }>;
 };
 
+/**
+ * Ephemeral routing facts maintained by the local runtime event stream.
+ *
+ * The persisted runtime snapshot is still the source of truth for policy and
+ * availability. This small overlay bridges the interval between a
+ * reserve/release event and the next snapshot refresh; its latest release
+ * marker also prevents a stale poll from bringing a completed route back.
+ */
+export type RuntimeActivityState = {
+  revision: number;
+  lastCandidateId: string | null;
+};
+
 export type WakeTask = {
   id: string;
   name: string;

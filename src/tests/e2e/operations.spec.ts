@@ -2317,10 +2317,54 @@ test("pool does not show the next route's models before any request", async ({ p
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   const priority = page.locator(".pool-priority-label");
-  await expect(priority).toContainText("Next choice: Personal Plus");
+  await expect(priority).toContainText("Waiting for the first request");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
+  await expect(priority).not.toContainText("Personal Plus");
   await expect(priority).not.toContainText("gpt-5.4");
   await expect(priority).not.toContainText("claude-opus-4-8");
+});
+
+test("pool follows a lower-priority stabilizer reported by runtime activity", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    usagePresent: false,
+    usageActive: false,
+    accountCount: 1,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "plugin:event|listen"))).toBe(true);
+
+  await emitTauriEvent(page, "zenith-runtime-activity", {
+    revision: 1,
+    candidateId: "source_synthetic",
+    inFlight: 1,
+    activeRequestCount: 1,
+    activeModels: [{ model: "claude-opus-4-8", requestCount: 1 }],
+  });
+  // A quota/usage state notification can arrive while the request is still
+  // running. It must not clear the activity overlay before the next snapshot.
+  await emitTauriEvent(page, "zenith-state-changed", null);
+
+  const priority = page.locator(".pool-priority-label");
+  await expect(priority).toContainText("Active now: Example compatible API");
+  await expect(priority).toContainText("Active now (1): claude-opus-4-8");
+  await expect(priority).not.toContainText("Next choice");
+  await expect(page.locator('[data-member-label="Example compatible API"]')).toHaveAttribute("data-current", "true");
+  await expect(page.locator('[data-member-label="Personal Plus"]')).toHaveAttribute("data-current", "false");
+
+  await emitTauriEvent(page, "zenith-runtime-activity", {
+    revision: 2,
+    candidateId: "source_synthetic",
+    inFlight: 0,
+    activeRequestCount: 0,
+    activeModels: [],
+  });
+  await expect(priority).toContainText("Last request: Example compatible API");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Personal Plus");
+  await expect(page.locator('[data-member-label="Example compatible API"]')).toHaveAttribute("data-current", "false");
 });
 
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {

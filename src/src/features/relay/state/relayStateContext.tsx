@@ -8,6 +8,7 @@ import type {
   RemoteUsage,
   RemoteUsagePage,
   RemoteUsageQuery,
+  RuntimeActivityState,
   RuntimeSnapshot,
 } from "../api/types";
 import type { UiState } from "../api/commands";
@@ -21,6 +22,8 @@ export type RelayContextValue = {
   page: PageId;
   setPage: (page: PageId) => void;
   runtime: RuntimeSnapshot | null;
+  /** Latest route fact received from the local scheduler activity stream. */
+  runtimeActivity: RuntimeActivityState;
   runtimeRevision: number;
   usageRevision: number;
   accountIdentitiesVisible: boolean;

@@ -1039,6 +1039,7 @@ const relayEn = {
     parallelism: "Parallelism",
     parallelRequests: "Parallel: {{count}}",
     priorityEmpty: "No route available",
+    awaitingRoute: "Waiting for the first request",
     readyModels: "Available now via {{member}}: {{models}}",
     memberStatus: {
       rotation: "In rotation",
