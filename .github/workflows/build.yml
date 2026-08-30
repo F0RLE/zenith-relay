@@ -140,10 +140,10 @@ jobs:
           $notes = ""
           if ($env:GITHUB_REF -like "refs/tags/*") {
             $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
-            $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
+            $changelog = Get-Content -Raw -LiteralPath "docs/releases/CHANGELOG.md"
             $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
             if (-not $releaseSection.Success) {
-              throw "CHANGELOG.md must contain a user-facing section for release $version"
+              throw "docs/releases/CHANGELOG.md must contain a user-facing section for release $version"
             }
             $notes = $releaseSection.Value.Trim()
           }
