@@ -124,7 +124,7 @@ export function OverviewPage() {
     return () => { active = false; };
   }, [mode, range, runtimeRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
 
-  if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} />;
+  if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} perform={perform} />;
 
   const totals = analytics?.totals ?? emptyUsageTotals();
   const requests = totals.requests;
@@ -140,8 +140,9 @@ export function OverviewPage() {
     </>}
   </section>;
 }
-function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOpen: () => void }) {
+function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean> }) {
   const { t, i18n } = useTranslation();
+  const { busy } = useRelayState();
   const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
   const [stats, setStats] = useState<SourceStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
@@ -175,12 +176,18 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
     localStorage.setItem("relay.directSourceId", sourceId);
     setSelection(sourceId);
   };
+  const refreshSourceData = async () => {
+    if (!source) return;
+    await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed");
+    setStatsRevision((value) => value + 1);
+  };
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const display = (value: string | null | undefined) => value || (statsLoading ? "…" : "—");
   const money = (value: number | null | undefined) => value == null ? null : formatProviderMicroUsd(value, locale);
   const requests = stats?.requests == null ? null : formatFullNumber(stats.requests, locale);
   const totalTokens = stats?.totalTokens == null ? null : formatFullNumber(stats.totalTokens, locale);
-  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={statsLoading} disabled={!source} onClick={() => setStatsRevision((value) => value + 1)}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
+  const sourceRefreshBusy = busy === "source-data-refresh";
+  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={statsLoading || sourceRefreshBusy} disabled={!source || sourceRefreshBusy} onClick={() => void refreshSourceData()}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
     {!source ? <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>} /> : <div className="direct-api-overview">

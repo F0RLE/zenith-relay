@@ -64,7 +64,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     runtimeByMember.get(member.id)?.nextRetryAtMs,
   ]));
   const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
-  const refreshSourceStats = useCallback(async (sourceId: string) => {
+  const refreshSourceStats = useCallback(async (sourceId: string, refreshModels = false, operationManaged = false) => {
     if (mode === "zenith") return;
     const generation = sourceStatsGeneration.current;
     setSourceStats((current) => ({
@@ -72,6 +72,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       [sourceId]: { value: current[sourceId]?.value ?? null, loading: true, failed: false },
     }));
     try {
+      if (refreshModels && mode === "local") {
+        const refresh = () => relayCommands.refreshSourceData(sourceId);
+        if (operationManaged) await refresh();
+        else await perform(`source-data-refresh-${sourceId}`, refresh, "feedback.refreshed");
+      }
       const value = await (mode === "local" ? relayCommands.localSourceStats(sourceId) : relayCommands.remoteSourceStats(sourceId));
       if (generation !== sourceStatsGeneration.current) return;
       setSourceStats((current) => ({ ...current, [sourceId]: { value, loading: false, failed: false } }));
@@ -129,11 +134,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     await remove(member);
   };
   const quotaAccountCount = members.filter((member) => member.kind === "account" && member.enabled).length;
+  const refreshableSourceIds = members
+    .filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source" && member.secretAvailable)
+    .map((member) => member.id);
+  const refreshableMemberCount = quotaAccountCount + refreshableSourceIds.length;
   const hasAccountMembers = members.some((member) => member.kind === "account");
   const refreshQuotas = async () => {
     let report: AccountQuotaRefreshReport | null = null;
     const ok = await perform("pool-quota-refresh", async () => {
-      report = await refreshAllAccountQuotas(mode);
+      if (quotaAccountCount) report = await refreshAllAccountQuotas(mode);
+      await Promise.all(refreshableSourceIds.map((sourceId) => refreshSourceStats(sourceId, mode === "local", true)));
     });
     if (ok && report) setQuotaReport(report);
   };
@@ -177,7 +187,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
             {hasAccountMembers ? <IconButton className="account-calculation-toggle" label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<DollarSign aria-hidden />} aria-pressed={accountValueVisible} onClick={() => setAccountValueVisible(!accountValueVisible)} /> : null}
-            <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button>
+            <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !refreshableMemberCount} title={!refreshableMemberCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button>
           </div>
         </div>
       </div>
@@ -277,7 +287,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
                 event.stopPropagation();
                 void remove(member);
               }} />
-              {member.kind === "source" ? <IconButton label={t("pool.refreshSourceStats")} icon={sourceStats[member.id]?.loading ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!member.secretAvailable || sourceStats[member.id]?.loading} onClick={() => void refreshSourceStats(member.id)} /> : null}
+              {member.kind === "source" ? <IconButton label={t("pool.refreshSourceStats")} icon={sourceStats[member.id]?.loading ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!member.secretAvailable || sourceStats[member.id]?.loading || Boolean(busy)} onClick={() => void refreshSourceStats(member.id, true)} /> : null}
               {member.kind === "account" ? <IconButton label={t("accounts.refreshQuota")} icon={busy === `pool-account-quota-${member.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !member.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(member)} /> : null}
               <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
             </div>

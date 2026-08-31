@@ -728,10 +728,9 @@ pub(crate) async fn refresh_account_quota_once(
 
 /// Refresh only the account's upstream model catalog.
 ///
-/// Model discovery has its own lifecycle: it runs when an active background
-/// session starts and every eight hours afterwards. Keeping it outside the
-/// quota queue prevents a long quota window from delaying discovery and avoids
-/// issuing a quota request merely because the model catalog is due.
+/// This is used for startup and membership-triggered discovery. Regular
+/// automatic quota refreshes can request the same discovery inline so the
+/// account's quota and model list stay current after one scheduled pass.
 pub(crate) async fn refresh_account_models_once(
     state: &DesktopState,
     account_id: &str,

@@ -69,12 +69,10 @@ pub(crate) fn start(app: AppHandle) {
 /// Start a one-shot model discovery for accounts that have just become local
 /// pool members.
 ///
-/// Quota refreshes and model discovery intentionally have separate periodic
-/// lifecycles. A membership change is the exception: the account must be
-/// discoverable immediately, otherwise the UI shows a fresh quota together
-/// with an empty model list until the user manually refreshes it. Keep the
-/// network work off the command path and reuse the per-account lock shared by
-/// the regular quota/model workers.
+/// A membership change needs immediate model discovery, otherwise the UI can
+/// show a fresh quota together with an empty model list until the user
+/// manually refreshes it. Keep this one-shot work off the command path and
+/// reuse the per-account lock shared by the regular quota/model workers.
 pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: Vec<String>) {
     let account_ids = account_ids
         .into_iter()
@@ -123,7 +121,7 @@ async fn quota_loop(app: AppHandle) {
         if !state.background_session_active() {
             continue;
         }
-        if run_due_quota_refreshes(&app, false).await.is_err() {
+        if run_due_quota_refreshes(&app, true).await.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
     }

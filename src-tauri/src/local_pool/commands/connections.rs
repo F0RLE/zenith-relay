@@ -393,10 +393,22 @@ pub async fn test_local_source(
     refresh_local_source_models(&state, &source_id, SourceRefreshMode::Manual).await
 }
 
+/// Refresh the source model catalog from the management view without
+/// replacing a manual model list. The UI pairs this operation with the
+/// provider-statistics request so both values are refreshed by one action.
+#[tauri::command]
+pub async fn refresh_local_source_data(
+    source_id: String,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProviderSourceRecord> {
+    refresh_local_source_models(&state, &source_id, SourceRefreshMode::OnDemand).await
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SourceRefreshMode {
     Background,
     Manual,
+    OnDemand,
 }
 
 impl SourceRefreshMode {
@@ -405,7 +417,7 @@ impl SourceRefreshMode {
     }
 
     fn refreshes_active_catalog(self) -> bool {
-        matches!(self, Self::Manual)
+        matches!(self, Self::Manual | Self::OnDemand)
     }
 }
 
@@ -840,6 +852,15 @@ mod tests {
 
         current.models.push("model-b".into());
         assert!(!source_probe_matches(&before, &current));
+    }
+
+    #[test]
+    fn on_demand_source_refresh_preserves_manual_catalogs_but_rebuilds_active_catalog() {
+        assert!(!SourceRefreshMode::OnDemand.replaces_manual_catalog());
+        assert!(SourceRefreshMode::OnDemand.refreshes_active_catalog());
+        assert!(SourceRefreshMode::Manual.replaces_manual_catalog());
+        assert!(SourceRefreshMode::Manual.refreshes_active_catalog());
+        assert!(!SourceRefreshMode::Background.refreshes_active_catalog());
     }
 
     #[test]

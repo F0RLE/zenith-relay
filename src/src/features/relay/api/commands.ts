@@ -66,6 +66,7 @@ export const relayCommands = {
   setSourceEnabled: (sourceId: string, enabled: boolean) => invoke("set_local_source_enabled", { sourceId, enabled }),
   deleteSource: (sourceId: string) => invoke("delete_local_source", { sourceId }),
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
+  refreshSourceData: (sourceId: string) => invoke("refresh_local_source_data", { sourceId }),
   localSourceStats: (sourceId: string) => invoke<SourceStats>("get_local_source_stats", { sourceId }),
   remoteSourceStats: (sourceId: string) => invoke<SourceStats>("get_remote_source_stats", { sourceId }),
 

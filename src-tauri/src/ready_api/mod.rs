@@ -279,6 +279,7 @@ pub fn run() {
             local_pool::commands::connections::delete_local_source,
             local_pool::commands::connections::rotate_local_source_key,
             local_pool::commands::connections::test_local_source,
+            local_pool::commands::connections::refresh_local_source_data,
             local_pool::commands::connections::get_local_source_stats,
             local_pool::commands::remote_server::get_remote_source_stats,
             local_pool::accounts::import_orchestrator::start_local_account_import,
