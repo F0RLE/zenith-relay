@@ -3,14 +3,15 @@ import { Camera, CircleAlert, FolderOpen, History, RotateCcw, Trash2 } from "luc
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ProfileSnapshot } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, PageHeader, StatusIcon } from "../../components/Ui";
+import { Button, Dialog, EmptyState, IconButton, PageHeader, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 const DELETE_COOLDOWN_SECONDS = 10;
 
 export function ProfilesPage() {
   const { i18n, t } = useTranslation();
-  const { mode, busy, perform } = useRelayState();
+  const { mode, busy, perform, readyState } = useRelayState();
+  const confirm = useConfirm();
   const [snapshots, setSnapshots] = useState<ProfileSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
   const [snapshotRestoreTarget, setSnapshotRestoreTarget] = useState<ProfileSnapshot | null>(null);
@@ -48,6 +49,10 @@ export function ProfilesPage() {
 
   const createSnapshot = async () => {
     const name = snapshotName.trim();
+    if (name && readyState?.codexRunning && !await confirm(t("profiles.snapshotRestartMessage"), {
+      title: t("profiles.snapshotRestartTitle"),
+      confirmLabel: t("profiles.snapshotRestartAction"),
+    })) return;
     if (name && await perform("profile-snapshot-create", () => relayCommands.createProfileSnapshot(name), "feedback.snapshotCreated")) {
       setSnapshotName("");
       loadRecovery();

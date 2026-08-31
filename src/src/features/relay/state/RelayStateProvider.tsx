@@ -126,6 +126,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "feedback.saved",
   ), [mode, perform, t]);
 
+  const restartManagedCodexIfRunning = useCallback(async () => {
+    const wasRunning = await relayCommands.stopManagedCodex();
+    if (wasRunning) await relayCommands.launchManagedCodex();
+  }, []);
+
   const setCodexWebsocketsEnabled = useCallback((enabled: boolean) => perform(
     "codex-websockets",
     mode === "remote"
@@ -133,7 +138,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         const previous = codexWebsocketsEnabled;
         await relayCommands.setRemoteCodexWebsockets(enabled);
         try {
-          return await relayCommands.setCodexProfileWebsockets(enabled);
+          const result = await relayCommands.setCodexProfileWebsockets(enabled);
+          await restartManagedCodexIfRunning();
+          return result;
         } catch (error) {
           try {
             await relayCommands.setRemoteCodexWebsockets(previous);
@@ -144,10 +151,14 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         }
       }
       : mode === "local"
-        ? () => relayCommands.setCodexWebsockets(enabled)
+        ? async () => {
+          const result = await relayCommands.setCodexWebsockets(enabled);
+          await restartManagedCodexIfRunning();
+          return result;
+        }
         : () => Promise.reject(new Error(t("errors.chatgpt_websockets_unavailable"))),
     "feedback.saved",
-  ), [codexWebsocketsEnabled, mode, perform, t]);
+  ), [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
