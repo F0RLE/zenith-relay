@@ -242,7 +242,7 @@
   min-width: 0;
   min-height: 104px;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: minmax(190px, 0.42fr) minmax(0, 0.58fr);
   align-items: center;
   gap: 18px;
   padding: 16px;
@@ -255,13 +255,15 @@
 .gateway-api-connection-panel > header {
   min-width: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
 }
 
 .gateway-api-connection-panel > header > div {
   min-width: 0;
   flex: 1;
+  display: flex;
+  align-items: center;
 }
 
 .gateway-api-connection-panel h2 {
@@ -272,10 +274,11 @@
 
 .gateway-endpoint-value {
   min-width: 0;
+  min-height: 42px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 6px 6px 12px;
+  padding: 6px 8px 6px 12px;
 }
 
 .gateway-endpoint-value code {
@@ -292,6 +295,8 @@
 
 .gateway-api-connection-controls {
   min-width: 0;
+  width: min(100%, 620px);
+  justify-self: end;
   display: grid;
   overflow: hidden;
   border: 1px solid var(--relay-border);
