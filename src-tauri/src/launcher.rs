@@ -135,6 +135,13 @@ fn signal_windows_process(pid: u32, force: bool) {
 }
 
 fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
+    // Opening an already running desktop app is a no-op. Besides avoiding a
+    // duplicate process, this prevents Chromium from reinitializing its
+    // profile and touching the large on-disk cache on every click.
+    if is_codex_running() {
+        return Ok(());
+    }
+
     #[cfg(target_os = "windows")]
     {
         let _ = inject_saved_key;
@@ -245,8 +252,21 @@ fn configure_launch_environment(command: &mut Command, inject_saved_key: bool) {
 
 #[cfg(target_os = "windows")]
 fn launch_codex_desktop() -> Result<(), String> {
+    // The packaged ChatGPT URI is stable and avoids starting PowerShell on
+    // every launch. Only fall back to app discovery when that URI fails.
+    let primary = r"shell:AppsFolder\OpenAI.ChatGPT_2p2nqsd0c76g0!App";
     let mut last_error = None;
+    for target in [primary] {
+        match windows_hidden_command("explorer.exe").arg(&target).spawn() {
+            Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT) => return Ok(()),
+            Ok(_) => last_error = Some(format!("ChatGPT did not start via {target}")),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
     for target in windows_chatgpt_launch_targets() {
+        if target.eq_ignore_ascii_case(primary) {
+            continue;
+        }
         match windows_hidden_command("explorer.exe").arg(&target).spawn() {
             Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT) => return Ok(()),
             Ok(_) => last_error = Some(format!("ChatGPT did not start via {target}")),
@@ -258,6 +278,11 @@ fn launch_codex_desktop() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn windows_chatgpt_launch_targets() -> Vec<String> {
+    let mut targets = vec![
+        r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App".to_string(),
+        "chatgpt:".to_string(),
+        "codex:".to_string(),
+    ];
     let output = windows_hidden_command("powershell.exe")
         .args([
             "-NoProfile",
@@ -267,18 +292,16 @@ fn windows_chatgpt_launch_targets() -> Vec<String> {
         ])
         .output()
         .ok();
-    let mut targets = output
+    let discovered = output
         .filter(|output| output.status.success())
         .map(|output| parse_windows_start_apps_output(&String::from_utf8_lossy(&output.stdout)))
         .unwrap_or_default();
-    for fallback in [
-        r"shell:AppsFolder\OpenAI.ChatGPT_2p2nqsd0c76g0!App",
-        r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App",
-        "chatgpt:",
-        "codex:",
-    ] {
-        if !targets.iter().any(|target| target == fallback) {
-            targets.push(fallback.to_string());
+    for target in discovered {
+        if !targets
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&target))
+        {
+            targets.push(target);
         }
     }
     targets

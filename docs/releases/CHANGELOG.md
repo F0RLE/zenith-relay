@@ -104,6 +104,9 @@ local-first security boundary.
 
 ### Desktop workflow
 
+- Reopening ChatGPT and switching within the same adapter no longer rescans the
+  full history. History repair now runs only when a profile crosses between
+  OAuth, Relay, and API sources.
 - API-source editing separates connection settings, model and format routing,
   and per-source pricing into focused tabs. Refresh checks only the saved
   source and stays beside its connection summary.
