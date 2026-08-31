@@ -53,6 +53,34 @@ pub fn default_codex_home() -> PathBuf {
     resolve_codex_home().unwrap_or_else(|error| panic!("{error}"))
 }
 
+pub fn default_opencode_config_path() -> PathBuf {
+    if let Some(path) = env::var_os("OPENCODE_CONFIG").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    // OpenCode uses `xdg-basedir` on every platform. In particular, its
+    // Windows desktop build does not use `%APPDATA%\opencode`; with no
+    // explicit XDG override the global config is `~/.config/opencode`.
+    // Keep this in sync so a successful connection is visible to both the
+    // desktop sidecar and the CLI.
+    let directory = opencode_config_directory(env::var_os("XDG_CONFIG_HOME"), user_home());
+    existing_opencode_config(&directory)
+}
+
+fn opencode_config_directory(xdg_config_home: Option<OsString>, home: PathBuf) -> PathBuf {
+    xdg_config_home
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("opencode")
+}
+
+fn existing_opencode_config(directory: &Path) -> PathBuf {
+    ["opencode.jsonc", "opencode.json", "config.json"]
+        .iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| directory.join("opencode.json"))
+}
+
 pub fn resolve_codex_home() -> Result<PathBuf, String> {
     resolve_codex_home_from(env::var_os("CODEX_HOME"), user_home())
 }
@@ -221,6 +249,33 @@ mod tests {
         assert_eq!(
             resolve_codex_home_from(Some(OsString::new()), home.clone()).unwrap(),
             home.join(".codex")
+        );
+    }
+
+    #[test]
+    fn opencode_config_prefers_the_file_open_code_loads_first() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-opencode-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let json = root.join("opencode.json");
+        let jsonc = root.join("opencode.jsonc");
+        fs::write(&json, "{}").unwrap();
+        assert_eq!(existing_opencode_config(&root), json);
+        fs::write(&jsonc, "{}").unwrap();
+        assert_eq!(existing_opencode_config(&root), jsonc);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opencode_config_uses_xdg_home_on_every_platform() {
+        let home = PathBuf::from(r"C:\Users\test");
+        assert_eq!(
+            opencode_config_directory(None, home.clone()),
+            home.join(".config").join("opencode")
+        );
+        assert_eq!(
+            opencode_config_directory(Some(OsString::from(r"D:\config")), home),
+            PathBuf::from(r"D:\config").join("opencode")
         );
     }
 

@@ -2,6 +2,7 @@ pub(crate) mod automations;
 pub(crate) mod connections;
 pub(crate) mod gateway;
 pub(crate) mod oauth;
+pub(crate) mod opencode;
 pub(crate) mod pool;
 pub(crate) mod profiles;
 pub(crate) mod proxies;

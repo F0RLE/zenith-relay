@@ -1,4 +1,5 @@
 pub(crate) mod accounts;
+pub(crate) mod applications;
 pub(crate) mod background;
 pub mod commands;
 mod error;
@@ -18,6 +19,7 @@ use std::{fs, path::Path, time::Instant};
 pub use state::DesktopState;
 
 pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
+    applications::validate();
     let started = Instant::now();
     let root = crate::platform::relay_dir(app)
         .map_err(|message| error::LocalPoolError::new(error::ErrorCode::Io, message))?;

@@ -33,6 +33,25 @@ release entries are kept concise and link to the corresponding tag.
   ChatGPT/Codex requests follow it directly, while external API clients retain
   their explicit tier; the upstream-reported tier remains a diagnostic value.
 
+### Desktop UI
+
+- Pool connections now include OpenCode. Connecting writes a managed
+  `zenith-relay` OpenCode provider with the currently enabled pool models and
+  preserves the previous OpenCode configuration for one-click recovery.
+- OpenCode reasoning variants follow the model's explicit Relay reasoning
+  policy, so unsupported effort choices are not advertised to the client.
+- Tooltips now wait briefly for pointer hover, appear immediately for keyboard
+  focus, and remain available for disabled actions without browser-native
+  `title` popups.
+- Usage refreshes no longer wait on an extra UI delay, while sign-in, setup,
+  and snapshot countdowns share one deadline-based clock instead of separate
+  polling intervals.
+- The Usage view warms its default report after the runtime is ready and keeps
+  a small per-query result cache, so returning to the page renders immediately
+  while the latest aggregates refresh in the background.
+- Update discovery starts with the application instead of an arbitrary startup
+  delay, and compact icon-only controls keep their accessible action names.
+
 ## [1.1.1] - 2026-08-28
 
 Zenith Relay 1.1.1 is the maintenance release after 1.1.0. It improves

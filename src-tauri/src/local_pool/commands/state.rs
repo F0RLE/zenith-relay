@@ -34,6 +34,15 @@ pub async fn get_local_pool_state(
 pub async fn get_local_runtime_state(
     state: State<'_, DesktopState>,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
+    build_local_runtime_state(&state).await
+}
+
+/// Build the same prepared runtime projection exposed to the UI. Consumers
+/// that generate integrations (for example OpenCode) must use this projection
+/// instead of rebuilding a second model catalog from raw pool records.
+pub(crate) async fn build_local_runtime_state(
+    state: &DesktopState,
+) -> Result<RuntimeStateSnapshot, CommandError> {
     let started = Instant::now();
     let inputs = state.runtime_inputs().await?;
     let running = inputs.running;
