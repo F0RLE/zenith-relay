@@ -74,6 +74,7 @@ type UsageEvent = LocalUsage | RemoteUsage;
 type UsageRowLabels = {
   backgroundConnection: string;
   unknownAccount: string;
+  removedAccount: string;
   unknownConnection: string;
 };
 
@@ -136,7 +137,7 @@ export function usageRowsFromLocal(events: readonly LocalUsage[], labels: LocalU
     const connection = requestOrigin
       ? labels.backgroundConnection
       : event.accountId
-        ? labels.accountLabels.get(event.accountId) ?? labels.unknownAccount
+        ? labels.accountLabels.get(event.accountId) ?? labels.removedAccount
         : labels.sourceLabels.get(event.sourceId) ?? labels.unknownConnection;
     return usageRowFromEvent(
       event,
@@ -156,7 +157,7 @@ export function usageRowsFromRemote(events: readonly RemoteUsage[], labels: Remo
     const connection = requestOrigin
       ? labels.backgroundConnection
       : event.candidateKind === "account"
-        ? labels.accountDisplayName(event.candidateLabel) ?? labels.unknownAccount
+        ? labels.accountDisplayName(event.candidateLabel) ?? labels.removedAccount
         : event.candidateLabel ?? labels.unknownConnection;
     return usageRowFromEvent(
       event,

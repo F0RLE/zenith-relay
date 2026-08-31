@@ -115,6 +115,7 @@ describe("usage data", () => {
     const labels = {
       backgroundConnection: "ChatGPT",
       unknownAccount: "Unknown account",
+      removedAccount: "Removed account",
       unknownConnection: "Unknown connection",
     };
 
@@ -147,6 +148,64 @@ describe("usage data", () => {
       ttft: 100,
       generationMs: 500,
     });
+  });
+
+  test("labels deleted account history without collapsing it into an unknown account", () => {
+    const labels = {
+      backgroundConnection: "ChatGPT",
+      unknownAccount: "Unknown account",
+      removedAccount: "Removed account",
+      unknownConnection: "Unknown connection",
+    };
+    const local = {
+      id: 3,
+      createdAt: "2026-08-23T02:00:00.000Z",
+      requestId: "deleted-local",
+      attempt: 1,
+      sourceId: "source-1",
+      accountId: "deleted-account",
+      requestedModel: "gpt-5.4",
+      resolvedModel: "gpt-5.4",
+      wireApi: "responses",
+      serviceTier: "standard" as const,
+      success: true,
+      httpStatus: 200,
+      errorCategory: null,
+      latencyMs: 100,
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+    } satisfies LocalUsage;
+    const remote = {
+      id: 4,
+      requestId: "deleted-remote",
+      attempt: 1,
+      candidateKind: "account" as const,
+      candidateHint: "deleted-account",
+      candidateLabel: null,
+      requestedModel: "gpt-5.4",
+      resolvedModel: "gpt-5.4",
+      wireApi: "responses",
+      serviceTier: "standard" as const,
+      success: true,
+      httpStatus: 200,
+      errorCategory: null,
+      latencyMs: 100,
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      createdAtMs: Date.parse("2026-08-23T02:00:00.000Z"),
+    } satisfies RemoteUsage;
+
+    expect(usageRowsFromLocal([local], {
+      ...labels,
+      accountLabels: new Map(),
+      sourceLabels: new Map([["source-1", "Primary source"]]),
+    })[0]?.connection).toBe("Removed account");
+    expect(usageRowsFromRemote([remote], {
+      ...labels,
+      accountDisplayName: () => null,
+    })[0]?.connection).toBe("Removed account");
   });
 
   test("aggregates usage and marks rows without a price as unpriced", () => {

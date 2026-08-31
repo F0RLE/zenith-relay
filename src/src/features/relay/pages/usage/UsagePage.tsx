@@ -95,6 +95,7 @@ export function UsagePage() {
     const labels = {
       backgroundConnection: t("codex.backgroundConnection"),
       unknownAccount: t("accounts.importUnknownAccount"),
+      removedAccount: t("usage.removedAccount"),
       unknownConnection: t("common.unknown"),
     };
     if (mode === "remote") {
@@ -147,14 +148,18 @@ export function UsagePage() {
   const canClear = mode === "local" || (mode === "remote" && remoteUsageSupported);
   const refreshUsage = refresh;
   const modelGroups = usagePage?.models;
-  const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: mode === "remote" ? accountDisplayName(null, group.label) ?? group.label ?? t("common.unknown") : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown") }));
+  const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: mode === "remote" ? accountDisplayName(null, group.label) ?? group.label ?? t("usage.removedAccount") : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown") }));
   const modelOptionIds = sortModelIdsForLauncher([...new Map(
     [...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])]
       .filter(Boolean)
       .map((value) => [value.toLowerCase(), value] as const),
   ).values()]);
   const modelOptions = [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))];
-  const poolMemberOptions = [{ value: "", label: t("usage.anyPoolMember") }, ...(poolMemberGroups ?? []).filter((group) => group.key).map((group) => ({ value: group.key, label: group.label || group.key })).sort((left, right) => left.label.localeCompare(right.label, i18n.language))];
+  const poolMemberOptions = [{ value: "", label: t("usage.anyPoolMember") }, ...Array.from(new Map((poolMemberGroups ?? [])
+    .filter((group) => group.key)
+    .map((group) => ({ value: group.key, label: group.label || group.key }))
+    .sort((left, right) => left.label.localeCompare(right.label, i18n.language))
+    .map((option) => [option.label, option] as const)).values())];
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setWireApi(""); setErrorQuery(""); setRequestQuery("");

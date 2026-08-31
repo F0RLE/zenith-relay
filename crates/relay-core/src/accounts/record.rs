@@ -106,7 +106,19 @@ pub fn apply_model_discovery_failure(
             }
             *health = AccountHealthState::Unhealthy;
         }
-        "models_forbidden" => *health = AccountHealthState::Blocked,
+        "models_forbidden" => {
+            // A model catalog endpoint can be forbidden while the account's
+            // normal inference and quota endpoints remain usable. Keep this
+            // scoped to discovery so a catalog permission issue does not
+            // remove an otherwise working account from the pool. Preserve a
+            // stronger, independently observed account state.
+            if !matches!(
+                *health,
+                AccountHealthState::Blocked | AccountHealthState::Unhealthy
+            ) {
+                *health = AccountHealthState::Degraded;
+            }
+        }
         _ if retryable => *health = AccountHealthState::Degraded,
         _ => *health = AccountHealthState::Unhealthy,
     }
@@ -500,6 +512,20 @@ mod tests {
         assert_eq!(health, AccountHealthState::Unhealthy);
 
         auth_state = AccountAuthState::Active;
+        health = AccountHealthState::Healthy;
+        last_error_code = None;
+        apply_model_discovery_failure(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+            "models_forbidden",
+            false,
+        );
+        assert_eq!(health, AccountHealthState::Degraded);
+
+        // A previously confirmed account block must not be cleared by a
+        // separate model-discovery permission failure.
+        health = AccountHealthState::Blocked;
         apply_model_discovery_failure(
             &mut auth_state,
             &mut health,
