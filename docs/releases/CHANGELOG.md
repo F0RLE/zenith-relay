@@ -38,8 +38,13 @@ release entries are kept concise and link to the corresponding tag.
 - Pool connections now include OpenCode. Connecting writes a managed
   `zenith-relay` OpenCode provider with the currently enabled pool models and
   preserves the previous OpenCode configuration for one-click recovery.
+- Relay-managed OpenCode models now advertise image attachments, so image
+  inputs can be selected and forwarded through the pool.
 - OpenCode reasoning variants follow the model's explicit Relay reasoning
   policy, so unsupported effort choices are not advertised to the client.
+- The application picker remembers whether a connected application should be
+  launched immediately, and its compact layout remains consistent across
+  desktop window sizes.
 - Tooltips now wait briefly for pointer hover, appear immediately for keyboard
   focus, and remain available for disabled actions without browser-native
   `title` popups.

@@ -18,7 +18,14 @@ async function openGatewayApi(page: Page) {
 
 async function openGatewayApplication(page: Page) {
   await openGatewayApi(page);
-  await page.getByRole("tab", { name: "Application", exact: true }).click();
+  await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+}
+
+async function connectPoolToChatGPT(page: Page, launchAfterConnect = false) {
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "What do you want to connect?" });
+  if (launchAfterConnect) await dialog.getByLabel("Launch application after connecting").check({ force: true });
+  await dialog.getByRole("button", { name: "ChatGPT", exact: true }).click();
 }
 
 test("application chrome is not text-selectable", async ({ page }) => {
@@ -199,7 +206,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("spinbutton", { name: "Port" }).press("Enter");
   await expect(page.getByRole("spinbutton", { name: "Port" })).toHaveValue("15001");
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
-  await page.getByRole("tab", { name: "Application", exact: true }).click();
+  await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
   await expect(page.locator(".gateway-settings-panel")).toBeVisible();
   await expect(page.getByRole("button", { name: /^Account:/ })).toHaveAttribute("data-value", "auto");
   await expect(page.getByRole("heading", { name: "ChatGPT account" })).toBeVisible();
@@ -2304,7 +2311,7 @@ test("pool keeps the last completed route visible after its lease is released", 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Usage order");
-  await expect(priority).toContainText("Last request: Pro account");
+  await expect(priority).toContainText("Next choice: Pro account");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
@@ -2324,9 +2331,8 @@ test("pool does not show the next route's models before any request", async ({ p
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   const priority = page.locator(".pool-priority-label");
-  await expect(priority).toContainText("Waiting for the first request");
+  await expect(priority).toContainText("Next choice: Personal Plus");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
-  await expect(priority).not.toContainText("Personal Plus");
   await expect(priority).not.toContainText("gpt-5.4");
   await expect(priority).not.toContainText("claude-opus-4-8");
 });
@@ -2369,7 +2375,7 @@ test("pool follows a lower-priority stabilizer reported by runtime activity", as
     activeRequestCount: 0,
     activeModels: [],
   });
-  await expect(priority).toContainText("Last request: Example compatible API");
+  await expect(priority).toContainText("Next choice: Example compatible API");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Personal Plus");
   await expect(page.locator('[data-member-label="Example compatible API"]')).toHaveAttribute("data-current", "false");
 });
@@ -3779,7 +3785,7 @@ test("pool toggle changes state without switching ChatGPT", async ({ page }) => 
   await expect(page.getByText("Endpoint started.")).toBeVisible();
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const header = page.locator(".relay-page-header");
-  await expect(header.getByRole("button", { name: "Switch ChatGPT to pool", exact: true })).toBeVisible();
+  await expect(header.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
   await expect(header.locator(".pool-header-actions > *")).toHaveCount(3);
   await expect(header.getByRole("button", { name: "Save preset", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Overview", exact: true }).click();
@@ -3806,9 +3812,9 @@ test("pool controls delegate an exhausted OAuth account to the backend", async (
   await expect(start).toBeEnabled();
   await start.click();
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const switchToPool = page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true });
+  const switchToPool = page.getByRole("button", { name: "Connect", exact: true });
   await expect(switchToPool).toBeEnabled();
-  await switchToPool.click();
+  await connectPoolToChatGPT(page);
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command))).toEqual(expect.arrayContaining([
     "start_local_gateway",
@@ -3820,7 +3826,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+  await connectPoolToChatGPT(page, true);
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
   const [feedbackBox, shellBox, helpBox] = await Promise.all([
@@ -3850,7 +3856,7 @@ test("profile switch errors stay visible until the one-minute timeout", async ({
   await page.clock.install({ time: 0 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+  await connectPoolToChatGPT(page);
 
   const feedback = page.locator(".global-feedback.error");
   await expect(feedback).toContainText("Something went wrong. Click to view details.");
@@ -3867,7 +3873,7 @@ test("global errors expose sanitized details and a copy confirmation", async ({ 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, profileSwitchError: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+  await connectPoolToChatGPT(page);
 
   const feedback = page.locator(".global-feedback.error");
   await expect(feedback.locator(".global-feedback-actions .relay-icon-button")).toHaveCount(0);

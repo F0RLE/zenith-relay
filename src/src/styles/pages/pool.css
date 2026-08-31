@@ -716,30 +716,30 @@
   border-left: 1px solid var(--relay-border);
 }
 .relay-dialog.pool-connection-picker {
-  width: min(460px, 100%);
+  width: min(500px, 100%);
 }
 
 .pool-connection-picker .relay-dialog-body {
-  padding: 22px;
+  padding: 20px;
 }
 
 .pool-connection-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 14px;
 }
 
 .pool-connection-option {
-  min-height: 176px;
+  min-height: 142px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
-  padding: 22px 14px 18px;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: var(--relay-surface);
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--relay-border) 86%, var(--relay-text));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--relay-surface) 92%, var(--relay-subtle));
   color: var(--relay-text);
   cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 140ms ease;
@@ -749,7 +749,7 @@
 .pool-connection-option:focus-visible:not(:disabled) {
   border-color: var(--relay-accent);
   background: var(--relay-subtle);
-  box-shadow: 0 8px 22px rgb(0 0 0 / 16%);
+  box-shadow: 0 7px 18px rgb(0 0 0 / 12%);
   outline: none;
   transform: translateY(-1px);
 }
@@ -765,13 +765,13 @@
 }
 
 .pool-connection-option-icon {
-  width: 72px;
-  height: 72px;
+  width: 60px;
+  height: 60px;
   display: grid;
   place-items: center;
   border: 1px solid var(--relay-border);
-  border-radius: 14px;
-  background: var(--relay-subtle);
+  border-radius: 16px;
+  background: var(--relay-bg);
   color: var(--relay-text);
 }
 
@@ -791,9 +791,11 @@
   align-items: center;
   gap: 9px;
   margin-top: 16px;
+  padding: 14px 4px 0;
+  border-top: 1px solid color-mix(in srgb, var(--relay-border) 82%, transparent);
   color: var(--relay-text);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .pool-connection-launch-toggle input {
@@ -847,6 +849,6 @@
   }
 
   .pool-connection-option {
-    min-height: 142px;
+    min-height: 132px;
   }
 }

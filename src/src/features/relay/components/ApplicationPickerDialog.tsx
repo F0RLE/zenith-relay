@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Dialog } from "./Ui";
+import { readLaunchApplicationAfterConnect, writeLaunchApplicationAfterConnect } from "../state/relayPreferences";
 
 type ApplicationPickerDialogProps = {
   title?: string;
@@ -19,7 +20,7 @@ export function ApplicationPickerDialog({
   showLaunchToggle = true,
 }: ApplicationPickerDialogProps) {
   const { t } = useTranslation();
-  const [launchAfterConnect, setLaunchAfterConnect] = useState(false);
+  const [launchAfterConnect, setLaunchAfterConnect] = useState(readLaunchApplicationAfterConnect);
   const dialogTitle = title ?? t("pool.connectDialogTitle");
   const choose = (action: () => void) => {
     onClose();
@@ -37,7 +38,11 @@ export function ApplicationPickerDialog({
       </button>
     </div>
     {showLaunchToggle ? <label className="pool-connection-launch-toggle">
-      <input type="checkbox" checked={launchAfterConnect} onChange={(event) => setLaunchAfterConnect(event.target.checked)} />
+      <input type="checkbox" checked={launchAfterConnect} onChange={(event) => {
+        const enabled = event.target.checked;
+        setLaunchAfterConnect(enabled);
+        writeLaunchApplicationAfterConnect(enabled);
+      }} />
       <span className="pool-connection-launch-switch" aria-hidden="true"><span /></span>
       <span>{t("pool.launchAfterConnect")}</span>
     </label> : null}

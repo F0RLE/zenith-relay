@@ -375,13 +375,13 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await page.screenshot({ path: "output/playwright/overview-analytics-lower-ru-dark-840x560.png" });
 });
 
-test("overview header keeps ChatGPT launch beside the API control", async ({ page }) => {
+test("overview header opens the application picker beside the API control", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
 
   const stop = page.getByRole("button", { name: "Остановить API", exact: true });
-  const launch = page.getByRole("button", { name: "Открыть ChatGPT", exact: true });
+  const launch = page.getByRole("button", { name: "Запустить приложение", exact: true });
   await expect(stop).toBeVisible();
   await expect(launch).toBeVisible();
   const [stopBox, launchBox] = await Promise.all([stop.boundingBox(), launch.boundingBox()]);
@@ -390,6 +390,9 @@ test("overview header keeps ChatGPT launch beside the API control", async ({ pag
   expect(launchBox!.x).toBeGreaterThan(stopBox!.x + stopBox!.width);
 
   await launch.click();
+  await page.getByRole("dialog", { name: "Какое приложение запустить?" })
+    .getByRole("button", { name: "ChatGPT", exact: true })
+    .click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_managed_codex_profile"))).toBe(true);
   await page.screenshot({ path: "output/playwright/overview-header-chatgpt-launch-ru-dark-1160x760.png" });
 });
@@ -775,10 +778,10 @@ for (const viewport of viewports) {
     await expect(headerActions.locator(":scope > *")).toHaveCount(3);
     await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Сохранить пресет", exact: true })).toBeVisible();
     await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Применить пресет", exact: true })).toBeVisible();
-    await expect(headerActions.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Сохранить пресет", "Применить пресет", "Добавить участника", "Переключить ChatGPT на пул"]);
+    await expect(headerActions.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Сохранить пресет", "Применить пресет", "Добавить участника", "Подключить"]);
     await expect(headerActions.getByRole("button", { name: "Добавить участника", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toHaveCount(0);
-    await expect(headerActions.getByRole("button", { name: "Переключить ChatGPT на пул", exact: true })).toBeDisabled();
+    await expect(headerActions.getByRole("button", { name: "Подключить", exact: true })).toBeDisabled();
     const actionBoxes = await headerActions.locator(":scope > .relay-button").evaluateAll((buttons) => buttons.map((button) => {
       const rect = button.getBoundingClientRect();
       return { width: rect.width, height: rect.height, overflow: button.scrollWidth - button.clientWidth };
@@ -1402,7 +1405,7 @@ for (const theme of themes) {
     const table = page.locator(".profile-snapshot-table");
     const headerBefore = await page.locator(".relay-page-header").boundingBox();
     expect(headerBefore).not.toBeNull();
-    await expect(page.getByRole("tab")).toHaveCount(0);
+    await expect(page.getByRole("tab")).toHaveCount(2);
     await expect(page.getByText("Исправление истории", { exact: true })).toHaveCount(0);
     const snapshotName = viewport.width === 840 ? "Перед большим обновлением проекта с очень длинным названием рабочей среды" : "Перед обновлением проекта";
     await page.getByLabel("Название снимка").fill(snapshotName);
@@ -1503,13 +1506,15 @@ for (const theme of themes) {
       const pageElement = element.closest<HTMLElement>(".profile-recovery-page")!;
       const page = pageElement.getBoundingClientRect();
       const header = pageElement.querySelector<HTMLElement>(".relay-page-header")!.getBoundingClientRect();
+      const tabs = pageElement.querySelector<HTMLElement>(".relay-tabs")?.getBoundingClientRect();
       const box = element.getBoundingClientRect();
       const availableBottom = page.bottom - Number.parseFloat(getComputedStyle(pageElement).paddingBottom);
-      const availableHeight = availableBottom - header.bottom;
+      const contentTop = Math.max(header.bottom, tabs?.bottom ?? header.bottom);
+      const availableHeight = availableBottom - contentTop;
       return {
         fits: box.height <= availableHeight + 1,
-        centerOffset: Math.abs((box.top + box.bottom) / 2 - (header.bottom + availableBottom) / 2),
-        topOffset: Math.abs(header.bottom - box.top),
+        centerOffset: Math.abs((box.top + box.bottom) / 2 - (contentTop + availableBottom) / 2),
+        topOffset: Math.abs(contentTop - box.top),
       };
     });
     expect(placement.fits ? placement.centerOffset : placement.topOffset).toBeLessThanOrEqual(2);
@@ -1527,7 +1532,8 @@ for (const scenario of [
     await page.setViewportSize(scenario.viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
-    await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("dialog", { name: "What do you want to connect?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
 
     const shell = page.locator(".relay-shell");
     const feedback = page.locator(".global-feedback.error");
@@ -1652,7 +1658,7 @@ for (const theme of themes) {
       expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
       await page.screenshot({ path: `output/playwright/gateway-api-connection-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
-      await page.getByRole("tab", { name: "Приложение", exact: true }).click();
+      await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Аккаунт ChatGPT" })).toBeVisible();
       await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "auto");
