@@ -284,6 +284,13 @@ export type RuntimeSnapshot = {
   warnings: string[];
 };
 
+export type OpenCodeConfigStatus = {
+  configured: boolean;
+  modelCount: number;
+  hasBackup: boolean;
+  path: string;
+};
+
 type ConfigurationPresetMemberRule = {
   id: string;
   enabled: boolean;

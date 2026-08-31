@@ -1136,7 +1136,12 @@
   background: transparent;
 }
 
-.account-card-actions .relay-icon-button + .relay-icon-button {
+.account-card-actions > .relay-disabled-tooltip-anchor {
+  flex: 1 1 0;
+}
+
+.account-card-actions > :not(:first-child).relay-icon-button,
+.account-card-actions > :not(:first-child).relay-disabled-tooltip-anchor > .relay-icon-button {
   border-left: 1px solid var(--relay-border);
 }
 

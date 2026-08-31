@@ -15,7 +15,12 @@ const ACCOUNT_TIMESTAMP_OPTIONS = {
  */
 export function useRelativeTimeClock(timestamps: readonly (number | null | undefined)[]) {
   const [nowMs, setNowMs] = useState(Date.now());
+  const timestampKey = timestamps.map((value) => value ?? "").join(":");
   const delay = relativeTimeRefreshDelay(timestamps, nowMs);
+
+  useEffect(() => {
+    setNowMs(Date.now());
+  }, [timestampKey]);
 
   useEffect(() => {
     if (delay == null) return;
@@ -30,6 +35,10 @@ export function relativeTimeRefreshDelay(timestamps: readonly (number | null | u
   const upcoming = timestamps.filter((value): value is number => value != null && value > nowMs);
   if (!upcoming.length) return null;
   return upcoming.some((value) => value - nowMs < URGENT_WINDOW_MS) ? 1_000 : 60_000;
+}
+
+export function secondsUntil(deadlineMs: number, nowMs: number) {
+  return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1_000));
 }
 
 export function subscriptionExpiryFormatter(locale: string) {

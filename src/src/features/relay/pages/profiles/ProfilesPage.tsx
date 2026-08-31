@@ -1,28 +1,34 @@
 import { useCallback, useEffect, useState } from "react";
-import { Camera, CircleAlert, FolderOpen, History, RotateCcw, Trash2 } from "lucide-react";
+import { Camera, CheckCircle2, CircleAlert, FolderOpen, History, Plug, RotateCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ProfileSnapshot } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, PageHeader, StatusIcon, useConfirm } from "../../components/Ui";
+import type { OpenCodeConfigStatus } from "../../api/types";
+import { Button, Dialog, EmptyState, IconButton, PageHeader, StatusIcon, Tabs, useConfirm } from "../../components/Ui";
+import { secondsUntil, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 const DELETE_COOLDOWN_SECONDS = 10;
+type RecoveryTab = "chatgpt" | "opencode";
 
 export function ProfilesPage() {
   const { i18n, t } = useTranslation();
   const { mode, busy, perform, readyState } = useRelayState();
   const confirm = useConfirm();
+  const [activeTab, setActiveTab] = useState<RecoveryTab>("chatgpt");
   const [snapshots, setSnapshots] = useState<ProfileSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
   const [snapshotRestoreTarget, setSnapshotRestoreTarget] = useState<ProfileSnapshot | null>(null);
   const [snapshotDeleteTarget, setSnapshotDeleteTarget] = useState<ProfileSnapshot | null>(null);
-  const [deleteCountdown, setDeleteCountdown] = useState(0);
+  const [deleteAllowedAtMs, setDeleteAllowedAtMs] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
   const snapshotRestoreBusy = busy === "profile-snapshot-restore";
   const snapshotDeleteBusy = busy === "profile-snapshot-delete";
+  const deleteClockMs = useRelativeTimeClock([snapshotDeleteTarget ? deleteAllowedAtMs : null]);
+  const deleteCountdown = secondsUntil(deleteAllowedAtMs, Math.max(deleteClockMs, Date.now()));
 
   const loadRecovery = useCallback(() => {
-    if (mode !== "local") {
+    if (mode !== "local" || activeTab !== "chatgpt") {
       setSnapshots([]);
       setLoadFailed(false);
       return;
@@ -35,17 +41,17 @@ export function ProfilesPage() {
       setSnapshots([]);
       setLoadFailed(true);
     });
-  }, [mode]);
+  }, [activeTab, mode]);
 
   useEffect(loadRecovery, [loadRecovery]);
 
   useEffect(() => {
-    if (!snapshotDeleteTarget || deleteCountdown <= 0) return;
-    const timer = window.setInterval(() => {
-      setDeleteCountdown((value) => Math.max(0, value - 1));
-    }, 1_000);
-    return () => window.clearInterval(timer);
-  }, [snapshotDeleteTarget, deleteCountdown]);
+    if (activeTab !== "chatgpt") {
+      setSnapshotRestoreTarget(null);
+      setSnapshotDeleteTarget(null);
+      setDeleteAllowedAtMs(0);
+    }
+  }, [activeTab]);
 
   const createSnapshot = async () => {
     const name = snapshotName.trim();
@@ -70,7 +76,13 @@ export function ProfilesPage() {
 
   const requestSnapshotDelete = (snapshot: ProfileSnapshot) => {
     setSnapshotDeleteTarget(snapshot);
-    setDeleteCountdown(DELETE_COOLDOWN_SECONDS);
+    setDeleteAllowedAtMs(Date.now() + DELETE_COOLDOWN_SECONDS * 1_000);
+  };
+
+  const closeSnapshotDelete = () => {
+    if (snapshotDeleteBusy) return;
+    setSnapshotDeleteTarget(null);
+    setDeleteAllowedAtMs(0);
   };
 
   const deleteSnapshot = async () => {
@@ -78,6 +90,7 @@ export function ProfilesPage() {
     if (!snapshot || deleteCountdown > 0) return;
     if (await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted")) {
       setSnapshotDeleteTarget(null);
+      setDeleteAllowedAtMs(0);
       loadRecovery();
     }
   };
@@ -98,8 +111,9 @@ export function ProfilesPage() {
   </form>;
 
   return <section className="relay-page profile-recovery-page">
-    <PageHeader title={t("nav.profiles")} subtitle={t("profiles.subtitle")} actions={mode === "local" ? <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened")}>{t("profiles.openFolder")}</Button> : null} />
-    {mode !== "local" ? <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} /> : <section className={`profile-recovery${snapshots.length ? "" : " is-empty"}`}>
+    <PageHeader title={t("nav.profiles")} subtitle={t("profiles.subtitle")} actions={mode === "local" && activeTab === "chatgpt" ? <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened")}>{t("profiles.openFolder")}</Button> : null} />
+    <Tabs value={activeTab} onChange={(value) => setActiveTab(value as RecoveryTab)} label={t("profiles.tabs.label")} items={[{ id: "chatgpt", label: t("profiles.tabs.chatgpt") }, { id: "opencode", label: t("profiles.tabs.opencode") }]} />
+    {activeTab === "opencode" ? mode !== "local" ? <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} /> : <OpenCodeRecoveryTab /> : mode !== "local" ? <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} /> : <section className={`profile-recovery${snapshots.length ? "" : " is-empty"}`}>
       {loadFailed ? <div className="profile-recovery-warning" role="alert"><CircleAlert aria-hidden /><span>{t("profiles.loadFailed")}</span><Button variant="secondary" onClick={loadRecovery}>{t("common.retry")}</Button></div> : null}
 
       <section className="profile-recovery-section profile-named-section"><header className="profile-recovery-section-heading"><span><History aria-hidden /></span><div><h2>{t("profiles.namedSectionTitle")}</h2><small>{t("profiles.namedSectionHint")}</small></div></header>
@@ -132,11 +146,35 @@ export function ProfilesPage() {
 
     {snapshotDeleteTarget ? <Dialog
       title={t("profiles.snapshotDeleteTitle")}
-      onClose={() => { if (!snapshotDeleteBusy) setSnapshotDeleteTarget(null); }}
-      footer={<><Button variant="secondary" disabled={snapshotDeleteBusy} onClick={() => setSnapshotDeleteTarget(null)}>{t("common.no")}</Button><Button variant="danger" busy={snapshotDeleteBusy} disabled={snapshotDeleteBusy || deleteCountdown > 0} onClick={() => void deleteSnapshot()}>{deleteCountdown > 0 ? t("profiles.snapshotDeleteCountdown", { seconds: deleteCountdown }) : t("common.yes")}</Button></>}
+      onClose={closeSnapshotDelete}
+      footer={<><Button variant="secondary" disabled={snapshotDeleteBusy} onClick={closeSnapshotDelete}>{t("common.no")}</Button><Button variant="danger" busy={snapshotDeleteBusy} disabled={snapshotDeleteBusy || deleteCountdown > 0} onClick={() => void deleteSnapshot()}>{deleteCountdown > 0 ? t("profiles.snapshotDeleteCountdown", { seconds: deleteCountdown }) : t("common.yes")}</Button></>}
     >
       <p className="confirm-dialog-message">{t("profiles.snapshotDeleteConfirm", { name: snapshotDisplayName(snapshotDeleteTarget) })}</p>
       {deleteCountdown > 0 ? <p className="snapshot-delete-countdown" role="status" aria-live="polite">{t("profiles.snapshotDeleteWait", { seconds: deleteCountdown })}</p> : null}
     </Dialog> : null}
+  </section>;
+}
+
+function OpenCodeRecoveryTab() {
+  const { t } = useTranslation();
+  const { busy, perform } = useRelayState();
+  const confirm = useConfirm();
+  const [status, setStatus] = useState<OpenCodeConfigStatus | null>(null);
+  const refreshStatus = () => void relayCommands.getOpenCodeConfigStatus().then(setStatus).catch(() => setStatus(null));
+  useEffect(refreshStatus, []);
+  const restore = async () => {
+    if (!await confirm(t("profiles.openCodeRestoreConfirm"), {
+      title: t("profiles.openCodeRestoreTitle"),
+      confirmLabel: t("profiles.openCodeRestore"),
+    })) return;
+    await perform("opencode-restore", relayCommands.restoreOpenCodeConfig, "feedback.restored").then(refreshStatus);
+  };
+  return <section className="profile-recovery profile-recovery-opencode">
+    <section className="profile-recovery-section"><header className="profile-recovery-section-heading"><span><Plug aria-hidden /></span><div><h2>{t("profiles.openCodeSectionTitle")}</h2><small>{t("profiles.openCodeSectionHint")}</small></div></header>
+      <div className="opencode-recovery-status">
+        <span className={`relay-status ${status?.configured ? "ready" : "info"}`}>{status?.configured ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />} {status?.configured ? t("profiles.openCodeConfigured", { count: status.modelCount }) : t("profiles.openCodeNotConfigured")}</span>
+        {status?.hasBackup ? <Button variant="secondary" icon={<RotateCcw aria-hidden />} busy={busy === "opencode-restore"} disabled={Boolean(busy)} onClick={() => void restore()}>{t("profiles.openCodeRestore")}</Button> : null}
+      </div>
+    </section>
   </section>;
 }

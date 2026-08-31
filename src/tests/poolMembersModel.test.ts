@@ -16,7 +16,10 @@ const member = (kind: "account" | "source", id: string, overrides: Record<string
   inPool: true,
   enabled: true,
   operationalStatus: "rotation",
+  secretAvailable: true,
+  proxyAvailable: true,
   priority: kind === "source" ? 1 : undefined,
+  models: [],
   lastErrorCode: null,
   ...(kind === "account" ? { authState: { state: "ready" }, quota: {}, quotaRefreshStatus: "updated" } : {}),
   ...overrides,
@@ -86,6 +89,32 @@ describe("pool members model", () => {
     expect(state.lastActivityMember?.id).toBe("stabilizer");
     expect(state.lastUsedMember).toBeNull();
     expect(state.nextMember?.id).toBe("account-top");
+  });
+
+  test("does not expose a stale healthy candidate for an unavailable member", () => {
+    const members = [member("source", "zenith", { operationalStatus: "unavailable", models: ["gpt-5.4"] })];
+    const order = [candidate("zenith::responses", { available: true })];
+    const state = poolActivityState(
+      members,
+      poolMemberRuntimeStates(members, order),
+      order,
+      undefined,
+      ["gpt-5.4"],
+    );
+    expect(state.nextMember).toBeNull();
+  });
+
+  test("does not expose a route when the visible model catalog is empty", () => {
+    const members = [member("source", "source-1", { models: ["gpt-5.4"] })];
+    const order = [candidate("source-1::responses", { available: true })];
+    const state = poolActivityState(
+      members,
+      poolMemberRuntimeStates(members, order),
+      order,
+      undefined,
+      [],
+    );
+    expect(state.nextMember).toBeNull();
   });
 
   test("counts account and source errors without changing status semantics", () => {

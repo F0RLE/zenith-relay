@@ -43,7 +43,6 @@ export function useAppUpdates(): AppUpdates {
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [updateInstallError, setUpdateInstallError] = useState<UpdateInstallError>(null);
-  const initialUpdateCheck = useRef(false);
   const updateCheckInFlight = useRef<Promise<UpdateCheckState> | null>(null);
   const pendingCheckOptions = useRef<ResolvedUpdateCheckOptions>(resolveCheckOptions());
 
@@ -124,21 +123,12 @@ export function useAppUpdates(): AppUpdates {
   }, [installingUpdate]);
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      if (initialUpdateCheck.current) return;
-      initialUpdateCheck.current = true;
-      void checkUpdates();
-    }, 1_500);
-    return () => window.clearTimeout(timeout);
+    void checkUpdates();
   }, [checkUpdates]);
 
   useEffect(() => {
     const checkWhenActive = () => {
       if (document.visibilityState !== "visible") return;
-      // Browsers can emit focus while the shell is mounting. Let that first
-      // visible check replace the deferred startup timer instead of issuing a
-      // second updater request moments later.
-      initialUpdateCheck.current = true;
       void checkUpdates();
     };
     const interval = window.setInterval(checkWhenActive, UPDATE_CHECK_INTERVAL_MS);

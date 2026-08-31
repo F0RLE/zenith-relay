@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, LogIn, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
+import { Activity, CheckCheck, CircleAlert, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, LogIn, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
@@ -30,6 +30,7 @@ import {
   poolMembersFromRuntime,
   poolMemberSourceIds,
   poolMemberStatusCounts,
+  memberCanRoute,
 } from "./poolMembersModel";
 
 type Member = PoolMember;
@@ -53,6 +54,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
   const runtimeByMember = poolMemberRuntimeStates(poolMembers, runtimeOrder);
   const members = orderedPoolMembers(poolMembers, runtimeOrder);
+  const visibleModelIds = runtime?.gateway.visibleModelIds ?? [];
   const sourceIds = poolMemberSourceIds(members);
   const nowMs = useRelativeTimeClock(members.flatMap((member) => [
     ...(member.kind === "account" ? [
@@ -103,7 +105,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     lastUsedRuntime,
     lastUsedMember,
     lastActivityMember,
-  } = poolActivityState(members, runtimeByMember, runtimeOrder, runtimeActivity);
+  } = poolActivityState(members, runtimeByMember, runtimeOrder, runtimeActivity, visibleModelIds);
   const activeModelList = activeModels
     .map(({ model, requestCount }) => requestCount > 1 ? t("pool.activeModelCount", { model, count: requestCount }) : model)
     .join(" · ");
@@ -112,16 +114,28 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       ? t("pool.activeRequests", { count: activeRequestTotal, models: activeModelList })
       : t("pool.activeRequestsUnknown", { count: activeRequestTotal })
     : null;
-  const hasAvailableRoute = runtimeOrder.some((candidate) => candidate.available);
+  const hasRoutableModel = members.some((member) => memberCanRoute(member, visibleModelIds));
+  const noAvailableModels = visibleModelIds.length === 0 || !hasRoutableModel;
+  const hasAvailableRoute = nextMember != null;
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
+      : noAvailableModels
+        ? t("pool.noAvailableModels")
       : nextMember
         ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
         : (lastActivityMember ?? lastUsedMember)
         ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
         : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
+  const unavailableRouteErrors = members
+    .map((member) => member.kind === "source" ? member.lastErrorCode?.trim() : currentAccountErrorCode(member))
+    .filter((code): code is string => Boolean(code));
+  const routingAlert = noAvailableModels
+    ? <div className="pool-routing-alert" role="alert"><CircleAlert aria-hidden /><span><strong>{t("pool.noAvailableModels")}</strong><small>{t("pool.noAvailableModelsHint")}{visibleModelIds.length > 0 ? ` ${t("pool.noEligibleSourceError")}` : ""}{unavailableRouteErrors.length ? ` ${t("pool.routeErrors", { errors: unavailableRouteErrors.slice(0, 3).join(", ") })}` : ""}</small></span></div>
+    : !activeMembers.length && !nextMember && unavailableRouteErrors.length
+      ? <div className="pool-routing-alert" role="alert"><CircleAlert aria-hidden /><span><strong>{t("pool.noAvailableRoute")}</strong><small>{t("pool.noAvailableRouteHint", { errors: unavailableRouteErrors.slice(0, 3).join(", ") })}</small></span></div>
+      : null;
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   const remove = async (member: Member) => {
     const ok = await perform(`pool-remove-${member.id}`, () => updatePoolMembership(mode, {
@@ -196,6 +210,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       </div>
       <div className="pool-summary"><div><span>{t("pool.memberStatus.rotation")}</span><i aria-hidden="true">—</i><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><i aria-hidden="true">—</i><strong>{counts.quotaWait}</strong></div><div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{counts.errors}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><i aria-hidden="true">—</i><strong>{counts.disabled}</strong></div></div>
     </div>
+    {routingAlert}
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><CheckCheck aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
     <div className="pool-member-list" role="list" aria-label={t("pool.members")}>
       {members.map((member) => {

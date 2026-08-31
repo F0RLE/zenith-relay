@@ -387,6 +387,14 @@
   height: 16px;
 }
 
+.opencode-provider-status {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .gateway-runtime-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

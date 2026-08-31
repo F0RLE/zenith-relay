@@ -73,13 +73,11 @@ export function UsagePage() {
     let active = true;
     setUsageLoading(true);
     setUsageError(false);
-    const timer = window.setTimeout(() => {
-      const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-      load(usageQuery)
-        .catch(() => active && setUsageError(true))
-        .finally(() => active && setUsageLoading(false));
-    }, 200);
-    return () => { active = false; window.clearTimeout(timer); };
+    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+    load(usageQuery)
+      .catch(() => active && setUsageError(true))
+      .finally(() => active && setUsageLoading(false));
+    return () => { active = false; };
   }, [mode, runtimeRevision, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
   useEffect(() => {

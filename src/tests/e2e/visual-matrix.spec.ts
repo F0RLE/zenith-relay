@@ -1440,7 +1440,6 @@ for (const theme of themes) {
         const rect = element.getBoundingClientRect();
         return rect.width <= 1 && rect.height <= 1 && style.clipPath === "inset(50%)";
       })).toBe(true);
-      await expect(page.locator(".global-feedback-status-icon")).toHaveAttribute("title", "Снимок профиля создан.");
       await expect(page.locator(".global-feedback")).toHaveAttribute("aria-label", "Снимок профиля создан.");
       const closeButton = page.locator(".global-feedback > .global-feedback-actions > .relay-icon-button");
       expect(await closeButton.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");

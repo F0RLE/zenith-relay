@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { SourceStats, SourceSummary } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
+import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
@@ -15,6 +16,7 @@ const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, runtimeRevision, setPage, perform, busy } = useRelayState();
+  const [applicationDialog, setApplicationDialog] = useState(false);
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
     const stored = localStorage.getItem("relay.overviewAnalyticsScope");
@@ -46,6 +48,10 @@ export function OverviewPage() {
   ], [runtime?.accounts, runtime?.sources, t]);
   const analytics = overviewData;
   const running = Boolean(runtime?.gateway.running);
+  const connectAndLaunchOpenCode = async () => {
+    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved");
+    if (connected) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched");
+  };
 
   useEffect(() => {
     if (!runtime) return;
@@ -132,12 +138,13 @@ export function OverviewPage() {
   const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
 
-  const primary = mode === "local" ? <><Button variant="primary" busy={busy === "gateway"} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button><Button variant="secondary" busy={busy === "chatgpt-launch"} icon={<Play aria-hidden />} disabled={!running} title={!running ? t("gateway.start") : t("gateway.launchChatGPT")} onClick={() => perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched")}>{t("gateway.launchChatGPT")}</Button></> : <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>{runtime ? t("overview.openServer") : t("remote.connect")}</Button>;
+  const primary = mode === "local" ? <><Button variant="primary" busy={busy === "gateway"} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button><Button variant="secondary" busy={busy === "chatgpt-launch" || busy === "opencode-connect" || busy === "opencode-launch"} icon={<Play aria-hidden />} disabled={!running} title={!running ? t("gateway.start") : t("overview.launchApplication")} onClick={() => setApplicationDialog(true)}>{t("overview.launchApplication")}</Button></> : <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>{runtime ? t("overview.openServer") : t("remote.connect")}</Button>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
     {!running && !runtime ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
       <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} scope={analyticsScopeSelection} setScope={(value) => { const next = value as AnalyticsScope; setAnalyticsScopeSelection(next); localStorage.setItem("relay.overviewAnalyticsScope", next); }} scopeOptions={analyticsScopeOptions} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}
     </>}
+    {applicationDialog ? <ApplicationPickerDialog title={t("overview.applicationPickerTitle")} showLaunchToggle={false} onClose={() => setApplicationDialog(false)} onChatGPT={() => void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched")} onOpenCode={() => void connectAndLaunchOpenCode()} /> : null}
   </section>;
 }
 function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean> }) {

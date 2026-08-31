@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands } from "../api/commands";
@@ -55,6 +55,22 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     resetUsage,
     reportErrorFeedback,
   });
+  const prefetchedUsageMode = useRef<"local" | "remote" | null>(null);
+
+  // Warm the default Usage view once the runtime snapshot is ready. The
+  // result is retained by useRelayUsage, so opening the page is immediate;
+  // UsagePage still performs its normal background refresh afterwards.
+  useEffect(() => {
+    if (!runtime || mode === "zenith") return;
+    if (mode === "remote" && !runtime.capabilities.features.includes("usage")) return;
+    if (prefetchedUsageMode.current === mode) return;
+    prefetchedUsageMode.current = mode;
+    const query = { page: 1, pageSize: 50 };
+    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+    void load(query).catch(() => {
+      // UsagePage retries and reports the error when it is opened.
+    });
+  }, [loadLocalUsage, loadRemoteUsage, mode, runtime]);
   const {
     onboardingComplete,
     finishOnboarding,

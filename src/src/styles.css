@@ -14,3 +14,15 @@
 @import "./styles/pages/setup.css";
 @import "./styles/pages/models.css";
 @import "./styles/responsive.css";
+
+/*
+ * The launcher uses hover, active and status states as its visual language.
+ * Keep the native focus traversal and dialog focus trap intact, but do not
+ * draw a second keyboard focus ring around controls when Tab is pressed.
+ */
+.app :where(button, input, textarea, select, summary, a, [tabindex]):focus,
+.app :where(button, input, textarea, select, summary, a, [tabindex]):focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
+  box-shadow: none !important;
+}

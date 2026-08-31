@@ -297,6 +297,17 @@
   margin-top: 4px;
 }
 
+.opencode-recovery-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
 .snapshot-delete-countdown {
   margin: 12px 0 0;
   color: var(--relay-muted);

@@ -13,6 +13,16 @@ export type RelayUsageCommands = {
   remoteUsage: (query: RemoteUsageQuery) => Promise<RemoteUsagePage | null>;
 };
 
+function rememberUsage<T>(cache: Map<string, T>, key: string, value: T) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > 8) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 /** Own paginated usage results and stale-request protection for both runtimes. */
 export function useRelayUsage(commands: RelayUsageCommands) {
   const [localUsagePage, setLocalUsagePage] = useState<LocalUsagePage | null>(null);
@@ -20,27 +30,73 @@ export function useRelayUsage(commands: RelayUsageCommands) {
   const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
   const localRequest = useRef(new LatestRequestGate());
   const remoteRequest = useRef(new LatestRequestGate());
+  // Usage pages are expensive aggregates. Keep a small per-query cache so
+  // navigating away and back can render the last complete result immediately
+  // while the newest snapshot is refreshed in the background.
+  const localCache = useRef(new Map<string, LocalUsagePage>());
+  const remoteCache = useRef(new Map<string, RemoteUsagePage | null>());
+  const localInFlight = useRef(new Map<string, Promise<LocalUsagePage>>());
+  const remoteInFlight = useRef(new Map<string, Promise<RemoteUsagePage | null>>());
 
-  const loadLocalUsage = useCallback((query: RemoteUsageQuery) => (
-    localRequest.current.run(
+  const loadLocalUsage = useCallback((query: RemoteUsageQuery) => {
+    const key = JSON.stringify(query);
+    const cached = localCache.current.get(key);
+    if (cached) setLocalUsagePage(cached);
+    else setLocalUsagePage(null);
+    const existing = localInFlight.current.get(key);
+    if (existing) return existing;
+    const request = localRequest.current.run(
       () => commands.localUsagePage(query),
-      setLocalUsagePage,
-    )
-  ), [commands]);
+      (value) => {
+        rememberUsage(localCache.current, key, value);
+        setLocalUsagePage(value);
+      },
+    );
+    localInFlight.current.set(key, request);
+    void request.then(() => {
+      if (localInFlight.current.get(key) === request) localInFlight.current.delete(key);
+    }, () => {
+      if (localInFlight.current.get(key) === request) localInFlight.current.delete(key);
+    });
+    return request;
+  }, [commands]);
 
-  const loadRemoteUsage = useCallback((query: RemoteUsageQuery) => (
-    remoteRequest.current.run(
+  const loadRemoteUsage = useCallback((query: RemoteUsageQuery) => {
+    const key = JSON.stringify(query);
+    const cached = remoteCache.current.get(key);
+    if (cached !== undefined) {
+      setRemoteUsage(cached?.events ?? []);
+      setRemoteUsagePage(cached);
+    } else {
+      setRemoteUsage([]);
+      setRemoteUsagePage(null);
+    }
+    const existing = remoteInFlight.current.get(key);
+    if (existing) return existing;
+    const request = remoteRequest.current.run(
       () => commands.remoteUsage(query),
       (usage) => {
+        rememberUsage(remoteCache.current, key, usage);
         setRemoteUsage(usage?.events ?? []);
         setRemoteUsagePage(usage);
       },
-    )
-  ), [commands]);
+    );
+    remoteInFlight.current.set(key, request);
+    void request.then(() => {
+      if (remoteInFlight.current.get(key) === request) remoteInFlight.current.delete(key);
+    }, () => {
+      if (remoteInFlight.current.get(key) === request) remoteInFlight.current.delete(key);
+    });
+    return request;
+  }, [commands]);
 
   const resetUsage = useCallback(() => {
     localRequest.current.invalidate();
     remoteRequest.current.invalidate();
+    localInFlight.current.clear();
+    remoteInFlight.current.clear();
+    localCache.current.clear();
+    remoteCache.current.clear();
     setLocalUsagePage(null);
     setRemoteUsage([]);
     setRemoteUsagePage(null);
@@ -48,12 +104,18 @@ export function useRelayUsage(commands: RelayUsageCommands) {
 
   const clearInactiveUsage = useCallback((mode: RelayMode) => {
     if (mode === "local") {
+      remoteCache.current.clear();
+      remoteInFlight.current.clear();
       setRemoteUsage([]);
       setRemoteUsagePage(null);
       return;
     }
     setLocalUsagePage(null);
+    localCache.current.clear();
+    localInFlight.current.clear();
     if (mode === "zenith") {
+      remoteCache.current.clear();
+      remoteInFlight.current.clear();
       setRemoteUsage([]);
       setRemoteUsagePage(null);
     }

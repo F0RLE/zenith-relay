@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowRightLeft, CheckCircle2, CircleAlert, Copy, KeyRound, Loader2, Network, Play, RefreshCw, RotateCw, Save, Square, UserRound } from "lucide-react";
+import { ArrowRightLeft, CheckCircle2, CircleAlert, Copy, KeyRound, Loader2, Network, Play, Plug, RefreshCw, RotateCw, Save, Square, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import { isCodexOauthAccountEligible } from "../../accountStatus";
@@ -8,7 +8,7 @@ import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTas
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
 
-type GatewayTab = "api" | "application";
+type GatewayTab = "api" | "chatgpt" | "opencode";
 
 export function GatewayPage() {
   const { t } = useTranslation();
@@ -21,7 +21,8 @@ export function GatewayPage() {
     ? [{ id: "api", label: t("gateway.tabs.api") }]
     : [
       { id: "api", label: t("gateway.tabs.api") },
-      { id: "application", label: t("gateway.tabs.application") },
+      { id: "chatgpt", label: t("gateway.tabs.chatgpt") },
+      { id: "opencode", label: t("gateway.tabs.opencode") },
     ];
 
   useEffect(() => {
@@ -61,7 +62,7 @@ export function GatewayPage() {
     </Button>
   </>;
 
-  const applicationActions = mode === "local" ? <Button
+  const chatGptActions = mode === "local" ? <Button
     variant="primary"
     busy={busy === "chatgpt-launch"}
     disabled={!running}
@@ -76,12 +77,12 @@ export function GatewayPage() {
     <PageHeader
       title={t("nav.gateway")}
       subtitle={t(`gateway.tabSubtitles.${activeTab}.${mode}`)}
-      actions={activeTab === "api" ? apiActions : applicationActions}
+      actions={activeTab === "api" || activeTab === "chatgpt" ? (activeTab === "api" ? apiActions : chatGptActions) : null}
     />
     <Tabs value={activeTab} onChange={(value) => setActiveTab(value as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />
     {activeTab === "api"
       ? <GatewayApiTab running={running} endpoint={endpoint} />
-      : <GatewayApplicationTab />}
+      : activeTab === "chatgpt" ? <GatewayChatGPTTab /> : <GatewayOpenCodeTab />}
   </section>;
 }
 
@@ -181,14 +182,14 @@ function GatewayRuntimePanel({ running }: { running: boolean }) {
   </section>;
 }
 
-function GatewayApplicationTab() {
+function GatewayChatGPTTab() {
   const { t } = useTranslation();
   const { mode } = useRelayState();
   if (mode === "zenith") return <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />;
-  return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.application")}>
+  return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.chatgpt")}>
     <div className="gateway-workspace">
       <div className="gateway-settings-panel gateway-application-panel">
-        <ApplicationSetup />
+        <ChatGPTSetup />
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
       </div>
@@ -196,7 +197,43 @@ function GatewayApplicationTab() {
   </section>;
 }
 
-function ApplicationSetup() {
+function GatewayOpenCodeTab() {
+  const { t } = useTranslation();
+  const { mode, runtime, busy, perform } = useRelayState();
+  const [status, setStatus] = useState<import("../../api/types").OpenCodeConfigStatus | null>(null);
+  const refreshStatus = () => {
+    if (mode !== "local") return;
+    void relayCommands.getOpenCodeConfigStatus().then(setStatus).catch(() => setStatus(null));
+  };
+  useEffect(refreshStatus, [mode]);
+  if (mode !== "local") return <section className="gateway-tab-panel gateway-empty-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
+    <EmptyState title={t("gateway.openCodeEmptyTitle")} description={t("gateway.openCodeEmptyDescription")} />
+  </section>;
+  const connect = () => perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved").then(refreshStatus);
+  return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
+    <div className="gateway-workspace">
+      <div className="gateway-settings-panel gateway-application-panel">
+        <section className="gateway-setting-row client-setup">
+          <header>
+            <span className="gateway-config-icon"><Plug aria-hidden /></span>
+            <div><h2>{t("gateway.openCodeProviderTitle")}</h2><p>{t("gateway.openCodeProviderHint")}</p></div>
+          </header>
+          <div className="opencode-provider-status">
+            <span className={`relay-status ${status?.configured ? "ready" : "info"}`}>
+              {status?.configured ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />}
+              {status?.configured ? t("gateway.openCodeConfigured", { count: status.modelCount }) : t("gateway.openCodeNotConfigured")}
+            </span>
+            <div className="inline-actions">
+              <Button variant="primary" icon={<Plug aria-hidden />} busy={busy === "opencode-connect"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : undefined} onClick={() => void connect()}>{t("gateway.openCodeConnect")}</Button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>;
+}
+
+function ChatGPTSetup() {
   const { t } = useTranslation();
   const { mode, runtime, busy, perform, activateCodexProfile, codexPoolOauthSelection, setCodexPoolOauthSelection } = useRelayState();
   const eligibleAccounts = (runtime?.accounts ?? [])

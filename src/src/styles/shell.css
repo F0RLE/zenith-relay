@@ -695,6 +695,20 @@
   padding: 0;
 }
 
+.relay-disabled-tooltip-anchor {
+  min-width: 0;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.relay-disabled-tooltip-anchor > .relay-icon-button {
+  flex: 1 1 auto;
+}
+
+.relay-disabled-tooltip-anchor > .relay-button {
+  width: 100%;
+}
+
 .relay-tooltip {
   --relay-tooltip-arrow-left: 50%;
   position: fixed;
@@ -757,6 +771,16 @@
 
 .relay-tooltip[data-positioned="true"] {
   opacity: 1;
+  animation: relay-tooltip-enter 90ms ease 550ms both;
+}
+
+.relay-tooltip[data-positioned="true"][data-instant="true"] {
+  animation-delay: 0ms;
+}
+
+@keyframes relay-tooltip-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .relay-icon-button.danger {

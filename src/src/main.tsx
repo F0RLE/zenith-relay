@@ -10,10 +10,18 @@ let startupFallbackTimer: number | undefined;
 function revealStartupShell() {
   if (document.documentElement.dataset.startupReady === "true") return;
   if (startupFallbackTimer !== undefined) window.clearTimeout(startupFallbackTimer);
+  const splash = document.getElementById("splash-screen");
+  if (splash && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    splash.remove();
+  } else if (splash) {
+    const removeAfterFade = (event: TransitionEvent) => {
+      if (event.target !== splash || event.propertyName !== "opacity") return;
+      splash.removeEventListener("transitionend", removeAfterFade);
+      splash.remove();
+    };
+    splash.addEventListener("transitionend", removeAfterFade);
+  }
   document.documentElement.dataset.startupReady = "true";
-  window.setTimeout(() => {
-    document.getElementById("splash-screen")?.remove();
-  }, 320);
 }
 
 window.addEventListener("zenith-startup-ready", revealStartupShell, { once: true });

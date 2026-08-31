@@ -47,7 +47,10 @@ test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
   await expect(websocket).not.toBeChecked();
   await expect(settings.getByText("Disabled · HTTP is used", { exact: true })).toBeVisible();
 
-  await websocket.check();
+  await websocket.click();
+  const restartDialog = page.getByRole("dialog", { name: "Restart ChatGPT" });
+  await expect(restartDialog).toBeVisible();
+  await restartDialog.getByRole("button", { name: "Restart and enable" }).click();
   await expect(websocket).toBeChecked();
   await expect(settings.getByText("Enabled", { exact: true })).toBeVisible();
 
@@ -1219,7 +1222,10 @@ test("bridge-only sources stay pool-compatible but cannot launch ChatGPT directl
   const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
   const launch = sourceRow.getByRole("button", { name: "Launch in ChatGPT", exact: true });
   await expect(launch).toBeDisabled();
-  await expect(launch).toHaveAttribute("title", /native Responses API binding/);
+  await launch.hover();
+  await expect(page.getByRole("tooltip")).toContainText("native Responses API binding");
+  await page.mouse.move(0, 0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
 });
 
 test("Choose API mode manages and launches saved sources without balance controls", async ({ page }) => {
@@ -1964,6 +1970,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.goto("/");
     const usageCommand = mode === "local" ? "get_local_usage_page" : "get_remote_server_usage";
     const usageReads = () => page.evaluate((command) => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === command).length, usageCommand);
+    await expect.poll(usageReads).toBeGreaterThan(0);
     const before = await usageReads();
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.waitForTimeout(300);
@@ -3345,20 +3352,17 @@ test("updates are checked again when the window returns to the foreground", asyn
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "plugin:updater|check").length)).toBe(before + 1);
 });
 
-test("an early foreground update check suppresses the deferred startup duplicate", async ({ page }) => {
+test("startup performs one update check without a deferred duplicate", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
     populated: true,
     updateVersion: "1.1.1",
-    updateCheckDelayMs: 500,
   });
   await page.goto("/");
 
   await expect(page.getByRole("button", { name: "Overview", exact: true })).toBeVisible();
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "plugin:updater|check").length)).toBe(1);
-  await page.waitForTimeout(1_700);
   const checks = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "plugin:updater|check"));
   expect(checks).toHaveLength(1);
   await expect(page.getByRole("button", { name: "Open update 1.1.1" })).toBeVisible();
@@ -3659,7 +3663,7 @@ test("remote usage never exposes an unresolved internal account hash", async ({ 
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
 
-  await expect(page.locator('.usage-request-table tbody tr td[data-column="connection"]')).toHaveText("Unknown account");
+  await expect(page.locator('.usage-request-table tbody tr td[data-column="connection"]')).toHaveText("Removed account");
   await expect(page.locator('.usage-request-table tbody tr td[data-column="tier"]')).toHaveText("Fast");
   await expect(page.getByText("4f5c821a909b", { exact: true })).toHaveCount(0);
 });
@@ -3678,7 +3682,7 @@ test("stale local usage and proxy references never expose internal account IDs",
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, proxyCount: 1, staleAccountReferences: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.locator('.usage-request-table tbody tr td[data-column="connection"]')).toHaveText("Unknown account");
+  await expect(page.locator('.usage-request-table tbody tr td[data-column="connection"]')).toHaveText("Removed account");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
@@ -3976,6 +3980,40 @@ test("usage records refresh only the visible Usage page", async ({ page }) => {
   await emitTauriEvent(page, "zenith-usage-recorded", null);
   await expect.poll(usageReads).toBeGreaterThan(activeUsageReads);
   expect(await stateReads()).toBe(activeStateReads);
+});
+
+test("Usage renders the cached report while a return navigation refresh is pending", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  const usageRow = page.getByRole("row").filter({ hasText: "req_synthetic_local" });
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(usageRow).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+
+  await page.evaluate(() => {
+    const testWindow = window as unknown as {
+      __USAGE_RETURN_PENDING__?: boolean;
+      __RELEASE_USAGE_RETURN__?: () => void;
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    };
+    const invoke = testWindow.__TAURI_INTERNALS__.invoke.bind(testWindow.__TAURI_INTERNALS__);
+    testWindow.__TAURI_INTERNALS__.invoke = (command, args, options) => {
+      if (command !== "get_local_usage_page") return invoke(command, args, options);
+      testWindow.__USAGE_RETURN_PENDING__ = true;
+      return new Promise((resolve, reject) => {
+        testWindow.__RELEASE_USAGE_RETURN__ = () => void invoke(command, args, options).then(resolve, reject);
+      });
+    };
+  });
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __USAGE_RETURN_PENDING__?: boolean }).__USAGE_RETURN_PENDING__))).toBe(true);
+  await expect(usageRow).toBeVisible();
+  await page.evaluate(() => {
+    const release = (window as unknown as { __RELEASE_USAGE_RETURN__?: () => void }).__RELEASE_USAGE_RETURN__;
+    if (!release) throw new Error("usage return was not pending");
+    release();
+  });
+  await expect(usageRow).toBeVisible();
 });
 
 test("Overview keeps rendered analytics while a background refresh is pending or fails", async ({ page }) => {
