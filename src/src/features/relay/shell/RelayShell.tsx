@@ -121,8 +121,8 @@ export function RelayShell() {
         <div className="mode-picker" ref={modePickerRef}>
           <button
             type="button"
+            className="mode-picker-trigger"
             aria-label={`${t("common.mode")}: ${t(`modes.${mode}`)}`}
-            title={t(`modes.${mode}`)}
             aria-haspopup="menu"
             aria-expanded={modeOpen}
             onClick={() => setModeOpen((value) => !value)}
@@ -160,7 +160,6 @@ export function RelayShell() {
               className={page === id ? "active" : ""}
               aria-label={t(`nav.${id}`)}
               aria-current={page === id ? "page" : undefined}
-              title={t(`nav.${id}`)}
               onClick={() => setPage(id)}
             >
               <Icon aria-hidden />
@@ -171,9 +170,9 @@ export function RelayShell() {
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
           <div className="sidebar-footer">
-            {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={openUpdateDialog}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
+            {availableUpdate ? <button className="sidebar-update" type="button" onClick={openUpdateDialog}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
             <div className="sidebar-footer-row">
-              <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
+              <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
                 <CircleHelp aria-hidden />
                 <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
               </button>
@@ -226,13 +225,12 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
         type="button"
         aria-label={t("feedback.showDetails")}
         aria-haspopup="dialog"
-        title={t("feedback.showDetails")}
         onClick={() => setDetailsOpen(true)}
       >
         <span className="global-feedback-status-icon" aria-hidden="true"><CircleAlert /></span>
         <span className="global-feedback-message"><span>{toastMessage}</span></span>
       </button> : <div className="global-feedback-copy">
-        <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>
+        <span className="global-feedback-status-icon" aria-hidden="true"><CheckCircle2 /></span>
         <span className="global-feedback-message"><span>{message}</span></span>
       </div>}
       <div className="global-feedback-actions">
