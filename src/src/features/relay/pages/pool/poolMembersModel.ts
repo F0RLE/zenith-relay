@@ -17,6 +17,7 @@ export type PoolMemberStatusCounts = {
 
 export type PoolActivityState = {
   activeMembers: PoolMember[];
+  nextMember: PoolMember | null;
   activeRuntime: CandidateRuntimeSnapshot[];
   activeRequestTotal: number;
   activeModels: ReturnType<typeof activeModelCounts>;
@@ -76,6 +77,11 @@ export function poolActivityState(
   activity?: RuntimeActivityState,
 ): PoolActivityState {
   const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
+  const activeMemberIds = new Set(activeMembers.map((member) => `${member.kind}:${member.id}`));
+  const nextMember = runtimeOrder
+    .filter((candidate) => candidate.available && activeRequestCount(candidate) === 0)
+    .map((candidate) => members.find((member) => candidateBelongsToMember(member, candidate.candidateId)))
+    .find((member): member is PoolMember => member != null && !activeMemberIds.has(`${member.kind}:${member.id}`)) ?? null;
   const activeRuntime = activeMembers.flatMap((member) => {
     const candidate = runtimeByMember.get(member.id);
     return candidate ? [candidate] : [];
@@ -96,6 +102,7 @@ export function poolActivityState(
     : null;
   return {
     activeMembers,
+    nextMember,
     activeRuntime,
     activeRequestTotal,
     activeModels,

@@ -621,6 +621,24 @@ fn sticky_prompt_affinity_does_not_rebind_to_spillover_candidate() {
 }
 
 #[test]
+fn removing_a_busy_candidate_drains_its_lease_before_final_removal() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("busy"));
+    assert!(scheduler.reserve_for("busy", "gpt-5", 100));
+
+    assert!(scheduler.remove("busy").is_some());
+    // The candidate is no longer selectable, but its activity remains visible
+    // so the in-flight request can release its lease normally.
+    assert!(scheduler.candidate("busy").is_some());
+    assert_eq!(scheduler.runtime_activity_for("busy").1, 1);
+    assert!(select(&mut scheduler, &HashSet::new()).is_none());
+
+    assert!(scheduler.release_for("busy", Some("gpt-5")));
+    assert!(scheduler.candidate("busy").is_none());
+    assert_eq!(scheduler.runtime_activity_for("busy").1, 0);
+}
+
+#[test]
 fn oauth_equal_quota_uses_stable_order_without_last_use() {
     let mut scheduler = PoolScheduler::new();
     let mut high_priority = oauth_candidate("high-priority");

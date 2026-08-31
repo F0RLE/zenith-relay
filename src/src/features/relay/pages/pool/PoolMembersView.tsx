@@ -97,6 +97,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   }, [mode, refreshSourceStats, sourceIds]);
   const {
     activeMembers,
+    nextMember,
     activeRequestTotal,
     activeModels,
     lastUsedRuntime,
@@ -116,7 +117,9 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
-      : (lastActivityMember ?? lastUsedMember)
+      : nextMember
+        ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
+        : (lastActivityMember ?? lastUsedMember)
         ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
         : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;

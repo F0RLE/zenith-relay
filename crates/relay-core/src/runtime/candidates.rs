@@ -431,7 +431,14 @@ impl GatewayRuntime {
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
-        let removed = self.lock_scheduler().remove(candidate_id).is_some();
+        // Scheduler removal is graceful when a lease is active: keep the
+        // executor alive until the request reaches its terminal outcome.
+        let (removed, deferred) = {
+            let mut scheduler = self.lock_scheduler();
+            let removed = scheduler.remove(candidate_id).is_some();
+            let deferred = scheduler.candidate(candidate_id).is_some();
+            (removed, deferred)
+        };
         self.model_metadata
             .codex_manifests
             .lock()
@@ -463,16 +470,18 @@ impl GatewayRuntime {
                 &BTreeMap::new(),
             );
         }
-        self.passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(candidate_id);
-        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
-            account.active.store(false, Ordering::Release);
-            *account
-                .agent_identity
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        if !deferred {
+            self.passive_quotas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(candidate_id);
+            if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+                account.active.store(false, Ordering::Release);
+                *account
+                    .agent_identity
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
         }
         if let Some(store) = self.response_affinity_store.as_ref() {
             let _ = store.delete_candidate(candidate_id);

@@ -68,9 +68,10 @@ describe("pool members model", () => {
     expect(state.activeModels).toEqual([{ model: "gpt-5.4", requestCount: 2 }]);
     expect(state.lastUsedMember?.id).toBe("source-last");
     expect(state.lastActivityMember).toBeNull();
+    expect(state.nextMember?.id).toBe("source-next");
   });
 
-  test("keeps the actual lower-priority route visible instead of predicting the first available member", () => {
+  test("exposes the next available route from the live scheduler order", () => {
     const members = [member("account", "account-top"), member("source", "stabilizer")];
     const order = [
       candidate("account-top", { available: true }),
@@ -84,6 +85,7 @@ describe("pool members model", () => {
 
     expect(state.lastActivityMember?.id).toBe("stabilizer");
     expect(state.lastUsedMember).toBeNull();
+    expect(state.nextMember?.id).toBe("account-top");
   });
 
   test("counts account and source errors without changing status semantics", () => {
