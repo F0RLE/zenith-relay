@@ -248,7 +248,6 @@ function ApplicationSetup() {
     </header>
     <div className="oauth-binding-settings">
       <div className="relay-field oauth-binding-account-control">
-        <span>{t("gateway.oauthBindingAccount")}</span>
         <OptionMenu className="field-option-menu" label={t("gateway.oauthBindingAccount")} value={codexPoolOauthSelection} onChange={setCodexPoolOauthSelection} options={accountOptions} />
       </div>
       <Button className="oauth-binding-switch" variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")} onClick={() => void switchNow()}>{t("gateway.oauthBindingSwitch")}</Button>
