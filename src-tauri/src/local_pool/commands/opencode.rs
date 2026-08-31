@@ -186,6 +186,14 @@ fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
         .map(|model| {
             let mut value = Map::new();
             value.insert("name".into(), Value::String(model.id.clone()));
+            // Relay accepts image attachments and forwards them to the active
+            // route. OpenCode requires both fields before it exposes image
+            // attachments for a custom provider model.
+            value.insert("attachment".into(), Value::Bool(true));
+            value.insert(
+                "modalities".into(),
+                json!({"input": ["text", "image"], "output": ["text"]}),
+            );
             let levels = if !model.reasoning_allowed_levels.is_empty() {
                 model.reasoning_allowed_levels.clone()
             } else if !model.reasoning_supported_levels.is_empty() && !model.reasoning_configurable
@@ -367,6 +375,7 @@ pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<b
 #[cfg(test)]
 mod tests {
     use super::{managed_provider, model_ids, parse_jsonc, PROVIDER_NPM};
+    use serde_json::json;
     use zenith_relay_core::protocol::ModelSummary;
 
     fn model(id: &str, enabled: bool) -> ModelSummary {
@@ -434,5 +443,10 @@ mod tests {
 
         assert_eq!(provider["npm"], PROVIDER_NPM);
         assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:14998/v1");
+        assert_eq!(provider["models"]["gpt-5.6-sol"]["attachment"], true);
+        assert_eq!(
+            provider["models"]["gpt-5.6-sol"]["modalities"]["input"],
+            json!(["text", "image"])
+        );
     }
 }
