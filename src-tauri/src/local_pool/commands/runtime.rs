@@ -51,13 +51,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
 ) -> Result<Arc<GatewayRuntime>> {
     let system_key = pool::ensure_system_gateway_key(state)?;
     let codex_home = crate::platform::default_codex_home();
-    let protected_account_id = if codex::credential_kind(&codex_home, &state.profile_backup_root())?
-        == Some(codex::ProfileCredentialKind::LocalGateway)
-    {
-        codex::active_managed_account_id(&codex_home, &state.profile_backup_root())?
-    } else {
-        None
-    };
+    let protected_account_id =
+        managed_chatgpt_account_id_for_reserve(&codex_home, &state.profile_backup_root());
     let LocalRuntimeInputs {
         gateway: settings,
         sources: source_records,
@@ -214,6 +209,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         default_service_tier: settings.default_service_tier,
         quota_stale_after_ms,
         image_base_model: None,
+        image_pricing_catalog: Some(state.pricing_catalog()),
         model_reasoning_allowed_levels: settings.model_reasoning_allowed_levels,
         response_affinity_store: Some(state.response_affinity_store()),
         provider_storm_breaker: false,
@@ -245,6 +241,24 @@ pub(in crate::local_pool) async fn runtime_from_store(
         settings.chatgpt_interface_quota_reserve_basis_points,
     );
     Ok(Arc::new(runtime))
+}
+
+/// ChatGPT profile recovery is an optional desktop integration. Its metadata
+/// must never prevent the independent local API gateway from starting or from
+/// enabling an API source. If the profile needs recovery, omit only the
+/// interface quota reserve; profile actions still surface their own errors.
+fn managed_chatgpt_account_id_for_reserve(
+    codex_home: &std::path::Path,
+    backup_root: &std::path::Path,
+) -> Option<String> {
+    (codex::credential_kind(codex_home, backup_root).ok()
+        == Some(Some(codex::ProfileCredentialKind::LocalGateway)))
+    .then(|| {
+        codex::active_managed_account_id(codex_home, backup_root)
+            .ok()
+            .flatten()
+    })
+    .flatten()
 }
 
 fn timestamp_ms(value: &str) -> Option<u64> {
@@ -548,12 +562,33 @@ pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> Loca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        fs,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn persisted_last_used_timestamp_maps_to_epoch_milliseconds() {
         assert_eq!(timestamp_ms("1970-01-01T00:00:00.001Z"), Some(1));
         assert_eq!(timestamp_ms("not-a-date"), None);
+    }
+
+    #[test]
+    fn profile_recovery_error_does_not_block_the_api_gateway_reserve_setup() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-runtime-profile-{}", uuid::Uuid::new_v4()));
+        let profile = root.join("profile");
+        let recovery = root.join("recovery");
+        fs::create_dir_all(&profile).unwrap();
+        fs::create_dir_all(&recovery).unwrap();
+        fs::write(recovery.join("codex-default.json"), "invalid backup").unwrap();
+
+        assert_eq!(
+            managed_chatgpt_account_id_for_reserve(&profile, &recovery),
+            None
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -601,6 +636,8 @@ mod tests {
                 draining: false,
                 base_url: "http://127.0.0.1:9/v1".into(),
                 secret_ref: source_secret_ref.clone(),
+                pricing_provider: None,
+                official_provider_family: None,
                 wire_api: zenith_relay_core::WireApi::Responses,
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
@@ -664,6 +701,8 @@ mod tests {
             draining: false,
             base_url: "http://127.0.0.1:9/v1".into(),
             secret_ref: source_secret_ref.clone(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
@@ -798,6 +837,8 @@ mod tests {
                 draining: false,
                 base_url: "http://127.0.0.1:9/v1".into(),
                 secret_ref: source_secret_ref.clone(),
+                pricing_provider: None,
+                official_provider_family: None,
                 wire_api: zenith_relay_core::WireApi::Responses,
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
@@ -864,6 +905,8 @@ mod tests {
             draining: false,
             base_url: "http://127.0.0.1:9/v1".into(),
             secret_ref: source_secret_ref.clone(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["old-model".into()],
@@ -969,6 +1012,8 @@ mod tests {
                 draining: false,
                 base_url: "http://127.0.0.1:9/v1".into(),
                 secret_ref: source_secret_ref.clone(),
+                pricing_provider: None,
+                official_provider_family: None,
                 wire_api: zenith_relay_core::WireApi::Responses,
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],

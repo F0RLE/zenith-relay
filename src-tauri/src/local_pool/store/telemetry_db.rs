@@ -10,13 +10,15 @@ use std::{
     time::Instant,
 };
 #[cfg(test)]
-use zenith_relay_core::ResponseAffinityBinding;
+use zenith_relay_core::pricing::PriceEvidence;
 use zenith_relay_core::{
-    api_pricing_revision,
+    pricing::{PriceSource, PricingCatalog, PricingContext, PricingMetadata, PricingSourceSummary},
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, CacheWriteTtl, DefaultServiceTier, ErrorOrigin,
-    ObservedServiceTier, RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
+    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
 };
+#[cfg(test)]
+use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
 
 mod affinity;
 mod migrations;
@@ -27,16 +29,20 @@ mod usage;
 
 use migrations::*;
 use usage::{
-    rust_u64, sql_u64, usage_buckets, usage_filter, usage_groups, usage_log_from_row,
+    account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, rust_u64,
+    sql_u64, usage_buckets, usage_filter, usage_groups, usage_log_from_row,
     usage_model_equivalents, usage_totals,
 };
 
+#[cfg(test)]
 pub type SourcePriceOverrides = zenith_relay_core::SourceModelPriceOverrides;
 
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
     usage_revision: AtomicU64,
     api_equivalent_cache: Mutex<Option<CachedUsageEquivalents>>,
+    quota_equivalent_cache: Mutex<Option<CachedQuotaEquivalents>>,
+    usage_totals_cache: Mutex<Option<UsageTotals>>,
     open_duration_ms: f64,
 }
 
@@ -45,6 +51,14 @@ struct CachedUsageEquivalents {
     usage_revision: u64,
     pricing_revision: String,
     value: UsageEquivalents,
+}
+
+#[derive(Clone)]
+struct CachedQuotaEquivalents {
+    usage_revision: u64,
+    pricing_revision: String,
+    windows: Vec<(String, u64, u64)>,
+    value: HashMap<String, ApiEquivalentSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -96,12 +110,134 @@ pub struct LocalUsagePage {
     pub models: Vec<UsageGroup>,
     pub pool_members: Vec<UsageGroup>,
     pub buckets: Vec<UsageBucket>,
+    #[serde(default)]
+    pub pricing: PricingMetadata,
 }
 
 #[derive(Clone, Default)]
 pub struct UsageEquivalents {
     pub accounts: HashMap<String, ApiEquivalentSummary>,
     pub sources: HashMap<String, ApiEquivalentSummary>,
+}
+
+trait UsagePriceResolver {
+    fn estimate(
+        &self,
+        candidate_kind: &str,
+        candidate_id: &str,
+        model: Option<&str>,
+        usage: zenith_relay_core::ApiEquivalentUsage,
+    ) -> ApiEquivalentSummary;
+
+    fn source(&self, candidate_kind: &str, candidate_id: &str, model: Option<&str>) -> PriceSource;
+
+    fn revision_key(&self) -> &str;
+
+    fn pricing_metadata(
+        &self,
+        value: ApiEquivalentSummary,
+        sources: &[PriceSource],
+    ) -> PricingMetadata;
+}
+
+#[cfg(test)]
+fn test_pricing_catalog() -> PricingCatalog {
+    PricingCatalog::from_litellm_json(include_str!(
+        "../../../../crates/relay-core/tests/fixtures/litellm-prices.json"
+    ))
+    .expect("pricing fixture must be valid")
+}
+
+#[cfg(test)]
+fn test_pricing_context(
+    price_overrides: &BTreeMap<String, zenith_relay_core::ApiModelPriceOverride>,
+    source_price_overrides: &SourcePriceOverrides,
+) -> PricingContext {
+    let source_evidence = source_price_overrides
+        .iter()
+        .map(|(source_id, models)| {
+            let evidence = models
+                .iter()
+                .map(|(model, prices)| {
+                    (
+                        model.to_ascii_lowercase(),
+                        PriceEvidence {
+                            provider: prices.provider.map(Into::into),
+                            manual: prices.manual.map(Into::into),
+                        },
+                    )
+                })
+                .collect();
+            (source_id.clone(), evidence)
+        })
+        .collect();
+    let global_manual_prices = price_overrides
+        .iter()
+        .map(|(model, price)| (model.to_ascii_lowercase(), (*price).into()))
+        .collect();
+    PricingContext {
+        source_evidence,
+        global_manual_prices,
+        ..PricingContext::default()
+    }
+}
+
+struct CatalogPriceResolver<'a> {
+    catalog: &'a PricingCatalog,
+    context: &'a PricingContext,
+    revision: String,
+}
+
+impl<'a> CatalogPriceResolver<'a> {
+    fn new(catalog: &'a PricingCatalog, context: &'a PricingContext) -> Self {
+        Self {
+            catalog,
+            context,
+            revision: context.revision_key(catalog),
+        }
+    }
+}
+
+impl UsagePriceResolver for CatalogPriceResolver<'_> {
+    fn estimate(
+        &self,
+        candidate_kind: &str,
+        candidate_id: &str,
+        model: Option<&str>,
+        usage: zenith_relay_core::ApiEquivalentUsage,
+    ) -> ApiEquivalentSummary {
+        zenith_relay_core::estimate_candidate_api_equivalent_with_catalog(
+            self.catalog,
+            self.context,
+            candidate_kind,
+            candidate_id,
+            model,
+            usage,
+        )
+        .0
+    }
+
+    fn source(&self, candidate_kind: &str, candidate_id: &str, model: Option<&str>) -> PriceSource {
+        self.context
+            .candidate_price(self.catalog, candidate_kind, candidate_id, model)
+            .source
+    }
+
+    fn revision_key(&self) -> &str {
+        &self.revision
+    }
+
+    fn pricing_metadata(
+        &self,
+        value: ApiEquivalentSummary,
+        sources: &[PriceSource],
+    ) -> PricingMetadata {
+        PricingMetadata::for_catalog(
+            self.catalog,
+            PricingSourceSummary::from_sources(sources.iter().copied()),
+            value.unpriced_tokens,
+        )
+    }
 }
 
 impl TelemetryDb {
@@ -119,6 +255,8 @@ impl TelemetryDb {
                 "PRAGMA journal_mode = WAL;\
                  PRAGMA synchronous = FULL;\
                  PRAGMA wal_autocheckpoint = 1000;\
+                 PRAGMA cache_size = -32768;\
+                 PRAGMA temp_store = MEMORY;\
                  PRAGMA busy_timeout = 5000;",
             )
             .map_err(db_error)?;
@@ -224,8 +362,59 @@ impl TelemetryDb {
             connection: Mutex::new(connection),
             usage_revision: AtomicU64::new(0),
             api_equivalent_cache: Mutex::new(None),
+            quota_equivalent_cache: Mutex::new(None),
+            usage_totals_cache: Mutex::new(None),
             open_duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
         })
+    }
+
+    pub(super) fn cached_usage_totals(
+        &self,
+        connection: &Connection,
+        query: &UsageQuery,
+        where_sql: &str,
+        values: &[SqlValue],
+    ) -> Result<UsageTotals> {
+        if is_unfiltered_all_time(query) {
+            if let Some(cached) = self
+                .usage_totals_cache
+                .lock()
+                .map_err(lock_error)?
+                .as_ref()
+                .cloned()
+            {
+                return Ok(cached);
+            }
+        }
+        let totals = usage_totals(connection, where_sql, values)?;
+        if is_unfiltered_all_time(query) {
+            self.usage_totals_cache
+                .lock()
+                .map_err(lock_error)?
+                .replace(totals.clone());
+        }
+        Ok(totals)
+    }
+
+    pub(super) fn update_cached_usage_totals(
+        &self,
+        previous: Option<UsageTotals>,
+        current: UsageTotals,
+    ) -> Result<()> {
+        let mut cache = self.usage_totals_cache.lock().map_err(lock_error)?;
+        let Some(totals) = cache.as_mut() else {
+            return Ok(());
+        };
+        if let Some(previous) = previous {
+            apply_usage_totals_delta(totals, previous, false);
+        }
+        apply_usage_totals_delta(totals, current, true);
+        Ok(())
+    }
+
+    pub(super) fn clear_cached_usage_totals(&self) -> Result<()> {
+        self.usage_totals_cache.lock().map_err(lock_error)?.take();
+        Ok(())
     }
 
     pub fn open_duration_ms(&self) -> f64 {
@@ -602,6 +791,90 @@ mod tests {
                 .unwrap()
                 == 0
         );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_totals_cache_tracks_new_and_replaced_events() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-totals-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut first = aggregate_test_event("cached-first", 1, 10, 0, None, 4);
+        first.latency_ms = 100;
+        first.ttft_ms = Some(20);
+        first.generation_ms = Some(60);
+        first.reasoning_tokens = Some(1);
+        first.total_tokens = Some(14);
+        database.record(&first).unwrap();
+
+        let initial = database.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(initial.totals.requests, 1);
+        assert!(database.usage_totals_cache.lock().unwrap().is_some());
+
+        let mut second = aggregate_test_event("cached-second", 1, 20, 0, None, 8);
+        second.latency_ms = 200;
+        second.ttft_ms = Some(30);
+        second.generation_ms = Some(100);
+        second.reasoning_tokens = Some(2);
+        second.total_tokens = Some(28);
+        database.record(&second).unwrap();
+
+        let appended = database.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(appended.totals.requests, 2);
+        assert_eq!(appended.totals.successful_requests, 2);
+        assert_eq!(appended.totals.latency_ms, 300);
+        assert_eq!(appended.totals.ttft_ms, 50);
+        assert_eq!(appended.totals.ttft_samples, 2);
+        assert_eq!(appended.totals.generation_ms, 160);
+        assert_eq!(appended.totals.generation_samples, 2);
+        assert_eq!(appended.totals.generation_output_tokens, 7);
+        assert_eq!(appended.totals.input_tokens, 30);
+        assert_eq!(appended.totals.reasoning_tokens, 3);
+        assert_eq!(appended.totals.output_tokens, 12);
+        assert_eq!(appended.totals.total_tokens, 42);
+        assert_eq!(appended.totals.speed_output_tokens, 12);
+        assert_eq!(appended.totals.speed_duration_ms, 300);
+
+        second.attempt = 2;
+        second.success = false;
+        second.http_status = 503;
+        second.error_category = Some("upstream_unavailable".into());
+        second.latency_ms = 400;
+        second.ttft_ms = None;
+        second.generation_ms = Some(500);
+        second.input_tokens = Some(40);
+        second.reasoning_tokens = Some(3);
+        second.output_tokens = Some(12);
+        second.total_tokens = Some(52);
+        database.record(&second).unwrap();
+
+        let replaced = database.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(replaced.totals.requests, 2);
+        assert_eq!(replaced.totals.successful_requests, 1);
+        assert_eq!(replaced.totals.latency_ms, 500);
+        assert_eq!(replaced.totals.ttft_ms, 20);
+        assert_eq!(replaced.totals.ttft_samples, 1);
+        assert_eq!(replaced.totals.generation_ms, 60);
+        assert_eq!(replaced.totals.generation_samples, 1);
+        assert_eq!(replaced.totals.generation_output_tokens, 2);
+        assert_eq!(replaced.totals.input_tokens, 50);
+        assert_eq!(replaced.totals.reasoning_tokens, 4);
+        assert_eq!(replaced.totals.output_tokens, 16);
+        assert_eq!(replaced.totals.total_tokens, 66);
+        assert_eq!(replaced.totals.speed_output_tokens, 4);
+        assert_eq!(replaced.totals.speed_duration_ms, 100);
+
+        second.attempt = 1;
+        second.input_tokens = Some(1_000);
+        database.record(&second).unwrap();
+        assert_eq!(
+            database.usage_page(&UsageQuery::default()).unwrap().totals,
+            replaced.totals
+        );
+
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1080,6 +1353,108 @@ mod tests {
     }
 
     #[test]
+    fn account_quota_projection_matches_the_filtered_usage_total() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-quota-projection-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut event = aggregate_test_event("account-window-1", 1, 40, 12, None, 8);
+        event.source_id = "codex".into();
+        event.candidate_id = Some("account-window".into());
+        event.account_id = Some("account-window".into());
+        database.record(&event).unwrap();
+        event.request_id = "account-window-2".into();
+        event.requested_model = Some("gpt-5.4".into());
+        event.resolved_model = Some("gpt-5.4".into());
+        event.input_tokens = Some(20);
+        event.cache_write_input_tokens = Some(5);
+        event.cache_write_ttl = Some(CacheWriteTtl::FiveMinutes);
+        event.output_tokens = Some(4);
+        event.total_tokens = Some(24);
+        database.record(&event).unwrap();
+
+        let now = zenith_relay_core::unix_time_ms();
+        let from_ms = now.saturating_sub(60_000);
+        let to_ms = now.saturating_add(60_000);
+        let catalog = test_pricing_catalog();
+        let context = test_pricing_context(&BTreeMap::new(), &BTreeMap::new());
+        let expected = database
+            .usage_page_with_pricing(
+                &UsageQuery {
+                    from_ms: Some(from_ms),
+                    to_ms: Some(to_ms),
+                    source_or_account_query: Some("account-window".into()),
+                    include_events: Some(false),
+                    include_models: Some(false),
+                    include_pool_members: Some(false),
+                    ..UsageQuery::default()
+                },
+                &catalog,
+                &context,
+            )
+            .unwrap()
+            .totals
+            .api_equivalent;
+        let actual = database
+            .account_api_equivalents_with_pricing(
+                &[("account-window".into(), from_ms, to_ms)],
+                &catalog,
+                &context,
+            )
+            .unwrap()["account-window"];
+
+        assert_eq!(actual, expected);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_quota_projection_cache_invalidates_after_usage_write() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-quota-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut event = aggregate_test_event("account-cache-1", 1, 100, 0, None, 10);
+        event.source_id = "codex".into();
+        event.candidate_id = Some("account-cache".into());
+        event.account_id = Some("account-cache".into());
+        event.requested_model = Some("gpt-5.4".into());
+        event.resolved_model = Some("gpt-5.4".into());
+        database.record(&event).unwrap();
+
+        let now = zenith_relay_core::unix_time_ms();
+        let windows = [(
+            "account-cache".to_string(),
+            now.saturating_sub(60_000),
+            now + 60_000,
+        )];
+        let catalog = test_pricing_catalog();
+        let context = test_pricing_context(&BTreeMap::new(), &BTreeMap::new());
+        let first = database
+            .account_api_equivalents_with_pricing(&windows, &catalog, &context)
+            .unwrap()["account-cache"];
+        assert!(database.quota_equivalent_cache.lock().unwrap().is_some());
+        let cached = database
+            .account_api_equivalents_with_pricing(&windows, &catalog, &context)
+            .unwrap()["account-cache"];
+        assert_eq!(cached, first);
+
+        event.request_id = "account-cache-2".into();
+        event.input_tokens = Some(200);
+        event.output_tokens = Some(20);
+        event.total_tokens = Some(220);
+        database.record(&event).unwrap();
+        let updated = database
+            .account_api_equivalents_with_pricing(&windows, &catalog, &context)
+            .unwrap()["account-cache"];
+        assert!(updated.micro_usd > first.micro_usd);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn usage_keeps_only_the_terminal_fallback_attempt() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-usage-attempts-{}",
@@ -1469,6 +1844,33 @@ mod tests {
     }
 
     #[test]
+    fn usage_speed_rollup_ignores_buffered_outliers() {
+        let outlier = usage::usage_totals_from_sample(usage::UsageTotalsSample {
+            success: true,
+            latency_ms: 50,
+            generation_ms: Some(10),
+            output_tokens: Some(52),
+            ..usage::UsageTotalsSample::default()
+        });
+        assert_eq!(outlier.generation_output_tokens, 0);
+        assert_eq!(outlier.generation_samples, 0);
+        assert_eq!(outlier.speed_output_tokens, 0);
+        assert_eq!(outlier.speed_duration_ms, 0);
+
+        let valid = usage::usage_totals_from_sample(usage::UsageTotalsSample {
+            success: true,
+            latency_ms: 100,
+            generation_ms: Some(100),
+            output_tokens: Some(11),
+            ..usage::UsageTotalsSample::default()
+        });
+        assert_eq!(valid.generation_output_tokens, 10);
+        assert_eq!(valid.generation_samples, 1);
+        assert_eq!(valid.speed_output_tokens, 11);
+        assert_eq!(valid.speed_duration_ms, 100);
+    }
+
+    #[test]
     fn usage_v1_migrates_existing_rows_to_attempt_one() {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-usage-v1-{}", uuid::Uuid::new_v4()));
@@ -1805,6 +2207,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(database.list(10).unwrap().len(), 1);
+
+        // A later upsert must not inherit the trigger rowid and run the
+        // retention scan again. Leave a fresh old row behind to detect that
+        // accidental rescan.
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO request_logs (
+                    request_id, attempt, local_key_id, source_id, candidate_id,
+                    requested_model, resolved_model, wire_api, success, http_status,
+                    latency_ms, input_tokens, output_tokens, total_tokens, created_at
+                 ) VALUES ('old-after-trigger', 1, 'key', 'source', 'source',
+                    'gpt-5.4', 'gpt-5.4', 'responses', 1, 200, 1, 20, 8, 28,
+                    datetime('now', '-31 days'))",
+                [],
+            )
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO performance_samples(id, name, duration_ms)
+                 VALUES (256, 'retention-regression', 1.0)",
+                [],
+            )
+            .unwrap();
+        database
+            .record(&aggregate_test_event("trigger-256", 2, 0, 0, None, 0))
+            .unwrap();
+        assert_eq!(
+            database
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM request_logs WHERE request_id = 'old-after-trigger'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
         assert_eq!(
             database.api_equivalents().unwrap().sources.get("source"),
             Some(&ApiEquivalentSummary {

@@ -11,6 +11,8 @@ use std::ffi::OsStr;
 
 #[cfg(any(not(target_os = "windows"), test))]
 use crate::codex_config::load_api_key_for_launch;
+#[cfg(target_os = "windows")]
+use sysinfo::Pid;
 use sysinfo::{ProcessesToUpdate, System};
 
 #[cfg(target_os = "windows")]
@@ -424,19 +426,19 @@ fn stop_codex_processes(pids: &[u32]) {
 
 #[cfg(target_os = "windows")]
 fn stop_codex_windows(initial_pids: &[u32], timeout: Duration) -> Result<(), String> {
-    stop_windows_processes(initial_pids, timeout, codex_process_pids, "ChatGPT")
+    stop_windows_processes(initial_pids, timeout, codex_process_pids_for, "ChatGPT")
 }
 
 #[cfg(target_os = "windows")]
 fn stop_opencode_windows(initial_pids: &[u32], timeout: Duration) -> Result<(), String> {
-    stop_windows_processes(initial_pids, timeout, opencode_process_pids, "OpenCode")
+    stop_windows_processes(initial_pids, timeout, opencode_process_pids_for, "OpenCode")
 }
 
 #[cfg(target_os = "windows")]
 fn stop_windows_processes(
     initial_pids: &[u32],
     timeout: Duration,
-    current_pids: fn() -> Vec<u32>,
+    current_pids: fn(&[u32]) -> Vec<u32>,
     product: &str,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -450,7 +452,10 @@ fn stop_windows_processes(
     }
 
     loop {
-        let running = current_pids();
+        // The initial taskkill uses `/T`, so all children are already covered.
+        // Probe only those exact main-process PIDs instead of enumerating every
+        // process on the machine on each 100 ms stop-loop iteration.
+        let running = current_pids(initial_pids);
         let now = Instant::now();
         let elapsed = now.duration_since(started);
         if elapsed >= timeout {
@@ -614,37 +619,21 @@ fn configure_launch_environment(command: &mut Command, inject_saved_key: bool) {
 
 #[cfg(target_os = "windows")]
 fn launch_codex_desktop() -> Result<(), String> {
-    // The packaged ChatGPT URI is stable and avoids starting PowerShell on
-    // every launch. Only fall back to app discovery when that URI fails.
-    let primary = r"shell:AppsFolder\OpenAI.ChatGPT_2p2nqsd0c76g0!App";
     let mut last_error = None;
-    for target in [primary] {
-        match windows_hidden_command("explorer.exe").arg(target).spawn() {
-            Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT) => return Ok(()),
-            Ok(_) => last_error = Some(format!("ChatGPT did not start via {target}")),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-    }
     for target in windows_chatgpt_launch_targets() {
-        if target.eq_ignore_ascii_case(primary) {
-            continue;
-        }
         match windows_hidden_command("explorer.exe").arg(&target).spawn() {
             Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT) => return Ok(()),
             Ok(_) => last_error = Some(format!("ChatGPT did not start via {target}")),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
-    Err(last_error.unwrap_or_else(|| "ChatGPT desktop process did not start".to_string()))
+    Err(last_error.unwrap_or_else(|| {
+        "ChatGPT was not found in Windows installed apps. Repair or reinstall ChatGPT, then try again.".to_string()
+    }))
 }
 
 #[cfg(target_os = "windows")]
 fn windows_chatgpt_launch_targets() -> Vec<String> {
-    let mut targets = vec![
-        r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App".to_string(),
-        "chatgpt:".to_string(),
-        "codex:".to_string(),
-    ];
     let output = windows_hidden_command("powershell.exe")
         .args([
             "-NoProfile",
@@ -654,19 +643,10 @@ fn windows_chatgpt_launch_targets() -> Vec<String> {
         ])
         .output()
         .ok();
-    let discovered = output
+    output
         .filter(|output| output.status.success())
         .map(|output| parse_windows_start_apps_output(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default();
-    for target in discovered {
-        if !targets
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&target))
-        {
-            targets.push(target);
-        }
-    }
-    targets
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
@@ -728,6 +708,36 @@ fn opencode_process_pids() -> Vec<u32> {
         .processes()
         .values()
         .filter(|process| is_opencode_process(process))
+        .map(|process| process.pid().as_u32())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn codex_process_pids_for(targets: &[u32]) -> Vec<u32> {
+    matching_process_pids(targets, is_codex_process)
+}
+
+#[cfg(target_os = "windows")]
+fn opencode_process_pids_for(targets: &[u32]) -> Vec<u32> {
+    matching_process_pids(targets, is_opencode_process)
+}
+
+#[cfg(target_os = "windows")]
+fn matching_process_pids(targets: &[u32], matcher: fn(&sysinfo::Process) -> bool) -> Vec<u32> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let pids = targets
+        .iter()
+        .copied()
+        .map(Pid::from_u32)
+        .collect::<Vec<_>>();
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
+    system
+        .processes()
+        .values()
+        .filter(|process| matcher(process))
         .map(|process| process.pid().as_u32())
         .collect()
 }

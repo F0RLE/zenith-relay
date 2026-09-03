@@ -103,6 +103,7 @@ pub enum RemoteServerAction {
     SetQuotaPolicy,
     SetRoutingPolicy,
     RefreshAllQuotas,
+    RefreshPricingCatalog,
     SetModelEnabled,
     SetModelPrice,
     SetModelReasoning,
@@ -716,6 +717,9 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::RefreshAllQuotas => {
             (Method::POST, "/pool/quota/refresh".to_string(), false)
         }
+        RemoteServerAction::RefreshPricingCatalog => {
+            (Method::POST, "/pricing/refresh".to_string(), false)
+        }
         RemoteServerAction::SetModelEnabled => (Method::POST, "/models/rules".to_string(), true),
         RemoteServerAction::SetModelPrice => (Method::POST, "/models/prices".to_string(), true),
         RemoteServerAction::SetModelReasoning => {
@@ -805,5 +809,16 @@ mod tests {
             "server-two",
             "fingerprint-two",
         ));
+    }
+
+    #[test]
+    fn pricing_catalog_refresh_uses_its_dedicated_empty_post_request() {
+        let (method, path, requires_payload) =
+            action_request(&RemoteServerAction::RefreshPricingCatalog)
+                .expect("pricing catalog refresh request should be supported");
+
+        assert_eq!(method, Method::POST);
+        assert_eq!(path, "/pricing/refresh");
+        assert!(!requires_payload);
     }
 }

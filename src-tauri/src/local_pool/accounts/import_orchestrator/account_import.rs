@@ -208,12 +208,6 @@ pub(super) async fn import_account_item(
             )
             .await
             .map_err(model_item_error)?;
-        if models.is_empty() {
-            return Err(ImportItemError::new(
-                "models_empty",
-                "ChatGPT account did not expose any supported models",
-            ));
-        }
         Some(models)
     } else {
         None

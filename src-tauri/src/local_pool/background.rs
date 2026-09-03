@@ -22,6 +22,7 @@ use zenith_relay_core::{
         verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
         WakeVerificationOutcome,
     },
+    pricing::pricing_refresh_delay,
     providers::chatgpt::CodexQuotaClient,
     unix_time_ms as current_time_ms,
 };
@@ -61,9 +62,42 @@ pub(crate) fn start(app: AppHandle) {
     let _account_model_worker = tauri::async_runtime::spawn(async move {
         account_model_loop(account_model_app).await;
     });
+    let pricing_app = app.clone();
+    let _pricing_worker = tauri::async_runtime::spawn(async move {
+        pricing_loop(pricing_app).await;
+    });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_loop(app).await;
     });
+}
+
+async fn pricing_loop(app: AppHandle) {
+    let instance_id = app
+        .state::<DesktopState>()
+        .root
+        .to_string_lossy()
+        .into_owned();
+    loop {
+        let state = app.state::<DesktopState>();
+        let loader = state.pricing_loader();
+        let now_ms = current_time_ms();
+        let deadline = loader.next_refresh_deadline(now_ms);
+        let delay = pricing_refresh_delay(&instance_id, deadline, now_ms);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = loader.wait_for_schedule_change() => continue,
+        }
+
+        let state = app.state::<DesktopState>();
+        let loader = state.pricing_loader();
+        if loader.refresh_due(current_time_ms()) {
+            let _ = loader.refresh(false).await;
+            // Refresh failures update the catalog status too. Notify the UI
+            // for every attempt so snapshot consumers can recalculate derived
+            // pricing data without waiting for another background event.
+            let _ = app.emit("zenith-state-changed", ());
+        }
+    }
 }
 
 /// Start a one-shot model discovery for accounts that have just become local
@@ -841,6 +875,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            provider_family: Some("openai".into()),
             purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,

@@ -260,16 +260,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             )
             .await
         {
-            Ok(models) if !models.is_empty() => (models, None),
-            Ok(_) => (
-                previous_models,
-                Some(InitialModelIssue {
-                    code: "models_empty",
-                    retryable: false,
-                    auth_error: false,
-                    blocked: false,
-                }),
-            ),
+            Ok(models) => (models, None),
             Err(error) => (previous_models, Some(initial_model_issue(&error))),
         },
         Err(error) => (previous_models, Some(initial_model_issue(&error))),
@@ -282,6 +273,12 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
+    let model_discovery_succeeded = model_issue.is_none();
+    if model_discovery_succeeded {
+        // Preserve an explicit empty discovery result. It is different from
+        // a failed probe and must suppress an older configured catalog.
+        record.discovered_models = Some(record.models.clone());
+    }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
         record.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -872,12 +869,15 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.purchase_cost_micro_usd = current.purchase_cost_micro_usd;
     next.remote_location = current.remote_location.clone();
     let fresh_models = std::mem::take(&mut next.models);
+    let fresh_discovered_models = next.discovered_models.take();
     next.models = current.models.clone();
-    next.discovered_models = if fresh_models.is_empty() {
-        current.discovered_models.clone()
-    } else {
-        Some(fresh_models)
-    };
+    next.discovered_models = fresh_discovered_models.or_else(|| {
+        if fresh_models.is_empty() {
+            current.discovered_models.clone()
+        } else {
+            Some(fresh_models)
+        }
+    });
     if next.account.subscription.plan_type.is_none() {
         next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
     }
@@ -1234,6 +1234,20 @@ mod tests {
         assert_eq!(next.models, vec!["gpt-test"]);
         assert_eq!(next.discovered_models, Some(vec!["new-model".into()]));
         assert_eq!(next.effective_models(), ["new-model"]);
+    }
+
+    #[test]
+    fn duplicate_identity_preserves_a_successful_empty_model_snapshot() {
+        let current = account("account_empty_models", "provider-account", "old-refresh");
+        let mut next = account("account_empty_models", "provider-account", "new-refresh");
+        next.models.clear();
+        next.discovered_models = Some(Vec::new());
+
+        preserve_existing_settings(&mut next, &current);
+
+        assert_eq!(next.models, current.models);
+        assert_eq!(next.discovered_models, Some(Vec::new()));
+        assert!(next.effective_models().is_empty());
     }
 
     #[test]

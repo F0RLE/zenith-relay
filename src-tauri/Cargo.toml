@@ -3,38 +3,56 @@ name = "zenith-relay"
 version = "1.1.1"
 edition = "2021"
 license = "AGPL-3.0-only"
+rust-version = "1.97"
+
+[lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_imports = "deny"
+unused_must_use = "deny"
+unused_variables = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+pedantic = { level = "allow", priority = -1 }
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-base64 = "0.23.0"
+base64 = "0.23.1"
 chrono = "0.4.45"
 chacha20poly1305 = "0.11.0"
 hex = "0.4.3"
-keyring = { version = "4.1.5", default-features = false, features = ["v1"] }
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 rand = "0.10.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls", "stream"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["backup", "bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 sha2 = "0.11.0"
 sys-locale = "0.3.2"
 sysinfo = "0.39.6"
 tauri = { version = "2.11.5", features = ["image-ico", "image-png", "tray-icon"] }
-tauri-plugin-opener = "2.5.4"
-tauri-plugin-dialog = "2.7.2"
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-dialog = "2.7.3"
 tauri-plugin-process = "2.3.1"
-tauri-plugin-updater = "2.10.1"
-tokio = { version = "1.53.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tauri-plugin-updater = "2.11.0"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml_edit = "0.25.13"
 url = "2.5.8"
-uuid = { version = "1.24.0", features = ["v4"] }
+uuid = { version = "1.26.0", features = ["v4"] }
 zenith-relay-core = { path = "../crates/relay-core" }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
-tauri-plugin-single-instance = "2.4.3"
+tauri-plugin-single-instance = "2.4.4"
 
 [profile.release]
 strip = true

@@ -468,6 +468,15 @@ fn usage_path(query: &UsageQuery) -> String {
         "requestIdQuery",
         query.request_id_query.as_deref(),
     );
+    if let Some(value) = query.include_events {
+        parameters.append_pair("includeEvents", if value { "true" } else { "false" });
+    }
+    if let Some(value) = query.include_models {
+        parameters.append_pair("includeModels", if value { "true" } else { "false" });
+    }
+    if let Some(value) = query.include_pool_members {
+        parameters.append_pair("includePoolMembers", if value { "true" } else { "false" });
+    }
     format!("/usage?{}", parameters.finish())
 }
 

@@ -59,7 +59,7 @@ impl AppState {
     }
 }
 
-pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()> {
+pub fn build_tray(app: &AppHandle, _state: &State<'_, AppState>) -> tauri::Result<()> {
     let show = MenuItem::with_id(
         app,
         "show",

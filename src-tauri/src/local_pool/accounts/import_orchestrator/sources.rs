@@ -91,13 +91,6 @@ pub(crate) async fn import_source_item(
             "models are required when discovery is disabled",
         ));
     };
-    if runtime_source.models.is_empty() {
-        return Err(ImportItemError::new(
-            "models_empty",
-            "source did not expose any configured models",
-        ));
-    }
-
     let mut record = imported_source_record(
         &item,
         runtime_source,
@@ -130,6 +123,12 @@ pub(crate) fn imported_source_record(
         draining: existing.as_ref().is_some_and(|source| source.draining),
         base_url: runtime_source.base_url,
         secret_ref,
+        pricing_provider: existing
+            .as_ref()
+            .and_then(|source| source.pricing_provider.clone()),
+        official_provider_family: existing
+            .as_ref()
+            .and_then(|source| source.official_provider_family.clone()),
         wire_api: runtime_source.wire_api,
         protocol_bindings,
         models: runtime_source.models,

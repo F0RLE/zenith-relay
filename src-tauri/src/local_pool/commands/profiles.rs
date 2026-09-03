@@ -497,6 +497,9 @@ async fn resolve_gateway_oauth_binding(
 pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     let profile_dir = default_codex_home();
+    if codex::credential_kind(&profile_dir, &state.profile_backup_root())?.is_none() {
+        return Ok(());
+    }
     let sync_history =
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
@@ -949,6 +952,8 @@ mod tests {
             draining: false,
             base_url: "https://provider.test/v1".into(),
             secret_ref: "source:test".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["provider-model".into()],

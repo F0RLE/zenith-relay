@@ -96,6 +96,7 @@ pub fn new_account_record(
             last_used_at_ms: None,
             last_error_code: None,
         },
+        provider_family: Some("openai".to_string()),
         purchase_cost_micro_usd: None,
         remote_location: None,
         wire_api: WireApi::Responses,

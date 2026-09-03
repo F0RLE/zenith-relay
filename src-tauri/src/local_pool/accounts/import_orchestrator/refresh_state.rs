@@ -66,9 +66,9 @@ pub(in crate::local_pool::accounts) fn apply_model_discovery(
 ) -> bool {
     let previous_models = account.effective_models().to_vec();
     match result {
-        Ok(models) if !models.is_empty() => {
+        Ok(models) => {
             let models = crate::local_pool::models::normalized_values(models);
-            if account.models.is_empty() {
+            if account.models.is_empty() && !models.is_empty() {
                 account.models = models.clone();
             }
             account.discovered_models = Some(models);
@@ -80,16 +80,12 @@ pub(in crate::local_pool::accounts) fn apply_model_discovery(
                 &mut state.last_error_code,
             );
         }
-        Ok(_) if account.effective_models().is_empty() => {
-            apply_model_discovery_failure(account, "models_empty", false)
-        }
         Err(error) => {
             // Keep the last good catalog for routing, but retain the model
             // discovery failure so the management UI can show stale model
             // availability instead of silently looking healthy.
             apply_model_discovery_failure(account, model_failure_code(&error), error.retryable)
         }
-        Ok(_) => {}
     }
     account.effective_models() != previous_models
 }

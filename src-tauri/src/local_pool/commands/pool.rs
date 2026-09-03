@@ -77,6 +77,8 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
             id: record.id,
             name: record.name,
             base_url: record.base_url.trim_end_matches('/').to_string(),
+            pricing_provider: record.pricing_provider,
+            official_provider_family: record.official_provider_family,
             wire_api: record.wire_api,
             protocol_bindings: record.protocol_bindings,
             enabled: record.enabled,
@@ -330,6 +332,8 @@ pub async fn apply_local_configuration_preset(
         let rule = source_rules[source.id.as_str()];
         source.name = rule.name.clone();
         source.base_url = rule.base_url.clone();
+        source.pricing_provider = rule.pricing_provider.clone();
+        source.official_provider_family = rule.official_provider_family.clone();
         source.wire_api = rule.wire_api;
         source.protocol_bindings = rule.protocol_bindings.clone();
         source.enabled = rule.enabled;
@@ -1072,6 +1076,8 @@ mod tests {
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: format!("source:{id}"),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api,
             protocol_bindings: Vec::new(),
             models: vec!["test-model".into()],

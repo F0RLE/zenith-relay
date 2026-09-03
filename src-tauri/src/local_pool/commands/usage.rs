@@ -1,4 +1,4 @@
-use super::source_model_price_overrides;
+use super::pricing_context;
 use crate::local_pool::{
     error::CommandError, state::DesktopState, store::telemetry_db::LocalUsagePage,
 };
@@ -12,21 +12,26 @@ pub fn get_local_usage_page(
     input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<LocalUsagePage, CommandError> {
-    let (price_overrides, source_price_overrides) = {
+    let (gateway, sources, accounts) = {
         let store = state.store()?;
         (
-            store.gateway().model_price_overrides.clone(),
-            source_model_price_overrides(store.sources()),
+            store.gateway().clone(),
+            store.sources().to_vec(),
+            store.accounts().to_vec(),
         )
     };
-    state
+    let catalog = state.pricing_catalog();
+    let context = pricing_context(&gateway, &sources, &accounts);
+    let mut page = state
         .telemetry
-        .usage_page_with_price_overrides(
+        .usage_page_with_pricing(
             &normalize_usage_query(input.unwrap_or_default()),
-            &price_overrides,
-            &source_price_overrides,
+            &catalog,
+            &context,
         )
-        .map_err(Into::into)
+        .map_err(CommandError::from)?;
+    page.pricing.catalog_status = state.pricing_status();
+    Ok(page)
 }
 
 #[tauri::command]

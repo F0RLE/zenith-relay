@@ -142,6 +142,8 @@ pub struct ProfileBinding {
     pub active: bool,
 }
 
+/// Exact user-owned profile state held by a manually requested snapshot.
+/// Payloads are stored in the OS secret store, never in snapshot metadata.
 pub(super) struct UserProfileSnapshot {
     pub config: Option<String>,
     pub auth: Option<String>,
