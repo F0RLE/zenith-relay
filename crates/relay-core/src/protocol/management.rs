@@ -5,8 +5,11 @@ use crate::pricing::{
 };
 use crate::{
     automations::{WakeHistory, WakeTask},
-    codex_model_display_name, codex_model_is_picker_eligible, ApiModelPriceOverride,
-    DefaultServiceTier, ModelRules, RoutingStrategy, SourceProtocolBinding, TokenPrice, WireApi,
+    codex_model_display_name, codex_model_is_picker_eligible, normalize_image_base_model,
+    normalize_model_ids, normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
+    normalize_subscription_plan_order, ApiModelPriceOverride, DefaultServiceTier, ModelRules,
+    RoutingStrategy, SourceProtocolBinding, TokenPrice, WireApi,
 };
 mod account;
 mod model;
@@ -103,6 +106,10 @@ impl fmt::Debug for ProfileKeyRotation {
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
 pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 3;
+const MIN_CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
+const MAX_PRESET_MEMBERS: usize = 2_048;
+const MAX_PRESET_MODELS: usize = 4_096;
+const MAX_SOURCE_RECOVERY_DELAY_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -110,6 +117,262 @@ pub struct ConfigurationPreset {
     pub format: String,
     pub schema_version: u16,
     pub settings: ConfigurationPresetSettings,
+}
+
+/// Validates and canonicalizes a portable configuration preset before either
+/// the desktop or server resolves its references to local credentials.
+///
+/// # Errors
+///
+/// Returns a redacted validation message when the schema, member references,
+/// routing policy, model policy, or endpoint metadata is invalid.
+pub fn normalize_configuration_preset(
+    mut preset: ConfigurationPreset,
+) -> Result<ConfigurationPreset, String> {
+    if preset.format != CONFIGURATION_PRESET_FORMAT {
+        return Err("configuration preset format is unsupported".into());
+    }
+    if !(MIN_CONFIGURATION_PRESET_SCHEMA_VERSION..=CONFIGURATION_PRESET_SCHEMA_VERSION)
+        .contains(&preset.schema_version)
+    {
+        return Err(format!(
+            "configuration preset schema {} is unsupported",
+            preset.schema_version
+        ));
+    }
+    normalize_source_preset_rules(&mut preset.settings.sources)?;
+    normalize_account_preset_rules(&mut preset.settings.accounts)?;
+    preset.settings.routing.subscription_plan_order =
+        normalize_subscription_plan_order(preset.settings.routing.subscription_plan_order)
+            .map_err(str::to_string)?;
+    preset.settings.routing.image_base_model =
+        normalize_image_base_model(preset.settings.routing.image_base_model)
+            .map_err(|error| error.to_string())?;
+    if !(1..=8).contains(&preset.settings.routing.max_retry_candidates)
+        || !(1..=8).contains(&preset.settings.routing.cooldown_after_failures)
+        || !(10..=20).contains(&preset.settings.quota.request_timeout_seconds)
+    {
+        return Err("configuration preset policy is invalid".into());
+    }
+    preset.settings.hidden_models = normalize_preset_model_ids(preset.settings.hidden_models)?;
+    preset.settings.model_price_overrides =
+        normalize_model_price_overrides(preset.settings.model_price_overrides)
+            .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_reasoning_allowed_levels =
+        normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
+            .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_service_tier_overrides =
+        normalize_model_service_tier_overrides(preset.settings.model_service_tier_overrides)
+            .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_display_order = normalize_model_ids(preset.settings.model_display_order);
+    Ok(preset)
+}
+
+/// Applies the portable part of a preset to the matching members in the
+/// current configuration. Credentials and endpoint identity stay owned by the
+/// desktop or server that resolves those references before calling this.
+///
+/// # Errors
+///
+/// Returns a redacted message when a requested source or account does not
+/// exist in the current configuration.
+pub fn merge_configuration_preset_settings(
+    current: &ConfigurationPresetSettings,
+    requested: &ConfigurationPresetSettings,
+) -> Result<ConfigurationPresetSettings, String> {
+    let mut merged = current.clone();
+    replace_preset_members(
+        &mut merged.sources,
+        &requested.sources,
+        |rule| &rule.id,
+        "source",
+    )?;
+    replace_preset_members(
+        &mut merged.accounts,
+        &requested.accounts,
+        |rule| &rule.id,
+        "account",
+    )?;
+    merged.routing.clone_from(&requested.routing);
+    merged.quota.clone_from(&requested.quota);
+    merged.hidden_models.clone_from(&requested.hidden_models);
+    merged
+        .model_price_overrides
+        .clone_from(&requested.model_price_overrides);
+    if requested.model_reasoning_allowed_levels_present {
+        merged
+            .model_reasoning_allowed_levels
+            .clone_from(&requested.model_reasoning_allowed_levels);
+    }
+    if requested.model_service_tier_overrides_present {
+        merged
+            .model_service_tier_overrides
+            .clone_from(&requested.model_service_tier_overrides);
+    }
+    if requested.model_display_order_present {
+        merged
+            .model_display_order
+            .clone_from(&requested.model_display_order);
+    }
+    merged.model_reasoning_allowed_levels_present = true;
+    merged.model_service_tier_overrides_present = true;
+    merged.model_display_order_present = true;
+    Ok(merged)
+}
+
+/// Verifies that reference resolution did not collapse multiple portable
+/// members onto the same local source or account.
+///
+/// # Errors
+///
+/// Returns a redacted validation message when multiple portable members resolve
+/// to one local member.
+pub fn validate_resolved_configuration_preset_members(
+    settings: &ConfigurationPresetSettings,
+) -> Result<(), String> {
+    validate_unique_preset_member_ids(&settings.sources, |rule| &rule.id, "source")?;
+    validate_unique_preset_member_ids(&settings.accounts, |rule| &rule.id, "account")
+}
+
+fn validate_unique_preset_member_ids<T, F>(members: &[T], id: F, kind: &str) -> Result<(), String>
+where
+    F: Fn(&T) -> &String,
+{
+    let unique_count = members.iter().map(id).collect::<BTreeSet<_>>().len();
+    if unique_count != members.len() {
+        return Err(format!(
+            "configuration preset resolves multiple {kind} rules to one local {kind}"
+        ));
+    }
+    Ok(())
+}
+
+fn replace_preset_members<T, F>(
+    current: &mut [T],
+    requested: &[T],
+    id: F,
+    kind: &str,
+) -> Result<(), String>
+where
+    T: Clone,
+    F: Fn(&T) -> &String,
+{
+    let indexes = current
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| (id(rule).clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for rule in requested {
+        let member_id = id(rule);
+        let index = indexes
+            .get(member_id)
+            .copied()
+            .ok_or_else(|| format!("referenced {kind} {member_id} does not exist"))?;
+        current[index] = rule.clone();
+    }
+    Ok(())
+}
+
+fn normalize_source_preset_rules(rules: &mut [SourcePresetRule]) -> Result<(), String> {
+    if rules.len() > MAX_PRESET_MEMBERS {
+        return Err("configuration preset contains too many sources".into());
+    }
+    let mut ids = BTreeSet::new();
+    for rule in rules.iter_mut() {
+        validate_preset_reference(&rule.id, "source")?;
+        rule.name = rule.name.trim().to_string();
+        rule.base_url = rule.base_url.trim().trim_end_matches('/').to_string();
+        let valid_url = url::Url::parse(&rule.base_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
+        if !ids.insert(rule.id.clone())
+            || rule.weight == 0
+            || rule.recovery_delay_seconds > MAX_SOURCE_RECOVERY_DELAY_SECONDS
+            || rule.name.is_empty()
+            || rule.name.len() > 256
+            || rule.name.chars().any(char::is_control)
+            || !valid_url
+        {
+            return Err("configuration preset source rule is invalid".into());
+        }
+        rule.allowed_models = normalize_preset_model_ids(std::mem::take(&mut rule.allowed_models))?;
+        rule.excluded_models =
+            normalize_preset_model_ids(std::mem::take(&mut rule.excluded_models))?;
+        rule.model_price_overrides =
+            normalize_model_price_overrides(std::mem::take(&mut rule.model_price_overrides))
+                .map_err(|message| format!("configuration preset {message}"))?;
+        if !rule.protocol_bindings.is_empty() {
+            rule.protocol_bindings = normalize_source_protocol_bindings(
+                std::mem::take(&mut rule.protocol_bindings),
+                rule.wire_api,
+                &[],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    rules.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(())
+}
+
+fn normalize_account_preset_rules(rules: &mut [AccountPresetRule]) -> Result<(), String> {
+    if rules.len() > MAX_PRESET_MEMBERS {
+        return Err("configuration preset contains too many accounts".into());
+    }
+    let mut ids = BTreeSet::new();
+    for rule in rules.iter_mut() {
+        validate_preset_reference(&rule.id, "account")?;
+        if !ids.insert(rule.id.clone())
+            || rule.weight == 0
+            || invalid_preset_reference(&rule.identity_hint)
+            || rule
+                .proxy_id
+                .as_deref()
+                .is_some_and(invalid_preset_reference)
+            || rule.proxy_id.is_some() && rule.bypass_common_proxy
+        {
+            return Err("configuration preset account rule is invalid".into());
+        }
+        rule.allowed_models = normalize_preset_model_ids(std::mem::take(&mut rule.allowed_models))?;
+        rule.excluded_models =
+            normalize_preset_model_ids(std::mem::take(&mut rule.excluded_models))?;
+    }
+    rules.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(())
+}
+
+fn validate_preset_reference(value: &str, kind: &str) -> Result<(), String> {
+    if invalid_preset_reference(value) {
+        return Err(format!("configuration preset {kind} reference is invalid"));
+    }
+    Ok(())
+}
+
+fn invalid_preset_reference(value: &str) -> bool {
+    value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn normalize_preset_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
+    if models.len() > MAX_PRESET_MODELS {
+        return Err("configuration preset model list is too large".into());
+    }
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if !crate::is_valid_model_id(model) {
+            return Err("configuration preset model id is invalid".into());
+        }
+        if seen.insert(model.to_ascii_lowercase()) {
+            normalized.push(model.to_string());
+        }
+    }
+    Ok(normalized)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1154,6 +1417,107 @@ mod tests {
         assert!(!source.contains_key("officialProviderFamily"));
     }
 
+    fn valid_configuration_preset() -> ConfigurationPreset {
+        serde_json::from_value(serde_json::json!({
+            "format": CONFIGURATION_PRESET_FORMAT,
+            "schemaVersion": CONFIGURATION_PRESET_SCHEMA_VERSION,
+            "settings": {
+                "sources": [{
+                    "id": "source_1", "name": "Source", "baseUrl": "https://example.test/v1",
+                    "wireApi": "responses", "enabled": true, "inPool": true,
+                    "allowedModels": [], "excludedModels": [], "priority": 0, "weight": 1
+                }],
+                "accounts": [],
+                "routing": {
+                    "maxRetryCandidates": 3, "cooldownAfterFailures": 3,
+                    "keepLastCandidateAvailable": true, "routingStrategy": "adaptive",
+                    "subscriptionPlanOrder": [], "defaultServiceTier": "standard", "imageBaseModel": null
+                },
+                "quota": { "requestTimeoutSeconds": 20, "accountProxyRequired": false, "commonProxyId": null },
+                "hiddenModels": [], "modelPriceOverrides": {}, "modelReasoningAllowedLevels": {},
+                "modelServiceTierOverrides": {}, "modelDisplayOrder": []
+            }
+        }))
+        .expect("static configuration preset is valid")
+    }
+
+    #[test]
+    fn configuration_preset_validation_rejects_untrusted_identity_and_endpoint() {
+        let mut preset = valid_configuration_preset();
+        preset.format = "other-product".into();
+        assert!(normalize_configuration_preset(preset).is_err());
+
+        let mut preset = valid_configuration_preset();
+        preset.schema_version = CONFIGURATION_PRESET_SCHEMA_VERSION + 1;
+        assert!(normalize_configuration_preset(preset).is_err());
+
+        let mut preset = valid_configuration_preset();
+        preset.settings.sources[0].base_url = "file:///not-an-api".into();
+        assert!(normalize_configuration_preset(preset).is_err());
+    }
+
+    #[test]
+    fn configuration_preset_validation_normalizes_source_policy() {
+        let mut preset = valid_configuration_preset();
+        let source = &mut preset.settings.sources[0];
+        source.base_url = " https://example.test/v1/ ".into();
+        source.allowed_models = vec!["gpt-test".into(), "GPT-TEST".into()];
+
+        let normalized = normalize_configuration_preset(preset).unwrap();
+        assert_eq!(
+            normalized.settings.sources[0].base_url,
+            "https://example.test/v1"
+        );
+        assert_eq!(normalized.settings.sources[0].allowed_models, ["gpt-test"]);
+    }
+
+    #[test]
+    fn sparse_configuration_preset_keeps_newer_model_policy() {
+        let current = valid_configuration_preset().settings;
+        let mut current = ConfigurationPresetSettings {
+            model_reasoning_allowed_levels: BTreeMap::from([(
+                "gpt-test".into(),
+                vec!["high".into()],
+            )]),
+            model_service_tier_overrides: BTreeMap::from([(
+                "gpt-test".into(),
+                DefaultServiceTier::Fast,
+            )]),
+            model_display_order: vec!["gpt-test".into()],
+            ..current
+        };
+        current.model_reasoning_allowed_levels_present = true;
+        current.model_service_tier_overrides_present = true;
+        current.model_display_order_present = true;
+        let mut sparse = current.clone();
+        sparse.model_reasoning_allowed_levels.clear();
+        sparse.model_service_tier_overrides.clear();
+        sparse.model_display_order.clear();
+        sparse.model_reasoning_allowed_levels_present = false;
+        sparse.model_service_tier_overrides_present = false;
+        sparse.model_display_order_present = false;
+
+        let merged = merge_configuration_preset_settings(&current, &sparse).unwrap();
+
+        assert_eq!(
+            merged.model_reasoning_allowed_levels,
+            current.model_reasoning_allowed_levels
+        );
+        assert_eq!(
+            merged.model_service_tier_overrides,
+            current.model_service_tier_overrides
+        );
+        assert_eq!(merged.model_display_order, current.model_display_order);
+    }
+
+    #[test]
+    fn resolved_configuration_preset_rejects_duplicate_local_members() {
+        let mut settings = valid_configuration_preset().settings;
+        settings.sources.push(settings.sources[0].clone());
+
+        assert!(validate_resolved_configuration_preset_members(&settings).is_err());
+    }
+
     #[test]
     fn pool_snapshot_configuration_uses_one_shared_policy() {
         let source = SourceSummary {
@@ -1262,7 +1626,16 @@ mod tests {
             last_error_code: None,
         };
 
-        let models = pool_model_summaries(&[source], &[], &[]);
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        apply_pool_model_configuration(
+            &mut models,
+            std::slice::from_ref(&source),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("claude-native".to_string(), DefaultServiceTier::Fast)]),
+            None,
+        );
 
         assert_eq!(
             models
@@ -1271,6 +1644,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-routed", "claude-native"]
         );
+        assert!(models[0].speed_supported);
+        assert!(!models[1].speed_supported);
+        assert_eq!(models[1].speed_tier, DefaultServiceTier::Standard);
     }
 
     #[test]

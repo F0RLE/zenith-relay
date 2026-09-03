@@ -658,7 +658,10 @@ pub async fn get_local_source_stats(
         .map_err(|message| LocalPoolError::new(ErrorCode::GatewayUnavailable, message).into())
 }
 
-fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -> LocalResult<()> {
+pub(crate) fn validate_source_record(
+    state: &DesktopState,
+    source: &ProviderSourceRecord,
+) -> LocalResult<()> {
     if source.recovery_delay_seconds > 24 * 60 * 60 {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,

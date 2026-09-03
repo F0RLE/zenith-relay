@@ -51,7 +51,8 @@ pub use catalog::{
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
     codex_model_is_picker_eligible, decode_codex_model_alias,
     deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
-    known_model_reasoning_levels, normalize_codex_catalog_priorities, normalize_model_ids,
+    known_model_reasoning_levels, model_supports_fast_service_tier,
+    normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, reasoning_policy_key, reasoning_policy_levels,
     routed_codex_catalog_entry, source_model_declares_image_input, ModelRegistry, ModelRules,
@@ -68,12 +69,13 @@ pub use pricing::{
     MAX_CACHE_STRING_LENGTH, PRICING_REFRESH_INTERVAL_SECONDS, PRICING_REFRESH_JITTER_MAX_SECONDS,
 };
 pub use protocol::{
-    bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError,
-    AdapterRequestContext, AdapterResponse, AdapterResult, AdapterStreamBridge,
-    GeminiBridgeRequest, GeminiBridgeResponse, GeminiStreamBridge, MessagesBridgeRequest,
-    MessagesBridgeResponse, MessagesBridgeState, MessagesBridgeStore, MessagesReasoningMode,
-    MessagesStreamBridge, NativeResponsesReplayState, NativeResponsesReplayStore,
-    PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+    bridged_response_id_scoped, merge_configuration_preset_settings,
+    normalize_configuration_preset, prepare_responses_to_messages_scoped,
+    validate_resolved_configuration_preset_members, AdapterError, AdapterRequestContext,
+    AdapterResponse, AdapterResult, AdapterStreamBridge, GeminiBridgeRequest, GeminiBridgeResponse,
+    GeminiStreamBridge, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
+    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
+    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};

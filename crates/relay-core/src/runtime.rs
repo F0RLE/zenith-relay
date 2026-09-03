@@ -325,7 +325,9 @@ pub fn normalize_model_service_tier_overrides(
         if !is_valid_model_id(model) {
             return Err("model service tier override has an invalid model id");
         }
-        normalized.insert(model.to_ascii_lowercase(), tier);
+        if crate::model_supports_fast_service_tier(model) {
+            normalized.insert(model.to_ascii_lowercase(), tier);
+        }
     }
     Ok(normalized)
 }
@@ -1452,6 +1454,9 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn model_service_tier(&self, model: &str) -> DefaultServiceTier {
+        if !crate::model_supports_fast_service_tier(model) {
+            return DefaultServiceTier::Standard;
+        }
         self.model_service_tier_overrides
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

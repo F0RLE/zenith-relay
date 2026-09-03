@@ -1233,11 +1233,11 @@ async fn generic_source_reasoning_metadata_survives_a_codex_catalog_cache_update
 }
 
 #[test]
-fn fast_service_tier_uses_the_pool_policy_without_catalog_gating() {
+fn fast_service_tier_is_applied_only_to_openai_models() {
     let runtime = GatewayRuntime::from_pool(
         vec![
-            RuntimeSource::unrestricted(source("source-1", "upstream-secret", &["provider/model"])),
-            RuntimeSource::unrestricted(source("source-2", "other-secret", &["provider/model"])),
+            RuntimeSource::unrestricted(source("source-1", "upstream-secret", &["provider/gpt-5"])),
+            RuntimeSource::unrestricted(source("source-2", "other-secret", &["provider/claude-5"])),
         ],
         vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
         GatewayRuntimeOptions::default(),
@@ -1247,18 +1247,32 @@ fn fast_service_tier_uses_the_pool_policy_without_catalog_gating() {
 
     runtime
         .set_model_service_tier_overrides(BTreeMap::from([(
-            "provider/model".to_string(),
+            "provider/gpt-5".to_string(),
             DefaultServiceTier::Fast,
         )]))
         .unwrap();
     assert_eq!(
-        runtime.model_service_tier("provider/model"),
+        runtime.model_service_tier("provider/gpt-5"),
         DefaultServiceTier::Fast
     );
     runtime.set_default_service_tier(DefaultServiceTier::Fast);
     assert_eq!(
-        runtime.model_service_tier("provider/other"),
-        DefaultServiceTier::Fast
+        runtime.model_service_tier("provider/claude-5"),
+        DefaultServiceTier::Standard
+    );
+}
+
+#[test]
+fn service_tier_normalization_discards_legacy_non_openai_overrides() {
+    let normalized = normalize_model_service_tier_overrides(BTreeMap::from([
+        ("provider/gpt-5".to_string(), DefaultServiceTier::Fast),
+        ("provider/claude-5".to_string(), DefaultServiceTier::Fast),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        normalized,
+        BTreeMap::from([("provider/gpt-5".to_string(), DefaultServiceTier::Fast)])
     );
 }
 

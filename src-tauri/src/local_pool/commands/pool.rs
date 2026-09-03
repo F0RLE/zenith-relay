@@ -1,5 +1,6 @@
 use super::{
-    cleanup_created_secret, restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback,
+    cleanup_created_secret, connections::validate_source_record, restart_or_rollback,
+    runtime_account_policy, sync_gateway_or_rollback,
 };
 use crate::{
     files::atomic_write,
@@ -25,13 +26,16 @@ use uuid::Uuid;
 #[cfg(test)]
 use zenith_relay_core::WireApi;
 use zenith_relay_core::{
+    merge_configuration_preset_settings, model_supports_fast_service_tier,
+    normalize_configuration_preset,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
         ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetPreview,
         ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy, SourcePresetRule,
         CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    validate_resolved_configuration_preset_members, ApiModelPriceOverride, DefaultServiceTier,
+    RoutingStrategy,
 };
 
 mod model_policy;
@@ -43,6 +47,12 @@ use reasoning::SetModelReasoningInput;
 type CommandResult<T> = std::result::Result<T, CommandError>;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
 const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+
+struct PreparedLocalPreset {
+    current: ConfigurationPreset,
+    resolved: ConfigurationPreset,
+    target: ConfigurationPreset,
+}
 
 #[tauri::command]
 pub async fn set_local_model_reasoning(
@@ -184,6 +194,163 @@ fn local_configuration_diff(
     Ok(changes)
 }
 
+fn prepare_local_configuration_preset(
+    state: &DesktopState,
+    preset: ConfigurationPreset,
+) -> CommandResult<PreparedLocalPreset> {
+    let current = local_configuration_preset(state)?;
+    let mut resolved = normalize_configuration_preset(preset)
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    resolve_local_preset_references(state, &mut resolved.settings)?;
+    resolved = normalize_configuration_preset(resolved)
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    if resolved.settings.quota.common_proxy_id != current.settings.quota.common_proxy_id {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "configuration preset references a different common proxy",
+        )
+        .into());
+    }
+    let target = ConfigurationPreset {
+        format: CONFIGURATION_PRESET_FORMAT.to_string(),
+        schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
+        settings: merge_configuration_preset_settings(&current.settings, &resolved.settings)
+            .map_err(|message| LocalPoolError::new(ErrorCode::NotFound, message))?,
+    };
+    Ok(PreparedLocalPreset {
+        current,
+        resolved,
+        target,
+    })
+}
+
+fn resolve_local_preset_references(
+    state: &DesktopState,
+    settings: &mut ConfigurationPresetSettings,
+) -> CommandResult<()> {
+    let (sources, accounts) = {
+        let store = state.store()?;
+        (store.sources().to_vec(), store.accounts().to_vec())
+    };
+    for rule in &mut settings.sources {
+        let source = resolve_local_source_reference(&sources, rule).ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "referenced source {} does not exist or is ambiguous",
+                    rule.name
+                ),
+            )
+        })?;
+        validate_source_record(state, source)?;
+        rule.id = source.id.clone();
+        rule.name = source.name.clone();
+        rule.base_url = source.base_url.trim_end_matches('/').to_string();
+        rule.wire_api = source.wire_api;
+    }
+    settings
+        .sources
+        .sort_by(|left, right| left.id.cmp(&right.id));
+
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    for rule in &mut settings.accounts {
+        let account = resolve_local_account_reference(&accounts, rule).ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "referenced account {} does not exist or is ambiguous",
+                    rule.identity_hint
+                ),
+            )
+        })?;
+        let credential = credentials.require(&account.account.id).map_err(|error| {
+            LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+        })?;
+        let proxy_id = credential
+            .proxy_url()
+            .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok());
+        if rule.proxy_id != proxy_id || rule.bypass_common_proxy != credential.bypass_common_proxy()
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "configuration preset references a different account proxy",
+            )
+            .into());
+        }
+        rule.id = account.account.id.clone();
+        rule.identity_hint = account
+            .account
+            .identity
+            .identity_hash
+            .chars()
+            .take(12)
+            .collect();
+    }
+    settings
+        .accounts
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    validate_resolved_configuration_preset_members(settings)
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    Ok(())
+}
+
+fn resolve_local_source_reference<'a>(
+    sources: &'a [ProviderSourceRecord],
+    rule: &SourcePresetRule,
+) -> Option<&'a ProviderSourceRecord> {
+    sources
+        .iter()
+        .find(|source| {
+            source.id == rule.id
+                && source.wire_api == rule.wire_api
+                && source.base_url.trim_end_matches('/') == rule.base_url
+        })
+        .or_else(|| unique_source_match(sources, rule, false))
+        .or_else(|| unique_source_match(sources, rule, true))
+}
+
+fn unique_source_match<'a>(
+    sources: &'a [ProviderSourceRecord],
+    rule: &SourcePresetRule,
+    match_name: bool,
+) -> Option<&'a ProviderSourceRecord> {
+    let mut matches = sources.iter().filter(|source| {
+        source.wire_api == rule.wire_api
+            && source.base_url.trim_end_matches('/') == rule.base_url
+            && (!match_name || source.name == rule.name)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn resolve_local_account_reference<'a>(
+    accounts: &'a [crate::local_pool::models::LocalAccountRecord],
+    rule: &AccountPresetRule,
+) -> Option<&'a crate::local_pool::models::LocalAccountRecord> {
+    accounts
+        .iter()
+        .find(|account| {
+            account.account.id == rule.id && account_identity_hint(account) == rule.identity_hint
+        })
+        .or_else(|| {
+            let mut matches = accounts
+                .iter()
+                .filter(|account| account_identity_hint(account) == rule.identity_hint);
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })
+}
+
+fn account_identity_hint(account: &crate::local_pool::models::LocalAccountRecord) -> String {
+    account
+        .account
+        .identity
+        .identity_hash
+        .chars()
+        .take(12)
+        .collect()
+}
+
 fn diff_json(
     path: String,
     before: &serde_json::Value,
@@ -249,12 +416,12 @@ pub fn preview_local_configuration_preset(
             "configuration preset is invalid or contains unsupported fields",
         )
     })?;
-    let current = local_configuration_preset(&state)?;
-    let base_revision = local_preset_revision(&current)?;
-    let changes = local_configuration_diff(&current, &preset)?;
+    let prepared = prepare_local_configuration_preset(&state, preset)?;
+    let base_revision = local_preset_revision(&prepared.current)?;
+    let changes = local_configuration_diff(&prepared.current, &prepared.target)?;
     Ok(Some(ConfigurationPresetPreview {
         base_revision,
-        preset,
+        preset: prepared.resolved,
         changes,
     }))
 }
@@ -265,8 +432,8 @@ pub async fn apply_local_configuration_preset(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ConfigurationPresetApplyResult> {
     let _mutation = state.setup_guard().await;
-    let current = local_configuration_preset(&state)?;
-    let current_revision = local_preset_revision(&current)?;
+    let prepared = prepare_local_configuration_preset(&state, input.preset)?;
+    let current_revision = local_preset_revision(&prepared.current)?;
     if input.base_revision != current_revision {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -274,7 +441,7 @@ pub async fn apply_local_configuration_preset(
         )
         .into());
     }
-    let changes = local_configuration_diff(&current, &input.preset)?;
+    let changes = local_configuration_diff(&prepared.current, &prepared.target)?;
     if changes.is_empty() {
         return Ok(ConfigurationPresetApplyResult {
             previous_revision: current_revision.clone(),
@@ -291,59 +458,25 @@ pub async fn apply_local_configuration_preset(
             store.keys().to_vec(),
         )
     };
-    let source_rules = input
-        .preset
+    let source_rules = prepared
+        .target
         .settings
         .sources
         .iter()
         .map(|rule| (rule.id.as_str(), rule))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let account_rules = input
-        .preset
+    let account_rules = prepared
+        .target
         .settings
         .accounts
         .iter()
         .map(|rule| (rule.id.as_str(), rule))
         .collect::<std::collections::BTreeMap<_, _>>();
-    if source_rules.len() != input.preset.settings.sources.len()
-        || account_rules.len() != input.preset.settings.accounts.len()
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "configuration preset contains duplicate member ids",
-        )
-        .into());
-    }
-    if old_sources
-        .iter()
-        .any(|source| !source_rules.contains_key(source.id.as_str()))
-        || old_accounts
-            .iter()
-            .any(|account| !account_rules.contains_key(account.account.id.as_str()))
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "configuration preset must include every existing local member",
-        )
-        .into());
-    }
     let mut sources = old_sources.clone();
     for source in &mut sources {
         let rule = source_rules[source.id.as_str()];
-        source.name = rule.name.clone();
-        source.base_url = rule.base_url.clone();
-        source.pricing_provider = rule.pricing_provider.clone();
-        source.official_provider_family = rule.official_provider_family.clone();
-        source.wire_api = rule.wire_api;
-        source.protocol_bindings = rule.protocol_bindings.clone();
-        source.enabled = rule.enabled;
-        source.in_pool = rule.in_pool;
-        source.allowed_models = rule.allowed_models.clone();
-        source.excluded_models = rule.excluded_models.clone();
-        source.priority = rule.priority;
-        source.weight = rule.weight.max(1);
-        source.recovery_delay_seconds = rule.recovery_delay_seconds;
-        source.model_price_overrides = rule.model_price_overrides.clone();
+        apply_source_preset_policy(source, rule);
+        validate_source_record(&state, source)?;
     }
     let mut accounts = old_accounts.clone();
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
@@ -374,7 +507,7 @@ pub async fn apply_local_configuration_preset(
         account.priority = rule.priority;
         account.weight = rule.weight.max(1);
     }
-    let settings = &input.preset.settings;
+    let settings = &prepared.target.settings;
     let current_proxy_id = if old_gateway.common_proxy_configured {
         secret_store::load(COMMON_PROXY_SECRET_REF)?
             .as_deref()
@@ -397,6 +530,7 @@ pub async fn apply_local_configuration_preset(
     gateway.subscription_plan_order = settings.routing.subscription_plan_order.clone();
     gateway.default_service_tier = settings.routing.default_service_tier;
     gateway.image_base_model = settings.routing.image_base_model.clone();
+    gateway.quota_request_timeout_seconds = settings.quota.request_timeout_seconds;
     gateway.account_proxy_required = settings.quota.account_proxy_required;
     gateway.hidden_models = settings.hidden_models.clone();
     gateway.model_price_overrides = settings.model_price_overrides.clone();
@@ -418,12 +552,26 @@ pub async fn apply_local_configuration_preset(
     {
         return Err(error.into());
     }
-    let revision = local_preset_revision(&input.preset)?;
+    let revision = local_preset_revision(&prepared.target)?;
     Ok(ConfigurationPresetApplyResult {
         previous_revision: current_revision,
         revision,
         changes,
     })
+}
+
+fn apply_source_preset_policy(source: &mut ProviderSourceRecord, rule: &SourcePresetRule) {
+    source.pricing_provider = rule.pricing_provider.clone();
+    source.official_provider_family = rule.official_provider_family.clone();
+    source.protocol_bindings = rule.protocol_bindings.clone();
+    source.enabled = rule.enabled;
+    source.in_pool = rule.in_pool;
+    source.allowed_models = rule.allowed_models.clone();
+    source.excluded_models = rule.excluded_models.clone();
+    source.priority = rule.priority;
+    source.weight = rule.weight.max(1);
+    source.recovery_delay_seconds = rule.recovery_delay_seconds;
+    source.model_price_overrides = rule.model_price_overrides.clone();
 }
 
 pub(super) fn write_configuration_preset(
@@ -776,6 +924,13 @@ pub async fn set_local_model_service_tier(
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
+    if !model_supports_fast_service_tier(&canonical) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "request speed is available only for OpenAI models",
+        )
+        .into());
+    }
     let snapshot = state.snapshot().await?;
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
@@ -1093,6 +1248,37 @@ mod tests {
             last_test_status: None,
             last_error: None,
         }
+    }
+
+    #[test]
+    fn source_preset_policy_preserves_source_identity() {
+        let mut record = source("source", true, WireApi::Responses);
+        record.name = "Existing connection".into();
+        record.base_url = "https://existing.test/v1".into();
+        let rule = SourcePresetRule {
+            id: "source".into(),
+            name: "Imported name".into(),
+            base_url: "https://imported.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            enabled: false,
+            in_pool: true,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 8,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
+        };
+
+        apply_source_preset_policy(&mut record, &rule);
+        assert_eq!(record.name, "Existing connection");
+        assert_eq!(record.base_url, "https://existing.test/v1");
+        assert_eq!(record.wire_api, WireApi::Responses);
+        assert!(!record.enabled);
+        assert_eq!(record.priority, 8);
     }
 
     #[test]

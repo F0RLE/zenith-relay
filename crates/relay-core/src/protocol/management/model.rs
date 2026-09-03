@@ -84,8 +84,8 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
-    /// Compatibility flag for older management clients. The current pool
-    /// exposes the same Normal/Fast policy for every listed model.
+    /// Compatibility flag for older management clients. Fast maps to an
+    /// OpenAI service tier and is unavailable for other model families.
     #[serde(default)]
     pub speed_supported: bool,
     #[serde(default)]
@@ -98,9 +98,14 @@ pub fn apply_model_speed_summary(
     model: &mut ModelSummary,
     configured_tier: Option<DefaultServiceTier>,
 ) {
-    model.speed_supported = true;
-    model.speed_configurable = true;
-    model.speed_tier = configured_tier.unwrap_or(DefaultServiceTier::Standard);
+    let supported = crate::model_supports_fast_service_tier(&model.id);
+    model.speed_supported = supported;
+    model.speed_configurable = supported;
+    model.speed_tier = if supported {
+        configured_tier.unwrap_or(DefaultServiceTier::Standard)
+    } else {
+        DefaultServiceTier::Standard
+    };
 }
 
 /// Applies the same configured pool policy to every runtime snapshot. Local
