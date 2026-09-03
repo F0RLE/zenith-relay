@@ -1391,138 +1391,6 @@ for (const viewport of viewports) {
   });
 }
 
-for (const theme of themes) {
-  for (const viewport of viewports) {
-    test(`profile recovery ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
-    await page.clock.install({ time: 0 });
-    await page.setViewportSize(viewport);
-    await page.goto("/");
-    await page.getByRole("button", { name: "Восстановление", exact: true }).click();
-
-    const recovery = page.locator(".profile-recovery");
-    const form = page.locator(".profile-snapshot-create");
-    const table = page.locator(".profile-snapshot-table");
-    const headerBefore = await page.locator(".relay-page-header").boundingBox();
-    expect(headerBefore).not.toBeNull();
-    await expect(page.getByRole("tab")).toHaveCount(2);
-    await expect(page.getByText("Исправление истории", { exact: true })).toHaveCount(0);
-    const snapshotName = viewport.width === 840 ? "Перед большим обновлением проекта с очень длинным названием рабочей среды" : "Перед обновлением проекта";
-    await page.getByLabel("Название снимка").fill(snapshotName);
-    await page.getByLabel("Название снимка").press("Enter");
-    await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
-    const shell = page.locator(".relay-shell");
-    const [feedbackBox, shellBox, sidebarBox, footerBox, helpBox, headerAfter] = await Promise.all([
-      page.locator(".global-feedback").boundingBox(),
-      page.locator(".relay-shell").boundingBox(),
-      page.locator(".relay-sidebar").boundingBox(),
-      page.locator(".sidebar-footer").boundingBox(),
-      page.getByRole("button", { name: "Помощь" }).boundingBox(),
-      page.locator(".relay-page-header").boundingBox(),
-    ]);
-    expect(feedbackBox).not.toBeNull();
-    expect(shellBox).not.toBeNull();
-    expect(sidebarBox).not.toBeNull();
-    expect(footerBox).not.toBeNull();
-    expect(helpBox).not.toBeNull();
-    expect(headerAfter).not.toBeNull();
-    expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
-    expect(feedbackBox!.x).toBeGreaterThanOrEqual(sidebarBox!.x);
-    expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
-    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(footerBox!.y + 1);
-    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
-    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
-    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
-    expect(await page.locator(".global-feedback").evaluate((element) => element.parentElement?.classList.contains("sidebar-feedback"))).toBe(true);
-    expect(feedbackBox!.y).toBeGreaterThanOrEqual(shellBox!.y - 1);
-    expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
-    if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
-      expect(feedbackBox!.width).toBeLessThanOrEqual(38);
-      expect(await page.locator(".global-feedback-message").evaluate((element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return rect.width <= 1 && rect.height <= 1 && style.clipPath === "inset(50%)";
-      })).toBe(true);
-      await expect(page.locator(".global-feedback")).toHaveAttribute("aria-label", "Снимок профиля создан.");
-      const closeButton = page.locator(".global-feedback > .global-feedback-actions > .relay-icon-button");
-      expect(await closeButton.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
-      await page.screenshot({ path: `output/playwright/feedback-bottom-left-resting-${theme}-${viewport.width}x${viewport.height}.png` });
-      await page.locator(".global-feedback").hover();
-      await expect.poll(() => closeButton.evaluate((element) => getComputedStyle(element).opacity), { timeout: 1_000 }).toBe("1");
-      const hoveredFeedbackBox = await page.locator(".global-feedback").boundingBox();
-      const statusIcon = page.locator(".global-feedback-status-icon");
-      const statusBox = await statusIcon.boundingBox();
-      const closeBox = await closeButton.boundingBox();
-      expect(hoveredFeedbackBox).not.toBeNull();
-      expect(statusBox).not.toBeNull();
-      expect(closeBox).not.toBeNull();
-      expect(hoveredFeedbackBox!.width).toBeLessThanOrEqual(38);
-      expect(hoveredFeedbackBox!.x + hoveredFeedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
-      expect(await statusIcon.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
-      expect(Math.abs((statusBox!.x + statusBox!.width / 2) - (closeBox!.x + closeBox!.width / 2))).toBeLessThanOrEqual(1);
-      expect(Math.abs((statusBox!.y + statusBox!.height / 2) - (closeBox!.y + closeBox!.height / 2))).toBeLessThanOrEqual(1);
-    } else {
-      await expect(page.locator(".global-feedback-message")).toBeVisible();
-    }
-    await page.screenshot({ path: `output/playwright/feedback-bottom-left-${theme}-${viewport.width}x${viewport.height}.png` });
-    await page.locator(".global-feedback .relay-icon-button").click();
-    await page.getByLabel("Название снимка").fill("Новый снимок");
-    const createButton = page.getByRole("button", { name: "Создать снимок" });
-    await expect(createButton).toBeEnabled();
-    expect(await createButton.evaluate((element) => {
-      const parse = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number).map((channel) => channel / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
-      const luminance = (value: string) => { const [red, green, blue] = parse(value); return 0.2126 * red + 0.7152 * green + 0.0722 * blue; };
-      const style = getComputedStyle(element);
-      const values = [luminance(style.color), luminance(style.backgroundColor)].sort((left, right) => right - left);
-      return (values[0] + 0.05) / (values[1] + 0.05);
-    })).toBeGreaterThanOrEqual(4.5);
-    expect(await recovery.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-    expect(await table.locator("th:visible, td:visible").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "center"))).toBe(true);
-    await expect(table.getByRole("columnheader", { name: "Содержимое" })).toBeVisible();
-    await expect(table.locator("tbody .relay-status-icon").first()).toHaveAttribute("aria-label", "Настройки и вход");
-    const actionButtons = table.locator("tbody tr").first().locator("td:last-child .relay-icon-button, td:last-child .relay-button");
-    expect(await actionButtons.evaluateAll((buttons) => {
-      const [first, second] = buttons.map((button) => button.getBoundingClientRect());
-      return first.width >= 38 && second.width >= 38 && second.left - first.right >= 8;
-    })).toBe(true);
-    const [tableWrapBox, actionsBox] = await Promise.all([
-      table.locator("xpath=..").boundingBox(),
-      table.locator("tbody tr").first().locator("td:last-child .inline-actions").boundingBox(),
-    ]);
-    expect(tableWrapBox).not.toBeNull();
-    expect(actionsBox).not.toBeNull();
-    expect(actionsBox!.x).toBeGreaterThanOrEqual(tableWrapBox!.x - 1);
-    expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(tableWrapBox!.x + tableWrapBox!.width + 1);
-    if (viewport.width === 840) {
-      const longName = table.getByText(snapshotName, { exact: true });
-      expect(await longName.evaluate((element) => getComputedStyle(element).textOverflow)).toBe("ellipsis");
-      expect(await longName.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
-    }
-    const [recoveryBox, formBox] = await Promise.all([recovery.boundingBox(), form.boundingBox()]);
-    expect(recoveryBox).not.toBeNull();
-    expect(formBox).not.toBeNull();
-    expect(Math.abs((formBox!.x - recoveryBox!.x) - (recoveryBox!.x + recoveryBox!.width - formBox!.x - formBox!.width))).toBeLessThanOrEqual(2);
-    const placement = await recovery.evaluate((element) => {
-      const pageElement = element.closest<HTMLElement>(".profile-recovery-page")!;
-      const page = pageElement.getBoundingClientRect();
-      const header = pageElement.querySelector<HTMLElement>(".relay-page-header")!.getBoundingClientRect();
-      const tabs = pageElement.querySelector<HTMLElement>(".relay-tabs")?.getBoundingClientRect();
-      const box = element.getBoundingClientRect();
-      const availableBottom = page.bottom - Number.parseFloat(getComputedStyle(pageElement).paddingBottom);
-      const contentTop = Math.max(header.bottom, tabs?.bottom ?? header.bottom);
-      const availableHeight = availableBottom - contentTop;
-      return {
-        fits: box.height <= availableHeight + 1,
-        centerOffset: Math.abs((box.top + box.bottom) / 2 - (contentTop + availableBottom) / 2),
-        topOffset: Math.abs(contentTop - box.top),
-      };
-    });
-    expect(placement.fits ? placement.centerOffset : placement.topOffset).toBeLessThanOrEqual(2);
-    await page.screenshot({ path: `output/playwright/profile-recovery-ru-${theme}-${viewport.width}x${viewport.height}.png` });
-    });
-  }
-}
-
 for (const scenario of [
   { name: "expanded", viewport: { width: 1160, height: 760 }, collapsed: false },
   { name: "compact", viewport: { width: 840, height: 560 }, collapsed: true },
@@ -1603,7 +1471,7 @@ for (const scenario of [
 
 for (const viewport of viewports) {
   test(`empty profile recovery is centered ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, profileSnapshotsEmpty: true });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Восстановление", exact: true }).click();
@@ -1626,6 +1494,11 @@ for (const viewport of viewports) {
     expect(metrics!.bottomOverflow).toBeLessThanOrEqual(1);
     expect(metrics!.horizontalOverflow).toBeLessThanOrEqual(0);
     await page.screenshot({ path: `output/playwright/profile-recovery-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
+
+    await page.getByRole("tab", { name: "OpenCode", exact: true }).click();
+    const openCodeRecovery = page.locator(".profile-recovery-opencode.is-empty");
+    await expect(openCodeRecovery.locator(".profile-recovery-empty-state")).toBeVisible();
+    await page.screenshot({ path: `output/playwright/profile-recovery-opencode-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
   });
 }
 

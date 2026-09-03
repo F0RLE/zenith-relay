@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   CalendarDays,
   Check,
@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, AccountTransferProgress, ProfileBinding } from "../../api/types";
+import type { AccountSummary, AccountTransferProgress, CandidateRuntimeSnapshot, ProfileBinding } from "../../api/types";
 import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, requiresAccountReauthentication, transientCandidateTone } from "../../accountStatus";
 import {
   refreshAllAccountQuotas,
@@ -70,6 +70,9 @@ import {
   type ParticipationFilter,
 } from "./accountTableModel";
 
+const EMPTY_ACCOUNTS: AccountSummary[] = [];
+const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
+
 export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onReauthenticate, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onReauthenticate: (account: AccountSummary) => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountValueVisible, setAccountValueVisible } = useRelayState();
@@ -81,9 +84,9 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   const [groupByPlan, setGroupByPlan] = useState(() => localStorage.getItem("relay.accountsGroupByPlan") === "true");
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
-  const allAccounts = runtime?.accounts ?? [];
-  const runtimeOrder = runtime?.gateway.routingOrder ?? [];
-  const nowMs = useRelativeTimeClock(allAccounts.flatMap((account) => [
+  const allAccounts = runtime?.accounts ?? EMPTY_ACCOUNTS;
+  const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
+  const accountTimestamps = useMemo(() => allAccounts.flatMap((account) => [
     account.subscription.activeUntilMs,
     account.quota.primary?.resetAtMs,
     account.quota.secondary?.resetAtMs,
@@ -91,16 +94,18 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     ...(account.inPool
       ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
       : []),
-  ]));
+  ]), [allAccounts, runtimeOrder]);
+  const nowMs = useRelativeTimeClock(accountTimestamps);
   const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
-  const plans = accountPlanOptions(allAccounts, t("common.unknown"));
-  const { errorCount, inPoolCount, disabledCount } = accountCounts(allAccounts);
-  const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
-  const runtimeByAccount = new Map(allAccounts.map((account) => [
+  const unknownPlanLabel = t("common.unknown");
+  const plans = useMemo(() => accountPlanOptions(allAccounts, unknownPlanLabel), [allAccounts, unknownPlanLabel]);
+  const { errorCount, inPoolCount, disabledCount } = useMemo(() => accountCounts(allAccounts), [allAccounts]);
+  const runtimePosition = useMemo(() => routingOrderPositions(runtimeOrder), [runtimeOrder]);
+  const runtimeByAccount = useMemo(() => new Map(allAccounts.map((account) => [
     account.id,
     account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
-  ]));
-  const activePlan = activeAccountPlan(planFilter, plans, errorCount);
+  ])), [allAccounts, runtimeOrder]);
+  const activePlan = useMemo(() => activeAccountPlan(planFilter, plans, errorCount), [errorCount, planFilter, plans]);
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
   useEffect(() => {
@@ -115,11 +120,16 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
       stop?.();
     };
   }, []);
-  if (!runtime?.accounts.length) {
-    return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
-  }
-  const canRefreshQuota = mode === "local" || runtime.capabilities.features.includes("quota");
-  const accounts = filterAndSortAccounts(runtime.accounts, query, activePlan, participationFilter, groupByPlan, runtimePosition, t("common.unknown"));
+  const canRefreshQuota = mode === "local" || Boolean(runtime?.capabilities.features.includes("quota"));
+  const accounts = useMemo(() => filterAndSortAccounts(
+    allAccounts,
+    query,
+    activePlan,
+    participationFilter,
+    groupByPlan,
+    runtimePosition,
+    unknownPlanLabel,
+  ), [activePlan, allAccounts, groupByPlan, participationFilter, query, runtimePosition, unknownPlanLabel]);
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
   const {
@@ -133,18 +143,21 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     canIncludeSelected,
     canExcludeSelected,
     allSelected,
-  } = accountSelectionState(allAccounts, accounts, selected);
-  const visiblePlanCounts = buildVisiblePlanCounts(accounts, t("common.unknown"));
-  const participationOptions = (["all", "included", "excluded"] as const).map((value) => {
+  } = useMemo(() => accountSelectionState(allAccounts, accounts, selected), [accounts, allAccounts, selected]);
+  const visiblePlanCounts = useMemo(() => buildVisiblePlanCounts(accounts, unknownPlanLabel), [accounts, unknownPlanLabel]);
+  const participationOptions = useMemo(() => (["all", "included", "excluded"] as const).map((value) => {
     const count = value === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (value === "included")).length;
     const state = t(`accounts.participation.${value}`);
     return { value, label: t("accounts.participationFilterOption", { state, count }), shortLabel: `${t("accounts.poolParticipation")}: ${state}` };
-  });
-  const planFilterOptions = [
+  }), [allAccounts, t]);
+  const planFilterOptions = useMemo(() => [
     { value: "all", label: t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length }), shortLabel: `${t("accounts.plan")}: ${t("accounts.allPlans")}` },
     ...(errorCount ? [{ value: "errors", label: t("accounts.planFilterOption", { plan: t("accounts.errorsOnly"), count: errorCount }), shortLabel: `${t("accounts.plan")}: ${t("accounts.errorsOnly")}` }] : []),
     ...plans.map((plan) => ({ value: plan.id, label: t("accounts.planFilterOption", { plan: plan.label, count: plan.count }), shortLabel: `${t("accounts.plan")}: ${plan.label}` })),
-  ];
+  ], [allAccounts.length, errorCount, plans, t]);
+  if (!runtime?.accounts.length) {
+    return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
+  }
   const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
   const toggleAllVisible = (checked: boolean) => setSelected(checked ? accounts.map((account) => account.id) : []);
   const togglePlanGrouping = () => setGroupByPlan((current) => {
@@ -164,7 +177,10 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   const deleteAccounts = async (accountIds: string[], operation: string) => {
     const ok = await perform(operation, async () => {
       if (mode === "local") {
-        if (accountIds.length === 1) await relayCommands.deleteAccount(accountIds[0]);
+        if (accountIds.length === 1) {
+          const accountId = accountIds[0];
+          if (accountId) await relayCommands.deleteAccount(accountId);
+        }
         else await relayCommands.deleteAccounts(accountIds);
       } else {
         for (const accountId of accountIds) await relayCommands.remoteAction({ type: "delete_account", id: accountId });
@@ -205,7 +221,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
       switchedProfile = await activateCodexProfile("move-profile-switch", relayCommands.attachCodexRemoteGateway);
       if (!switchedProfile) return;
     }
-    setTransfer({ accountIds, progress: { completed: 0, total: accountIds.length, phase: "preparing", currentAccountId: accountIds[0] } });
+    setTransfer({ accountIds, progress: { completed: 0, total: accountIds.length, phase: "preparing", ...(accountIds[0] ? { currentAccountId: accountIds[0] } : {}) } });
     const ok = await perform("move-accounts-to-remote", () => relayCommands.moveAccountsToRemote(accountIds), "feedback.accountsMovedToServer");
     setTransfer(null);
     if (!ok && switchedProfile) {
@@ -296,7 +312,8 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")}>
       {accounts.map((account, index) => {
         const plan = accountPlanOption(account.subscription.planType, t("common.unknown"));
-        const previousPlan = index ? accountPlanOption(accounts[index - 1].subscription.planType, t("common.unknown")).id : null;
+        const previousAccount = index ? accounts[index - 1] : undefined;
+        const previousPlan = previousAccount ? accountPlanOption(previousAccount.subscription.planType, t("common.unknown")).id : null;
         const participates = accountParticipates(account);
         const subscriptionEnded = account.subscription.activeUntilMs != null && account.subscription.activeUntilMs <= Date.now();
         const subscriptionEnd = account.subscription.activeUntilMs == null
@@ -311,10 +328,11 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : t(`connections.status.${operationalStatus}`);
         const runtimeState = account.inPool ? runtimeByAccount.get(account.id) : undefined;
         const modelRetries = upcomingModelRetries(runtimeState, nowMs);
-        const modelRetryHint = modelRetries.length
+        const firstModelRetry = modelRetries[0];
+        const modelRetryHint = firstModelRetry
           ? t("pool.modelRetryAt", {
             models: modelRetries.map((retry) => retry.model).join(", "),
-            time: formatDetailedRemainingTime(modelRetries[0].retryAtMs, nowMs, t),
+            time: formatDetailedRemainingTime(firstModelRetry.retryAtMs, nowMs, t),
           })
           : null;
         const runtimeTone = operationalStatus === "rotation"

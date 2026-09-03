@@ -1,4 +1,4 @@
-import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, RefreshCw, Server, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -7,37 +7,38 @@ import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui"
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { useRelayUsageContext } from "../../state/relayStateContext";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import { sourceHost } from "../../sourceUrl";
+import { getCachedOverviewAnalytics, isOverviewAnalyticsFresh, loadOverviewAnalytics } from "./overviewAnalyticsCache";
 import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
-
-const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
+import AnalyticsPanel from "./OverviewAnalytics";
 
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, runtimeRevision, setPage, perform, busy } = useRelayState();
+  const { mode, runtime, setPage, perform, busy } = useRelayState();
+  const { revision: usageRevision } = useRelayUsageContext();
   const [applicationDialog, setApplicationDialog] = useState(false);
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
     const stored = localStorage.getItem("relay.overviewAnalyticsScope");
     return stored?.startsWith("source:") || stored?.startsWith("account:") ? stored as AnalyticsScope : "";
   });
-  const [overviewData, setOverviewData] = useState<Analytics | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
-  const [chartsReady, setChartsReady] = useState(false);
-  const analyticsScope = useRef<string | null>(null);
-  const pendingAnalyticsRequests = useRef(new Map<string, Set<number>>());
-  const nextAnalyticsRequestId = useRef(0);
-  const mounted = useRef(false);
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const now = new Date();
   const calendarDay = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
   const windows = useMemo(() => chartWindows(range, locale), [range, locale, calendarDay]);
   const usageAvailable = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
-  const windowStartMs = windows[0].startMs;
-  const windowEndMs = windows[windows.length - 1].endMs;
+  const runtimeReady = runtime !== null;
+  const windowStartMs = windows[0]?.startMs ?? 0;
+  const windowEndMs = windows[windows.length - 1]?.endMs ?? windowStartMs;
   const usageScope = `${mode}:${range}:${analyticsScopeSelection}:${windowStartMs}:${windowEndMs}`;
+  const [overviewData, setOverviewData] = useState<Analytics | null>(() => getCachedOverviewAnalytics(usageScope));
+  const analyticsScope = useRef<string | null>(null);
+  const appliedUsageRevision = useRef(usageRevision);
+  const mounted = useRef(false);
   const analyticsScopeQuery = analyticsScopeSelection
     ? analyticsScopeSelection.slice(analyticsScopeSelection.indexOf(":") + 1)
     : undefined;
@@ -48,9 +49,14 @@ export function OverviewPage() {
   ], [runtime?.accounts, runtime?.sources, t]);
   const analytics = overviewData;
   const running = Boolean(runtime?.gateway.running);
-  const connectAndLaunchOpenCode = async () => {
+  const setAnalyticsScope = useCallback((value: string) => {
+    const next = value as AnalyticsScope;
+    setAnalyticsScopeSelection(next);
+    localStorage.setItem("relay.overviewAnalyticsScope", next);
+  }, []);
+  const connectOpenCode = async (launchAfterConnect: boolean) => {
     const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved");
-    if (connected) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched");
+    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched");
   };
 
   useEffect(() => {
@@ -67,21 +73,15 @@ export function OverviewPage() {
   }, []);
 
   useEffect(() => {
-    let secondFrame = 0;
-    const firstFrame = requestAnimationFrame(() => {
-      secondFrame = requestAnimationFrame(() => setChartsReady(true));
-    });
-    return () => {
-      cancelAnimationFrame(firstFrame);
-      cancelAnimationFrame(secondFrame);
-    };
-  }, []);
-
-  useEffect(() => {
     let active = true;
     const scopeChanged = analyticsScope.current !== usageScope;
     analyticsScope.current = usageScope;
-    if (scopeChanged) startTransition(() => setOverviewData(null));
+    if (scopeChanged) {
+      // Re-entry can reuse the last complete snapshot immediately. The same
+      // scope is refreshed below, so the cached value is only a stale view.
+      const cached = getCachedOverviewAnalytics(usageScope);
+      if (cached) startTransition(() => setOverviewData(cached));
+    }
     setAnalyticsError(false);
     const stopLoading = () => {
       setAnalyticsLoading(false);
@@ -99,36 +99,44 @@ export function OverviewPage() {
       stopLoading();
       return () => { active = false; };
     }
-    const pending = pendingAnalyticsRequests.current;
-    const requestId = nextAnalyticsRequestId.current++;
-    const scopeRequests = pending.get(usageScope) ?? new Set<number>();
-    scopeRequests.add(requestId);
-    pending.set(usageScope, scopeRequests);
+    const usageChanged = appliedUsageRevision.current !== usageRevision;
+    appliedUsageRevision.current = usageRevision;
+    if (!usageChanged && isOverviewAnalyticsFresh(usageScope)) {
+      stopLoading();
+      return () => { active = false; };
+    }
     setAnalyticsLoading(true);
-    const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS, sourceOrAccountQuery: analyticsScopeQuery };
-    const request = mode === "local"
+    const input = {
+      page: 1,
+      pageSize: 1,
+      range: "custom" as const,
+      fromMs: windowStartMs,
+      toMs: windowEndMs,
+      bucketMs: range === "today" ? HOUR_MS : DAY_MS,
+      includeEvents: false,
+      includeModels: false,
+      includePoolMembers: false,
+      ...(analyticsScopeQuery ? { sourceOrAccountQuery: analyticsScopeQuery } : {}),
+    };
+    const load = () => mode === "local"
       ? relayCommands.localUsagePage(input).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
       : relayCommands.remoteUsage(input).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
-    request
+    loadOverviewAnalytics(usageScope, load)
       .then((result) => {
-        if (!active) return;
         if (!result) {
-          setAnalyticsError(true);
+          if (active) setAnalyticsError(true);
           return;
         }
+        if (!active) return;
         startTransition(() => setOverviewData(result));
       })
       .catch(() => active && setAnalyticsError(true))
       .finally(() => {
-        const requests = pending.get(usageScope);
-        requests?.delete(requestId);
-        const remaining = requests?.size ?? 0;
-        if (!remaining) pending.delete(usageScope);
         // A same-scope refresh may supersede this effect while its request is still in flight.
-        if (mounted.current && analyticsScope.current === usageScope) setAnalyticsLoading(remaining > 0);
+        if (mounted.current && analyticsScope.current === usageScope) setAnalyticsLoading(false);
       });
     return () => { active = false; };
-  }, [mode, range, runtimeRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
+  }, [mode, range, runtimeReady, usageRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
 
   if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} perform={perform} />;
 
@@ -142,9 +150,9 @@ export function OverviewPage() {
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
     {!running && !runtime ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
-      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} scope={analyticsScopeSelection} setScope={(value) => { const next = value as AnalyticsScope; setAnalyticsScopeSelection(next); localStorage.setItem("relay.overviewAnalyticsScope", next); }} scopeOptions={analyticsScopeOptions} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}
+       <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} scope={analyticsScopeSelection} setScope={setAnalyticsScope} scopeOptions={analyticsScopeOptions} />
     </>}
-    {applicationDialog ? <ApplicationPickerDialog title={t("overview.applicationPickerTitle")} showLaunchToggle={false} onClose={() => setApplicationDialog(false)} onChatGPT={() => void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched")} onOpenCode={() => void connectAndLaunchOpenCode()} /> : null}
+    {applicationDialog ? <ApplicationPickerDialog title={t("overview.applicationPickerTitle")} onClose={() => setApplicationDialog(false)} onChatGPT={(launchAfterConnect) => { if (launchAfterConnect) void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched"); }} onOpenCode={(launchAfterConnect) => void connectOpenCode(launchAfterConnect)} /> : null}
   </section>;
 }
 function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean> }) {

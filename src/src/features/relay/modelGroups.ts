@@ -212,6 +212,16 @@ export function modelProviderGroup(model: string, nativeChatGpt = false): ModelP
   return family ? `provider-${family}` : otherGroup;
 }
 
+/**
+ * Presentation grouping only. Native ChatGPT models still retain their
+ * native flag and exact IDs for routing; the launcher shows all OpenAI-family
+ * models together to avoid making equivalent access paths look duplicated.
+ */
+export function modelProviderGroupForDisplay(model: string, nativeChatGpt = false): ModelProviderGroup {
+  const group = modelProviderGroup(model, nativeChatGpt);
+  return group === "chatgpt" ? "openai" : group;
+}
+
 function compareModelIdsForLauncher(
   left: string,
   right: string,
@@ -259,7 +269,7 @@ export function groupModels<T>(
 ) {
   const groups = new Map<ModelProviderGroup, T[]>();
   for (const item of sortModelsForLauncher(items, model, isNativeChatGpt)) {
-    const group = modelProviderGroup(model(item), isNativeChatGpt(item));
+    const group = modelProviderGroupForDisplay(model(item), isNativeChatGpt(item));
     const values = groups.get(group);
     if (values) values.push(item);
     else groups.set(group, [item]);

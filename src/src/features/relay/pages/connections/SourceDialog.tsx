@@ -43,16 +43,31 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
       if (!source) {
         const payload = apiProviderSourceInput(provider);
         const created = mode !== "remote"
-          ? await relayCommands.createSource(payload) as { id: string }
-          : await relayCommands.remoteAction({ type: "create_source" }, payload) as { id: string };
-        if (addToPool) {
+          ? await relayCommands.createSource(payload) as { id: string; models?: string[] }
+          : await relayCommands.remoteAction({ type: "create_source" }, payload) as { id: string; models?: string[] };
+        if (addToPool && created.models?.length) {
           await updatePoolMembership(mode, { accountIds: [], sourceIds: [created.id], inPool: true });
         }
         return;
       }
       const normalizedProtocolBindings = normalizedBindings(protocolBindings, source.models);
       const wireApi = normalizedProtocolBindings[0]?.wireApi ?? source.wireApi;
-      const update = { name, baseUrl, wireApi, protocolBindings: normalizedProtocolBindings, models: source.models, allowedModels: source.allowedModels, excludedModels: source.excludedModels, draining: source.draining, priority: source.priority, weight: source.weight, recoveryDelaySeconds: source.recoveryDelaySeconds, modelPriceOverrides };
+      const update = {
+        name,
+        baseUrl,
+        pricingProvider: source.pricingProvider ?? null,
+        officialProviderFamily: source.officialProviderFamily ?? null,
+        wireApi,
+        protocolBindings: normalizedProtocolBindings,
+        models: source.models,
+        allowedModels: source.allowedModels,
+        excludedModels: source.excludedModels,
+        draining: source.draining,
+        priority: source.priority,
+        weight: source.weight,
+        recoveryDelaySeconds: source.recoveryDelaySeconds,
+        modelPriceOverrides,
+      };
       if (mode !== "remote") {
         await relayCommands.updateSource({ sourceId: source.id, ...update });
         if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);

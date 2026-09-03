@@ -11,7 +11,7 @@ import {
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
-import { applyRuntimeActivity, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivity, applyRuntimeActivities, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -249,6 +249,23 @@ describe("pool helpers", () => {
     expect(next[1]).toMatchObject({ candidateId: "account-a", inFlight: 0, activeRequestCount: 0, activeModels: [] });
     expect(order[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0, activeModels: [] });
     expect(applyRuntimeActivity(order, { revision: 2, candidateId: "missing", inFlight: 1, activeRequestCount: 1, activeModels: [] })).toBe(order);
+  });
+
+  test("applies a burst once and keeps the last update per candidate", () => {
+    const order = [
+      { candidateId: "account-a", kind: "oauth_account" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+      { candidateId: "source-b", kind: "api_source" as const, available: true, inFlight: 0, activeRequestCount: 0, activeModels: [], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+    ];
+    const next = applyRuntimeActivities(order, [
+      { revision: 1, candidateId: "source-b", inFlight: 1, activeRequestCount: 1, activeModels: [] },
+      { revision: 2, candidateId: "source-b", inFlight: 0, activeRequestCount: 0, activeModels: [] },
+      { revision: 3, candidateId: "account-a", inFlight: 2, activeRequestCount: 2, activeModels: [] },
+    ]);
+
+    expect(next.map((candidate) => candidate.candidateId)).toEqual(["account-a", "source-b"]);
+    expect(next[0]).toMatchObject({ inFlight: 2, activeRequestCount: 2 });
+    expect(next[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0 });
+    expect(order[0]).toMatchObject({ inFlight: 0, activeRequestCount: 0 });
   });
 
   test("positions a multi-protocol source by its active binding", () => {

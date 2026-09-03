@@ -28,6 +28,7 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
   const markdownFileInput = useRef<HTMLInputElement>(null);
   const formats = accountExportFormats.filter((option) => accountIds.length === 1 || option.multiple);
   const selectedFormat = formats.find((option) => option.value === format) ?? formats[0];
+  if (!selectedFormat) return null;
   const loadMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];

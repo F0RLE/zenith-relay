@@ -1335,19 +1335,31 @@ test("profile switch reminder can cancel a switch and be disabled", async ({ pag
   expect(launches).toBe(1);
 });
 
-test("profile snapshot recovery has no pre-restore save preference", async ({ page }) => {
+test("ChatGPT recovery restores a selected manual snapshot", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, profileSnapshots: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Recovery", exact: true }).click();
+
+  await expect(page.getByRole("button", { name: "Restore Before switch" })).toBeVisible();
+  await page.getByRole("button", { name: "Restore Before switch" }).click();
+  const restoreDialog = page.getByRole("dialog", { name: "Restore snapshot" });
+  await restoreDialog.getByRole("button", { name: "Yes" }).click();
+  await expect(restoreDialog).toHaveCount(0);
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).toContain("restore_full_codex_profile_snapshot");
+});
+
+test("Overview connects OpenCode without launching it by default", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Launch application" }).click();
+  const dialog = page.getByRole("dialog", { name: "Which application do you want to launch?" });
+  await expect(dialog.getByLabel("Launch application after connecting")).not.toBeChecked();
+  await dialog.getByRole("button", { name: "OpenCode", exact: true }).click();
 
-  await expect(page.getByLabel("Save before restoring")).toHaveCount(0);
-
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-  await page.getByRole("button", { name: "Restore Original profile" }).click();
-  const restoreDialog = page.getByRole("dialog", { name: "Restore snapshot" });
-  await expect(restoreDialog.getByRole("checkbox")).toHaveCount(0);
-  await expect(restoreDialog.getByRole("button", { name: "Yes" })).toBeVisible();
-  await restoreDialog.getByRole("button", { name: "No" }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "connect_opencode_to_local_gateway"))).toBe(true);
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).not.toContain("restart_opencode_app");
 });
 
 test("confirmed local reset delegates protected restoration to Rust", async ({ page }) => {
@@ -1358,8 +1370,6 @@ test("confirmed local reset delegates protected restoration to Rust", async ({ p
   await settleConfirmation(page);
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "reset_local_pool_data"))).toBe(true);
-  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
-  expect(commands).not.toContain("create_codex_profile_snapshot");
 });
 
 test("local pool reset is hidden outside Computer mode", async ({ page }) => {
@@ -1401,7 +1411,12 @@ test("usage pagination follows the errors table", async ({ page }) => {
 });
 
 test("dense status rows use accessible icons without repeated labels", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    profileSnapshots: true,
+  });
   await page.goto("/");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -1421,7 +1436,7 @@ test("dense status rows use accessible icons without repeated labels", async ({ 
   await expect(requestStatus).toHaveText("");
 
   await page.getByRole("button", { name: "Recovery", exact: true }).click();
-  await expect(page.locator(".profile-snapshot-table tbody tr").first().locator(".relay-status-icon")).toHaveAttribute("aria-label", "Config and sign-in");
+  await expect(page.getByRole("button", { name: "Restore Before switch" })).toBeVisible();
 });
 
 test("account export supports bulk copy and per-account download", async ({ page }) => {
@@ -2820,15 +2835,15 @@ test("usage filters are named and stay scoped to the request report", async ({ p
   await page.locator('[role="option"][data-value="responses"]').click();
   await chooseOption(page, page, "Status", "failed");
   await expect.poll(() => page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { success?: boolean; wireApi?: string } } }> }).__TAURI_TEST_INVOKES__;
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { success?: boolean; wireApi?: string; includeEvents?: boolean; includeModels?: boolean; includePoolMembers?: boolean } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_local_usage_page")?.args.input;
-  })).toMatchObject({ success: false, wireApi: "responses" });
+  })).toMatchObject({ success: false, wireApi: "responses", includeEvents: true, includeModels: false, includePoolMembers: false });
 
   await page.getByRole("tab", { name: "Models" }).click();
   await expect.poll(() => page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { success?: boolean; wireApi?: string } } }> }).__TAURI_TEST_INVOKES__;
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { success?: boolean; wireApi?: string; includeEvents?: boolean; includeModels?: boolean; includePoolMembers?: boolean } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_local_usage_page")?.args.input ?? {};
-  })).not.toMatchObject({ success: false, wireApi: "responses" });
+  })).toMatchObject({ includeEvents: false, includeModels: true, includePoolMembers: false });
 });
 
 test("account usage keeps API equivalent, payback, and provider quota windows separate", async ({ page }) => {
@@ -3445,93 +3460,6 @@ test("OAuth countdown follows the active locale", async ({ page }) => {
   await expect(dialog).not.toContainText(/\b(?:AM|PM)\b/);
 });
 
-test("named ChatGPT snapshots restore the full profile without an extra backup", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, canonicalProfilePath: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-
-  await expect(page.getByRole("tab")).toHaveCount(0);
-  await expect(page.getByText("History repair", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Launch ChatGPT" })).toHaveCount(0);
-  await expect(page.locator(".profile-automatic-backup")).toHaveCount(0);
-  await page.getByRole("button", { name: "Open backups folder" }).click();
-
-  await expect(page.getByRole("row").filter({ hasText: "Original profile" })).toBeVisible();
-  await page.getByLabel("Snapshot name").fill("Before migration");
-  await page.getByLabel("Snapshot name").press("Enter");
-  const createdSnapshotId = "22222222-2222-4222-8222-000000000002";
-  const created = page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) });
-  await expect(created).toBeVisible();
-  const snapshotRows = page.locator(".profile-snapshot-table tbody tr");
-  await expect(snapshotRows).toHaveCount(2);
-
-  await created.getByRole("button", { name: "Restore Before migration" }).click();
-  const restoreDialog = page.getByRole("dialog", { name: "Restore snapshot" });
-  await expect(restoreDialog.getByRole("checkbox")).toHaveCount(0);
-  await expect(restoreDialog).toContainText("config.toml and auth.json will be replaced completely");
-  await expect(restoreDialog.getByRole("button", { name: "Yes" })).toBeVisible();
-  await page.screenshot({ path: "output/playwright/profile-restore-dialog-1160x760.png" });
-  await restoreDialog.getByRole("button", { name: "Yes" }).click();
-  await expect(restoreDialog).toHaveCount(0);
-  await expect(snapshotRows).toHaveCount(2);
-  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  const fullRestoreCalls = calls.filter((call) => call.command === "restore_full_codex_profile_snapshot");
-  expect(fullRestoreCalls).toHaveLength(1);
-  expect(fullRestoreCalls[0]?.args).toEqual({ snapshotId: createdSnapshotId });
-  expect(calls.some((call) => call.command === "restore_codex_profile_snapshot")).toBe(false);
-  expect(calls.filter((call) => call.command === "create_codex_profile_snapshot")).toHaveLength(1);
-  expect(calls.findLast((call) => call.command === "open_relay_folder")?.args).toEqual({ folder: "profile_backups" });
-});
-
-test("recovery does not render a separate automatic profile block", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, profileSnapshotsEmpty: true, codexBindingKind: "oauth_account" });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-
-  await expect(page.locator(".profile-automatic-backup")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
-});
-
-test("recovery hides actions that have no available backup", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, profileSnapshotsEmpty: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-
-  await expect(page.getByText("No named snapshots", { exact: true })).toBeVisible();
-  await expect(page.locator(".profile-automatic-backup")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Open backups folder" })).toBeVisible();
-});
-
-test("snapshot deletion waits ten seconds before enabling Yes", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
-  await page.clock.install({ time: 0 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-
-  const row = page.locator(".profile-snapshot-table tbody tr").first();
-  await row.getByRole("button", { name: "Delete Original profile", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Delete snapshot" });
-  const yes = dialog.getByRole("button", { name: "Yes (10)", exact: true });
-  await expect(yes).toBeDisabled();
-  await expect(dialog).toContainText("available in 10 s");
-  await page.clock.runFor(10_000);
-  await expect(dialog.getByRole("button", { name: "Yes", exact: true })).toBeEnabled();
-  await dialog.getByRole("button", { name: "Yes", exact: true }).click();
-  await expect(page.locator(".profile-snapshot-table tbody tr").first()).toHaveCount(0);
-});
-
-test("recovery reports load failures instead of claiming backups are empty", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", recoveryLoadError: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
-
-  await expect(page.getByRole("alert")).toContainText("Some recovery data could not be loaded");
-  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByText("No named snapshots", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Open backups folder" })).toBeVisible();
-});
-
 test("account identities are controlled only from the global action", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, distinctAccountIdentityHints: true });
   await page.goto("/");
@@ -3846,7 +3774,6 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["attach_codex_to_local_gateway", "launch_managed_codex_profile"]);
   expect(workflow[0].args).toEqual({ boundOauthAccountId: null });
-  expect(calls.some((call) => call.command === "create_codex_profile_snapshot")).toBe(false);
   await expect(page.getByRole("dialog", { name: "Confirm action" })).toHaveCount(0);
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
@@ -4011,6 +3938,7 @@ test("Usage renders the cached report while a return navigation refresh is pendi
       });
     };
   });
+  await page.waitForTimeout(1_100);
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __USAGE_RETURN_PENDING__?: boolean }).__USAGE_RETURN_PENDING__))).toBe(true);
   await expect(usageRow).toBeVisible();
@@ -4071,6 +3999,44 @@ test("Overview keeps rendered analytics while a background refresh is pending or
   await emitTauriEvent(page, "zenith-state-changed", null);
   await expect(analytics.getByRole("alert")).toBeVisible();
   await expect(tokenSummary).toHaveText("28");
+});
+
+test("Overview restores the last analytics snapshot when re-entered", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  const tokenSummary = page.locator(".overview-chart.tokens .overview-chart-summary");
+  await expect(tokenSummary).toHaveText("28");
+
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Connections" })).toBeVisible();
+  await page.evaluate(() => {
+    const testWindow = window as unknown as {
+      __OVERVIEW_REENTRY_USAGE_PENDING__?: boolean;
+      __RELEASE_OVERVIEW_REENTRY_USAGE__?: () => void;
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    };
+    const internals = testWindow.__TAURI_INTERNALS__;
+    const invoke = internals.invoke.bind(internals);
+    let delayNextUsageRead = true;
+    internals.invoke = (command, args, options) => {
+      if (command !== "get_local_usage_page" || !delayNextUsageRead) return invoke(command, args, options);
+      delayNextUsageRead = false;
+      testWindow.__OVERVIEW_REENTRY_USAGE_PENDING__ = true;
+      return new Promise((resolve, reject) => {
+        testWindow.__RELEASE_OVERVIEW_REENTRY_USAGE__ = () => void invoke(command, args, options).then(resolve, reject);
+      });
+    };
+  });
+  await page.waitForTimeout(1_100);
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __OVERVIEW_REENTRY_USAGE_PENDING__?: boolean }).__OVERVIEW_REENTRY_USAGE_PENDING__))).toBe(true);
+  await expect(tokenSummary).toHaveText("28");
+  await page.evaluate(() => {
+    const release = (window as unknown as { __RELEASE_OVERVIEW_REENTRY_USAGE__?: () => void }).__RELEASE_OVERVIEW_REENTRY_USAGE__;
+    if (!release) throw new Error("overview re-entry usage request was not pending");
+    release();
+  });
+  await expect(page.locator(".overview-analytics")).toHaveAttribute("aria-busy", "false");
 });
 
 test("open request details follow the terminal fallback result", async ({ page }) => {

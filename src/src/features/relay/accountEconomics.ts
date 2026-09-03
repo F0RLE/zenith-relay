@@ -1,4 +1,5 @@
 import type { ApiEquivalentSummary, QuotaSnapshot, QuotaWindowUsage } from "./api/types";
+import { formatNumber } from "./numberFormatting";
 
 const MIN_OBSERVED_USAGE_BASIS_POINTS = 500;
 const MIN_PRICING_COVERAGE_BASIS_POINTS = 8_000;
@@ -21,7 +22,7 @@ export type AccountValueProjection = {
 
 export function formatAccountPayback(payback: number | null, locale: string, approximate = false) {
   if (payback == null) return "—";
-  const formatted = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback);
+  const formatted = formatNumber(payback, locale, { style: "percent", maximumFractionDigits: 0 });
   return `${approximate ? "≈" : ""}${formatted}`;
 }
 

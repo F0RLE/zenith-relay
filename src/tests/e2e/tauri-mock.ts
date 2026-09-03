@@ -6,6 +6,7 @@ export type MockOptions = {
   mode?: "local" | "remote" | "zenith";
   theme?: "system" | "light" | "dark";
   populated?: boolean;
+  profileSnapshots?: boolean;
   readyConnected?: boolean;
   readyActive?: boolean;
   sourceCount?: number;
@@ -34,7 +35,6 @@ export type MockOptions = {
   recoveryLoadError?: boolean;
   canonicalProfilePath?: boolean;
   moveAccountsError?: boolean;
-  profileSnapshotsEmpty?: boolean;
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
@@ -259,17 +259,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.quotaRefreshStatus = item.quota.error ? "failed" : item.quota.updatedAtMs == null ? "pending" : "updated";
       return item;
     });
-    const systemCredentialId = "key_system";
-    const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
-    let profileSnapshots = input.profileSnapshotsEmpty ? [] : [{
-      id: "11111111-1111-4111-8111-111111111111",
-      name: locale === "ru" ? "Исходный профиль" : "Original profile",
-      profileDir,
-      createdAtMs: Date.now() - 3_600_000,
-      configAvailable: true,
-      authAvailable: true,
-      isOriginal: true,
-    }];
+      const systemCredentialId = "key_system";
+      const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
     type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; speedSupported?: boolean; speedTier?: "standard" | "fast"; speedConfigurable?: boolean };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
@@ -464,10 +455,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         const measuredOutputTokens = Math.max(0, outputTokens - reasoningTokens - 1);
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
         if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
-        if (item.success && item.generationMs != null && item.generationMs > 0 && measuredOutputTokens > 0) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += measuredOutputTokens; }
+        if (item.success && item.generationMs != null && item.generationMs > 0 && measuredOutputTokens > 0 && measuredOutputTokens <= item.generationMs) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += measuredOutputTokens; }
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null); totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0; totals.cacheWriteInputSamples += Number(item.cacheWriteInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
-        if (outputTokens && item.latencyMs) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += item.latencyMs; }
+        if (outputTokens && item.latencyMs && outputTokens <= item.latencyMs) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += item.latencyMs; }
         totals.apiEquivalent.microUsd += item.apiEquivalent?.microUsd ?? 0; totals.apiEquivalent.pricedTokens += item.apiEquivalent?.pricedTokens ?? 0; totals.apiEquivalent.unpricedTokens += item.apiEquivalent?.unpricedTokens ?? item.totalTokens ?? 0;
         return totals;
       }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
@@ -529,23 +520,23 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "preview_remote_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "apply_remote_configuration_preset": remoteRuntime.gateway.maxRetryCandidates = 4; remoteRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: remoteRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "get_local_usage_page": {
-            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string; includeEvents?: boolean; includeModels?: boolean; includePoolMembers?: boolean };
             const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
             const createdAtMs = events[0] ? Date.parse(events[0].createdAt) : 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
             const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? input.usageTotalPages ?? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: sourceUsage ? source.id : account.id, label: sourceUsage ? source.name : account.label, totals }] : [] };
+            return { events: query.includeEvents === false ? [] : structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? input.usageTotalPages ?? 1 : 0, totals, buckets, models: query.includeModels === false || !events.length ? [] : [{ key: "gpt-5.4", totals }], poolMembers: query.includePoolMembers === false || !events.length ? [] : [{ key: sourceUsage ? source.id : account.id, label: sourceUsage ? source.name : account.label, totals }] };
           }
           case "get_remote_server_usage": {
-            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string; includeEvents?: boolean; includeModels?: boolean; includePoolMembers?: boolean };
             const sourceOrAccountQuery = query.sourceOrAccountQuery === account.id ? "a1b2c3d4e5f6" : query.sourceOrAccountQuery;
             const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!sourceOrAccountQuery || item.candidateHint.includes(sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
             const createdAtMs = events[0]?.createdAtMs ?? 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
             const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: sourceUsage ? source.id : "a1b2c3d4e5f6", label: sourceUsage ? source.name : account.label, totals }] : [] };
+            return { events: query.includeEvents === false ? [] : structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: query.includeModels === false || !events.length ? [] : [{ key: "gpt-5.4", totals }], poolMembers: query.includePoolMembers === false || !events.length ? [] : [{ key: sourceUsage ? source.id : "a1b2c3d4e5f6", label: sourceUsage ? source.name : account.label, totals }] };
           }
           case "create_local_source": {
             if (input.sourceCreateError) throw { code: input.sourceCreateError, message: "Synthetic upstream model discovery failed" };
@@ -943,16 +934,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "launch_saved_codex":
           case "restore_codex_profile":
           case "restore_codex_account_profile": return null;
-          case "list_codex_profile_snapshots": if (input.recoveryLoadError) throw { code: "recovery_required" }; return { snapshots: structuredClone(profileSnapshots), invalidCount: 0 };
-          case "create_codex_profile_snapshot": {
-            const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.name), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true, isOriginal: false };
-            profileSnapshots = [snapshot, ...profileSnapshots].sort((left, right) => Number(Boolean(right.isOriginal)) - Number(Boolean(left.isOriginal)) || right.createdAtMs - left.createdAtMs);
-            return structuredClone(snapshot);
-          }
-          case "restore_full_codex_profile_snapshot": {
-            return null;
-          }
-          case "delete_codex_profile_snapshot": profileSnapshots = profileSnapshots.filter((snapshot) => snapshot.id !== String(args.snapshotId)); return null;
+          case "list_codex_profile_snapshots": return { snapshots: input.profileSnapshots ? [{ id: "snapshot_synthetic", name: "Before switch", profileDir, createdAtMs: 1_781_000_000_000, configAvailable: true, authAvailable: true }] : [], invalidCount: 0 };
+          case "create_codex_profile_snapshot": return { id: "snapshot_created", name: String(args.name), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
+          case "restore_full_codex_profile_snapshot":
+          case "delete_codex_profile_snapshot": return null;
+          case "get_opencode_config_status": return { configured: false, modelCount: 0, hasBackup: false, backupCreatedAtMs: null, backupName: null, path: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
+          case "create_opencode_snapshot": return true;
+          case "connect_opencode_to_local_gateway": return { path: "C:\\Users\\Test\\.config\\opencode\\opencode.json", modelCount: 2, backupCreated: true };
+          case "restart_opencode_app":
+          case "restore_opencode_config": return null;
           case "stop_managed_codex_profile": return true;
           case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: systemCredentialId, boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null, active: true } };
           case "attach_codex_to_account":

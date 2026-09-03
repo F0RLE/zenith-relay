@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -6,6 +6,7 @@ import type { RemoteUsageQuery } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { useRelayUsageContext } from "../../state/relayStateContext";
 import { formatTokenSpeed } from "../../usageSpeed";
 import { AggregateView, CompactNumber, ErrorsView, RequestDetails, RequestsView } from "./UsageReportViews";
 import { AccountUsageSummary } from "./AccountUsageSummary";
@@ -25,14 +26,15 @@ function loadUsageSummaryMetrics(): Record<UsageSummaryMetric, boolean> {
   try {
     const stored = JSON.parse(localStorage.getItem(USAGE_SUMMARY_LAYOUT_KEY) ?? "null") as Record<string, unknown> | null;
     for (const metric of USAGE_SUMMARY_METRICS) if (typeof stored?.[metric] === "boolean") defaults[metric] = stored[metric];
-    if (typeof stored?.generationSpeed !== "boolean" && typeof stored?.streamSpeed === "boolean") defaults.generationSpeed = stored.streamSpeed;
+    if (typeof stored?.["generationSpeed"] !== "boolean" && typeof stored?.["streamSpeed"] === "boolean") defaults.generationSpeed = stored["streamSpeed"];
   } catch { }
   return defaults;
 }
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, runtimeRevision, usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
+  const { mode, runtime, loading, busy, perform, accountDisplayName } = useRelayState();
+  const { revision: usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage } = useRelayUsageContext();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -49,36 +51,56 @@ export function UsagePage() {
   const [selected, setSelected] = useState<UsageRow | null>(null);
   const [summaryMetrics, setSummaryMetrics] = useState(loadUsageSummaryMetrics);
   const [summarySettingsOpen, setSummarySettingsOpen] = useState(false);
+  const appliedUsageRevision = useRef(usageRevision);
+  const locale = i18n.resolvedLanguage ?? i18n.language;
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
+  const runtimeReady = runtime !== null;
   const requestFiltersActive = view === "requests";
   const selectedAccount = runtime?.accounts.find((account) => account.id === selectedAccountId) ?? null;
   const selectedAccountQuery = selectedAccount?.id;
-  const usageQuery = useMemo<RemoteUsageQuery>(() => ({
-    page,
-    pageSize: 50,
-    range: range === "all" ? undefined : range,
-    modelQuery: requestFiltersActive ? modelQuery.trim() || undefined : undefined,
-    sourceOrAccountQuery: selectedAccountQuery ?? (requestFiltersActive ? connectionQuery.trim() || undefined : undefined),
-    wireApi: requestFiltersActive && wireApi ? wireApi as RemoteUsageQuery["wireApi"] : undefined,
-    success: view === "errors" ? false : requestFiltersActive && status !== "all" ? status === "success" : undefined,
-    errorCategory: requestFiltersActive ? errorQuery.trim() || undefined : undefined,
-    requestIdQuery: requestFiltersActive ? requestQuery.trim() || undefined : undefined,
-  }), [page, range, modelQuery, connectionQuery, wireApi, status, errorQuery, requestQuery, view, selectedAccountQuery]);
+  const usageQuery = useMemo<RemoteUsageQuery>(() => {
+    const model = requestFiltersActive ? modelQuery.trim() : "";
+    const connection = requestFiltersActive ? connectionQuery.trim() : "";
+    const error = requestFiltersActive ? errorQuery.trim() : "";
+    const requestId = requestFiltersActive ? requestQuery.trim() : "";
+    const selectedWireApi: NonNullable<RemoteUsageQuery["wireApi"]> | undefined = requestFiltersActive && wireApi
+      ? wireApi as NonNullable<RemoteUsageQuery["wireApi"]>
+      : undefined;
+    const success = view === "errors" ? false : requestFiltersActive && status !== "all" ? status === "success" : undefined;
+    return {
+      page,
+      pageSize: 50,
+      ...(range !== "all" ? { range } : {}),
+      ...(model ? { modelQuery: model } : {}),
+      ...((selectedAccountQuery ?? connection) ? { sourceOrAccountQuery: selectedAccountQuery ?? connection } : {}),
+      ...(selectedWireApi !== undefined ? { wireApi: selectedWireApi } : {}),
+      ...(success !== undefined ? { success } : {}),
+      ...(error ? { errorCategory: error } : {}),
+      ...(requestId ? { requestIdQuery: requestId } : {}),
+      // Aggregate tabs opt into only the projection they render. Requests and
+      // errors keep the response lightweight while retaining their page data.
+      includeEvents: view === "requests" || view === "errors",
+      includeModels: view === "models",
+      includePoolMembers: view === "connections",
+    };
+  }, [page, range, modelQuery, connectionQuery, wireApi, status, errorQuery, requestQuery, view, selectedAccountQuery, requestFiltersActive]);
 
   useEffect(() => {
-    if (mode === "zenith" || !runtime || !remoteUsageSupported) {
+    if (mode === "zenith" || !runtimeReady || !remoteUsageSupported) {
       setUsageLoading(false);
       return;
     }
     let active = true;
+    const usageChanged = appliedUsageRevision.current !== usageRevision;
+    appliedUsageRevision.current = usageRevision;
     setUsageLoading(true);
     setUsageError(false);
     const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    load(usageQuery)
+    load(usageQuery, { force: usageChanged })
       .catch(() => active && setUsageError(true))
       .finally(() => active && setUsageLoading(false));
     return () => { active = false; };
-  }, [mode, runtimeRevision, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
+  }, [mode, runtimeReady, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
   useEffect(() => {
     setPage(1);
@@ -114,18 +136,25 @@ export function UsagePage() {
       ?? (selected.requestId ? rows.find((row) => row.requestId === selected.requestId) : undefined);
     if (current !== selected) setSelected(current ?? null);
   }, [rows, selected]);
-  const cutoff = range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000;
-  const filtered = mode !== "zenith" ? rows : rows.filter((item) => {
-    if (new Date(item.time).getTime() < cutoff) return false;
-    if (view === "errors") return !item.success;
-    if (!requestFiltersActive) return true;
-    return (status === "all" || (status === "success" ? item.success : !item.success))
-      && (!requestQuery.trim() || item.requestId?.toLocaleLowerCase().includes(requestQuery.trim().toLocaleLowerCase()))
-      && (!modelQuery.trim() || item.model?.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()))
-      && (!connectionQuery.trim() || item.connection.toLocaleLowerCase().includes(connectionQuery.trim().toLocaleLowerCase()))
-      && (!wireApi || item.wireApi === wireApi)
-      && (!errorQuery.trim() || item.errorCategory === errorQuery.trim());
-  });
+  const cutoff = useMemo(() => range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000, [range]);
+  const filtered = useMemo(() => {
+    if (mode !== "zenith") return rows;
+    const normalizedRequestQuery = requestFiltersActive ? requestQuery.trim().toLocaleLowerCase() : "";
+    const normalizedModelQuery = requestFiltersActive ? modelQuery.trim().toLocaleLowerCase() : "";
+    const normalizedConnectionQuery = requestFiltersActive ? connectionQuery.trim().toLocaleLowerCase() : "";
+    const normalizedErrorQuery = requestFiltersActive ? errorQuery.trim() : "";
+    return rows.filter((item) => {
+      if (new Date(item.time).getTime() < cutoff) return false;
+      if (view === "errors") return !item.success;
+      if (!requestFiltersActive) return true;
+      return (status === "all" || (status === "success" ? item.success : !item.success))
+        && (!normalizedRequestQuery || item.requestId?.toLocaleLowerCase().includes(normalizedRequestQuery))
+        && (!normalizedModelQuery || item.model?.toLocaleLowerCase().includes(normalizedModelQuery))
+        && (!normalizedConnectionQuery || item.connection.toLocaleLowerCase().includes(normalizedConnectionQuery))
+        && (!wireApi || item.wireApi === wireApi)
+        && (!normalizedErrorQuery || item.errorCategory === normalizedErrorQuery);
+    });
+  }, [connectionQuery, cutoff, errorQuery, mode, modelQuery, requestFiltersActive, requestQuery, rows, status, view, wireApi]);
   const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
   const totals = usagePage?.totals ?? totalsFromRows(filtered);
   const averageGenerationSpeed = totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
@@ -135,29 +164,53 @@ export function UsagePage() {
   useEffect(() => {
     try { localStorage.setItem(USAGE_SUMMARY_LAYOUT_KEY, JSON.stringify(summaryMetrics)); } catch { }
   }, [summaryMetrics]);
-  const formatTime = (value: string) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
+  const timeFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
+  const formatTime = useCallback((value: string) => timeFormatter.format(new Date(value)), [timeFormatter]);
   const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
-  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, requestedReasoningEffort: row.requestedReasoningEffort, effectiveReasoningEffort: row.effectiveReasoningEffort, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, cacheWriteTtl: row.cacheWriteTtl, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory, errorOrigin: row.errorOrigin, serviceTier: row.serviceTier ?? undefined, appliedServiceTier: row.appliedServiceTier }))), "feedback.exported");
+  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, requestedReasoningEffort: row.requestedReasoningEffort, effectiveReasoningEffort: row.effectiveReasoningEffort, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, cacheWriteTtl: row.cacheWriteTtl, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory, errorOrigin: row.errorOrigin, ...(row.serviceTier ? { serviceTier: row.serviceTier } : {}), appliedServiceTier: row.appliedServiceTier }))), "feedback.exported");
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
     setPage(1);
     await perform("usage-clear", () => mode === "local" ? relayCommands.clearLocalUsage() : relayCommands.remoteAction({ type: "clear_usage" }), "feedback.cleared");
   };
   const canClear = mode === "local" || (mode === "remote" && remoteUsageSupported);
-  const refreshUsage = refresh;
+  const refreshUsage = async () => {
+    setUsageLoading(true);
+    setUsageError(false);
+    try {
+      const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+      await load(usageQuery, { force: true });
+    } catch {
+      setUsageError(true);
+    } finally {
+      setUsageLoading(false);
+    }
+  };
   const modelGroups = usagePage?.models;
-  const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: mode === "remote" ? accountDisplayName(null, group.label) ?? group.label ?? t("usage.removedAccount") : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown") }));
-  const modelOptionIds = sortModelIdsForLauncher([...new Map(
+  const poolMemberGroups = useMemo(() => usagePage?.poolMembers?.map((group) => ({
+    ...group,
+    label: mode === "remote"
+      ? accountDisplayName(null, group.label) ?? group.label ?? t("usage.removedAccount")
+      : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown"),
+  })), [accountDisplayName, accountLabels, mode, sourceLabels, t, usagePage?.poolMembers]);
+  const modelOptionIds = useMemo(() => sortModelIdsForLauncher([...new Map(
     [...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])]
       .filter(Boolean)
       .map((value) => [value.toLowerCase(), value] as const),
-  ).values()]);
-  const modelOptions = [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))];
-  const poolMemberOptions = [{ value: "", label: t("usage.anyPoolMember") }, ...Array.from(new Map((poolMemberGroups ?? [])
+  ).values()]), [modelGroups, modelQuery, rows, runtime?.gateway.visibleModelIds]);
+  const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))], [modelOptionIds, t]);
+  const poolMemberOptionSource = useMemo(() => [
+    ...(poolMemberGroups ?? []),
+    ...(runtime?.accounts ?? []).map((account) => ({ key: account.id, label: account.label })),
+    ...(runtime?.sources ?? []).map((source) => ({ key: source.id, label: source.name })),
+    ...rows.map((row) => ({ key: row.candidateKey, label: row.connection })),
+  ], [poolMemberGroups, rows, runtime?.accounts, runtime?.sources]);
+  const poolMemberOptions = useMemo(() => [{ value: "", label: t("usage.anyPoolMember") }, ...Array.from(new Map(poolMemberOptionSource
     .filter((group) => group.key)
     .map((group) => ({ value: group.key, label: group.label || group.key }))
     .sort((left, right) => left.label.localeCompare(right.label, i18n.language))
-    .map((option) => [option.label, option] as const)).values())];
+    .map((option) => [option.label, option] as const)).values())], [i18n.language, poolMemberOptionSource, t]);
+  const errorRows = useMemo(() => filtered.filter((item) => !item.success), [filtered]);
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setWireApi(""); setErrorQuery(""); setRequestQuery("");
@@ -189,9 +242,9 @@ export function UsagePage() {
       </div> : null}
     </section> : null}
     {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} modelOptions={modelOptions} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} poolMemberOptions={poolMemberOptions} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
-    {view === "models" ? <AggregateView rows={filtered} groups={modelGroups} field="model" empty={t("usage.empty")} /> : null}
-    {view === "connections" ? <AggregateView rows={filtered} groups={poolMemberGroups} field="connection" empty={t("usage.empty")} /> : null}
-    {view === "errors" ? <ErrorsView rows={filtered.filter((item) => !item.success)} formatTime={formatTime} onSelect={setSelected} /> : null}
+    {view === "models" ? <AggregateView rows={filtered} {...(modelGroups ? { groups: modelGroups } : {})} field="model" empty={t("usage.empty")} /> : null}
+    {view === "connections" ? <AggregateView rows={filtered} {...(poolMemberGroups ? { groups: poolMemberGroups } : {})} field="connection" empty={t("usage.empty")} /> : null}
+    {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelected} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.totalPages > 1 ? <nav className="usage-pagination" aria-label={t("usage.pagination")}><Button variant="secondary" icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || usageLoading} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t("common.back")}</Button><span>{t("usage.page", { page: usagePage.page, total: usagePage.totalPages })}</span><Button variant="secondary" icon={<ChevronRight aria-hidden />} disabled={page >= usagePage.totalPages || usageLoading} onClick={() => setPage((value) => value + 1)}>{t("common.continue")}</Button></nav> : null}
     {selected ? <RequestDetails row={selected} onClose={() => setSelected(null)} /> : null}

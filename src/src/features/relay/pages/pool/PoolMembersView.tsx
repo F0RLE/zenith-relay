@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CheckCheck, CircleAlert, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, LogIn, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
 import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import {
   refreshAllAccountQuotas,
@@ -20,7 +20,7 @@ import { memberName, type PoolMember } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { formatApiEquivalent, formatProviderMicroUsd } from "../../poolFormatting";
 import { persistRoutingPolicy } from "../../routingPolicy";
-import { useRelayState } from "../../state/RelayStateProvider";
+import { useRelayActivity, useRelayState } from "../../state/relayStateContext";
 import { formatFullNumber } from "../../usageTotals";
 import { AccountErrorDialog } from "../connections/AccountsTable";
 import {
@@ -35,10 +35,14 @@ import {
 
 type Member = PoolMember;
 type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: boolean };
+const EMPTY_POOL_MEMBERS: Member[] = [];
+const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
+const EMPTY_VISIBLE_MODELS: string[] = [];
 
 export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; onReauthenticate: (account: AccountSummary) => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, runtimeActivity, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
+  const { mode, runtime, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
+  const runtimeActivity = useRelayActivity();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
@@ -50,13 +54,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
   const sourceStatsGeneration = useRef(0);
-  const poolMembers: Member[] = poolMembersFromRuntime(runtime);
-  const runtimeOrder = runtime?.gateway.routingOrder ?? [];
-  const runtimeByMember = poolMemberRuntimeStates(poolMembers, runtimeOrder);
-  const members = orderedPoolMembers(poolMembers, runtimeOrder);
-  const visibleModelIds = runtime?.gateway.visibleModelIds ?? [];
-  const sourceIds = poolMemberSourceIds(members);
-  const nowMs = useRelativeTimeClock(members.flatMap((member) => [
+  const poolMembers: Member[] = useMemo(
+    () => runtime ? poolMembersFromRuntime(runtime) : EMPTY_POOL_MEMBERS,
+    [runtime?.accounts, runtime?.sources],
+  );
+  const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
+  const runtimeByMember = useMemo(() => poolMemberRuntimeStates(poolMembers, runtimeOrder), [poolMembers, runtimeOrder]);
+  const members = useMemo(() => orderedPoolMembers(poolMembers, runtimeOrder), [poolMembers, runtimeOrder]);
+  const visibleModelIds = runtime?.gateway.visibleModelIds ?? EMPTY_VISIBLE_MODELS;
+  const sourceIds = useMemo(() => poolMemberSourceIds(members), [members]);
+  const memberTimestamps = useMemo(() => members.flatMap((member) => [
     ...(member.kind === "account" ? [
       member.subscription.activeUntilMs,
       member.quota.primary?.resetAtMs,
@@ -64,7 +71,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
     ] : []),
     runtimeByMember.get(member.id)?.nextRetryAtMs,
-  ]));
+  ]), [members, runtimeByMember]);
+  const nowMs = useRelativeTimeClock(memberTimestamps);
   const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
   const refreshSourceStats = useCallback(async (sourceId: string, refreshModels = false, operationManaged = false) => {
     if (mode === "zenith") return;
@@ -105,7 +113,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     lastUsedRuntime,
     lastUsedMember,
     lastActivityMember,
-  } = poolActivityState(members, runtimeByMember, runtimeOrder, runtimeActivity, visibleModelIds);
+  } = useMemo(() => poolActivityState(members, runtimeByMember, runtimeOrder, runtimeActivity, visibleModelIds), [members, runtimeActivity, runtimeByMember, runtimeOrder, visibleModelIds]);
   const activeModelList = activeModels
     .map(({ model, requestCount }) => requestCount > 1 ? t("pool.activeModelCount", { model, count: requestCount }) : model)
     .join(" · ");
@@ -117,17 +125,28 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const hasRoutableModel = members.some((member) => memberCanRoute(member, visibleModelIds));
   const noAvailableModels = visibleModelIds.length === 0 || !hasRoutableModel;
   const hasAvailableRoute = nextMember != null;
-  const routingSummary = activeMembers.length === 1
-    ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
+  const firstActiveMember = activeMembers[0];
+  const routingSummary = firstActiveMember
+    ? activeMembers.length === 1
+      ? `${t("pool.currentRoute")}: ${memberName(firstActiveMember)}`
+      : activeMembers.length > 1
+        ? t("pool.activeRoutes", { count: activeMembers.length })
+        : noAvailableModels
+          ? t("pool.noAvailableModels")
+          : nextMember
+            ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
+            : (lastActivityMember ?? lastUsedMember)
+              ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
+              : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty")
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
       : noAvailableModels
         ? t("pool.noAvailableModels")
-      : nextMember
-        ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
-        : (lastActivityMember ?? lastUsedMember)
-        ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
-        : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
+        : nextMember
+          ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
+          : (lastActivityMember ?? lastUsedMember)
+            ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
+            : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
   const unavailableRouteErrors = members
     .map((member) => member.kind === "source" ? member.lastErrorCode?.trim() : currentAccountErrorCode(member))
     .filter((code): code is string => Boolean(code));
@@ -234,10 +253,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         const isCurrent = activeRequestCount(runtimeState) > 0;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.lastUsedAtMs != null && runtimeState.lastUsedAtMs === lastUsedRuntime?.lastUsedAtMs;
         const modelRetries = upcomingModelRetries(runtimeState, nowMs);
-        const modelRetryHint = modelRetries.length
+        const firstModelRetry = modelRetries[0];
+        const modelRetryHint = firstModelRetry
           ? t("pool.modelRetryAt", {
             models: modelRetries.map((retry) => retry.model).join(", "),
-            time: formatDetailedRemainingTime(modelRetries[0].retryAtMs, nowMs, t),
+            time: formatDetailedRemainingTime(firstModelRetry.retryAtMs, nowMs, t),
           })
           : null;
         const memberErrorCode = member.kind === "source" ? member.lastErrorCode?.trim() : errorCode;
@@ -293,7 +313,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
             </div>
           </header>
           <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>
-            {member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} onReauthenticate={onReauthenticate} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}
+            {member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} onReauthenticate={onReauthenticate} /> : <PoolSourceStats source={member} {...(sourceStats[member.id] ? { state: sourceStats[member.id] } : {})} />}
             {mode === "local" && member.kind === "account" ? <ResetCreditsControl account={member} onCompleted={() => refresh()} /> : null}
           </div>
           <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}{runtimeHint ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-runtime-hint" data-warning="false">{runtimeHint}</span></> : null}</> : <div className="pool-member-runtime-meta"><div><span>{t("pool.operationMode")}</span><strong>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</strong></div><div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div>}</div>

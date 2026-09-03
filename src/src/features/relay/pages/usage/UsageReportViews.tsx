@@ -4,6 +4,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { ErrorOrigin, ReasoningEffort, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
+import { formatNumber } from "../../numberFormatting";
 import { formatTokenSpeed, tokenSpeed } from "../../usageSpeed";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
@@ -25,6 +26,7 @@ import {
   type RequestTableLayout,
 } from "./useColumnLayout";
 import { normalizeObservedServiceTier, totalsFromRows, usageSpeedSample, type CodexRequestOrigin, type UsageRow } from "./usageData";
+import { usageBreakdown } from "./usageBreakdown";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 
 export function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setModelQuery, connectionQuery, poolMemberOptions, setConnectionQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; modelOptions: Array<{ value: string; label: string }>; setModelQuery: (value: string) => void; connectionQuery: string; poolMemberOptions: Array<{ value: string; label: string }>; setConnectionQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
@@ -72,7 +74,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
   const resized = REQUEST_COLUMN_IDS.every((id) => layout.widths[id] != null);
   const totalWidth = resized ? REQUEST_COLUMN_IDS.reduce((total, id) => total + (layout.widths[id] ?? 0), 0) : 0;
   const captureWidths = (table: HTMLTableElement) => Object.fromEntries(Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]")).map((cell) => {
-    const id = cell.dataset.column as RequestColumnId;
+    const id = cell.dataset["column"] as RequestColumnId;
     return [id, Math.max(REQUEST_COLUMN_MIN_WIDTH[id], Math.round(cell.getBoundingClientRect().width))];
   })) as Record<RequestColumnId, number>;
   const moveColumn = (column: RequestColumnId, target: RequestColumnId, after = false) => setLayout((current) => ({ ...current, order: reorderColumns(current.order, column, target, after) }));
@@ -198,7 +200,16 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   const toolUse = row.toolUse;
   const speed = usageSpeedSample(row);
   const generationSpeed = tokenSpeed(speed);
-  const visibleOutputTokens = row.outputTokens == null ? null : Math.max(0, row.outputTokens - (row.reasoningTokens ?? 0));
+  const breakdown = usageBreakdown({
+    inputTokens: row.inputTokens,
+    cachedInputTokens: row.cachedInputTokens,
+    cacheWriteInputTokens: row.cacheWriteInputTokens,
+    outputTokens: row.outputTokens,
+    reasoningTokens: row.reasoningTokens,
+    totalTokens: row.tokens,
+  });
+  const formatTokens = (value: number | null) => value == null ? "—" : formatFullNumber(value, i18n.language);
+  const hasTokenValue = (value: number | null): value is number => value != null && value > 0;
   const toolWarning = Boolean(
     toolUse
       && toolUse.forwardedToolCount > 0
@@ -223,7 +234,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} />
       <RequestDetailMetric label={t("usage.generationSpeed")} value={<SpeedValue value={generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} />
       <RequestDetailMetric label={t("usage.totalTime")} value={formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t)} />
-      <RequestDetailMetric label={t("usage.visibleOutputTokens")} value={visibleOutputTokens == null ? "—" : formatCompactNumber(visibleOutputTokens, i18n.language)} />
+      <RequestDetailMetric label={t("usage.visibleOutputTokens")} value={breakdown.visibleOutput == null ? "—" : formatCompactNumber(breakdown.visibleOutput, i18n.language)} />
     </div>
     <Tabs value={section} items={tabs} onChange={(value) => setSection(value as typeof section)} label={t("usage.requestSectionsLabel")} />
     {section === "overview" ? <>
@@ -247,13 +258,18 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       </section> : null}
     </> : null}
     {section === "tokens" ? <dl className="request-details-list request-details-token-list">
-      <div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div>
-      {row.cacheWriteInputTokens != null ? <div><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{row.cacheWriteInputTokens}{row.cacheWriteTtl ? ` (${t(`usage.cacheWriteTtls.${row.cacheWriteTtl}`)})` : ""}</dd></div> : null}
-      <div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div>
-      <div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>
+      {breakdown.inputTotal == null || hasTokenValue(breakdown.inputTotal) ? <div className="request-details-token-group">
+        <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><dd>{formatTokens(breakdown.inputTotal)}</dd></div>
+        {hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><dd>{formatTokens(breakdown.uncachedInput)}</dd></div> : null}
+        {hasTokenValue(breakdown.cacheRead) ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}</dd></div> : null}
+        {hasTokenValue(breakdown.cacheWrite) ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)}{row.cacheWriteTtl ? ` (${t(`usage.cacheWriteTtls.${row.cacheWriteTtl}`)})` : ""}</dd></div> : null}
+      </div> : null}
+      {breakdown.outputTotal == null || hasTokenValue(breakdown.outputTotal) ? <div className="request-details-token-group">
+        <div className="request-details-token-group-heading"><dt>{t("usage.outputTokens")}</dt><dd>{formatTokens(breakdown.outputTotal)}</dd></div>
+        {hasTokenValue(breakdown.reasoning) ? <div className="request-details-token-child"><dt>{t("usage.reasoningTokens")}</dt><dd>{formatTokens(breakdown.reasoning)}</dd></div> : null}
+      </div> : null}
+      {breakdown.total == null || hasTokenValue(breakdown.total) ? <div className="request-details-token-total"><dt>{t("usage.totalTokens")}</dt><dd>{formatTokens(breakdown.total)}</dd></div> : null}
+      {row.apiEquivalent && (row.apiEquivalent.microUsd > 0 || row.apiEquivalent.pricedTokens > 0 || row.apiEquivalent.unpricedTokens > 0) ? <div className="request-details-token-api"><dt>{t("usage.apiEquivalent")}</dt><dd title={t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens })}>{formatUsageApiEquivalent(row.apiEquivalent, i18n.language)}</dd></div> : null}
     </dl> : null}
     {section === "tools" && toolUse ? <section className="request-details-section">
       <dl className="request-details-list">
@@ -286,7 +302,7 @@ function SpeedValue({ value, locale, unit }: { value: number | null; locale: str
 
 function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
   if (value == null || !Number.isFinite(value)) return "—";
-  if (value >= 1000) return t("usage.durationSeconds", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1000) });
+  if (value >= 1000) return t("usage.durationSeconds", { value: formatNumber(value / 1000, locale, { maximumFractionDigits: 1 }) });
   return t("usage.durationMilliseconds", { value: Math.round(value) });
 }
 
@@ -360,11 +376,13 @@ function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: T
 }
 
 function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
-  const groups = rows.reduce((map, row) => {
+  const groups = new Map<string, UsageRow[]>();
+  for (const row of rows) {
     const key = row[field] || unknown;
-    map.set(key, [...(map.get(key) ?? []), row]);
-    return map;
-  }, new Map<string, UsageRow[]>());
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
   return [...groups.entries()].map(([name, groupRows]) => aggregateRowFromTotals(name, totalsFromRows(groupRows)));
 }
 

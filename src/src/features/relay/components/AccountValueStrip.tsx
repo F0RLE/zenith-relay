@@ -47,7 +47,7 @@ export function AccountValueStrip({ account }: { account: AccountSummary }) {
       <dt>{t("accounts.accountValue.remaining")}</dt>
       <dd>{formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate)}</dd>
     </AccountValueMetric> : null}
-    <AccountValueMetric title={paybackTitle} state={payback != null && payback >= 1 ? "paid" : undefined}>
+    <AccountValueMetric title={paybackTitle} {...(payback != null && payback >= 1 ? { state: "paid" } : {})}>
       <dt>{t("accounts.accountValue.payback")}</dt>
       <dd>{formatAccountPayback(payback, locale, approximate)}</dd>
     </AccountValueMetric>

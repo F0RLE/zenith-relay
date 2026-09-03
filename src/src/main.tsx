@@ -8,7 +8,7 @@ const STARTUP_REVEAL_FALLBACK_MS = 10_000;
 let startupFallbackTimer: number | undefined;
 
 function revealStartupShell() {
-  if (document.documentElement.dataset.startupReady === "true") return;
+  if (document.documentElement.dataset["startupReady"] === "true") return;
   if (startupFallbackTimer !== undefined) window.clearTimeout(startupFallbackTimer);
   const splash = document.getElementById("splash-screen");
   if (splash && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -21,11 +21,11 @@ function revealStartupShell() {
     };
     splash.addEventListener("transitionend", removeAfterFade);
   }
-  document.documentElement.dataset.startupReady = "true";
+  document.documentElement.dataset["startupReady"] = "true";
 }
 
 window.addEventListener("zenith-startup-ready", revealStartupShell, { once: true });
-const initialTheme = document.documentElement.dataset.theme;
+const initialTheme = document.documentElement.dataset["theme"];
 const initialThemeIsDark = initialTheme === "dark" || (
   initialTheme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches
 );

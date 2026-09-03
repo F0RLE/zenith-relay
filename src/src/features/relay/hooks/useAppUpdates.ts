@@ -97,7 +97,7 @@ export function useAppUpdates(): AppUpdates {
     setUpdateInstallError(null);
     setUpdateProgress({ downloaded: 0 });
     try {
-      const result = await installUpdate(availableUpdate, (downloaded, total) => setUpdateProgress({ downloaded, total }));
+      const result = await installUpdate(availableUpdate, (downloaded, total) => setUpdateProgress({ downloaded, ...(total !== undefined ? { total } : {}) }));
       if (result === "unavailable") {
         setUpdateCheckState("error");
         setUpdateInstallError("install");

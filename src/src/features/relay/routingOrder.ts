@@ -50,7 +50,8 @@ export function runtimeCandidateForMember(
         && (protocol === "all" || isResponsesCandidate(candidate.candidateId, legacyWireApi))
   ));
   if (!candidates.length) return undefined;
-  if (candidates.length === 1 && candidates[0].candidateId === memberId) return candidates[0];
+  const firstCandidate = candidates[0];
+  if (candidates.length === 1 && firstCandidate?.candidateId === memberId) return firstCandidate;
   return {
     candidateId: memberId,
     kind,
@@ -113,9 +114,26 @@ export function applyRuntimeActivity(
   order: CandidateRuntimeSnapshot[],
   activity: RuntimeActivitySnapshot,
 ) {
+  return applyRuntimeActivities(order, [activity]);
+}
+
+export function applyRuntimeActivities(
+  order: CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  const updates = new Map<string, RuntimeActivitySnapshot>();
+  for (const activity of activities) {
+    const previous = updates.get(activity.candidateId);
+    if (!previous || activity.revision > previous.revision) {
+      updates.set(activity.candidateId, activity);
+    }
+  }
+  if (!updates.size) return order;
+
   let changed = false;
   const next = order.map((candidate) => {
-    if (candidate.candidateId !== activity.candidateId) return candidate;
+    const activity = updates.get(candidate.candidateId);
+    if (!activity) return candidate;
     changed = true;
     return {
       ...candidate,
@@ -126,10 +144,9 @@ export function applyRuntimeActivity(
   });
   if (!changed) return order;
 
-  // `PoolScheduler::runtime_order` puts leased candidates first. Mirror that
-  // invariant as soon as the event arrives, rather than waiting for the
-  // lightweight order poll. The sort is stable, so the scheduler's policy
-  // order remains intact for candidates in the same activity state.
+  // `PoolScheduler::runtime_order` puts leased candidates first. Apply the
+  // whole burst before sorting once; this keeps activity updates linear in the
+  // number of candidates instead of sorting the complete order per event.
   return next
     .map((candidate, index) => ({ candidate, index }))
     .sort((left, right) => {
@@ -138,15 +155,6 @@ export function applyRuntimeActivity(
       return Number(rightActive) - Number(leftActive) || left.index - right.index;
     })
     .map(({ candidate }) => candidate);
-}
-
-export function applyRuntimeActivities(
-  order: CandidateRuntimeSnapshot[],
-  activities: Iterable<RuntimeActivitySnapshot>,
-) {
-  let next = order;
-  for (const activity of activities) next = applyRuntimeActivity(next, activity);
-  return next;
 }
 
 export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {

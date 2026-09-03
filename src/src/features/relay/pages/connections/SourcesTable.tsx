@@ -1,7 +1,8 @@
-import { ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { SourceSummary } from "../../api/types";
+import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
 import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolBindingsEditor";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
@@ -14,17 +15,65 @@ import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember, 
 import { compareStableText } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
+
+type SourceSortColumn = "status" | "name" | "server" | "route" | "models";
+type SourceSortKey = "runtime" | SourceSortColumn;
+type SourceSortDirection = "asc" | "desc";
+
+const sourceStatusRank: Record<SourceSummary["operationalStatus"], number> = {
+  disabled: 0,
+  unavailable: 1,
+  quotaWait: 2,
+  rotation: 3,
+};
+const EMPTY_SOURCES: SourceSummary[] = [];
+const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
+
+function sourceSortValue(source: SourceSummary, key: SourceSortColumn) {
+  switch (key) {
+    case "status": return sourceStatusRank[source.operationalStatus];
+    case "server": return sourceHost(source.baseUrl);
+    case "route": return effectiveSourceProtocolBindings(source)
+      .map((binding) => `${binding.wireApi}:${binding.adapter ?? "native"}`)
+      .join(",");
+    case "models": return source.models.length;
+    case "name": return source.name;
+  }
+}
+
+function compareSourcesForTable(
+  left: SourceSummary,
+  right: SourceSummary,
+  key: SourceSortKey,
+  direction: SourceSortDirection,
+  runtimePosition: ReadonlyMap<string, number>,
+) {
+  if (key === "runtime") {
+    return compareRoutingOrder(left.id, right.id, runtimePosition)
+      || compareStableText(left.name, right.name)
+      || compareStableText(left.id, right.id);
+  }
+  const leftValue = sourceSortValue(left, key);
+  const rightValue = sourceSortValue(right, key);
+  const primary = typeof leftValue === "number" && typeof rightValue === "number"
+    ? leftValue - rightValue
+    : compareStableText(String(leftValue), String(rightValue));
+  if (primary) return direction === "asc" ? primary : -primary;
+  return compareStableText(left.name, right.name) || compareStableText(left.id, right.id);
+}
+
 export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEdit: (source: SourceSummary) => void; onRefresh: (sourceId: string) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
-  const nowMs = useRelativeTimeClock((runtime?.gateway.routingOrder ?? [])
-    .flatMap((candidate) => candidate.kind === "api_source" ? [candidate.nextRetryAtMs] : []));
-  if (!runtime?.sources.length) {
-    return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
-  }
-  const runtimePosition = routingOrderPositions(runtime.gateway.routingOrder ?? []);
-  const sources = runtime.sources
+  const [sort, setSort] = useState<{ key: SourceSortKey; direction: SourceSortDirection }>({ key: "runtime", direction: "asc" });
+  const sourcesSnapshot = runtime?.sources ?? EMPTY_SOURCES;
+  const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
+  const retryTimestamps = useMemo(() => runtimeOrder
+    .flatMap((candidate) => candidate.kind === "api_source" ? [candidate.nextRetryAtMs] : []), [runtimeOrder]);
+  const nowMs = useRelativeTimeClock(retryTimestamps);
+  const runtimePosition = useMemo(() => routingOrderPositions(runtimeOrder), [runtimeOrder]);
+  const sources = useMemo(() => sourcesSnapshot
     .filter((source) => matchesQuery(
       query,
       source.name,
@@ -32,10 +81,34 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
       effectiveSourceProtocolBindings(source).map((binding) => binding.wireApi),
       source.models,
     ))
-    .sort((left, right) => compareRoutingOrder(left.id, right.id, runtimePosition) || compareStableText(left.name, right.name));
+    .sort((left, right) => compareSourcesForTable(left, right, sort.key, sort.direction, runtimePosition)),
+  [query, runtimePosition, sort.direction, sort.key, sourcesSnapshot]);
+  if (!runtime?.sources.length) {
+    return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
+  }
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
-  const runtimeOrder = runtime.gateway.routingOrder ?? [];
+  const sortColumn = (key: SourceSortKey) => setSort((current) =>
+    current.key === key
+      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: "asc" },
+  );
+  const sortLabel = (key: SourceSortKey, label: string) => {
+    const active = sort.key === key;
+    const direction = active ? sort.direction : "asc";
+    const Icon = active ? (direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+    return (
+      <button
+        className="source-sort-button"
+        type="button"
+        aria-label={t(direction === "asc" ? "sources.sortAscending" : "sources.sortDescending", { column: label })}
+        aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}
+        onClick={() => sortColumn(key)}
+      >
+        <span>{label}</span><Icon aria-hidden />
+      </button>
+    );
+  };
   const updateParticipation = (source: SourceSummary, inPool: boolean) => perform(
     `source-pool-${source.id}`,
     () => updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool }),
@@ -44,7 +117,14 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
   return (
     <div className="relay-table-wrap relay-compact-content">
       <table className="relay-table source-table">
-        <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.route")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
+        <thead><tr>
+          <th aria-sort={sort.key === "status" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("status", t("common.status"))}</th>
+          <th aria-sort={sort.key === "name" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("name", t("common.name"))}</th>
+          <th aria-sort={sort.key === "server" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("server", t("sources.host"))}</th>
+          <th aria-sort={sort.key === "route" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("route", t("sources.route"))}</th>
+          <th aria-sort={sort.key === "models" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("models", t("common.models"))}</th>
+          <th><span className="sr-only">{t("common.actions")}</span></th>
+        </tr></thead>
         <tbody>{sources.map((source) => {
           const launchBusy = busy === `launch-source-${source.id}`;
           const supportsAnyRoute = sourceSupportsAnyWireApi(source);
@@ -61,14 +141,15 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
              ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi)
             : undefined;
           const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
-          const modelRetries = upcomingModelRetries(runtimeState, nowMs);
+           const modelRetries = upcomingModelRetries(runtimeState, nowMs);
+           const firstModelRetry = modelRetries[0];
           const runtimeHint = runtimeState?.halfOpen
             ? t("pool.recoveryProbe")
-            : modelRetries.length
-              ? t("pool.modelRetryAt", {
-                models: modelRetries.map((retry) => retry.model).join(", "),
-                time: formatDetailedRemainingTime(modelRetries[0].retryAtMs, nowMs, t),
-              })
+             : firstModelRetry
+               ? t("pool.modelRetryAt", {
+                 models: modelRetries.map((retry) => retry.model).join(", "),
+                 time: formatDetailedRemainingTime(firstModelRetry.retryAtMs, nowMs, t),
+               })
             : runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
               ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
               : null;

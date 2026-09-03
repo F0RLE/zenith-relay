@@ -48,7 +48,7 @@ export function useSourceOrderDrag({
       return;
     }
     const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId ?? null;
+    const targetId = row?.dataset["sourceId"] ?? null;
     setDropRole(null);
     setDropTarget(targetId && targetId !== sourceId ? targetId : null);
     if (targetId && targetId !== sourceId && row) {
@@ -70,7 +70,7 @@ export function useSourceOrderDrag({
       return;
     }
     const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId;
+    const targetId = row?.dataset["sourceId"];
     if (targetId && targetId !== sourceId && row) {
       const bounds = row.getBoundingClientRect();
       onSourceDrop(sourceId, targetId, clientY >= bounds.top + bounds.height / 2);
@@ -112,6 +112,6 @@ export function useSourceOrderDrag({
 }
 
 function sourceRoleAt(target: Element | null): ApiSourceRole | null {
-  const role = target?.closest<HTMLElement>("[data-source-role]")?.dataset.sourceRole;
+  const role = target?.closest<HTMLElement>("[data-source-role]")?.dataset["sourceRole"];
   return role === "primary" || role === "stabilizer" || role === "reserve" ? role : null;
 }

@@ -1,4 +1,5 @@
 import { formatMicroUsd } from "./currencyFormatting";
+import { formatNumber } from "./numberFormatting";
 
 export function formatApiEquivalent(microUsd: number, locale: string) {
   return `≈${formatMicroUsd(microUsd, locale, {
@@ -23,7 +24,7 @@ export function formatAccountValueMicroUsd(value: number, locale: string, approx
 }
 
 export function formatModelPrice(microUsd: number, locale: string) {
-  return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`;
+  return `$${formatNumber(microUsd / 1_000_000, locale, { maximumFractionDigits: 6 })}`;
 }
 
 export function formatReasoningEffort(effort: string) {

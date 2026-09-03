@@ -1,4 +1,5 @@
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands } from "../api/commands";
@@ -10,7 +11,7 @@ import { useRelayOperations } from "./useRelayOperations";
 import { useRelayPreferences } from "./useRelayPreferences";
 import { useRelayRuntime } from "./useRelayRuntime";
 import { useRelayUsage } from "./useRelayUsage";
-import { RelayContext, type PerformOptions, type RelayContextValue } from "./relayStateContext";
+import { RelayStateContexts, type PerformOptions, type RelayContextValue, type RelayUsageContextValue } from "./relayStateContext";
 import { projectRuntimeAccountLabels } from "./runtimeDisplay";
 
 export { useRelayState } from "./relayStateContext";
@@ -29,11 +30,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     reportErrorFeedback,
   } = useRelayOperations();
   const {
+    loadLocalUsage,
+    loadRemoteUsage,
     localUsagePage,
     remoteUsage,
     remoteUsagePage,
-    loadLocalUsage,
-    loadRemoteUsage,
     resetUsage,
     clearInactiveUsage,
   } = useRelayUsage(relayCommands);
@@ -65,7 +66,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (mode === "remote" && !runtime.capabilities.features.includes("usage")) return;
     if (prefetchedUsageMode.current === mode) return;
     prefetchedUsageMode.current = mode;
-    const query = { page: 1, pageSize: 50 };
+    const query = {
+      page: 1,
+      pageSize: 50,
+      includeEvents: false,
+      includeModels: false,
+      includePoolMembers: false,
+    };
     const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
     void load(query).catch(() => {
       // UsagePage retries and reports the error when it is opened.
@@ -179,7 +186,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
-      document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset["theme"] = theme;
       const dark = theme === "dark" || (theme === "system" && systemTheme.matches);
       void setWindowBackgroundColor(dark ? "#121719" : "#f2f5f6");
     };
@@ -192,8 +199,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
     return displayAccountIdentity({
       index: accountIndex,
-      accountId,
-      fallbackLabel,
+      ...(accountId !== undefined ? { accountId } : {}),
+      ...(fallbackLabel !== undefined ? { fallbackLabel } : {}),
       identitiesVisible: accountIdentitiesVisible,
       canReveal: canRevealAccountIdentities,
       mode,
@@ -211,9 +218,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     runtime: displayRuntime,
-    runtimeActivity,
     runtimeRevision,
-    usageRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
     canRevealAccountIdentities,
@@ -221,11 +226,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    localUsagePage,
-    loadLocalUsage,
-    remoteUsage,
-    remoteUsagePage,
-    loadRemoteUsage,
     readyState,
     loading,
     busy,
@@ -254,9 +254,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     displayRuntime,
-    runtimeActivity,
     runtimeRevision,
-    usageRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
     canRevealAccountIdentities,
@@ -264,11 +262,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    localUsagePage,
-    loadLocalUsage,
-    remoteUsage,
-    remoteUsagePage,
-    loadRemoteUsage,
     readyState,
     loading,
     busy,
@@ -291,9 +284,18 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexWebsocketsEnabled,
   ]);
 
+  const usage = useMemo<RelayUsageContextValue>(() => ({
+    localUsagePage,
+    loadLocalUsage,
+    remoteUsage,
+    remoteUsagePage,
+    loadRemoteUsage,
+    revision: usageRevision,
+  }), [loadLocalUsage, loadRemoteUsage, localUsagePage, remoteUsage, remoteUsagePage, usageRevision]);
+
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
   }, [i18n.language]);
 
-  return <RelayContext.Provider value={value}>{children}</RelayContext.Provider>;
+  return <RelayStateContexts value={value} activity={runtimeActivity} usage={usage}>{children}</RelayStateContexts>;
 }

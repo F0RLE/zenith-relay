@@ -120,13 +120,13 @@ export function ModelRulesView() {
     const target = document.elementFromPoint(clientX, clientY);
     if (drag.kind === "group") {
       const row = target?.closest<HTMLElement>("[data-group-id]");
-      const targetId = row?.dataset.groupId ?? null;
+      const targetId = row?.dataset["groupId"] ?? null;
       setDropGroupId(targetId && targetId !== drag.id ? targetId : null);
       setDropModelId(null);
       return;
     }
     const row = target?.closest<HTMLElement>("[data-model-id]");
-    const targetId = row?.dataset.modelId ?? null;
+    const targetId = row?.dataset["modelId"] ?? null;
     setDropModelId(targetId && targetId !== drag.id ? targetId : null);
     setDropGroupId(null);
   };
@@ -135,10 +135,10 @@ export function ModelRulesView() {
     if (!drag) return;
     const target = document.elementFromPoint(clientX, clientY);
     if (drag.kind === "group") {
-      const targetId = target?.closest<HTMLElement>("[data-group-id]")?.dataset.groupId;
+      const targetId = target?.closest<HTMLElement>("[data-group-id]")?.dataset["groupId"];
       if (targetId && targetId !== drag.id) reorderGroups(drag.id, targetId);
     } else {
-      const targetId = target?.closest<HTMLElement>("[data-model-id]")?.dataset.modelId;
+      const targetId = target?.closest<HTMLElement>("[data-model-id]")?.dataset["modelId"];
       if (targetId && targetId !== drag.id) reorderModels(drag.id, targetId);
     }
     clearModelDrag();

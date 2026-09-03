@@ -1,5 +1,6 @@
 import type { UsageTotals } from "./api/types";
-import { measureTokenSpeed } from "./usageSpeed";
+import { getNumberFormatter } from "./numberFormatting";
+import { isReasonableTokenSpeed, measureTokenSpeed } from "./usageSpeed";
 
 /** Canonical input for every UI aggregation of request telemetry. */
 export type UsageTotalsSample = {
@@ -75,7 +76,7 @@ export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): Us
     totals.reasoningTokens += sample.reasoningTokens ?? 0;
     totals.outputTokens += sample.outputTokens ?? 0;
     totals.totalTokens += sample.totalTokens ?? 0;
-    if (outputTokens > 0 && sample.latencyMs > 0) {
+    if (isReasonableTokenSpeed(outputTokens, sample.latencyMs)) {
       totals.speedOutputTokens += outputTokens;
       totals.speedDurationMs += sample.latencyMs;
     }
@@ -91,12 +92,13 @@ export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): Us
 }
 
 export function formatCompactNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, {
-    notation: Math.abs(value) >= 1_000 ? "compact" : "standard",
+  const notation = Math.abs(value) >= 1_000 ? "compact" : "standard";
+  return getNumberFormatter(locale, {
+    notation,
     maximumFractionDigits: 1,
   }).format(value);
 }
 
 export function formatFullNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value);
+  return getNumberFormatter(locale, { maximumFractionDigits: 0 }).format(value);
 }

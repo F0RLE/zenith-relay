@@ -1,26 +1,40 @@
 import type { ReactNode } from "react";
+import { memo, useMemo } from "react";
 import { Activity, CreditCard, Database, Gauge, Timer } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UsageTotals } from "../../api/types";
 import { OptionMenu, Tabs } from "../../components/Ui";
+import { formatNumber } from "../../numberFormatting";
 import { formatTokenSpeed } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import { fillBuckets, formatApiEquivalent, formatUsd, lineSegments, type Analytics, type Range, type WindowBucket } from "./overviewAnalyticsModel";
 
-export default function AnalyticsPanel({ range, setRange, windows, analytics, loading, error, scope, setScope, scopeOptions }: { range: Range; setRange: (range: Range) => void; windows: WindowBucket[]; analytics: Analytics | null; loading: boolean; error: boolean; scope: string; setScope: (scope: string) => void; scopeOptions: Array<{ value: string; label: string }> }) {
+type AnalyticsPanelProps = {
+  range: Range;
+  setRange: (range: Range) => void;
+  windows: WindowBucket[];
+  analytics: Analytics | null;
+  loading: boolean;
+  error: boolean;
+  scope: string;
+  setScope: (scope: string) => void;
+  scopeOptions: Array<{ value: string; label: string }>;
+};
+
+function AnalyticsPanel({ range, setRange, windows, analytics, loading, error, scope, setScope, scopeOptions }: AnalyticsPanelProps) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const hasAnalytics = analytics !== null;
-  const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals);
-  const requestValues = buckets.map((totals) => totals.requests || null);
-  const apiValues = buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null);
-  const generationSpeedValues = buckets.map((totals) => totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null);
-  const e2eSpeedValues = buckets.map((totals) => totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null);
-  const totals = analytics?.totals ?? emptyUsageTotals();
+  const buckets = useMemo(() => analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals), [analytics, windows]);
+  const requestValues = useMemo(() => buckets.map((totals) => totals.requests || null), [buckets]);
+  const apiValues = useMemo(() => buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null), [buckets]);
+  const generationSpeedValues = useMemo(() => buckets.map((totals) => totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null), [buckets]);
+  const e2eSpeedValues = useMemo(() => buckets.map((totals) => totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null), [buckets]);
+  const totals = useMemo(() => analytics?.totals ?? emptyUsageTotals(), [analytics]);
   const averageGenerationSpeed = totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
   const averageE2eSpeed = totals.speedDurationMs && totals.speedOutputTokens ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
   const apiTotal = totals.apiEquivalent;
-  const rangeTabs = [{ id: "today", label: t("overview.ranges.today") }, { id: "week", label: t("overview.ranges.week") }, { id: "month", label: t("overview.ranges.month") }];
+  const rangeTabs = useMemo(() => [{ id: "today", label: t("overview.ranges.today") }, { id: "week", label: t("overview.ranges.week") }, { id: "month", label: t("overview.ranges.month") }], [t]);
 
   return <section className={`overview-analytics ${loading ? "loading" : ""} ${hasAnalytics ? "has-data" : ""}`} aria-busy={loading}>
     <header className="overview-analytics-header"><h2>{t("overview.analytics")}</h2><div className="overview-analytics-controls"><OptionMenu className="overview-scope-menu" label={t("overview.scopeLabel")} value={scope} onChange={setScope} options={scopeOptions} /><Tabs value={range} onChange={(value) => setRange(value as Range)} label={t("overview.period")} items={rangeTabs} /></div></header>
@@ -29,11 +43,13 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
       <TokenUsageTrend buckets={buckets} totals={totals} windows={windows} loading={loading && !hasAnalytics} />
       <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading && !hasAnalytics} />
       <OverviewChart icon={<Activity aria-hidden />} title={t("usage.requests")} summary={formatCompactNumber(totals.requests, locale)} values={requestValues} windows={windows} variant="bars" tone="requests" formatValue={(value) => formatFullNumber(value, locale)} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<Gauge aria-hidden />} title={t("usage.generationSpeed")} summary={formatTokenSpeed(averageGenerationSpeed, locale, t("usage.tokensPerSecondUnit"))} values={generationSpeedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<Timer aria-hidden />} title={t("usage.summaryMetrics.e2eSpeed")} summary={formatTokenSpeed(averageE2eSpeed, locale, t("usage.tokensPerSecondUnit"))} values={e2eSpeedValues} windows={windows} variant="line" tone="e2e-speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Gauge aria-hidden />} title={t("usage.generationSpeed")} summary={formatTokenSpeed(averageGenerationSpeed, locale, t("usage.tokensPerSecondUnit"))} values={generationSpeedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Timer aria-hidden />} title={t("usage.summaryMetrics.e2eSpeed")} summary={formatTokenSpeed(averageE2eSpeed, locale, t("usage.tokensPerSecondUnit"))} values={e2eSpeedValues} windows={windows} variant="line" tone="e2e-speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })} loading={loading && !hasAnalytics} />
     </div>
   </section>;
 }
+
+export default memo(AnalyticsPanel);
 function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: UsageTotals[]; totals: UsageTotals; windows: WindowBucket[]; loading: boolean }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
@@ -96,9 +112,11 @@ function OverviewChart({ icon, title, summary, values, windows, variant, tone, f
           <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none"><path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />{variant === "line" ? segments.map((path, index) => <path className="overview-chart-line" d={path} key={index} />) : null}</svg>
           <ol className={`overview-chart-points ${variant}`} style={{ gridTemplateColumns: `repeat(${values.length}, minmax(0, 1fr))` }}>
             {values.map((value, index) => {
+              const window = windows[index];
+              if (!window) return null;
               const ratio = value == null ? 0 : value / max;
               const label = value == null ? t("common.unknown") : formatValue(value);
-              return <li key={windows[index].startMs}>{variant === "bars" && value != null ? <span tabIndex={0} className="overview-chart-bar" style={{ height: `${Math.max(3, ratio * 100)}%` }} aria-label={`${windows[index].fullLabel}: ${label}`}><span role="tooltip">{windows[index].fullLabel}<strong>{label}</strong></span></span> : null}{variant === "line" && value != null ? <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${windows[index].fullLabel}: ${label}`}><span role="tooltip">{windows[index].fullLabel}<strong>{label}</strong></span></span> : null}</li>;
+              return <li key={window.startMs}>{variant === "bars" && value != null ? <span tabIndex={0} className="overview-chart-bar" style={{ height: `${Math.max(3, ratio * 100)}%` }} aria-label={`${window.fullLabel}: ${label}`}><span role="tooltip">{window.fullLabel}<strong>{label}</strong></span></span> : null}{variant === "line" && value != null ? <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${window.fullLabel}: ${label}`}><span role="tooltip">{window.fullLabel}<strong>{label}</strong></span></span> : null}</li>;
             })}
           </ol>
           {!loading && !hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}

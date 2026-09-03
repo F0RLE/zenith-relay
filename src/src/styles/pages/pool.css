@@ -776,9 +776,17 @@
 }
 
 .pool-connection-option-icon img {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   object-fit: contain;
+}
+
+/* Keep the two product marks balanced on the light surface: the ChatGPT
+   mark needs a readable mid-tone while OpenCode's official black mark gets
+   a little more breathing room inside its tile. */
+:root:not([data-theme="dark"]) .pool-connection-option-icon img[src*="opencode"] {
+  width: 38px;
+  height: 38px;
 }
 
 .pool-connection-option strong {

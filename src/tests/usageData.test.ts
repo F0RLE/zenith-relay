@@ -40,6 +40,7 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   routing: null,
   accountId: "account",
   candidateKind: "account",
+  candidateKey: "account",
   apiEquivalent: { microUsd: 1_500_000, pricedTokens: 45, unpricedTokens: 0 },
   requestOrigin: null,
   ...overrides,
@@ -129,6 +130,7 @@ describe("usage data", () => {
       connection: "ChatGPT",
       accountId: "account-1",
       candidateKind: "account",
+      candidateKey: "account-1",
       appliedServiceTier: "priority",
       requestOrigin: "activity_summary",
       ttft: 120,
@@ -143,6 +145,7 @@ describe("usage data", () => {
       connection: "Named Remote account",
       accountId: null,
       candidateKind: "account",
+      candidateKey: "remote-account",
       appliedServiceTier: "flex",
       requestOrigin: null,
       ttft: 100,
@@ -225,7 +228,7 @@ describe("usage data", () => {
   });
 
   test("renders unavailable and partially priced API equivalents consistently", () => {
-    expect(formatUsageApiEquivalent({ microUsd: 0, pricedTokens: 0, unpricedTokens: 10 }, "en-US")).toBe("-");
+    expect(formatUsageApiEquivalent({ microUsd: 0, pricedTokens: 0, unpricedTokens: 10 }, "en-US")).toBe("—");
     expect(formatUsageApiEquivalent({ microUsd: 1_234_567, pricedTokens: 10, unpricedTokens: 2 }, "en-US")).toBe("≈$1.2346");
   });
 });

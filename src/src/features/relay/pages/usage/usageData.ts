@@ -50,6 +50,7 @@ export type UsageRow = {
   routing: RoutingDiagnostics | null;
   accountId: string | null;
   candidateKind: "account" | "source";
+  candidateKey: string;
   apiEquivalent: UsageTotals["apiEquivalent"] | null;
   requestOrigin: CodexRequestOrigin;
 };
@@ -93,6 +94,7 @@ function usageRowFromEvent(
   connection: string,
   accountId: string | null,
   candidateKind: UsageRow["candidateKind"],
+  candidateKey: string,
   requestOrigin: CodexRequestOrigin,
 ): UsageRow {
   return {
@@ -125,6 +127,7 @@ function usageRowFromEvent(
     routing: event.routing ?? null,
     accountId,
     candidateKind,
+    candidateKey,
     apiEquivalent: event.apiEquivalent ?? null,
     requestOrigin,
   };
@@ -145,6 +148,7 @@ export function usageRowsFromLocal(events: readonly LocalUsage[], labels: LocalU
       connection,
       event.accountId ?? null,
       event.accountId ? "account" : "source",
+      event.accountId ?? event.sourceId,
       requestOrigin,
     );
   });
@@ -165,6 +169,7 @@ export function usageRowsFromRemote(events: readonly RemoteUsage[], labels: Remo
       connection,
       null,
       event.candidateKind,
+      event.candidateHint,
       requestOrigin,
     );
   });

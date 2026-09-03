@@ -193,8 +193,8 @@ function collectImportFailures(response: ConfirmAccountImportResponse | null, se
       return {
         itemId: item.itemId,
         code: item.error?.code ?? "unknown",
-        label: row?.label,
-        identity: row?.identity,
+        ...(row?.label ? { label: row.label } : {}),
+        ...(row?.identity ? { identity: row.identity } : {}),
       };
     });
 }

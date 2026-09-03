@@ -31,10 +31,16 @@ function localizeReleaseNotes(body: string | undefined, language: string) {
   if (!body?.trim()) return "";
   const markers = [...body.matchAll(/<!--\s*relay-notes:([a-z0-9-]+)\s*-->/gi)];
   if (!markers.length) return body.trim();
-  const sections = new Map(markers.map((marker, index) => [
-    marker[1].toLowerCase(),
-    body.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index).trim(),
-  ]));
+  const sections = new Map<string, string>();
+  markers.forEach((marker, index) => {
+    const markerLocale = marker[1];
+    if (!markerLocale) return;
+    sections.set(
+      markerLocale.toLowerCase(),
+      body.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index).trim(),
+    );
+  });
   const locale = language.toLowerCase();
-  return sections.get(locale) ?? sections.get(locale.split("-")[0]) ?? sections.get("en") ?? sections.values().next().value ?? "";
+  const baseLocale = locale.split("-")[0] ?? locale;
+  return sections.get(locale) ?? sections.get(baseLocale) ?? sections.get("en") ?? sections.values().next().value ?? "";
 }

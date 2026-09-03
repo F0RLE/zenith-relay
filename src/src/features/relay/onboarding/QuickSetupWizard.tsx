@@ -248,7 +248,7 @@ export function QuickSetupWizard() {
       {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p></div> : null}
     </section>
     <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 4 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>
-    {showImport ? <Suspense fallback={null}><ImportDialog initialSession={importSession ?? undefined} modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={closeImport} /></Suspense> : null}
+    {showImport ? <Suspense fallback={null}><ImportDialog {...(importSession ? { initialSession: importSession } : {})} modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={closeImport} /></Suspense> : null}
   </main>;
 }
 

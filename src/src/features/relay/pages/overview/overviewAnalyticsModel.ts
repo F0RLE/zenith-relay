@@ -49,6 +49,31 @@ export function analyticsFromPage(
 }
 
 export function bucketsFromSamples(windows: WindowBucket[], samples: UsageSample[]) {
+  const firstWindow = windows[0];
+  if (!firstWindow) return [];
+
+  // Chart windows are fixed-width and contiguous. Indexing them in one pass
+  // avoids scanning the complete sample list once for every bucket.
+  const bucketMs = firstWindow.endMs - firstWindow.startMs + 1;
+  const fixedWindows = bucketMs > 0 && windows.every((window, index) => {
+    const previous = windows[index - 1];
+    return window.endMs === window.startMs + bucketMs - 1
+      && (index === 0 || (previous !== undefined && window.startMs === previous.startMs + bucketMs));
+  });
+  if (fixedWindows) {
+    const samplesByBucket = windows.map(() => [] as UsageSample[]);
+    const firstStartMs = firstWindow.startMs;
+    for (const sample of samples) {
+      const index = Math.floor((sample.createdAtMs - firstStartMs) / bucketMs);
+      if (index < 0 || index >= samplesByBucket.length) continue;
+      const window = windows[index];
+      const bucket = samplesByBucket[index];
+      if (window && bucket && sample.createdAtMs >= window.startMs && sample.createdAtMs <= window.endMs) bucket.push(sample);
+    }
+    return windows.map((window, index) => ({ startMs: window.startMs, totals: totalsFromSamples(samplesByBucket[index] ?? []) }));
+  }
+
+  // Keep the inclusive behavior for callers that provide irregular windows.
   return windows.map((window) => ({
     startMs: window.startMs,
     totals: totalsFromSamples(samples.filter((sample) => sample.createdAtMs >= window.startMs && sample.createdAtMs <= window.endMs)),

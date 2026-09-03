@@ -1,4 +1,5 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
@@ -422,7 +423,9 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
     const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;
     if (nextIndex < 0) return;
     event.preventDefault();
-    onChange(items[nextIndex].id);
+    const nextItem = items[nextIndex];
+    if (!nextItem) return;
+    onChange(nextItem.id);
     event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus();
   };
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
@@ -488,6 +491,7 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
       }
       const first = items[0];
       const last = items[items.length - 1];
+      if (!first || !last) return;
       const active = document.activeElement;
       if (active === dialog || !dialog.contains(active)) {
         event.preventDefault();
@@ -589,12 +593,12 @@ export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: Quo
     ...(["primary", "secondary"] as const).flatMap((kind) => {
       const window = snapshot[kind];
       if (!window) return [];
-      return [{ id: kind, label: "", serviceTier: undefined, window }];
+      return [{ id: kind, label: "", serviceTier: null, window }];
     }),
     ...supplemental,
   ];
-  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} concise={concise} /></div>;
-  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${formatSupplementalQuotaLabel(item.label, item.serviceTier, t)} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} concise={concise} />)}</div>;
+  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} concise={concise} {...(nowMs !== undefined ? { nowMs } : {})} /></div>;
+  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} concise={concise} {...(item.label ? { label: `${formatSupplementalQuotaLabel(item.label, item.serviceTier, t)} · ${quotaWindowLabel(item.window, item.window.kind, t)}` } : {})} {...(nowMs !== undefined ? { nowMs } : {})} />)}</div>;
 }
 
 export function SecretField({

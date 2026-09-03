@@ -59,7 +59,7 @@ export function RelayShell() {
   const openImport = useCallback((paths?: string[]) => {
     if (mode === "zenith") setMode("local");
     setPage("connections");
-    setImportRequest({ id: ++nextImportRequest.current, paths });
+    setImportRequest({ id: ++nextImportRequest.current, ...(paths ? { paths } : {}) });
   }, [mode, setMode, setPage]);
   useEffect(() => {
     if (contentRef.current) {
@@ -189,7 +189,7 @@ export function RelayShell() {
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates({ openWhenAvailable: true, includeSkipped: true })} /></Suspense>}
       </div>
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
-      {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /></Suspense> : null}
+      {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} {...(importRequest.paths ? { initialPaths: importRequest.paths } : {})} onClose={() => setImportRequest(null)} /></Suspense> : null}
       {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={closeUpdateDialog} /> : null}
     </div>
   );

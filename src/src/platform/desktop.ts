@@ -108,11 +108,11 @@ export async function checkForUpdate(): Promise<AppUpdate | null> {
   const portableTarget = await getPortableUpdateTarget();
   const update = portableTarget ? await checkPortableUpdate(portableTarget) : await check();
   if (!update) return null;
-  const metadata = {
+  const metadata: AppUpdate = {
     currentVersion: update.currentVersion,
     version: update.version,
-    date: update.date,
-    body: update.body,
+    ...(update.date !== undefined ? { date: update.date } : {}),
+    ...(update.body !== undefined ? { body: update.body } : {}),
     portable: Boolean(portableTarget),
   };
   await update.close();
