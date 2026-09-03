@@ -1,7 +1,7 @@
 <div align="center">
   <img src="src-tauri/icons/zenith-relay.svg" width="128" alt="Zenith Relay">
   <h1>Zenith Relay</h1>
-  <p>Personal desktop relay for ChatGPT accounts and compatible APIs.</p>
+  <p>Personal desktop relay for ChatGPT, OpenCode, and compatible APIs.</p>
   <p>
     <a href="https://github.com/F0RLE/zenith-relay/releases/latest"><img src="https://img.shields.io/github/v/release/F0RLE/zenith-relay?display_name=tag&style=for-the-badge" alt="Latest release"></a>&nbsp;
     <a href="docs/help/en/README.md"><img src="https://img.shields.io/badge/docs-English-2ea44f?style=for-the-badge" alt="English documentation"></a>&nbsp;
@@ -14,7 +14,8 @@
   Zenith Relay keeps user-owned ChatGPT accounts and compatible API sources in
   one place, lets you choose which connections receive requests, and exposes
   one private OpenAI-compatible endpoint.<br>
-  ChatGPT profile changes are reversible and protected by a recovery point.
+  Relay-managed ChatGPT settings are reversible, and OpenCode keeps its
+  original configuration for recovery.
 </p>
 
 ## Download
@@ -44,9 +45,10 @@ be opened again from **Help**.
 1. Open **Connections** and add a ChatGPT account, an API source, or a proxy.
 2. In **Pool**, include the connections and models that may receive traffic.
 3. Start the endpoint in **API**, open the **Application** tab, and connect
-   the selected ChatGPT profile.
+   ChatGPT or OpenCode when needed.
 4. Use **Overview** for status and performance, **Usage** for request history,
-   and **Recovery** for profile snapshots.
+   and **Recovery** to restore Relay-managed ChatGPT settings or the saved
+   OpenCode configuration.
 
 The complete behavior and troubleshooting guidance are kept in the in-app
 **Help** section and the [English guide](docs/help/en/README.md).

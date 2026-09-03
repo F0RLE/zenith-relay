@@ -23,11 +23,14 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-Dwarnings"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.1
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-audit
@@ -42,6 +45,9 @@ jobs:
       - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
       - run: cargo check --manifest-path relay-server/Cargo.toml --locked
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Agent guardrails
+        shell: pwsh
+        run: ./scripts/check-agent-guardrails.ps1
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
 

@@ -33,8 +33,27 @@ release entries are kept concise and link to the corresponding tag.
   ChatGPT/Codex requests follow it directly, while external API clients retain
   their explicit tier; the upstream-reported tier remains a diagnostic value.
 
+### Pricing
+
+- Replaced the hand-maintained OpenAI price file with one validated LiteLLM
+  catalog shared by desktop and Relay Server. Account estimates use only an
+  exact record in the account's declared official family; API sources resolve
+  provider evidence, LiteLLM exact, declared-family canonical, then a manual
+  source value.
+- Kept input, cache-read, cache-write (5m/1h), output, and image/request
+  tariffs independent. Missing components remain unpriced instead of falling
+  back to another tariff or displaying `$0`.
+- Added immutable catalog snapshots, local ETag/Last-Modified cache metadata,
+  stale/offline fallback, atomic replacement, and revision-aware invalidation
+  for usage and API-equivalent totals. Pricing remains informational and never
+  changes routing or quota decisions.
+
 ### Desktop UI
 
+- ChatGPT recovery now restores only Relay-managed configuration and sign-in
+  state. Named and full-profile snapshots were removed, while reversible
+  history repair remains active for ChatGPT-to-Relay and Relay-to-ChatGPT
+  transitions.
 - Pool connections now include OpenCode. Connecting writes a managed
   `zenith-relay` OpenCode provider with the currently enabled pool models and
   preserves the previous OpenCode configuration for one-click recovery.
@@ -56,6 +75,13 @@ release entries are kept concise and link to the corresponding tag.
   while the latest aggregates refresh in the background.
 - Update discovery starts with the application instead of an arbitrary startup
   delay, and compact icon-only controls keep their accessible action names.
+- OpenCode recovery now mirrors the ChatGPT recovery view with an explicit
+  original-config snapshot, creation date, path, and confirmed restore action.
+- Relay-owned recovery files now use an application-first layout under
+  `recovery/applications`, while legacy recovery directories migrate safely on
+  startup without overwriting conflicts.
+- Help, planning, and release documentation now describe the current ChatGPT
+  and OpenCode integrations and the actual local storage boundaries.
 
 ## [1.1.1] - 2026-08-28
 
@@ -188,9 +214,12 @@ account pool.
   Responses-to-Gemini compatibility, including tool-call continuations.
 - Added source model discovery, clear price provenance, image generation/edit
   prices, semantic model ordering, and declared reasoning catalog modes.
-- Catalog refresh runs at startup and every eight hours during an active app
-  session. Catalog failures stay visible after restart; reasoning modes remain
-  catalog metadata and changing a reasoning setting does not probe a provider.
+- Catalog refresh runs as an asynchronous conditional check at startup and
+  approximately every 24 hours during an active app session. A deterministic
+  spread prevents synchronized daily checks, while 5/30/120-minute retry
+  deadlines remain exact after failures. Catalog failures stay visible after
+  restart; reasoning modes remain catalog metadata and changing a reasoning
+  setting does not probe a provider.
 - Reasoning policies apply only to pooled API sources. Native OAuth models keep
   their provider capabilities unchanged.
 - Added native WebSocket support and an HTTP/SSE compatibility path for

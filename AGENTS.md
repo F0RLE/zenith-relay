@@ -54,6 +54,11 @@ bun run test:e2e
 For shared runtime or server changes, also run the strict Rust checks documented
 in `CONTRIBUTING.md`.
 
+The repository CI additionally runs `scripts/check-agent-guardrails.ps1` and
+`scripts/check-duplicate-code.ps1`. The duplicate check compares the working
+tree with the Git base and rejects only newly introduced Rust or TypeScript
+clones.
+
 For packaging/updater changes, also run or verify the Tauri build path:
 
 ```bash

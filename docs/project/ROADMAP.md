@@ -1,6 +1,6 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-08-23.
+Last reviewed: 2026-09-03.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
@@ -19,11 +19,12 @@ user operates, after an explicit management confirmation. State, usage,
 telemetry, diagnostics, exports, and API snapshots must remain redacted. Any
 future feature that cannot prove this boundary is out of scope.
 
-## Release baseline - v1.1.0
+## Implementation status
 
-The product implementation gate is closed for the 1.1.0 release: the local
-desktop surface, provider-neutral routing contracts, profile recovery, quota
-automation, model availability handling, redaction rules, and responsive UI
+The current product implementation gate is closed for the shipped desktop
+scope: the local desktop surface, provider-neutral routing contracts, profile
+recovery, quota automation, model availability handling, redaction rules, and
+responsive UI
 are covered by the implementation checks and review required by the release
 process. The user-visible scope is recorded in
 [CHANGELOG.md](../releases/CHANGELOG.md);
@@ -36,16 +37,16 @@ step and must be tested after the local desktop path, not in parallel with it.
 
 ## Current order
 
-1. The v1.1.0 implementation baseline is complete; no live production claim is
+1. The shipped implementation baseline is complete; no live production claim is
    made without the deferred P0 evidence below.
 2. P0 live acceptance is deferred until permitted real accounts are available;
    the user-managed server path is last.
-3. P1 is in progress: explain the reported slow pool switch with warm timing
-   and disk-I/O evidence before changing the loading architecture.
-4. P2 is in progress: keep the shared reliability contracts and close the
-   remaining `repair` consistency risks.
-5. P3 is in progress: the catalog, reasoning, usage, and adapter foundations
-   are implemented, but real client/provider acceptance evidence is still open.
+3. P1 is in progress: measure warm startup, page open, and pool-switch disk I/O
+   before changing the loading architecture.
+4. P2 is in progress: preserve reliability contracts and validate the new
+   application recovery layout on upgraded installations.
+5. P3 is in progress: catalog, reasoning, usage, adapter, ChatGPT, and OpenCode
+   foundations are implemented; real client/provider acceptance remains open.
 6. P4 and P5 remain demand-gated. Do not add speculative account connectors or
    multi-server coordination ahead of the existing acceptance gates.
 7. P6 through P8 are long-term design records only. Do not start named-profile,
@@ -53,7 +54,7 @@ step and must be tested after the local desktop path, not in parallel with it.
    the current Zenith production Gateway/Control API path is stable.
 8. P9 remains the release-evidence gate for any production claim.
 
-## Review record — 2026-08-20
+## Implementation review — 2026-09-03
 
 The previous review was stale by one implementation cycle. The current tree
 already contains the following foundations, so they are no longer described as
@@ -69,6 +70,10 @@ unstarted work:
   rebuild, and rollback.
 - incremental API-equivalent totals backed by the existing usage rollup,
   including migration-safe handling of retained request logs.
+- OpenCode connection, live pool model projection, image/reasoning metadata,
+  and one-shot original-config recovery.
+- Application-first recovery storage with an idempotent migration from the
+  previous `recovery/profiles` and sibling-directory layout.
 
 These are implementation and fixture results, not production acceptance. The
 remaining release blockers are real-account pool/server runs, real
@@ -81,15 +86,19 @@ stop after partially deleting the batch. Both implementation follow-ups are
 now closed; live provider and client acceptance
 remains open.
 
-The profile-recovery follow-up is now closed in the implementation: the first
-local startup creates one durable original snapshot and orders it first;
-manual snapshots remain available at any time; restore is full-only and never
-creates a hidden pre-restore copy; and deletion uses an explicit ten-second
-confirmation cooldown. Snapshot metadata also stores portable Windows paths.
-The history-repair path now preserves its rollback handle during cleanup,
-updates only SQLite threads whose rollout was actually processed, rewrites
-every relevant session metadata record, and normalizes extended Windows paths
+The profile-recovery follow-up is now closed in the implementation: ChatGPT
+restores only Relay-managed configuration and authentication, preserving
+unrelated settings and rejecting a newer manual sign-in. Named and full-profile
+ChatGPT snapshots were removed. The history-repair path preserves its rollback
+handle during cleanup, updates only SQLite threads whose rollout was actually
+processed, rewrites every relevant session metadata record in either direction
+between ChatGPT and Relay/API providers, and normalizes extended Windows paths
 in preview and backup validation.
+
+The remaining recovery acceptance is client-level: verify that a running
+OpenCode desktop/CLI process reloads after connect, that a failed config write
+leaves the original file intact, and that restore works for JSON and JSONC
+files on each supported platform.
 
 ## P0 - Prove the personal pool in production (deferred)
 
@@ -212,8 +221,9 @@ evidence.
 1. Run source discovery against real Responses and Messages endpoints and prove
    that model availability, protocol bindings, reasoning hints, discovered
    prices, and manual price overrides remain separate across refreshes. Keep
-   account API-equivalent estimates on the official account catalog path, while
-   API sources resolve provider evidence, official fallback, then manual price.
+   account API-equivalent estimates on the LiteLLM exact-record path within
+   the declared official family, while API sources resolve provider evidence,
+   LiteLLM exact, declared-family canonical, then manual price.
 2. Keep native passthrough as the provider contract and use a named adapter for
    every protocol conversion. A confirmed native Messages binding may derive
    the existing Responses-to-Messages runtime route; it must not be treated as
@@ -252,10 +262,12 @@ restores the previous profile catalog on recovery. Remaining release gates:
 
 ### Additional client applications
 
-Add a client integration only where users need it and the program supports a
-safe reversible configuration path. Each integration must use the shared pool
-endpoint and server authentication boundary; it must not fork routing or
-secret storage.
+OpenCode configuration integration is shipped. The remaining acceptance work is
+to run it against supported desktop/CLI installations on each platform and
+prove model refresh, image input, reasoning variants, restart behavior, and
+restore after a failed write. Future applications must use the same shared pool
+endpoint and reversible storage boundary; they must not fork routing or secret
+storage.
 
 ## P4 - Additional subscription account connectors (deferred)
 
@@ -362,6 +374,11 @@ complete alias contract; keep those distinctions explicit.
    reports prices, retain evidence, currency/unit, freshness, and the manual
    override separately. Relay personal API-equivalent values remain
    informational, not customer billing prices.
+6. Keep LiteLLM catalog refresh independent from request execution: load the
+   last valid local snapshot before the first runtime snapshot, use stale data
+   offline, validate before atomic replacement, and invalidate derived totals
+   by catalog/policy revision. Never reintroduce a hand-maintained OpenAI price
+   file or let a missing price become `$0`.
 
 ## P8 - Optional Zenith runtime convergence (future)
 

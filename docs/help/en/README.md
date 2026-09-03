@@ -97,12 +97,13 @@ never rendered in the application.
 Use the reissue action next to it only when the key may have been exposed. The
 previous key stops working after the replacement is copied.
 
-The **Application** tab configures ChatGPT separately from the API. Its
-connection creates a protected recovery point before changing the selected
-profile, and can be returned from **Recovery**. The ChatGPT client can
-use every enabled, compatible model in the pool through the endpoint, not only
-models from the ChatGPT family. Reasoning, request speed, price rules, and pool
-order still come from **Pool**.
+The **Application** tab configures ChatGPT or OpenCode separately from the API.
+Connecting either application preserves the state Relay needs to reverse its
+own configuration. The ChatGPT client can use every enabled, compatible model
+in the pool through the endpoint, not only models from the ChatGPT family.
+OpenCode receives the prepared pool model snapshot and its reasoning variants
+when connected.
+Reasoning, request speed, price rules, and pool order still come from **Pool**.
 
 The ChatGPT application's WebSocket preference is separate from the provider transport.
 If WebSocket is unavailable, Relay can use its supported HTTP route; a client
@@ -124,14 +125,27 @@ secrets are not stored.
 
 ## 6. Recovery
 
-**Recovery** keeps local ChatGPT profile snapshots. Relay creates an automatic
-return point before a managed profile switch. You can also create a named
-snapshot before a risky change and restore it after confirmation.
+**Recovery** has separate ownership boundaries for ChatGPT and OpenCode.
+For ChatGPT, **Restore** reverses only the configuration and sign-in state
+managed by Relay. It preserves unrelated client settings and refuses to
+overwrite a newer manual sign-in. There are no named or full-profile ChatGPT
+snapshots.
 
-A snapshot restores the profile files that it contains, including sign-in and
-client settings. Relay refuses to overwrite a newer manual sign-in. The local
-pool reset first attempts to restore the previous profile, then removes local
-accounts, sources, settings, and usage; named snapshots stay available.
+When ChatGPT crosses between its native account and a Relay/API connection,
+Relay repairs the affected conversation metadata for the target provider. The
+repair is transactional in both directions and rolls back if the profile change
+does not complete.
+
+OpenCode keeps one exact original `opencode.json`/JSONC copy before its first
+Relay change. Its restore replaces the managed configuration and consumes that
+saved original copy. The local pool reset first attempts the managed ChatGPT
+restore, then removes local accounts, sources, settings, and usage.
+
+Relay-owned files are stored under `%LOCALAPPDATA%\\Zenith Relay`. Runtime data
+and the encrypted vault are in `data`, temporary imports and deployment bundles
+are in `cache`, and recovery files are grouped under
+`recovery/applications/chatgpt`, `recovery/applications/opencode`, and
+`recovery/operations/history-repair`.
 
 Account export is different from a snapshot: it is a credential-bearing transfer
 file. Treat it as a secret, use it only for the intended import, and delete it
@@ -156,7 +170,7 @@ The following groups cover the normal failures.
 | Pool | No eligible pool member | Enable a member, add the model to its rules, repair its account/source, or add a compatible fallback. |
 | Pool | All members cooling down or out of quota | Wait for retry/reset or change the pool membership/order. |
 | Pool | No compatible adapter or route | Assign the model to the correct native or bridge format in **Model Rules**. |
-| Relay | API stopped, wrong address, profile switch failed, local data unavailable | Start the endpoint, reconnect the displayed address, restore a recovery point, or inspect the local error details. |
+| Relay | API stopped, wrong address, profile switch failed, local data unavailable | Start the endpoint, reconnect the displayed address, restore the managed configuration, or inspect the local error details. |
 
 Relay can retry a different eligible member only before response data reaches the
 client. Once a response has started, its owner stays fixed so the client does
