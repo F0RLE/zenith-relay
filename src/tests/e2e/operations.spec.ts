@@ -2609,15 +2609,23 @@ test("remote configuration presets require preview before an explicit apply", as
   expect(calls.findLast((call) => call.command === "apply_remote_configuration_preset")?.args).toMatchObject({ input: { baseRevision: "cfg_synthetic_current" } });
 });
 
-test("local pool can save a portable configuration without exposing server apply", async ({ page }) => {
+test("local configuration presets require preview before an explicit apply", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await expect(page.getByRole("button", { name: "Apply preset", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Save preset", exact: true }).click();
+  await page.getByRole("button", { name: "Apply preset", exact: true }).click();
 
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "export_local_configuration_preset"))).toBe(true);
+  const dialog = page.getByRole("dialog", { name: "Configuration preset" });
+  await expect(dialog.getByText("Changes: 1", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Apply changes" }).click();
+  await expect(dialog).toBeHidden();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.some((call) => call.command === "export_local_configuration_preset")).toBe(true);
+  expect(calls.some((call) => call.command === "preview_local_configuration_preset")).toBe(true);
+  expect(calls.findLast((call) => call.command === "apply_local_configuration_preset")?.args).toMatchObject({ input: { baseRevision: "cfg_synthetic_current" } });
 });
 
 test("remote pool refreshes quotas without exposing an interval setting", async ({ page }) => {
@@ -3143,10 +3151,14 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("tab", { name: "Model Rules" }).click();
 
     const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
-    const speed = model.locator(".model-speed-menu");
-    await speed.getByRole("button", { name: "Speed: Standard" }).click();
-    await page.getByRole("option", { name: "Fast", exact: true }).click();
-    await expect(speed.getByRole("button", { name: "Speed: Fast" })).toBeVisible();
+    const speed = model.locator(".model-speed-toggle");
+    await expect(model.locator(".model-rule-secondary-actions")).toHaveCSS("opacity", "1");
+    await expect(speed).toHaveAttribute("aria-pressed", "false");
+    await speed.click();
+    await expect(speed).toHaveAttribute("aria-pressed", "true");
+    const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+    await expect(claude.locator(".model-speed-toggle")).toHaveCount(0);
+    await expect(claude.locator(".model-speed-unavailable")).toBeVisible();
 
     const groups = page.locator(".model-rules .model-group-row");
     await groups.first().dragTo(groups.last());
@@ -3822,6 +3834,7 @@ test("focus refreshes runtime only after a state revision changes", async ({ pag
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   const stateReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_runtime_state").length);
+  await expect.poll(stateReads).toBeGreaterThan(0);
   const before = await stateReads();
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.waitForTimeout(300);

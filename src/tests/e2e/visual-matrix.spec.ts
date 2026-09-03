@@ -476,7 +476,7 @@ for (const theme of ["light", "dark"] as const) {
 }
 
 test("disabled model state stays readable in the compact dark window", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true });
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true, modelSpeed: { "gpt-5.4-mini": "fast" } });
   await page.setViewportSize({ width: 840, height: 560 });
   await page.goto("/");
   await page.getByRole("button", { name: "Пул", exact: true }).click();

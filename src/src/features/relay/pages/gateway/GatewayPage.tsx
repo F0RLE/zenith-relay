@@ -213,11 +213,7 @@ function GatewayOpenCodeTab() {
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
     <div className="gateway-workspace">
       <div className="gateway-settings-panel gateway-application-panel">
-        <section className="gateway-setting-row client-setup">
-          <header>
-            <span className="gateway-config-icon"><Plug aria-hidden /></span>
-            <div><h2>{t("gateway.openCodeProviderTitle")}</h2><p>{t("gateway.openCodeProviderHint")}</p></div>
-          </header>
+        <section className="gateway-setting-row client-setup opencode-client-setup">
           <div className="opencode-provider-status">
             <span className={`relay-status ${status?.configured ? "ready" : "info"}`}>
               {status?.configured ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />}

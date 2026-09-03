@@ -395,6 +395,11 @@
   gap: 12px;
 }
 
+.gateway-setting-row.opencode-client-setup {
+  min-height: 72px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .gateway-runtime-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

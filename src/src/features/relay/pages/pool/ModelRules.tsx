@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical, Loader2, Pencil, Power, RotateCcw } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical, Loader2, Pencil, Power, RotateCcw, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ModelSummary } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, OptionMenu } from "../../components/Ui";
-import { supportsCacheWritePricing } from "../../modelGroups";
+import { Button, Dialog, EmptyState, IconButton } from "../../components/Ui";
+import { modelProviderGroup, supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
 import { groupModelSummariesForRules, modelSummaries } from "../../poolHelpers";
 import {
@@ -208,10 +208,16 @@ export function ModelRulesView() {
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
       const hasReasoningModes = !isImageModel && ((model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0);
       const canEditReasoning = !isImageModel && Boolean(model.reasoningConfigurable);
+      const speedTier = model.speedTier ?? "standard";
+      const canEditSpeed = modelProviderGroup(model.id) === "openai"
+        && model.speedSupported === true
+        && model.speedConfigurable === true;
+      const speedLabel = t("pool.serviceTier");
+      const speedStateLabel = t(`pool.serviceTiers.${speedTier}`);
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"} data-drop-target={dropModelId === model.id ? "true" : undefined} className={dragModelId === model.id ? "model-dragging" : undefined} draggable onPointerDown={(event) => startPointerDrag(event, "model", model.id)} onDragStart={(event) => startModelDrag(event, model.id)} onDragEnd={() => { setDragModelId(null); setDropModelId(null); }} onDragOver={(event) => { event.preventDefault(); setDropModelId(dragModelId && dragModelId !== model.id ? model.id : null); }} onDrop={() => { if (dragModelId) reorderModels(dragModelId, model.id); setDragModelId(null); setDropModelId(null); }}>
         <td data-column="model"><button className="model-rule-drag-handle" type="button" aria-label={t("models.dragModel", { model: displayName })} title={t("models.dragModel", { model: displayName })} onPointerDown={(event) => startPointerDrag(event, "model", model.id)}><GripVertical aria-hidden /></button><div className="model-rule-identity"><strong title={displayName}>{displayName}</strong>{displayName !== model.id ? <code title={model.id}>{model.id}</code> : null}</div></td>
         <td data-column="price"><div className="model-price">{isImageModel ? <div className="model-image-price-summary"><span className="model-image-price-heading"><strong>{t("models.imageOperation.generation")}</strong><small>{t("models.imagePriceUnit")}</small></span><div className="model-image-price-list">{imagePrices.filter((price) => price.operation === "generation").slice(0, 3).map((price) => <span className="model-image-price-item" key={`${price.quality}-${price.size}`}><small>{t(`models.imageQuality.${price.quality}`, { defaultValue: price.quality })} · {price.size}</small><strong>{formatModelPrice(price.microUsd, i18n.language)}</strong></span>)}</div></div> : hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
-        <td data-column="speed"><OptionMenu className="model-speed-menu" label={t("models.speedColumn")} value={model.speedTier ?? "standard"} disabled={busy === `model-speed-${model.id}`} onChange={(value) => { const serviceTier = value as "standard" | "fast"; void perform(`model-speed-${model.id}`, () => mode === "local" ? relayCommands.setModelServiceTier(model.id, serviceTier) : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier }), "feedback.saved"); }} options={[{ value: "standard", label: t("pool.serviceTiers.standard") }, { value: "fast", label: t("pool.serviceTiers.fast") }]} /></td>
+        <td data-column="speed">{canEditSpeed ? <IconButton className="model-speed-toggle" label={`${speedLabel}: ${speedStateLabel}`} title={`${speedLabel}: ${speedStateLabel}`} icon={<Zap aria-hidden />} aria-pressed={speedTier === "fast"} data-speed-tier={speedTier} disabled={busy === `model-speed-${model.id}`} onClick={() => { const nextTier = speedTier === "fast" ? "standard" : "fast"; void perform(`model-speed-${model.id}`, () => mode === "local" ? relayCommands.setModelServiceTier(model.id, nextTier) : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved"); }} /> : <span className="model-speed-unavailable" aria-label={t("models.speedUnavailable")}><Zap aria-hidden /></span>}</td>
         <td data-column="actions"><div className="model-rule-actions"><span className="model-rule-secondary-actions">{(canEditPrice || isImageModel) ? <IconButton data-model-price-edit={model.id} label={t(isImageModel ? "models.viewImagePrice" : "models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}{canEditReasoning || hasReasoningModes ? <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} onClick={() => setReasoningModel(model)} /> : null}</span><IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
       </tr>;
       })}</tbody>;
