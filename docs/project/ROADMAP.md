@@ -42,7 +42,8 @@ step and must be tested after the local desktop path, not in parallel with it.
 2. P0 live acceptance is deferred until permitted real accounts are available;
    the user-managed server path is last.
 3. P1 is in progress: measure warm startup, page open, and pool-switch disk I/O
-   before changing the loading architecture.
+   before changing the loading architecture, then replace source roles with a
+   unified adaptive pool scheduler and explicit manual ordering.
 4. P2 is in progress: preserve reliability contracts and validate the new
    application recovery layout on upgraded installations.
 5. P3 is in progress: catalog, reasoning, usage, adapter, ChatGPT, and OpenCode
@@ -86,10 +87,11 @@ stop after partially deleting the batch. Both implementation follow-ups are
 now closed; live provider and client acceptance
 remains open.
 
-The profile-recovery follow-up is now closed in the implementation: ChatGPT
-restores only Relay-managed configuration and authentication, preserving
-unrelated settings and rejecting a newer manual sign-in. Named and full-profile
-ChatGPT snapshots were removed. The history-repair path preserves its rollback
+The profile-recovery follow-up is now closed in the implementation: managed
+ChatGPT switching restores only Relay-owned configuration and authentication,
+preserving unrelated settings and rejecting a newer manual sign-in. Separate
+named recovery points capture only `config.toml` and authentication for an
+explicit, confirmed restore. The history-repair path preserves its rollback
 handle during cleanup, updates only SQLite threads whose rollout was actually
 processed, rewrites every relevant session metadata record in either direction
 between ChatGPT and Relay/API providers, and normalizes extended Windows paths
@@ -170,6 +172,235 @@ or representative local/remote disk-I/O baseline has been accepted yet.
 
 The goal is a responsive application, not speculative caching or background
 work that makes account state stale.
+
+### Unified adaptive pool routing
+
+Replace the API-first, stabilizer, and reserve source roles with one routing
+contract shared by subscription accounts and API sources. The scheduler must
+remain provider-neutral: a logical pool member owns routing policy, while any
+protocol-specific candidates derived from that member remain internal runtime
+details. The redesign must preserve the current response-ownership, streaming,
+failure-isolation, and redaction guarantees.
+
+#### Routing modes and ordering
+
+Expose three user-facing routing modes:
+
+1. **Smart** is the default adaptive mode. It combines manual preference,
+   quota headroom, capacity, observed reliability, latency, reset timing, and
+   optional cost evidence without allowing one noisy sample to monopolize the
+   pool.
+2. **In order** selects the first eligible member in the saved manual order and
+   proceeds to the next member only when the current request can safely fail
+   over.
+3. **Round robin** distributes new sessions across eligible members. Requests
+   belonging to an already assigned session remain on their affinity owner
+   while that owner is usable.
+
+Store one atomic order containing tagged member references such as
+`account:<id>` and `source:<id>`. Accounts and sources appear in the same list,
+can be reordered together, and do not expose magic numeric role thresholds.
+An API source with multiple protocol bindings inherits its logical source
+position; its internal candidates must not become separate user-visible rows.
+
+New members are appended deterministically. Deleted references are ignored and
+removed on the next successful policy save. A temporarily unavailable member
+keeps its position so that recovery does not silently rewrite user policy.
+Reordering applies immediately to new sessions and safe retry selection, but
+never interrupts an in-flight request or moves an upstream-owned continuation.
+
+#### Selection pipeline
+
+Apply routing in this order:
+
+1. Resolve mandatory response ownership and active connection affinity.
+2. Filter candidates by enabled and draining state, secret and proxy
+   availability, requested model, client and upstream protocol, adapter
+   capability, request lane, quota, concurrency, cooldown, and circuit state.
+3. Apply explicit cache-key and session affinity when the bound candidate still
+   has sufficient health, quota, and capacity.
+4. Rank the remaining eligible candidates with the selected routing mode.
+5. Attempt bounded fallback only while no response bytes have been committed
+   and the request or continuation contract permits another candidate.
+
+`previous_response_id` ownership and an active WebSocket connection are hard
+affinities. Prompt-cache and ordinary session affinity are strong preferences
+with guarded escape conditions. Create or replace a soft affinity binding only
+after a request has reached a verified successful response boundary, so a
+failed first attempt cannot pin the session to a bad candidate.
+
+Key every affinity by the minimum complete routing scope, including the client
+scope, canonical public model, request lane, and protocol where required. A
+candidate recovering at a higher preference may receive new sessions
+immediately, but it must not steal an existing healthy session from another
+candidate.
+
+#### Smart score
+
+Maintain normalized `0..1` factors for each eligible candidate and calculate a
+bounded score from:
+
+- manual priority;
+- reported quota headroom;
+- free parallel capacity and queue depth;
+- error-rate EWMA;
+- time-to-first-output EWMA;
+- quota or subscription reset urgency;
+- confirmed upstream cost evidence when the active profile explicitly enables
+  cost-aware routing;
+- response, cache, connection, and session affinity bonuses.
+
+Record operational observations at candidate, canonical model, protocol, and
+request-lane scope so that a slow or failing route cannot penalize an unrelated
+model or binding from the same logical source. Clamp samples, require a minimum
+observation count, decay stale data, and add hysteresis before moving a soft
+affinity. Unknown quota, latency, cost, or reset data is neutral rather than
+zero; incomplete evidence must neither win nor lose a route by accident.
+
+Offer routing profiles instead of exposing raw coefficients by default:
+
+- **Cache** emphasizes affinity and stability and is the Relay default;
+- **Balanced** combines quota, capacity, reliability, latency, and manual
+  preference;
+- **Speed** emphasizes first-output latency, error rate, and available
+  capacity;
+- **Economy** enables confirmed cost and reset-use factors;
+- **Custom** exposes validated bounded coefficients in advanced settings.
+
+The current contract that prices do not affect routing remains true until the
+Economy/Custom implementation, evidence rules, UI disclosure, tests, and
+stable documentation are complete. Provider-discovered cost, reference API
+price, account API-equivalent estimates, and user purchase cost must remain
+separate facts; purchase cost and payback never become scheduler inputs.
+
+#### Top-K distribution
+
+Smart routing ranks the eligible set, retains a bounded Top-K, and distributes
+new assignments inside that set so that the current highest score does not
+receive all traffic indefinitely. The default Top-K is three and is bounded by
+the actual eligible count.
+
+Use a stable session-derived choice when a trustworthy session key exists, so
+the same session returns to the same candidate and availability changes remap
+only affected sessions. Use smooth weighted round robin for unscoped requests.
+Candidate weight defaults to one, is validated and bounded, and affects only
+distribution inside the selected Top-K; zero weight excludes a candidate from
+normal selection without replacing the explicit enabled state. Weight changes
+must reset or safely rebase accumulated rotation credit.
+
+#### Failure feedback and recovery
+
+Classify every failed attempt before mutating scheduler state:
+
+- client/request validation failures are terminal and do not penalize a
+  candidate;
+- unsupported or disabled models cool down only the exact candidate and model;
+- quota, authentication, payment, or credential failures cool down the exact
+  physical slot at the narrowest proven scope;
+- safe pre-response overload, timeout, transport, and generic upstream
+  rejection may continue to the next eligible candidate;
+- failures after response commitment never start a transparent replay;
+- upstream-owned continuations move only after an explicitly proven recoverable
+  affinity miss.
+
+Track circuit state as `closed`, `open`, and `half-open`. An expired cooldown
+admits a bounded probe before the candidate re-enters normal Top-K selection.
+Persist enough timestamped cooldown and recent-health state to avoid a restart
+storm, but expire stale observations and never let an old snapshot disable a
+candidate indefinitely. Provider/model storm protection remains scoped so that
+one failing credential, model, or binding cannot disable unrelated routes.
+
+#### Runtime metrics and diagnostics
+
+Maintain bounded rolling state for dispatches, active requests, queue depth,
+success and error EWMA, first-output EWMA, circuit state, affinity hits and
+escapes, fallback attempts, and score inputs. Hot policy changes must update the
+running scheduler without reopening the listener or discarding active leases,
+affinity, or safe health state.
+
+For every request, expose a redacted routing trace containing:
+
+- selected logical member and physical candidate;
+- selection mode, profile, final score, and decisive factors;
+- affinity type and hit, miss, or escape reason;
+- attempted fallback chain and classified rejection reasons;
+- cooldown and half-open transitions;
+- the policy and runtime revisions used for the decision.
+
+Never retain prompts, response bodies, credentials, cookies, authorization
+headers, or raw provider error bodies. Replace the unconditional **Next
+candidate** presentation with factual **In use** activity and a model-scoped
+**Expected route** preview. A preview must accept a concrete model, protocol,
+lane, and client scope and clearly remain a simulation rather than a promise
+about the next request.
+
+#### Desktop and server UI
+
+Move all cross-member routing controls into the pool distribution dialog. Show
+one draggable list containing accounts and API sources with name, kind,
+availability, supported-model count, active-request state, cooldown, and manual
+position. Keep source protocol, model, price, and recovery settings in the
+source editor; remove source-role selection and API-only order controls from
+the member editor.
+
+The distribution dialog contains the Smart, In order, and Round robin mode
+control; the Smart profile control; the unified order; and an advanced section
+for Top-K, bounded traffic weight, affinity escape thresholds, and Custom
+coefficients. The default surface must stay understandable without opening the
+advanced section. Local and user-managed server modes render and mutate the
+same versioned routing contract, subject to negotiated server capabilities.
+
+#### Migration and compatibility
+
+Add an append-only schema migration and a versioned management contract. Derive
+the first unified order from the existing effective path: API-first sources in
+their saved order, subscription accounts, stabilizer sources, then reserve
+sources. Preserve existing account behavior during migration rather than
+turning a formerly balanced account set into an accidental strict chain.
+
+Continue accepting legacy role priorities and routing-strategy values in old
+imports and older server payloads long enough to produce an explicit preview,
+but emit only the new contract after a successful conversion. Import preview,
+revision CAS, runtime rebuild, rollback, backup, restore, and redacted export
+must cover the unified order and all scheduler settings. A failed conversion or
+runtime rebuild leaves the previous verified policy active.
+
+After local/server compatibility is complete, remove the API role constants,
+role inference, source-role UI, stale diagnostic reason variants, unused CSS
+and translations, and any legacy weight path that is not connected to the new
+Top-K implementation. Do not retain two schedulers or two active routing
+contracts.
+
+#### Implementation and acceptance order
+
+1. Specify the versioned routing contract, score semantics, affinity scopes,
+   error classes, migration mapping, and rollback behavior.
+2. Add shared protocol types and append-only local/server migrations with
+   round-trip, old-import, backup, restore, and interrupted-upgrade tests.
+3. Refactor eligibility into a provider-neutral candidate pipeline shared by
+   every routing mode.
+4. Implement normalized observations, EWMA decay, routing profiles, scoring,
+   Top-K selection, stable session assignment, and smooth weighted rotation.
+5. Implement typed failure feedback, scoped circuit breakers, persisted
+   cooldown recovery, half-open probes, and affinity escape hysteresis.
+6. Add atomic management operations and hot-apply behavior for desktop and
+   user-managed server runtimes.
+7. Replace the role UI with the unified order, routing modes, profiles,
+   advanced controls, model-scoped route preview, and factual activity state.
+8. Add deterministic unit and property tests for ordering, score bounds,
+   unknown evidence, weight changes, Top-K membership, minimal remapping,
+   concurrency, quota refresh, cooldown recovery, and live policy updates.
+9. Add gateway tests for every error class, bounded fallback, partial streams,
+   Responses ownership, WebSocket affinity, adapter routes, and one unhealthy
+   slot among otherwise healthy members.
+10. Add local/server integration, configuration migration, redaction,
+    performance, and Playwright coverage; then remove the superseded role and
+    scheduler legacy in the same delivery series.
+
+Do not claim this P1 routing work complete until local and user-managed server
+runtimes produce the same deterministic decisions from the same snapshot and
+policy, cache-affinity behavior has measurable evidence, and no policy-only
+change restarts the listener or loses active runtime state.
 
 ## P2 - Preserve reliability and ownership boundaries
 

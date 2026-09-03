@@ -352,8 +352,9 @@ API-equivalent is an informational estimate, never a routing input:
 - Fast is Relay's user-facing name for the upstream `priority` service tier.
   It stays separate from scheduler/source priority. Fast is a request-speed
   mode, not a second user-facing quota; provider Fast/priority metadata remains
-  diagnostic and is not rendered as another account quota meter. A provider
-  may report that the requested Fast tier was served as Standard.
+  diagnostic and is not rendered as another account quota meter. The managed
+  pool control applies only to OpenAI-family models; other model families stay
+  on Standard. A provider may report that requested Fast was served as Standard.
 
 Provider quota remains a provider-reported operational signal. It is rendered
 as a percentage and reset boundary, never as money, an entitlement, a routing
@@ -404,11 +405,16 @@ apply or restore managed configuration -> verify -> discard or roll back history
 ~~~
 
 Before the first managed ChatGPT change, Relay records only the configuration,
-authentication, and catalog state that it will own. After confirmation,
-**Restore** returns those managed fields, including the prior
+authentication, and catalog state that it will own. After confirmation, the
+managed restore returns those fields, including the prior
 <code>config.toml</code> state and managed authentication. It preserves
 unrelated client settings and refuses to overwrite a newer manual sign-in.
-ChatGPT does not provide named snapshots or full-profile recovery.
+
+Manual ChatGPT recovery points are a separate contract. Each named snapshot
+stores the current <code>config.toml</code> and authentication state in protected
+local storage. A confirmed restore replaces only those files, and invalid
+metadata or payloads remain visible as recovery errors instead of being
+partially applied.
 
 When a profile crosses the ChatGPT, Relay-local, or local API boundary, history
 repair rewrites only the affected provider metadata for the target. The same
@@ -416,11 +422,13 @@ reversible repair runs in either direction; a failed profile operation restores
 the repair backup. Windows extended path prefixes are normalized in repair
 manifests and validation.
 
-OpenCode has a single exact original configuration copy instead. Relay resolves
-the user's `opencode.json`/JSONC path, copies it before the first managed write,
-and restores it only after explicit confirmation. OpenCode recovery is
-intentionally separate from the ChatGPT managed-state restore because the
-files, lifecycle, and client ownership differ.
+OpenCode keeps one byte-for-byte original configuration as its recovery source.
+Relay resolves the user's `opencode.json`/JSONC path and copies it before the
+first managed write. A confirmed restore removes Relay's provider and
+semantically merges compatible settings changed by the user since that copy;
+the resulting JSON may therefore have different formatting. OpenCode recovery
+is separate from ChatGPT managed-state restore because the files, lifecycle,
+and client ownership differ.
 
 ## User-managed server
 

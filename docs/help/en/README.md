@@ -62,9 +62,10 @@ The **Model Rules** table is also where model behavior is controlled:
 - **Reasoning** lists the modes supplied by the backend catalog. Relay passes
   the selected mode through; it does not invent a mode or send a separate probe
   request for each one.
-- **Request speed** is the standard/fast service-tier choice for a route. Fast
-  is shown only when that route confirms `fast` or `priority`; it is a speed
-  request, not another quota or another model.
+- **Request speed** is the Standard/Fast service-tier choice for OpenAI-family
+  models. Relay maps Fast to OpenAI's `priority` request tier; it is a speed
+  request, not another quota or another model. Other model families always use
+  Standard through this pool control.
 - **Price** is the provider or verified catalog price, with an explicit local
   override when needed. It is used for API-equivalent estimates and does not
   alter the provider invoice.
@@ -72,6 +73,11 @@ The **Model Rules** table is also where model behavior is controlled:
 The table preserves the provider's model order. Relay applies pool rules and
 health checks around that order; it does not silently alphabetize or replace
 the provider catalog.
+
+**Save preset** exports the pool policy for backup or reuse: membership rules,
+routing, quotas, and model settings. It never includes API keys, account
+credentials, or proxy secrets. Applying a preset first shows its diff and can
+only bind to existing unambiguous local connections with their secrets present.
 
 Adapters are explicit. A native route keeps its original request format. A
 Responses source may be assigned to a Messages or Gemini bridge when that
@@ -126,20 +132,27 @@ secrets are not stored.
 ## 6. Recovery
 
 **Recovery** has separate ownership boundaries for ChatGPT and OpenCode.
-For ChatGPT, **Restore** reverses only the configuration and sign-in state
-managed by Relay. It preserves unrelated client settings and refuses to
-overwrite a newer manual sign-in. There are no named or full-profile ChatGPT
-snapshots.
+For ChatGPT, you can create named recovery points containing its current
+`config.toml` and sign-in state. Restoring one replaces only those two files;
+other profile data remains untouched. Snapshot payloads use protected local
+storage, and invalid or incomplete entries are reported instead of being
+silently applied.
+
+Relay also keeps the automatic backup required to reverse a managed ChatGPT
+connection. That restore changes only Relay-managed configuration and sign-in
+state, preserves unrelated settings, and refuses to overwrite a newer manual
+sign-in.
 
 When ChatGPT crosses between its native account and a Relay/API connection,
 Relay repairs the affected conversation metadata for the target provider. The
 repair is transactional in both directions and rolls back if the profile change
 does not complete.
 
-OpenCode keeps one exact original `opencode.json`/JSONC copy before its first
-Relay change. Its restore replaces the managed configuration and consumes that
-saved original copy. The local pool reset first attempts the managed ChatGPT
-restore, then removes local accounts, sources, settings, and usage.
+OpenCode keeps one named or automatically created exact original
+`opencode.json`/JSONC copy before its first Relay change. Its restore removes
+the managed provider while preserving compatible user changes, then consumes
+the saved recovery point. The local pool reset first attempts the managed
+ChatGPT restore, then removes local accounts, sources, settings, and usage.
 
 Relay-owned files are stored under `%LOCALAPPDATA%\\Zenith Relay`. Runtime data
 and the encrypted vault are in `data`, temporary imports and deployment bundles
@@ -166,15 +179,17 @@ The following groups cover the normal failures.
 | Provider | 401/403 unauthorized or forbidden | Check the API key, endpoint, permissions, and provider plan. |
 | Provider | 404, no models, or model not found | Check the API root and protocol. Remove a model-specific path; use a verified manual model ID only when discovery is unavailable. |
 | Provider | 429, overloaded, unavailable, or 5xx | Wait for recovery or enable another eligible source; repeated failures cool down that exact route. |
-| Provider | Timeout, incomplete stream, invalid request, unsupported tools or region | Check the provider's supported request shape, model, region, and limits. |
+| Provider | Timeout, incomplete stream, invalid request, unsupported tools or region | Check the provider's supported request shape, model, region, and limits. An unclassified provider rejection before response data is sent is isolated to that model and Relay tries the next eligible source. |
 | Pool | No eligible pool member | Enable a member, add the model to its rules, repair its account/source, or add a compatible fallback. |
 | Pool | All members cooling down or out of quota | Wait for retry/reset or change the pool membership/order. |
 | Pool | No compatible adapter or route | Assign the model to the correct native or bridge format in **Model Rules**. |
 | Relay | API stopped, wrong address, profile switch failed, local data unavailable | Start the endpoint, reconnect the displayed address, restore the managed configuration, or inspect the local error details. |
 
 Relay can retry a different eligible member only before response data reaches the
-client. Once a response has started, its owner stays fixed so the client does
-not receive two different answers in one stream.
+client. Known request-format, context, tool-call, and continuation errors remain
+terminal. An unclassified provider rejection is isolated to that model and
+temporarily cooled; once a response has started, its owner stays fixed so the
+client does not receive two different answers in one stream.
 
 When asking for help, copy the sanitized status, HTTP code, model, and **Error
 source**. Never include API keys, cookies, tokens, prompts, or provider bodies.
