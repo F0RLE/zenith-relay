@@ -375,6 +375,50 @@ fn managed_provider(base_url: &str, secret: &str, models: &[ModelSummary]) -> Va
     })
 }
 
+fn apply_managed_provider(
+    config: &mut Map<String, Value>,
+    base_url: &str,
+    secret: &str,
+    models: &[ModelSummary],
+) -> Result<(), LocalPoolError> {
+    config
+        .entry("$schema")
+        .or_insert_with(|| Value::String("https://opencode.ai/config.json".into()));
+    config
+        .entry("provider")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let providers = config
+        .get_mut("provider")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "OpenCode provider configuration must be an object",
+            )
+        })?;
+    providers.insert(
+        PROVIDER_ID.into(),
+        managed_provider(base_url, secret, models),
+    );
+
+    let current_model = config
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let managed_model_selected = current_model.starts_with(&format!("{PROVIDER_ID}/"));
+    if let Some(first) = models.first() {
+        if !current_model.contains('/') || managed_model_selected {
+            config.insert(
+                "model".into(),
+                Value::String(format!("{PROVIDER_ID}/{}", first.id)),
+            );
+        }
+    } else if managed_model_selected {
+        config.remove("model");
+    }
+    Ok(())
+}
+
 fn backup_original_config(
     state: &DesktopState,
     path: &Path,
@@ -463,35 +507,9 @@ pub async fn connect_opencode_to_local_gateway(
     }
     let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
     let models = model_ids(&prepared.gateway.models);
-    if models.is_empty() {
-        return Err(
-            LocalPoolError::new(ErrorCode::Conflict, "managed pool has no visible models").into(),
-        );
-    }
     let mut config = read_config(&path)?;
     let backup_created = backup_original_config(&state, &path, None)?;
-    let provider = managed_provider(&prepared.gateway.base_url, &secret, &models);
-    config
-        .entry("$schema")
-        .or_insert_with(|| Value::String("https://opencode.ai/config.json".into()));
-    config
-        .entry("provider")
-        .or_insert_with(|| Value::Object(Map::new()));
-    config
-        .get_mut("provider")
-        .and_then(Value::as_object_mut)
-        .unwrap()
-        .insert(PROVIDER_ID.into(), provider);
-    let current_model = config
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !current_model.contains('/') || current_model.starts_with(&format!("{PROVIDER_ID}/")) {
-        config.insert(
-            "model".into(),
-            Value::String(format!("{PROVIDER_ID}/{}", models[0].id)),
-        );
-    }
+    apply_managed_provider(&mut config, &prepared.gateway.base_url, &secret, &models)?;
     write_config(&path, &config)?;
     Ok(OpenCodeConnectionResult {
         path: path.display().to_string(),
@@ -552,10 +570,10 @@ pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<b
 #[cfg(test)]
 mod tests {
     use super::{
-        managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
+        apply_managed_provider, managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
         remove_managed_configuration, PROVIDER_ID, PROVIDER_NPM,
     };
-    use serde_json::json;
+    use serde_json::{json, Map, Value};
     use zenith_relay_core::protocol::ModelSummary;
 
     fn model(id: &str, enabled: bool) -> ModelSummary {
@@ -628,6 +646,28 @@ mod tests {
             provider["models"]["gpt-5.6-sol"]["modalities"]["input"],
             json!(["text", "image"])
         );
+    }
+
+    #[test]
+    fn empty_catalog_replaces_stale_models_without_touching_other_providers() {
+        let mut config = serde_json::from_value(json!({
+            "model": format!("{PROVIDER_ID}/stale-model"),
+            "provider": {
+                PROVIDER_ID: { "models": { "stale-model": {} } },
+                "anthropic": { "name": "Claude" }
+            }
+        }))
+        .unwrap();
+
+        apply_managed_provider(&mut config, "http://127.0.0.1:14998/v1", "test-secret", &[])
+            .unwrap();
+
+        assert_eq!(
+            config["provider"][PROVIDER_ID]["models"],
+            Value::Object(Map::new())
+        );
+        assert!(config["provider"].get("anthropic").is_some());
+        assert!(config.get("model").is_none());
     }
 
     #[test]
