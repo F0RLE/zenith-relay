@@ -10,8 +10,10 @@ use crate::{
 };
 use std::{collections::HashMap, sync::atomic::Ordering};
 use zenith_relay_core::{
+    pricing::{PricingCatalog, PricingContext, PricingMetadata},
     protocol::{
         apply_model_display_order, apply_pool_model_configuration, pool_candidate_count,
+        pool_model_summaries_with_pricing, pool_pricing_source_summary,
         pooled_source_runtime_available, source_runtime_available, AccountSummary, GatewaySummary,
         ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
         UsageQuery,
@@ -46,7 +48,11 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
     let model_display_order = state.store.model_display_order()?;
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
-    let equivalents = state.store.api_equivalents()?;
+    let pricing_catalog = state.pricing_catalog();
+    let pricing_context = state.pricing_context()?;
+    let equivalents = state
+        .store
+        .api_equivalents_with_pricing(&pricing_catalog, &pricing_context)?;
     let runtime = state.runtime()?;
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
@@ -69,12 +75,16 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &accounts,
         proxy_settings,
         &equivalents,
+        &pricing_catalog,
+        &pricing_context,
         &mut warnings,
     )?;
-    let mut models = zenith_relay_core::protocol::pool_model_summaries(
+    let mut models = pool_model_summaries_with_pricing(
         &source_summaries,
         &account_summaries,
         &hidden_models,
+        &pricing_catalog,
+        &pricing_context,
     );
     apply_pool_model_configuration(
         &mut models,
@@ -91,6 +101,20 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         .filter(|model| model.enabled)
         .map(|model| model.id.clone())
         .collect();
+    let pricing_metadata = PricingMetadata::for_catalog_with_status(
+        &pricing_catalog,
+        state.pricing_status(),
+        pool_pricing_source_summary(
+            &source_summaries,
+            &account_summaries,
+            &pricing_catalog,
+            &pricing_context,
+        ),
+        equivalents
+            .values()
+            .map(|value| value.unpriced_tokens)
+            .sum(),
+    );
 
     Ok(RuntimeStateSnapshot {
         schema_version: SERVER_SCHEMA_VERSION,
@@ -141,6 +165,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             .cloned()
             .collect(),
         warnings,
+        pricing: pricing_metadata,
     })
 }
 
@@ -191,6 +216,8 @@ fn account_summaries(
     records: &[ServerAccountRecord],
     proxy_settings: AccountProxySettings,
     equivalents: &HashMap<String, ApiEquivalentSummary>,
+    pricing_catalog: &PricingCatalog,
+    pricing_context: &PricingContext,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<AccountSummary>, String> {
     records
@@ -215,7 +242,8 @@ fn account_summaries(
                     )
                 })
                 .unwrap_or((ProxyMode::Direct, false));
-            let quota_window_usage = account_quota_window_usage(state, record)?;
+            let quota_window_usage =
+                account_quota_window_usage(state, record, pricing_catalog, pricing_context)?;
             Ok(account_summary(
                 record,
                 secret_available,
@@ -235,6 +263,8 @@ fn account_summaries(
 fn account_quota_window_usage(
     state: &AppState,
     record: &ServerAccountRecord,
+    pricing_catalog: &PricingCatalog,
+    pricing_context: &PricingContext,
 ) -> Result<Option<QuotaWindowUsage>, String> {
     let Some(window) = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)
     else {
@@ -242,14 +272,18 @@ fn account_quota_window_usage(
     };
     let window_start_ms = window.window_start_ms.unwrap_or_default();
     let window_minutes = window.window_minutes.unwrap_or_default();
-    let usage = state.store.usage_page(&UsageQuery {
-        page: 1,
-        page_size: 1,
-        from_ms: Some(window_start_ms),
-        to_ms: Some(window.observed_at_ms),
-        source_or_account_query: Some(identity_hint(&record.id)),
-        ..UsageQuery::default()
-    })?;
+    let usage = state.store.usage_page_with_pricing(
+        &UsageQuery {
+            page: 1,
+            page_size: 1,
+            from_ms: Some(window_start_ms),
+            to_ms: Some(window.observed_at_ms),
+            source_or_account_query: Some(identity_hint(&record.id)),
+            ..UsageQuery::default()
+        },
+        pricing_catalog,
+        pricing_context,
+    )?;
     Ok(Some(QuotaWindowUsage {
         kind: window.kind,
         window_start_ms,

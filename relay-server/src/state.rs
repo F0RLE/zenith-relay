@@ -14,6 +14,10 @@ use std::{
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
+    pricing::{
+        CatalogStatus, PriceEvidence, PricingCatalog, PricingCatalogLoader, PricingContext,
+        SourcePricingMetadata,
+    },
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
@@ -51,6 +55,10 @@ pub struct SourceRecord {
     pub draining: bool,
     pub base_url: String,
     pub secret_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -124,6 +132,8 @@ pub struct ServerAccountRecord {
     pub draining: bool,
     pub source_id: String,
     pub secret_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_family: Option<String>,
     pub auth_state: AccountAuthState,
     pub health: AccountHealthState,
     pub models: Vec<String>,
@@ -153,10 +163,7 @@ pub struct ServerAccountRecord {
 
 impl ServerAccountRecord {
     pub fn effective_models(&self) -> &[String] {
-        self.discovered_models
-            .as_deref()
-            .filter(|models| !models.is_empty())
-            .unwrap_or(&self.models)
+        self.discovered_models.as_deref().unwrap_or(&self.models)
     }
 }
 
@@ -266,6 +273,7 @@ pub struct AppState {
     pub quota_reset_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) failed_usage_writes: AtomicU64,
     pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
+    pricing: Arc<PricingCatalogLoader>,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
 }
 
@@ -276,6 +284,10 @@ impl AppState {
         ensure_system_gateway_key(&store, &vault)?;
         let server_id = store.server_id()?;
         let fingerprint = identity_fingerprint(&server_id);
+        let pricing = Arc::new(
+            PricingCatalogLoader::open(config.data_dir.join("litellm-prices.json"))
+                .map_err(|error| error.to_string())?,
+        );
         Ok(Arc::new(Self {
             config,
             store,
@@ -290,8 +302,78 @@ impl AppState {
             quota_reset_locks: Mutex::new(HashMap::new()),
             failed_usage_writes: AtomicU64::new(0),
             usage_writer: Mutex::new(None),
+            pricing,
             runtime: RwLock::new(None),
         }))
+    }
+
+    pub(crate) fn pricing_loader(&self) -> Arc<PricingCatalogLoader> {
+        self.pricing.clone()
+    }
+
+    pub(crate) fn pricing_catalog(&self) -> Arc<PricingCatalog> {
+        self.pricing.snapshot()
+    }
+
+    pub(crate) fn pricing_status(&self) -> CatalogStatus {
+        self.pricing.status()
+    }
+
+    /// Build a redacted pricing identity map for usage and snapshot reads.
+    /// Usage storage keeps only identity hints, so this context deliberately
+    /// contains no credentials or provider response data.
+    pub(crate) fn pricing_context(&self) -> Result<PricingContext, String> {
+        let sources = self.store.sources()?;
+        let accounts = self.store.accounts()?;
+        let global_manual_prices = self
+            .store
+            .model_price_overrides()?
+            .into_iter()
+            .map(|(model, price)| (model.to_ascii_lowercase(), price.into()))
+            .collect();
+        let mut account_provider_families = BTreeMap::new();
+        for account in accounts {
+            let family = account
+                .provider_family
+                .unwrap_or_else(|| "openai".to_string());
+            // Usage rows use the redacted identity hint, while snapshot model
+            // projections address the same candidate by its durable id. Keep
+            // both aliases in-memory so neither path loses the family.
+            account_provider_families.insert(identity_hint(&account.id), family.clone());
+            account_provider_families.insert(account.id, family);
+        }
+        let mut source_metadata = BTreeMap::new();
+        let mut source_evidence = BTreeMap::new();
+        for source in sources {
+            let metadata = SourcePricingMetadata {
+                pricing_provider: source.pricing_provider.clone(),
+                official_provider_family: source.official_provider_family.clone(),
+            };
+            let key = identity_hint(&source.id);
+            source_metadata.insert(key.clone(), metadata.clone());
+            source_metadata.insert(source.id.clone(), metadata);
+            let mut evidence = BTreeMap::new();
+            for (model, price) in source.detected_model_prices {
+                evidence
+                    .entry(model.to_ascii_lowercase())
+                    .or_insert_with(PriceEvidence::default)
+                    .provider = Some(price.into());
+            }
+            for (model, price) in source.model_price_overrides {
+                evidence
+                    .entry(model.to_ascii_lowercase())
+                    .or_insert_with(PriceEvidence::default)
+                    .manual = Some(price.into());
+            }
+            source_evidence.insert(key, evidence.clone());
+            source_evidence.insert(source.id, evidence);
+        }
+        Ok(PricingContext {
+            account_provider_families,
+            source_metadata,
+            source_evidence,
+            global_manual_prices,
+        })
     }
 
     pub(crate) fn quota_reset_lock(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {

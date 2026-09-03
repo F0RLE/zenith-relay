@@ -398,6 +398,7 @@ mod tests {
             draining: false,
             source_id: "openai_codex".into(),
             secret_ref: "account:1".into(),
+            provider_family: Some("openai".into()),
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: vec!["gpt-test".into()],

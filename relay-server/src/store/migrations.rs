@@ -426,6 +426,7 @@ mod tests {
             draining: false,
             source_id: "openai_codex".to_string(),
             secret_ref: format!("account:{id}"),
+            provider_family: Some("openai".to_string()),
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: vec!["gpt-test".to_string()],

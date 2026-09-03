@@ -41,6 +41,10 @@ pub struct SourceInput {
     name: String,
     base_url: String,
     api_key: String,
+    #[serde(default)]
+    pricing_provider: Option<String>,
+    #[serde(default)]
+    official_provider_family: Option<String>,
     wire_api: WireApi,
     #[serde(default)]
     protocol_bindings: Vec<SourceProtocolBinding>,
@@ -70,13 +74,23 @@ pub async fn create_source(
     let secret_ref = format!("source:{id}");
     let mut record = source_record(id, secret_ref.clone(), input)?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    let discovery = discover_models(&record, &api_key).await?;
-    if let Some(base_url) = discovery.resolved_base_url.as_deref() {
-        record.base_url = base_url.to_string();
+    match discover_models(&record, &api_key).await {
+        Ok(discovery) => {
+            if let Some(base_url) = discovery.resolved_base_url.as_deref() {
+                record.base_url = base_url.to_string();
+            }
+            record.models = discovery.models;
+            record.protocol_bindings = discovery.protocol_bindings;
+            record.detected_model_prices = discovery.detected_model_prices;
+        }
+        Err(error) => {
+            // A catalog response is capability evidence, not a prerequisite
+            // for saving credentials. Keep the source editable and surface
+            // the failed discovery in its diagnostic status instead.
+            clear_source_catalog(&mut record);
+            record.last_error_code = Some(error.code);
+        }
     }
-    record.models = discovery.models;
-    record.protocol_bindings = discovery.protocol_bindings;
-    record.detected_model_prices = discovery.detected_model_prices;
     normalize_record_protocol_bindings(&mut record)?;
     state
         .vault
@@ -103,6 +117,10 @@ pub struct SourcePatch {
     name: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
+    #[serde(default)]
+    pricing_provider: Option<String>,
+    #[serde(default)]
+    official_provider_family: Option<String>,
     wire_api: Option<WireApi>,
     protocol_bindings: Option<Vec<SourceProtocolBinding>>,
     models: Option<Vec<String>>,
@@ -140,6 +158,13 @@ pub async fn update_source(
     }
     if let Some(value) = input.base_url {
         record.base_url = value.trim().to_string();
+    }
+    if let Some(value) = input.pricing_provider {
+        record.pricing_provider = normalize_pricing_identity(Some(value), "pricing provider")?;
+    }
+    if let Some(value) = input.official_provider_family {
+        record.official_provider_family =
+            normalize_pricing_identity(Some(value), "official provider family")?;
     }
     if let Some(value) = input.wire_api {
         record.wire_api = value;
@@ -355,9 +380,12 @@ pub async fn test_source(
     let discovery = match discover_models(&record, &api_key).await {
         Ok(discovery) => discovery,
         Err(error) => {
+            // Keep the last confirmed catalog available while the upstream
+            // endpoint is temporarily unreachable. The error is diagnostic;
+            // it must not silently remove otherwise valid runtime routes.
             record.last_error_code = Some(error.code.clone());
             state.store.save_source(&record).map_err(store_error)?;
-            return Err(error);
+            return Ok(Json(source_summary(&state, &record)?));
         }
     };
     if let Some(base_url) = discovery.resolved_base_url.as_deref() {
@@ -422,6 +450,11 @@ fn source_record(
         draining: false,
         base_url: input.base_url.trim().to_string(),
         secret_ref,
+        pricing_provider: normalize_pricing_identity(input.pricing_provider, "pricing provider")?,
+        official_provider_family: normalize_pricing_identity(
+            input.official_provider_family,
+            "official provider family",
+        )?,
         wire_api: input.wire_api,
         protocol_bindings: input.protocol_bindings,
         models: normalized_values(input.models),
@@ -440,6 +473,11 @@ fn source_record(
 }
 
 fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), ManagementError> {
+    normalize_pricing_identity(record.pricing_provider.clone(), "pricing provider")?;
+    normalize_pricing_identity(
+        record.official_provider_family.clone(),
+        "official provider family",
+    )?;
     valid_recovery_delay(record.recovery_delay_seconds)?;
     normalize_source_prices(record.model_price_overrides.clone())?;
     normalize_source_prices(record.detected_model_prices.clone())?;
@@ -454,6 +492,28 @@ fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), Ma
     }
     .validate()
     .map_err(|error| validation_error(error.to_string()))
+}
+
+fn normalize_pricing_identity(
+    value: Option<String>,
+    label: &str,
+) -> Result<Option<String>, ManagementError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(ManagementError::validation(
+            "source_pricing_identity_invalid",
+            format!("{label} contains unsupported characters"),
+        ));
+    }
+    Ok(Some(value))
 }
 
 fn validate_record_protocol_bindings(record: &SourceRecord) -> Result<(), ManagementError> {
@@ -492,6 +552,18 @@ fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), M
     Ok(())
 }
 
+fn clear_source_binding_models(bindings: &mut [SourceProtocolBinding]) {
+    for binding in bindings {
+        binding.model_ids.clear();
+    }
+}
+
+fn clear_source_catalog(record: &mut SourceRecord) {
+    record.models.clear();
+    record.detected_model_prices.clear();
+    clear_source_binding_models(&mut record.protocol_bindings);
+}
+
 fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
     (value <= 24 * 60 * 60).then_some(value).ok_or_else(|| {
         ManagementError::validation(
@@ -524,12 +596,6 @@ async fn discover_models(
         discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings)
             .await
             .map_err(source_discovery_error)?;
-    if discovery.models.is_empty() {
-        return Err(ManagementError::validation(
-            "source_models_empty",
-            "source did not expose any models",
-        ));
-    }
     Ok(discovery)
 }
 
@@ -634,6 +700,53 @@ mod tests {
         assert!(error.retryable);
     }
 
+    #[test]
+    fn failed_refresh_clears_the_source_catalog() {
+        let mut record = SourceRecord {
+            id: "source".to_string(),
+            name: "Provider".to_string(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "https://provider.test/v1".to_string(),
+            secret_ref: "source:source".to_string(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: zenith_relay_core::SourceAdapter::Native,
+                reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                model_ids: vec!["model-a".to_string()],
+            }],
+            models: vec!["model-a".to_string()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::from([(
+                "model-a".to_string(),
+                ApiModelPriceOverride {
+                    input_micro_usd_per_million: 1,
+                    cached_input_micro_usd_per_million: None,
+                    cache_write_5m_micro_usd_per_million: None,
+                    cache_write_1h_micro_usd_per_million: None,
+                    output_micro_usd_per_million: 1,
+                },
+            )]),
+            last_error_code: None,
+        };
+
+        clear_source_catalog(&mut record);
+
+        assert!(record.models.is_empty());
+        assert!(record.detected_model_prices.is_empty());
+        assert!(record.protocol_bindings[0].model_ids.is_empty());
+    }
+
     #[tokio::test]
     async fn source_stats_rejects_a_self_route_before_contacting_gateway() {
         let root = TempDir::new().unwrap();
@@ -649,6 +762,8 @@ mod tests {
                 state.config.public_base_url.as_str().trim_end_matches('/')
             ),
             secret_ref: "source:self-source".to_string(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["provider/model".to_string()],

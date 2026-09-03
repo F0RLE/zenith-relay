@@ -41,6 +41,8 @@ mod tests {
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:test".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],

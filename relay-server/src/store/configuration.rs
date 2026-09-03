@@ -1,7 +1,9 @@
 mod validation;
 
 use super::sqlite::{db_error, parse_json, to_json, Store};
-use crate::state::{identity_hint, ServerAccountRecord, SourceRecord};
+#[cfg(test)]
+use crate::state::identity_hint;
+use crate::state::{ServerAccountRecord, SourceRecord};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,6 +12,8 @@ use validation::{
     model_reasoning_allowed_levels_from_metadata, normalize_validated_model_ids,
     validate_configuration_settings, validate_quota_request_timeout, validate_routing_policy,
 };
+#[cfg(test)]
+use zenith_relay_core::ApiModelPriceSources;
 use zenith_relay_core::{
     normalize_image_base_model, normalize_model_ids, normalize_model_price_overrides,
     normalize_model_reasoning_allowed_levels, normalize_model_service_tier_overrides,
@@ -18,14 +22,15 @@ use zenith_relay_core::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
     },
-    ApiModelPriceOverride, ApiModelPriceSources, DefaultServiceTier, RoutingStrategy,
-    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, DEFAULT_COOLDOWN_AFTER_FAILURES,
+    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 
+#[cfg(test)]
 pub(super) type SourcePriceOverrides = zenith_relay_core::SourceModelPriceOverrides;
 
 #[derive(Debug)]
@@ -276,6 +281,7 @@ impl Store {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn source_price_overrides(&self) -> Result<SourcePriceOverrides, String> {
         self.sources()?
             .into_iter()
@@ -360,6 +366,8 @@ fn configuration_settings_from_connection(
             id: record.id,
             name: record.name,
             base_url: record.base_url,
+            pricing_provider: record.pricing_provider,
+            official_provider_family: record.official_provider_family,
             wire_api: record.wire_api,
             protocol_bindings: record.protocol_bindings,
             enabled: record.enabled,
@@ -509,6 +517,8 @@ fn write_configuration(
         record.enabled = rule.enabled;
         record.in_pool = rule.in_pool;
         record.protocol_bindings = rule.protocol_bindings.clone();
+        record.pricing_provider = rule.pricing_provider.clone();
+        record.official_provider_family = rule.official_provider_family.clone();
         record.allowed_models = rule.allowed_models.clone();
         record.excluded_models = rule.excluded_models.clone();
         record.priority = rule.priority;
@@ -888,6 +898,8 @@ mod tests {
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:detected".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: zenith_relay_core::WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["private-model".into()],

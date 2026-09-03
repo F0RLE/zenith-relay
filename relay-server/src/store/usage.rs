@@ -1,25 +1,137 @@
 use super::sqlite::{db_error, optional_u64, to_json, Store};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, TransactionBehavior};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use zenith_relay_core::{
-    candidate_model_price_sources, estimate_candidate_api_equivalent,
     normalize_observed_service_tier,
+    pricing::{PriceSource, PricingCatalog, PricingContext, PricingMetadata, PricingSourceSummary},
     protocol::{UsagePage, UsageQuery, UsageSummary},
     ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier, UsageEvent, WireApi,
 };
 
 mod query;
 
+#[cfg(test)]
+use super::configuration::SourcePriceOverrides;
 use query::{
     usage_buckets, usage_filter, usage_groups, usage_model_equivalents, usage_totals,
     USAGE_TOTAL_COLUMNS,
 };
+#[cfg(test)]
+use zenith_relay_core::ApiModelPriceOverride;
+#[cfg(test)]
+use zenith_relay_core::{pricing::PriceEvidence, ToolUseDiagnostics};
+
+pub(super) trait UsagePriceResolver {
+    fn estimate(
+        &self,
+        candidate_kind: &str,
+        candidate_id: &str,
+        model: Option<&str>,
+        usage: ApiEquivalentUsage,
+    ) -> ApiEquivalentSummary;
+
+    fn source(&self, candidate_kind: &str, candidate_id: &str, model: Option<&str>) -> PriceSource;
+
+    fn pricing_metadata(
+        &self,
+        value: ApiEquivalentSummary,
+        sources: &[PriceSource],
+    ) -> PricingMetadata;
+}
 
 #[cfg(test)]
-use std::collections::BTreeMap;
+fn test_pricing_catalog() -> PricingCatalog {
+    PricingCatalog::from_litellm_json(include_str!(
+        "../../../crates/relay-core/tests/fixtures/litellm-prices.json"
+    ))
+    .expect("pricing fixture must be valid")
+}
+
 #[cfg(test)]
-use zenith_relay_core::{ApiModelPriceOverride, ToolUseDiagnostics};
+fn test_pricing_context(
+    price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    source_price_overrides: &SourcePriceOverrides,
+) -> PricingContext {
+    let source_evidence = source_price_overrides
+        .iter()
+        .map(|(source_id, models)| {
+            let evidence = models
+                .iter()
+                .map(|(model, prices)| {
+                    (
+                        model.to_ascii_lowercase(),
+                        PriceEvidence {
+                            provider: prices.provider.map(Into::into),
+                            manual: prices.manual.map(Into::into),
+                        },
+                    )
+                })
+                .collect();
+            (source_id.clone(), evidence)
+        })
+        .collect();
+    let global_manual_prices = price_overrides
+        .iter()
+        .map(|(model, price)| (model.to_ascii_lowercase(), (*price).into()))
+        .collect();
+    PricingContext {
+        source_evidence,
+        global_manual_prices,
+        ..PricingContext::default()
+    }
+}
+
+struct CatalogPriceResolver<'a> {
+    catalog: &'a PricingCatalog,
+    context: &'a PricingContext,
+}
+
+impl<'a> CatalogPriceResolver<'a> {
+    fn new(catalog: &'a PricingCatalog, context: &'a PricingContext) -> Self {
+        Self { catalog, context }
+    }
+}
+
+impl UsagePriceResolver for CatalogPriceResolver<'_> {
+    fn estimate(
+        &self,
+        candidate_kind: &str,
+        candidate_id: &str,
+        model: Option<&str>,
+        usage: ApiEquivalentUsage,
+    ) -> ApiEquivalentSummary {
+        zenith_relay_core::estimate_candidate_api_equivalent_with_catalog(
+            self.catalog,
+            self.context,
+            candidate_kind,
+            candidate_id,
+            model,
+            usage,
+        )
+        .0
+    }
+
+    fn source(&self, candidate_kind: &str, candidate_id: &str, model: Option<&str>) -> PriceSource {
+        self.context
+            .candidate_price(self.catalog, candidate_kind, candidate_id, model)
+            .source
+    }
+
+    fn pricing_metadata(
+        &self,
+        value: ApiEquivalentSummary,
+        sources: &[PriceSource],
+    ) -> PricingMetadata {
+        PricingMetadata::for_catalog(
+            self.catalog,
+            PricingSourceSummary::from_sources(sources.iter().copied()),
+            value.unpriced_tokens,
+        )
+    }
+}
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 
@@ -191,9 +303,31 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
+    #[cfg(test)]
     pub fn usage_page(&self, query: &UsageQuery) -> Result<UsagePage, String> {
         let price_overrides = self.model_price_overrides()?;
         let source_price_overrides = self.source_price_overrides()?;
+        let catalog = test_pricing_catalog();
+        let context = test_pricing_context(&price_overrides, &source_price_overrides);
+        let resolver = CatalogPriceResolver::new(&catalog, &context);
+        self.usage_page_with_resolver(query, &resolver)
+    }
+
+    pub fn usage_page_with_pricing(
+        &self,
+        query: &UsageQuery,
+        catalog: &PricingCatalog,
+        context: &PricingContext,
+    ) -> Result<UsagePage, String> {
+        let resolver = CatalogPriceResolver::new(catalog, context);
+        self.usage_page_with_resolver(query, &resolver)
+    }
+
+    fn usage_page_with_resolver(
+        &self,
+        query: &UsageQuery,
+        resolver: &dyn UsagePriceResolver,
+    ) -> Result<UsagePage, String> {
         let page = query.page.max(1);
         let page_size = if query.page_size == 0 {
             50
@@ -203,109 +337,117 @@ impl Store {
         let connection = self.lock()?;
         let (where_sql, values) = usage_filter(query);
         let mut totals = usage_totals(&connection, &where_sql, &values)?;
-        let mut models = usage_groups(
-            &connection,
-            &where_sql,
-            &values,
-            "COALESCE(resolved_model, requested_model, '')",
-        )?;
-        let mut model_equivalents = usage_model_equivalents(
-            &connection,
-            &where_sql,
-            &values,
-            &price_overrides,
-            &source_price_overrides,
-        )?;
-        for group in &mut models {
-            group.totals.api_equivalent = model_equivalents.remove(&group.key).unwrap_or_default();
-            totals.api_equivalent.merge(group.totals.api_equivalent);
+        let mut models = if query.includes_models() {
+            usage_groups(
+                &connection,
+                &where_sql,
+                &values,
+                "COALESCE(resolved_model, requested_model, '')",
+            )?
+        } else {
+            Vec::new()
+        };
+        let (mut model_equivalents, pricing_sources) =
+            usage_model_equivalents(&connection, &where_sql, &values, resolver)?;
+        if query.includes_models() {
+            for group in &mut models {
+                group.totals.api_equivalent =
+                    model_equivalents.remove(&group.key).unwrap_or_default();
+                totals.api_equivalent.merge(group.totals.api_equivalent);
+            }
+        } else {
+            for estimate in model_equivalents.values() {
+                totals.api_equivalent.merge(*estimate);
+            }
         }
-        let pool_members = usage_groups(
-            &connection,
-            &where_sql,
-            &values,
-            "COALESCE(candidate_hint, '')",
-        )?;
-        let buckets = usage_buckets(
-            &connection,
-            &where_sql,
-            &values,
-            query,
-            &price_overrides,
-            &source_price_overrides,
-        )?;
+        let pool_members = if query.includes_pool_members() {
+            usage_groups(
+                &connection,
+                &where_sql,
+                &values,
+                "COALESCE(candidate_hint, '')",
+            )?
+        } else {
+            Vec::new()
+        };
+        let buckets = usage_buckets(&connection, &where_sql, &values, query, resolver)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
-        let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, attempt \
-             FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
-        );
-        let mut statement = connection.prepare(&sql).map_err(db_error)?;
-        let mut page_values = values;
-        page_values.push(SqlValue::Integer(i64::from(page_size)));
-        page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
-        let rows = statement
-            .query_map(params_from_iter(page_values.iter()), |row| {
-                let wire_api: String = row.get(7)?;
-                Ok(UsageSummary {
-                    id: row.get(0)?,
-                    request_id: row.get(1)?,
-                    attempt: row.get::<_, i64>(29)?.clamp(0, i64::from(u16::MAX)) as u16,
-                    candidate_kind: row.get(3)?,
-                    candidate_hint: row.get(4)?,
-                    candidate_label: None,
-                    routing: row
-                        .get::<_, Option<String>>(21)?
-                        .as_deref()
-                        .and_then(|value| serde_json::from_str(value).ok()),
-                    requested_model: row.get(5)?,
-                    resolved_model: row.get(6)?,
-                    requested_reasoning_effort: row
-                        .get::<_, Option<String>>(26)?
-                        .as_deref()
-                        .and_then(zenith_relay_core::normalize_reasoning_effort),
-                    effective_reasoning_effort: row
-                        .get::<_, Option<String>>(27)?
-                        .as_deref()
-                        .and_then(zenith_relay_core::normalize_reasoning_effort),
-                    wire_api: WireApi::from_storage_value(&wire_api).unwrap_or(WireApi::Responses),
-                    service_tier: DefaultServiceTier::from_storage_value(
-                        &row.get::<_, String>(22)?,
-                    ),
-                    applied_service_tier: row
-                        .get::<_, Option<String>>(23)?
-                        .as_deref()
-                        .and_then(normalize_observed_service_tier),
-                    tool_use: row
-                        .get::<_, Option<String>>(24)?
-                        .as_deref()
-                        .and_then(|value| serde_json::from_str(value).ok()),
-                    success: row.get::<_, i64>(8)? != 0,
-                    http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
-                    error_category: row.get(10)?,
-                    error_origin: row
-                        .get::<_, Option<String>>(25)?
-                        .as_deref()
-                        .and_then(|value| value.parse().ok()),
-                    latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
-                    ttft_ms: optional_u64(row.get(12)?),
-                    generation_ms: optional_u64(row.get(13)?),
-                    input_tokens: optional_u64(row.get(14)?),
-                    cached_input_tokens: optional_u64(row.get(15)?),
-                    cache_write_input_tokens: optional_u64(row.get(16)?),
-                    cache_write_ttl: row
-                        .get::<_, Option<String>>(28)?
-                        .as_deref()
-                        .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
-                    reasoning_tokens: optional_u64(row.get(17)?),
-                    output_tokens: optional_u64(row.get(18)?),
-                    total_tokens: optional_u64(row.get(19)?),
-                    api_equivalent: ApiEquivalentSummary::default(),
-                    created_at_ms: row.get::<_, i64>(20)?.max(0) as u64,
+        let mut events = if query.includes_events() {
+            let sql = format!(
+                "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, attempt \
+                 FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+            );
+            let mut statement = connection.prepare(&sql).map_err(db_error)?;
+            let mut page_values = values;
+            page_values.push(SqlValue::Integer(i64::from(page_size)));
+            page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
+            let rows = statement
+                .query_map(params_from_iter(page_values.iter()), |row| {
+                    let wire_api: String = row.get(7)?;
+                    Ok(UsageSummary {
+                        id: row.get(0)?,
+                        request_id: row.get(1)?,
+                        attempt: row.get::<_, i64>(29)?.clamp(0, i64::from(u16::MAX)) as u16,
+                        candidate_kind: row.get(3)?,
+                        candidate_hint: row.get(4)?,
+                        candidate_label: None,
+                        routing: row
+                            .get::<_, Option<String>>(21)?
+                            .as_deref()
+                            .and_then(|value| serde_json::from_str(value).ok()),
+                        requested_model: row.get(5)?,
+                        resolved_model: row.get(6)?,
+                        requested_reasoning_effort: row
+                            .get::<_, Option<String>>(26)?
+                            .as_deref()
+                            .and_then(zenith_relay_core::normalize_reasoning_effort),
+                        effective_reasoning_effort: row
+                            .get::<_, Option<String>>(27)?
+                            .as_deref()
+                            .and_then(zenith_relay_core::normalize_reasoning_effort),
+                        wire_api: WireApi::from_storage_value(&wire_api)
+                            .unwrap_or(WireApi::Responses),
+                        service_tier: DefaultServiceTier::from_storage_value(
+                            &row.get::<_, String>(22)?,
+                        ),
+                        applied_service_tier: row
+                            .get::<_, Option<String>>(23)?
+                            .as_deref()
+                            .and_then(normalize_observed_service_tier),
+                        tool_use: row
+                            .get::<_, Option<String>>(24)?
+                            .as_deref()
+                            .and_then(|value| serde_json::from_str(value).ok()),
+                        success: row.get::<_, i64>(8)? != 0,
+                        http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
+                        error_category: row.get(10)?,
+                        error_origin: row
+                            .get::<_, Option<String>>(25)?
+                            .as_deref()
+                            .and_then(|value| value.parse().ok()),
+                        latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
+                        ttft_ms: optional_u64(row.get(12)?),
+                        generation_ms: optional_u64(row.get(13)?),
+                        input_tokens: optional_u64(row.get(14)?),
+                        cached_input_tokens: optional_u64(row.get(15)?),
+                        cache_write_input_tokens: optional_u64(row.get(16)?),
+                        cache_write_ttl: row
+                            .get::<_, Option<String>>(28)?
+                            .as_deref()
+                            .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
+                        reasoning_tokens: optional_u64(row.get(17)?),
+                        output_tokens: optional_u64(row.get(18)?),
+                        total_tokens: optional_u64(row.get(19)?),
+                        api_equivalent: ApiEquivalentSummary::default(),
+                        created_at_ms: row.get::<_, i64>(20)?.max(0) as u64,
+                    })
                 })
-            })
-            .map_err(db_error)?;
-        let mut events = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+                .map_err(db_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
+        } else {
+            Vec::new()
+        };
         for event in &mut events {
             let model = event
                 .resolved_model
@@ -321,8 +463,9 @@ impl Store {
                 }
                 _ => (Some(0), Some(0), event.cache_write_input_tokens),
             };
-            event.api_equivalent = estimate_candidate_api_equivalent(
+            event.api_equivalent = resolver.estimate(
                 &event.candidate_kind,
+                &event.candidate_hint,
                 model,
                 ApiEquivalentUsage {
                     input_tokens: event.input_tokens,
@@ -333,13 +476,6 @@ impl Store {
                     output_tokens: event.output_tokens,
                     total_tokens: event.total_tokens,
                 },
-                candidate_model_price_sources(
-                    &price_overrides,
-                    &source_price_overrides,
-                    &event.candidate_kind,
-                    &event.candidate_hint,
-                    model,
-                ),
             );
         }
         let total_pages = if total == 0 {
@@ -347,6 +483,7 @@ impl Store {
         } else {
             total.div_ceil(u64::from(page_size)) as u32
         };
+        let pricing_metadata = resolver.pricing_metadata(totals.api_equivalent, &pricing_sources);
         Ok(UsagePage {
             events,
             total,
@@ -357,12 +494,33 @@ impl Store {
             models,
             pool_members,
             buckets,
+            pricing: pricing_metadata,
         })
     }
 
+    #[cfg(test)]
     pub fn api_equivalents(&self) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
         let price_overrides = self.model_price_overrides()?;
         let source_price_overrides = self.source_price_overrides()?;
+        let catalog = test_pricing_catalog();
+        let context = test_pricing_context(&price_overrides, &source_price_overrides);
+        let resolver = CatalogPriceResolver::new(&catalog, &context);
+        self.api_equivalents_with_resolver(&resolver)
+    }
+
+    pub fn api_equivalents_with_pricing(
+        &self,
+        catalog: &PricingCatalog,
+        context: &PricingContext,
+    ) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
+        let resolver = CatalogPriceResolver::new(catalog, context);
+        self.api_equivalents_with_resolver(&resolver)
+    }
+
+    fn api_equivalents_with_resolver(
+        &self,
+        resolver: &dyn UsagePriceResolver,
+    ) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
@@ -410,8 +568,9 @@ impl Store {
                 let cached_samples: i64 = row.get(12)?;
                 let cache_write_samples: i64 = row.get(13)?;
                 Ok((candidate_id.clone(), {
-                    estimate_candidate_api_equivalent(
+                    resolver.estimate(
                         &kind,
+                        &candidate_id,
                         model.as_deref(),
                         ApiEquivalentUsage {
                             input_tokens: optional_u64(input_tokens),
@@ -429,13 +588,6 @@ impl Store {
                             output_tokens: optional_u64(output_tokens),
                             total_tokens: optional_u64(total_tokens),
                         },
-                        candidate_model_price_sources(
-                            &price_overrides,
-                            &source_price_overrides,
-                            &kind,
-                            &candidate_id,
-                            model.as_deref(),
-                        ),
                     )
                 }))
             })
@@ -737,6 +889,7 @@ mod tests {
                 draining: false,
                 source_id: "codex".into(),
                 secret_ref: "account:delete".into(),
+                provider_family: Some("openai".into()),
                 auth_state: AccountAuthState::Active,
                 health: AccountHealthState::Healthy,
                 models: vec!["gpt-test".into()],
@@ -875,8 +1028,8 @@ mod tests {
         };
         store.record_usage(&event, DAY_MS).unwrap();
         let initial_usage = store.usage_page(&UsageQuery::default()).unwrap();
-        assert_eq!(initial_usage.totals.generation_output_tokens, 99_999);
-        assert_eq!(initial_usage.totals.generation_samples, 1);
+        assert_eq!(initial_usage.totals.generation_output_tokens, 0);
+        assert_eq!(initial_usage.totals.generation_samples, 0);
         event.request_id = "req_current".into();
         event.input_tokens = Some(10);
         event.cached_input_tokens = Some(0);
@@ -961,6 +1114,8 @@ mod tests {
                     draining: false,
                     base_url: "https://example.test/v1".into(),
                     secret_ref: format!("source:{id}"),
+                    pricing_provider: None,
+                    official_provider_family: None,
                     wire_api: WireApi::Responses,
                     protocol_bindings: Vec::new(),
                     models: vec!["private-model".into()],
@@ -1157,9 +1312,9 @@ mod tests {
         assert_eq!(
             store.api_equivalents().unwrap().get(&hint),
             Some(&ApiEquivalentSummary {
-                micro_usd: 15,
-                priced_tokens: 2,
-                unpriced_tokens: 4,
+                micro_usd: 17,
+                priced_tokens: 4,
+                unpriced_tokens: 2,
             })
         );
         assert_eq!(store.clear_usage().unwrap(), 3);

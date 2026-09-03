@@ -238,9 +238,9 @@ fn apply_discovered_models(
     result: Result<Vec<String>, (String, bool)>,
 ) {
     match result {
-        Ok(models) if !models.is_empty() => {
+        Ok(models) => {
             let models = zenith_relay_core::normalize_model_ids(models);
-            if account.models.is_empty() {
+            if account.models.is_empty() && !models.is_empty() {
                 account.models = models.clone();
             }
             account.discovered_models = Some(models);
@@ -250,13 +250,6 @@ fn apply_discovered_models(
                 &mut account.last_error_code,
             );
         }
-        Ok(_) if account.effective_models().is_empty() => apply_account_model_discovery_failure(
-            &mut account.auth_state,
-            &mut account.health,
-            &mut account.last_error_code,
-            "models_empty",
-            false,
-        ),
         Err((code, retryable)) => {
             // Cached model slugs remain routable, but the failed refresh must
             // remain visible to management clients as stale availability.
@@ -268,7 +261,6 @@ fn apply_discovered_models(
                 retryable,
             )
         }
-        Ok(_) => {}
     }
 }
 
@@ -365,6 +357,7 @@ mod tests {
             draining: false,
             source_id: "codex".into(),
             secret_ref: "account:account-test".into(),
+            provider_family: Some("openai".into()),
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: models.iter().map(|model| (*model).to_string()).collect(),
@@ -415,6 +408,18 @@ mod tests {
             .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered"));
         assert_eq!(empty.health, AccountHealthState::Healthy);
         assert!(empty.last_error_code.is_none());
+    }
+
+    #[test]
+    fn successful_empty_model_refresh_is_authoritative() {
+        let mut record = account(&["gpt-old"]);
+
+        apply_discovered_models(&mut record, Ok(Vec::new()));
+
+        assert_eq!(record.discovered_models, Some(Vec::new()));
+        assert!(record.effective_models().is_empty());
+        assert!(record.last_error_code.is_none());
+        assert_eq!(record.health, AccountHealthState::Healthy);
     }
 
     #[test]
