@@ -4,6 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+define_usage_request_contract! {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
@@ -16,22 +17,6 @@ pub struct UsageSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingDiagnostics>,
-    pub requested_model: Option<String>,
-    pub resolved_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_reasoning_effort: Option<String>,
-    pub wire_api: WireApi,
-    #[serde(default)]
-    pub service_tier: DefaultServiceTier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_service_tier: Option<ObservedServiceTier>,
-    pub success: bool,
-    pub http_status: u16,
-    pub error_category: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_origin: Option<ErrorOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use: Option<ToolUseDiagnostics>,
@@ -40,6 +25,20 @@ pub struct UsageSummary {
     pub ttft_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_ms: Option<u64>,
+    #[serde(flatten)]
+    pub tokens: UsageTokenBreakdown,
+    #[serde(default)]
+    pub api_equivalent: ApiEquivalentSummary,
+    pub created_at_ms: u64,
+}
+}
+
+/// Normalized token counters for one completed request. Cache counters remain
+/// part of input and reasoning remains part of output, so clients must not add
+/// either component to the reported totals a second time.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTokenBreakdown {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,9 +49,6 @@ pub struct UsageSummary {
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
-    #[serde(default)]
-    pub api_equivalent: ApiEquivalentSummary,
-    pub created_at_ms: u64,
 }
 
 fn default_attempt() -> u16 {

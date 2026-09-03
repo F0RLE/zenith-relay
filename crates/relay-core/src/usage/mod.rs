@@ -384,6 +384,7 @@ impl std::str::FromStr for ErrorOrigin {
     }
 }
 
+define_usage_request_contract! {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageEvent {
@@ -397,22 +398,6 @@ pub struct UsageEvent {
     pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_context_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingDiagnostics>,
-    pub requested_model: Option<String>,
-    pub resolved_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_reasoning_effort: Option<String>,
-    pub wire_api: WireApi,
-    #[serde(default)]
-    pub service_tier: DefaultServiceTier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_service_tier: Option<ObservedServiceTier>,
-    pub success: bool,
-    pub http_status: u16,
-    pub error_category: Option<String>,
     #[serde(default)]
     pub tool_use: ToolUseDiagnostics,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -434,6 +419,7 @@ pub struct UsageEvent {
     pub total_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_snapshot: Option<QuotaSnapshot>,
+}
 }
 
 impl UsageEvent {

@@ -1,3 +1,31 @@
+// Usage events and management summaries serialize the same request metadata.
+// Defining their complete items through one macro keeps that wire contract in
+// lockstep while allowing each type to retain its own ownership-only fields.
+macro_rules! define_usage_request_contract {
+    ($(#[$attribute:meta])* $visibility:vis struct $name:ident { $($fields:tt)* }) => {
+        $(#[$attribute])*
+        $visibility struct $name {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub routing: Option<RoutingDiagnostics>,
+            pub requested_model: Option<String>,
+            pub resolved_model: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub requested_reasoning_effort: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub effective_reasoning_effort: Option<String>,
+            pub wire_api: WireApi,
+            #[serde(default)]
+            pub service_tier: DefaultServiceTier,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub applied_service_tier: Option<ObservedServiceTier>,
+            pub success: bool,
+            pub http_status: u16,
+            pub error_category: Option<String>,
+            $($fields)*
+        }
+    };
+}
+
 pub mod accounts;
 pub mod automations;
 pub mod catalog;

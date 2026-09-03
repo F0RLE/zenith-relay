@@ -390,7 +390,9 @@ test("overview header opens the application picker beside the API control", asyn
   expect(launchBox!.x).toBeGreaterThan(stopBox!.x + stopBox!.width);
 
   await launch.click();
-  await page.getByRole("dialog", { name: "Какое приложение запустить?" })
+  const picker = page.getByRole("dialog", { name: "Какое приложение запустить?" });
+  await picker.getByLabel("Запустить приложение после подключения").check({ force: true });
+  await picker
     .getByRole("button", { name: "ChatGPT", exact: true })
     .click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_managed_codex_profile"))).toBe(true);
@@ -482,7 +484,7 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   const table = page.locator(".model-rules-table");
   await expect(table.getByRole("columnheader")).toHaveCount(4);
   expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center"]);
-  await expect(table.locator(".model-group-row").first()).toContainText("ChatGPT");
+  await expect(table.locator(".model-group-row").first()).toContainText("OpenAI");
   await expect(table.locator(".model-group-row").nth(1)).toContainText("Anthropic");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();

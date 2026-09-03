@@ -35,8 +35,8 @@ pub use management::{
     PresetRoutingPolicy, ProfileKeyRotation, ProxyMode, QuotaRefreshStatus, QuotaWindowUsage,
     RemoteAccountLocation, RevealedAccountIdentity, RuntimeStateSnapshot, RuntimeTargetSummary,
     SourcePresetRule, SourceSummary, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange,
-    UsageSummary, UsageTotals, CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
-    PROFILE_KEY_ROTATION_SCHEMA_VERSION,
+    UsageSummary, UsageTokenBreakdown, UsageTotals, CONFIGURATION_PRESET_FORMAT,
+    CONFIGURATION_PRESET_SCHEMA_VERSION, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
 pub(crate) use sse::event_end as sse_event_end;
 pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

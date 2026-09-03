@@ -28,7 +28,8 @@ pub use routing::{
     ProxyMode, QuotaRefreshStatus,
 };
 pub use usage::{
-    UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTotals,
+    UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown,
+    UsageTotals,
 };
 
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
@@ -1395,7 +1396,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(summary.reasoning_tokens, None);
+        assert_eq!(summary.tokens.reasoning_tokens, None);
         assert_eq!(summary.ttft_ms, None);
         assert!(!serde_json::to_value(&summary)
             .unwrap()

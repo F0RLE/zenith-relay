@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use zenith_relay_core::{
     normalize_observed_service_tier,
     pricing::{PriceSource, PricingCatalog, PricingContext, PricingMetadata, PricingSourceSummary},
-    protocol::{UsagePage, UsageQuery, UsageSummary},
+    protocol::{UsagePage, UsageQuery, UsageSummary, UsageTokenBreakdown},
     ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier, UsageEvent, WireApi,
 };
 
@@ -429,16 +429,18 @@ impl Store {
                         latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
                         ttft_ms: optional_u64(row.get(12)?),
                         generation_ms: optional_u64(row.get(13)?),
-                        input_tokens: optional_u64(row.get(14)?),
-                        cached_input_tokens: optional_u64(row.get(15)?),
-                        cache_write_input_tokens: optional_u64(row.get(16)?),
-                        cache_write_ttl: row
-                            .get::<_, Option<String>>(28)?
-                            .as_deref()
-                            .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
-                        reasoning_tokens: optional_u64(row.get(17)?),
-                        output_tokens: optional_u64(row.get(18)?),
-                        total_tokens: optional_u64(row.get(19)?),
+                        tokens: UsageTokenBreakdown {
+                            input_tokens: optional_u64(row.get(14)?),
+                            cached_input_tokens: optional_u64(row.get(15)?),
+                            cache_write_input_tokens: optional_u64(row.get(16)?),
+                            cache_write_ttl: row
+                                .get::<_, Option<String>>(28)?
+                                .as_deref()
+                                .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
+                            reasoning_tokens: optional_u64(row.get(17)?),
+                            output_tokens: optional_u64(row.get(18)?),
+                            total_tokens: optional_u64(row.get(19)?),
+                        },
                         api_equivalent: ApiEquivalentSummary::default(),
                         created_at_ms: row.get::<_, i64>(20)?.max(0) as u64,
                     })
@@ -453,28 +455,28 @@ impl Store {
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
-            let (cache_write_5m, cache_write_1h, unknown_cache_write) = match event.cache_write_ttl
-            {
-                Some(zenith_relay_core::CacheWriteTtl::FiveMinutes) => {
-                    (event.cache_write_input_tokens, Some(0), Some(0))
-                }
-                Some(zenith_relay_core::CacheWriteTtl::OneHour) => {
-                    (Some(0), event.cache_write_input_tokens, Some(0))
-                }
-                _ => (Some(0), Some(0), event.cache_write_input_tokens),
-            };
+            let (cache_write_5m, cache_write_1h, unknown_cache_write) =
+                match event.tokens.cache_write_ttl {
+                    Some(zenith_relay_core::CacheWriteTtl::FiveMinutes) => {
+                        (event.tokens.cache_write_input_tokens, Some(0), Some(0))
+                    }
+                    Some(zenith_relay_core::CacheWriteTtl::OneHour) => {
+                        (Some(0), event.tokens.cache_write_input_tokens, Some(0))
+                    }
+                    _ => (Some(0), Some(0), event.tokens.cache_write_input_tokens),
+                };
             event.api_equivalent = resolver.estimate(
                 &event.candidate_kind,
                 &event.candidate_hint,
                 model,
                 ApiEquivalentUsage {
-                    input_tokens: event.input_tokens,
-                    cached_input_tokens: event.cached_input_tokens,
+                    input_tokens: event.tokens.input_tokens,
+                    cached_input_tokens: event.tokens.cached_input_tokens,
                     cache_write_5m_tokens: cache_write_5m,
                     cache_write_1h_tokens: cache_write_1h,
                     unknown_cache_write_tokens: unknown_cache_write,
-                    output_tokens: event.output_tokens,
-                    total_tokens: event.total_tokens,
+                    output_tokens: event.tokens.output_tokens,
+                    total_tokens: event.tokens.total_tokens,
                 },
             );
         }
@@ -1297,7 +1299,7 @@ mod tests {
         );
         assert_eq!(page.events[0].request_id, "req_2");
         assert_eq!(page.events[0].ttft_ms, Some(4));
-        assert_eq!(page.events[0].cache_write_input_tokens, Some(1));
+        assert_eq!(page.events[0].tokens.cache_write_input_tokens, Some(1));
         assert_eq!(page.events[0].api_equivalent, page.totals.api_equivalent);
         assert_eq!(page.totals.cache_write_input_tokens, 1);
         assert_eq!(page.totals.cache_write_input_samples, 1);

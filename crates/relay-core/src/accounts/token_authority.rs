@@ -842,8 +842,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn transient_refresh_failure_preserves_auth_state_and_tokens() {
+    async fn active_authority_with_refreshable_expired_token() -> TokenAuthority {
         let authority = TokenAuthority::new(1).unwrap();
         authority
             .register(
@@ -861,6 +860,12 @@ mod tests {
             )
             .await
             .unwrap();
+        authority
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_preserves_auth_state_and_tokens() {
+        let authority = active_authority_with_refreshable_expired_token().await;
         let persistence = CapturePersistence::default();
 
         assert_eq!(
@@ -894,23 +899,7 @@ mod tests {
 
     #[tokio::test]
     async fn reused_refresh_token_preserves_auth_state_and_tokens() {
-        let authority = TokenAuthority::new(1).unwrap();
-        authority
-            .register(
-                "local-account",
-                TokenSet::new(
-                    "access",
-                    Some("refresh".into()),
-                    Some("identity".into()),
-                    Some(1),
-                    0,
-                    7,
-                )
-                .unwrap(),
-                AccountAuthState::Active,
-            )
-            .await
-            .unwrap();
+        let authority = active_authority_with_refreshable_expired_token().await;
         let persistence = CapturePersistence::default();
 
         assert_eq!(
