@@ -95,6 +95,8 @@ integration, recovery, and the local-first desktop workflow.
 - Tooltips now wait briefly for pointer hover, appear immediately for keyboard
   focus, and remain available for disabled actions without browser-native
   `title` popups.
+- The startup screen and application chrome no longer allow accidental text
+  selection, while editable fields remain selectable.
 - Usage refreshes no longer wait on an extra UI delay, while sign-in, setup,
   and snapshot countdowns share one deadline-based clock instead of separate
   polling intervals.
