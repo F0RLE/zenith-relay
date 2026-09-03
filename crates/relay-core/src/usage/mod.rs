@@ -1,14 +1,10 @@
 mod api_equivalent;
 
 pub use api_equivalent::{
-    api_model_price, api_pricing_revision, candidate_model_price_sources, estimate_api_equivalent,
-    estimate_api_equivalent_with_cache_ttl,
-    estimate_api_equivalent_with_cache_ttl_and_price_override,
-    estimate_api_equivalent_with_cache_ttl_and_price_sources,
-    estimate_api_equivalent_with_price_override, estimate_candidate_api_equivalent,
-    normalize_model_price_overrides, official_image_request_prices, ApiEquivalentUsage,
-    ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources, ImageRequestPrice,
-    SourceModelPriceOverrides, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
+    estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
+    resolve_candidate_price, ApiEquivalentUsage, ApiModelPriceOverride, ApiModelPriceSources,
+    SourceModelPriceOverrides,
 };
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.
@@ -449,7 +445,7 @@ impl UsageEvent {
             return None;
         }
         let category = self.error_category.as_deref().unwrap_or_default();
-        if relay_error_category(category) || category.starts_with("adapter_") {
+        if relay_error_category(category) || adapter_error_category_is_relay(category) {
             return Some(ErrorOrigin::Relay);
         }
         if self.account_id.is_some() {
@@ -501,9 +497,11 @@ fn relay_error_category(category: &str) -> bool {
             | "client_websocket"
             | "response_affinity_miss"
             | "stream_event_too_large"
-            | "stream_semantic_timeout"
-            | "websocket_idle_timeout"
     )
+}
+
+fn adapter_error_category_is_relay(category: &str) -> bool {
+    category.starts_with("adapter_") && !category.starts_with("adapter_upstream_")
 }
 
 #[cfg(test)]
@@ -560,11 +558,27 @@ mod tests {
             Some(ErrorOrigin::Account)
         );
         assert_eq!(
+            failed_usage_event("websocket_idle_timeout", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("stream_semantic_timeout", None).error_origin(),
+            Some(ErrorOrigin::Provider)
+        );
+        assert_eq!(
             failed_usage_event("invalid_request", Some("account")).error_origin(),
             Some(ErrorOrigin::Relay)
         );
         assert_eq!(
             failed_usage_event("adapter_upstream_error", None).error_origin(),
+            Some(ErrorOrigin::Provider)
+        );
+        assert_eq!(
+            failed_usage_event("adapter_upstream_response_invalid", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("adapter_invalid_request", Some("account")).error_origin(),
             Some(ErrorOrigin::Relay)
         );
     }

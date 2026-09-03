@@ -117,13 +117,9 @@ pub fn apply_pool_model_configuration(
 ) {
     for model in models {
         let model_id = model.id.clone();
-        if let Some(price) = model_price_overrides.get(&model_id.to_ascii_lowercase()) {
+        if let Some(price) = model_price_overrides.get(&model_id.trim().to_ascii_lowercase()) {
             model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
-            model.cached_input_micro_usd_per_million = Some(
-                price
-                    .cached_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-            );
+            model.cached_input_micro_usd_per_million = price.cached_input_micro_usd_per_million;
             model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
             model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);

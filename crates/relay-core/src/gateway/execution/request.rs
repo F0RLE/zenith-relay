@@ -30,7 +30,8 @@ use super::super::turn_state::{
 };
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids, AdapterError, AdapterRequestContext,
+    repair_custom_tool_item_ids, AdapterError, AdapterRequestContext, AdapterResponse,
+    PreparedAdapterRequest,
 };
 use crate::runtime::AuthenticatedKey;
 use crate::usage::ReasoningEffortDiagnostics;
@@ -59,6 +60,25 @@ pub(super) struct RequestExecution {
     pub(super) responses_lite: Option<HeaderValue>,
     pub(super) allow_previous_response_reset: bool,
     pub(super) attempt_offset: u16,
+}
+
+/// Keeps adapter translation and JSON serialization at the protocol boundary.
+/// Native responses preserve their upstream bytes, while bridged responses
+/// return both the client representation and continuation state.
+fn translate_completed_response(
+    adapter_request: PreparedAdapterRequest,
+    upstream_bytes: Vec<u8>,
+) -> Result<(Vec<u8>, Option<AdapterResponse>), AdapterError> {
+    let bridge_response = adapter_request.translate_response_bytes(&upstream_bytes)?;
+    let response_bytes = bridge_response
+        .as_ref()
+        .map(|response| {
+            serde_json::to_vec(response.response_body())
+                .map_err(|_| AdapterError::upstream_response_invalid())
+        })
+        .transpose()?
+        .unwrap_or(upstream_bytes);
+    Ok((response_bytes, bridge_response))
 }
 
 pub(super) async fn execute_request(context: RequestExecution) -> Response<Body> {
@@ -494,6 +514,13 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
+                    // A retryable upstream failure means the affinity owner
+                    // cannot serve this continuation right now. Release the
+                    // sticky binding before the next selection so another
+                    // eligible slot can carry the request.
+                    if response_affinity_hit {
+                        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    }
                     let state = apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
@@ -516,23 +543,22 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 continue;
             }
             if !adapter_is_passthrough {
-                event.error_category = Some("adapter_upstream_error".to_string());
                 emit_usage(&runtime, event);
                 if let Some(preserved) = last_preserved_upstream_error.as_ref() {
                     return api_error_with_origin_and_category(
                         preserved.status,
                         &preserved.message,
                         &preserved.code,
-                        "adapter_upstream_error",
-                        crate::ErrorOrigin::Relay,
+                        preserved.category,
+                        selected_error_origin,
                         Some(&request_id),
                     );
                 }
                 return api_error_with_origin(
                     failure.status,
-                    "upstream source rejected the translated request",
-                    "adapter_upstream_error",
-                    crate::ErrorOrigin::Relay,
+                    failure.message,
+                    failure.category,
+                    selected_error_origin,
                     Some(&request_id),
                 );
             }
@@ -684,33 +710,10 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             } else {
                 bytes
             };
-            let bridge_response = match adapter_request.translate_response_bytes(&bytes) {
-                Ok(response) => response,
-                Err(error) => {
-                    let mut event = usage_event(
-                        &request_id,
-                        attempt,
-                        &key.id,
-                        &route,
-                        Some(&reasoning_effort),
-                        &requested_model,
-                        false,
-                        StatusCode::BAD_GATEWAY.as_u16(),
-                        Some(error.code().to_string()),
-                        started.elapsed().as_millis() as u64,
-                        tool_use.clone(),
-                    );
-                    event.error_category = Some(error.code().to_string());
-                    emit_usage(&runtime, event);
-                    drop(lease);
-                    return adapter_error_response(error);
-                }
-            };
-            let bytes = if let Some(response) = bridge_response.as_ref() {
-                match serde_json::to_vec(response.response_body()) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        let error = AdapterError::upstream_response_invalid();
+            let (bytes, bridge_response) =
+                match translate_completed_response(adapter_request, bytes) {
+                    Ok(response) => response,
+                    Err(error) => {
                         let mut event = usage_event(
                             &request_id,
                             attempt,
@@ -727,12 +730,9 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         event.error_category = Some(error.code().to_string());
                         emit_usage(&runtime, event);
                         drop(lease);
-                        return adapter_error_response(error);
+                        return adapter_error_response_for_origin(error, selected_error_origin);
                     }
-                }
-            } else {
-                bytes
-            };
+                };
             let mut event = usage_event(
                 &request_id,
                 attempt,
@@ -1070,12 +1070,19 @@ fn replay_native_tool_continuation(
 }
 
 fn adapter_error_response(error: AdapterError) -> Response<Body> {
+    adapter_error_response_for_origin(error, crate::ErrorOrigin::Relay)
+}
+
+fn adapter_error_response_for_origin(
+    error: AdapterError,
+    origin: crate::ErrorOrigin,
+) -> Response<Body> {
     let status = if error.is_upstream_failure() {
         StatusCode::BAD_GATEWAY
     } else {
         StatusCode::BAD_REQUEST
     };
-    api_error(status, error.message(), error.code())
+    api_error_with_origin(status, error.message(), error.code(), origin, None)
 }
 
 #[cfg(test)]

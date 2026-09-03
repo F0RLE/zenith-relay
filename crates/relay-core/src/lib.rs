@@ -3,6 +3,7 @@ pub mod automations;
 pub mod catalog;
 mod error;
 pub mod gateway;
+pub mod pricing;
 pub mod protocol;
 pub mod providers;
 pub mod proxy;
@@ -29,6 +30,15 @@ pub use catalog::{
     CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
+pub use pricing::{
+    pricing_refresh_delay, pricing_refresh_jitter_seconds, usd_per_request_to_micro_usd,
+    usd_per_token_to_micro_usd_per_million, usd_to_micro, CatalogEntry, CatalogRefreshDeadline,
+    CatalogRefreshKind, ImageModelPrice, ImageRequestPrice, PriceEvidence, PriceSource,
+    PricingCacheEnvelope, PricingCatalog, PricingCatalogHandle, PricingContext, PricingError,
+    PricingMetadata, PricingSourceSummary, ResolvedPrice, SourcePricingMetadata, TokenPrice,
+    CACHE_FORMAT, CACHE_SCHEMA_VERSION, LITELLM_SOURCE_URL, MAX_CACHE_BYTES, MAX_CACHE_RECORDS,
+    MAX_CACHE_STRING_LENGTH, PRICING_REFRESH_INTERVAL_SECONDS, PRICING_REFRESH_JITTER_MAX_SECONDS,
+};
 pub use protocol::{
     bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError,
     AdapterRequestContext, AdapterResponse, AdapterResult, AdapterStreamBridge,
@@ -65,15 +75,10 @@ pub use sources::{
 };
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{
-    api_model_price, api_pricing_revision, candidate_model_price_sources, estimate_api_equivalent,
-    estimate_api_equivalent_with_cache_ttl,
-    estimate_api_equivalent_with_cache_ttl_and_price_override,
-    estimate_api_equivalent_with_cache_ttl_and_price_sources,
-    estimate_api_equivalent_with_price_override, estimate_candidate_api_equivalent,
-    normalize_model_price_overrides, normalize_observed_service_tier, normalize_reasoning_effort,
-    official_image_request_prices, sql_like_contains_pattern, ApiEquivalentSummary,
-    ApiEquivalentUsage, ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources, ErrorOrigin,
-    ImageRequestPrice, ObservedServiceTier, SourceModelPriceOverrides, TerminalOutputKind,
-    ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
-    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
+    estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
+    normalize_observed_service_tier, normalize_reasoning_effort, resolve_candidate_price,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
+    ApiModelPriceSources, ErrorOrigin, ObservedServiceTier, SourceModelPriceOverrides,
+    TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
 };

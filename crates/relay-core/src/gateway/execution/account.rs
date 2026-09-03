@@ -364,6 +364,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
+                    if response_affinity_hit {
+                        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    }
                     let state = apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,

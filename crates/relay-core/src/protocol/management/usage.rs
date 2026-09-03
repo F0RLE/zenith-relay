@@ -1,6 +1,6 @@
 use crate::{
     ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
-    RoutingDiagnostics, ToolUseDiagnostics, WireApi,
+    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, WireApi,
 };
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +117,8 @@ pub struct UsagePage {
     pub pool_members: Vec<UsageGroup>,
     #[serde(default)]
     pub buckets: Vec<UsageBucket>,
+    #[serde(default)]
+    pub pricing: PricingMetadata,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -145,6 +147,18 @@ pub struct UsageQuery {
     pub success: Option<bool>,
     pub error_category: Option<String>,
     pub request_id_query: Option<String>,
+    /// Include request event rows in the response. `None` preserves the
+    /// legacy behavior for API clients that do not send the projection hint.
+    #[serde(default)]
+    pub include_events: Option<bool>,
+    /// Include model aggregates in the response. `None` preserves the legacy
+    /// behavior for API clients that do not send the projection hint.
+    #[serde(default)]
+    pub include_models: Option<bool>,
+    /// Include pool-member aggregates in the response. `None` preserves the
+    /// legacy behavior for API clients that do not send the projection hint.
+    #[serde(default)]
+    pub include_pool_members: Option<bool>,
 }
 
 impl UsageQuery {
@@ -156,5 +170,17 @@ impl UsageQuery {
             self.page_size.clamp(1, 200)
         };
         self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
+    }
+
+    pub fn includes_models(&self) -> bool {
+        self.include_models != Some(false)
+    }
+
+    pub fn includes_events(&self) -> bool {
+        self.include_events != Some(false)
+    }
+
+    pub fn includes_pool_members(&self) -> bool {
+        self.include_pool_members != Some(false)
     }
 }

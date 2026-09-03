@@ -2235,9 +2235,39 @@ fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
         .iter()
         .collect::<Vec<_>>(),
     );
+    // Automatic selection uses the immutable LiteLLM snapshot when one is
+    // available.  Keep the fixture explicit so this test does not depend on
+    // the shared LiteLLM fixture catalog.
+    let catalog = crate::pricing::PricingCatalog::from_litellm_json(
+        r#"{
+            "gpt-5.6-terra": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": "0.000002",
+                "output_cost_per_token": "0.000012"
+            },
+            "gpt-5.6-sol": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": "0.000004",
+                "output_cost_per_token": "0.000020"
+            },
+            "gpt-5.4-mini": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": "0.000001",
+                "output_cost_per_token": "0.000006"
+            }
+        }"#,
+    )
+    .unwrap();
     assert_eq!(
-        cheapest_image_main_model(&models).as_deref(),
+        super::images::cheapest_image_main_model_with_catalog(&models, Some(&catalog)).as_deref(),
         Some("gpt-5.4-mini")
+    );
+    // An empty/offline snapshot must still allow a deterministic runtime
+    // build; its choice is a stable fallback, not an implicit price claim.
+    let empty = crate::pricing::PricingCatalog::empty();
+    assert_eq!(
+        super::images::cheapest_image_main_model_with_catalog(&models, Some(&empty)).as_deref(),
+        Some("gpt-5.6-sol")
     );
     let terra = normalized_set(["gpt-5.6-terra".to_string()].iter());
     assert_eq!(

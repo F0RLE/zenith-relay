@@ -1,9 +1,6 @@
 use crate::ApiModelPriceOverride;
 use serde_json::Value;
 
-const MICRO_USD_PER_MILLION_TOKENS: u128 = 1_000_000_000_000;
-const MICRO_USD_PER_USD: u128 = 1_000_000;
-
 pub(super) fn detected_model_price(model: &Value) -> Option<ApiModelPriceOverride> {
     let pricing = model.get("pricing").filter(|value| value.is_object());
     let input = price_component(
@@ -152,67 +149,11 @@ fn unsigned_integer(value: &Value) -> Option<u64> {
 }
 
 fn usd_per_token_to_micro_usd_per_million(value: &Value) -> Option<u64> {
-    usd_decimal_to_microusd(value, MICRO_USD_PER_MILLION_TOKENS)
+    crate::usd_per_token_to_micro_usd_per_million(value).ok()
 }
 
 fn usd_per_request_to_micro_usd(value: &Value) -> Option<u64> {
-    usd_decimal_to_microusd(value, MICRO_USD_PER_USD)
-}
-
-fn usd_decimal_to_microusd(value: &Value, scale: u128) -> Option<u64> {
-    let value = value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| value.as_number().map(ToString::to_string))?;
-    let value = value.trim();
-    let (mantissa, exponent) = match value.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
-        None => (value, 0),
-    };
-    let (whole, fractional) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    if (whole.is_empty() && fractional.is_empty())
-        || !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let mut digits = String::with_capacity(whole.len() + fractional.len());
-    digits.push_str(whole);
-    digits.push_str(fractional);
-    let digits = digits.trim_start_matches('0');
-    if digits.is_empty() {
-        return Some(0);
-    }
-    // u128 has enough room for supported prices while keeping malformed
-    // provider metadata bounded and entirely free of floating-point math.
-    if digits.len() > 38 {
-        return None;
-    }
-    let digits = digits.parse::<u128>().ok()?;
-    let scale_digits = i64::from(scale.ilog10());
-    let fractional_digits = i64::try_from(fractional.len()).ok()?;
-    let shift = i64::from(exponent)
-        .checked_add(scale_digits)?
-        .checked_sub(fractional_digits)?;
-    let result = if shift >= 0 {
-        if shift > 38 {
-            return None;
-        }
-        digits.checked_mul(10_u128.checked_pow(u32::try_from(shift).ok()?)?)?
-    } else {
-        let divisor_power = shift.unsigned_abs();
-        // The significant value is below 10^38, so a denominator this large
-        // cannot round it to one micro-unit.
-        if divisor_power > 38 {
-            return Some(0);
-        }
-        let divisor = 10_u128.checked_pow(u32::try_from(divisor_power).ok()?)?;
-        let quotient = digits / divisor;
-        let remainder = digits % divisor;
-        quotient + u128::from(remainder >= divisor.div_ceil(2))
-    };
-
-    u64::try_from(result).ok()
+    crate::usd_per_request_to_micro_usd(value).ok()
 }
 
 #[cfg(test)]
@@ -293,7 +234,7 @@ mod tests {
             price,
             Some(ApiModelPriceOverride {
                 input_micro_usd_per_million: 1_000_000,
-                cached_input_micro_usd_per_million: Some(1_000_000),
+                cached_input_micro_usd_per_million: None,
                 cache_write_5m_micro_usd_per_million: None,
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 2_500_000,

@@ -1152,6 +1152,36 @@ fn response_affinity_is_mandatory() {
 }
 
 #[test]
+fn invalidated_response_affinity_allows_retry_on_another_candidate() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    let mut fallback = candidate("fallback");
+    fallback.priority = 10;
+    scheduler.upsert(fallback);
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+    scheduler.set_cooldown("owner", "gpt-5", 10);
+
+    // Retryable provider failures invalidate the owner binding before the
+    // next selection. The tried set then excludes the cooled owner and lets
+    // the scheduler use the next eligible candidate.
+    assert!(scheduler.invalidate_response_affinity("response"));
+    let tried = HashSet::from(["owner".to_string()]);
+    let selection = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &tried,
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: None,
+            now_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(selection.candidate_id, "fallback");
+    assert!(!selection.response_affinity_hit);
+}
+
+#[test]
 fn cooldown_expires_and_success_clears_it_and_updates_last_used_timestamp() {
     let mut scheduler = PoolScheduler::new();
     let mut candidate = candidate("candidate");

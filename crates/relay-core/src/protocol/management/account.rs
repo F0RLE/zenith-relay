@@ -22,6 +22,10 @@ pub struct SourceSummary {
     pub draining: bool,
     pub operational_status: OperationalStatus,
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -174,6 +178,8 @@ pub struct AccountSummary {
     pub id: String,
     pub label: String,
     pub identity_hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_family: Option<String>,
     pub enabled: bool,
     #[serde(default)]
     pub in_pool: bool,

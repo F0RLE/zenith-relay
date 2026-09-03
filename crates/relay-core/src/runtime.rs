@@ -1,5 +1,6 @@
 use crate::accounts::{TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities};
+use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     AgentIdentityCredential, CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
@@ -380,6 +381,9 @@ pub struct GatewayRuntimeOptions {
     /// Optional text model used as the Responses image-generation bridge.
     /// `None` selects the cheapest known compatible model per account.
     pub image_base_model: Option<String>,
+    /// Immutable pricing snapshot used only to rank the automatic image
+    /// bridge model. A missing or empty snapshot never blocks runtime build.
+    pub image_pricing_catalog: Option<Arc<PricingCatalog>>,
     /// Manually enabled source-model reasoning efforts. An absent model
     /// exposes no reasoning selector for API sources.
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
@@ -403,6 +407,10 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .field("default_service_tier", &self.default_service_tier)
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
             .field("image_base_model", &self.image_base_model)
+            .field(
+                "image_pricing_catalog",
+                &self.image_pricing_catalog.as_ref().map(|_| "configured"),
+            )
             .field(
                 "model_reasoning_allowed_levels",
                 &self.model_reasoning_allowed_levels,
@@ -428,6 +436,7 @@ impl Default for GatewayRuntimeOptions {
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            image_pricing_catalog: None,
             model_reasoning_allowed_levels: BTreeMap::new(),
             response_affinity_store: None,
             provider_storm_breaker: false,
@@ -855,11 +864,13 @@ impl GatewayRuntime {
         let mut scheduler = configure_scheduler(&options)?;
         let mut registry = ModelRegistry::default();
         let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
+        let image_pricing_catalog = options.image_pricing_catalog.as_deref();
         let source_parts = build_sources(sources, &mut registry, &mut scheduler)?;
         let account_parts = build_accounts(
             accounts,
             account_auth.as_ref(),
             image_base_model.as_deref(),
+            image_pricing_catalog,
             &source_parts,
             &mut registry,
             &mut scheduler,
