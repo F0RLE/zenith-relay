@@ -1619,7 +1619,7 @@ async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].error_category.as_deref(),
-        Some("upstream_invalid_request")
+        Some("upstream_candidate_rejected")
     );
 }
 

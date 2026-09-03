@@ -353,6 +353,16 @@ fn upstream_errors_use_stable_status_and_body_categories() {
             ),
             (
                 StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"model_disabled","message":"Requested model is disabled"}}"#.as_slice(),
+                "upstream_candidate_rejected",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"vendor_route_42","message":"this route cannot serve the request"}}"#.as_slice(),
+                "upstream_candidate_rejected",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"websocket_not_supported"}}"#.as_slice(),
                 "upstream_websocket_unsupported",
             ),
@@ -479,6 +489,21 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         StatusCode::BAD_REQUEST,
         "upstream_model_capacity",
         false
+    ));
+    assert!(retryable_failure(
+        StatusCode::BAD_REQUEST,
+        "upstream_model_unsupported",
+        false
+    ));
+    assert!(retryable_failure(
+        StatusCode::BAD_REQUEST,
+        "upstream_candidate_rejected",
+        false
+    ));
+    assert!(!retryable_failure(
+        StatusCode::BAD_REQUEST,
+        "upstream_candidate_rejected",
+        true
     ));
     assert!(retryable_failure(
         StatusCode::BAD_REQUEST,

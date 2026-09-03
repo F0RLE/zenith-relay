@@ -161,6 +161,7 @@ pub(crate) fn apply_failure_cooldown_with_hint(
             | "upstream_model_unsupported"
             | "upstream_model_capacity"
             | "upstream_overloaded"
+            | "upstream_candidate_rejected"
     ) {
         let has_explicit_retry_after =
             retry_after_ms(headers, SystemTime::now()).is_some() || hint.retry_after_ms.is_some();
