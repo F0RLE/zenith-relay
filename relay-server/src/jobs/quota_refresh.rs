@@ -2,14 +2,16 @@ use crate::{
     app::{account_proxy_config, prepare_server_account_authorization},
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
-use reqwest::header::HeaderValue;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{
-    accounts::{reduce_account_quota, AccountAuthState, AccountHealthState, AccountQuotaOutcome},
+    accounts::{
+        apply_model_discovery_failure as apply_account_model_discovery_failure,
+        recover_model_discovery_state, reduce_account_quota, AccountAuthState, AccountQuotaOutcome,
+    },
     providers::chatgpt::{
-        is_agent_identity_task_invalid_failure, subscription_refresh_due, CodexModelsClient,
-        CodexQuotaClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
+        bearer_authorization, is_agent_identity_task_invalid_failure, subscription_refresh_due,
+        CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
         CODEX_MODELS_CLIENT_VERSION,
     },
     quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
@@ -92,7 +94,7 @@ async fn refresh_models_best_effort(state: &Arc<AppState>, account: &mut ServerA
                 .token_authority
                 .auth_state(&account.id)
                 .await
-                .filter(|auth_state| matches!(auth_state, AccountAuthState::RequiresReauth(_))),
+                .filter(|auth_state| auth_state.requires_fresh_login()),
         }
     } else {
         None
@@ -236,35 +238,29 @@ fn apply_discovered_models(
     result: Result<Vec<String>, (String, bool)>,
 ) {
     match result {
-        Ok(models) if !models.is_empty() => {
+        Ok(models) => {
             let models = zenith_relay_core::normalize_model_ids(models);
-            if account.models.is_empty() {
+            if account.models.is_empty() && !models.is_empty() {
                 account.models = models.clone();
             }
             account.discovered_models = Some(models);
-            let recovered = account
-                .last_error_code
-                .as_deref()
-                .is_some_and(|code| code.starts_with("models_"));
-            if recovered {
-                account.last_error_code = None;
-                if !matches!(account.auth_state, AccountAuthState::RequiresReauth(_)) {
-                    if account.auth_state == AccountAuthState::Error {
-                        account.auth_state = AccountAuthState::Active;
-                    }
-                    account.health = AccountHealthState::Healthy;
-                }
-            }
-        }
-        Ok(_) if account.effective_models().is_empty() => {
-            apply_model_failure(account, "models_empty", false)
+            recover_model_discovery_state(
+                &mut account.auth_state,
+                &mut account.health,
+                &mut account.last_error_code,
+            );
         }
         Err((code, retryable)) => {
             // Cached model slugs remain routable, but the failed refresh must
             // remain visible to management clients as stale availability.
-            apply_model_failure(account, &code, retryable)
+            apply_account_model_discovery_failure(
+                &mut account.auth_state,
+                &mut account.health,
+                &mut account.last_error_code,
+                &code,
+                retryable,
+            )
         }
-        Ok(_) => {}
     }
 }
 
@@ -336,50 +332,19 @@ fn model_discovery_error(error: ModelDiscoveryFailure) -> (String, bool) {
         // The server retries agent task registration once. A second failed
         // attempt used to be handled as its 401 response category.
         ModelDiscoveryFailureCode::AgentTaskInvalid => "models_unauthorized",
-        ModelDiscoveryFailureCode::Forbidden => "models_forbidden",
-        ModelDiscoveryFailureCode::HttpStatus => "models_http_status",
-        ModelDiscoveryFailureCode::InvalidAccessToken => "models_invalid_access_token",
-        ModelDiscoveryFailureCode::InvalidAccountId => "models_invalid_account_id",
-        ModelDiscoveryFailureCode::InvalidClientVersion => "models_invalid_client_version",
+        // The server categorizes client construction errors separately from
+        // a malformed endpoint response.
         ModelDiscoveryFailureCode::InvalidEndpoint => "models_client_init",
-        ModelDiscoveryFailureCode::InvalidResponse => "models_invalid_response",
-        ModelDiscoveryFailureCode::RateLimited => "models_rate_limited",
-        ModelDiscoveryFailureCode::ResponseTooLarge => "models_response_too_large",
-        ModelDiscoveryFailureCode::Transport => "models_transport",
-        ModelDiscoveryFailureCode::Unauthorized => "models_unauthorized",
-        ModelDiscoveryFailureCode::Upstream => "models_upstream",
+        code => code.management_code(),
     };
     (code.to_string(), error.retryable)
-}
-
-fn bearer_authorization(access_token: &str) -> Result<HeaderValue, ()> {
-    let mut authorization =
-        HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| ())?;
-    authorization.set_sensitive(true);
-    Ok(authorization)
-}
-
-fn apply_model_failure(account: &mut ServerAccountRecord, code: &str, retryable: bool) {
-    account.last_error_code = Some(code.to_string());
-    match code {
-        "models_unauthorized" | "models_invalid_access_token" | "models_invalid_account_id" => {
-            // Reauthentication is a terminal, user-actionable state. A
-            // later failed model probe must not downgrade it to generic Error.
-            if !matches!(account.auth_state, AccountAuthState::RequiresReauth(_)) {
-                account.auth_state = AccountAuthState::Error;
-            }
-            account.health = AccountHealthState::Unhealthy;
-        }
-        "models_forbidden" => account.health = AccountHealthState::Blocked,
-        _ if retryable => account.health = AccountHealthState::Degraded,
-        _ => account.health = AccountHealthState::Unhealthy,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use zenith_relay_core::accounts::AccountHealthState;
     use zenith_relay_core::quota::QuotaSnapshot;
 
     fn account(models: &[&str]) -> ServerAccountRecord {
@@ -392,6 +357,7 @@ mod tests {
             draining: false,
             source_id: "codex".into(),
             secret_ref: "account:account-test".into(),
+            provider_family: Some("openai".into()),
             auth_state: AccountAuthState::Active,
             health: AccountHealthState::Healthy,
             models: models.iter().map(|model| (*model).to_string()).collect(),
@@ -442,6 +408,18 @@ mod tests {
             .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered"));
         assert_eq!(empty.health, AccountHealthState::Healthy);
         assert!(empty.last_error_code.is_none());
+    }
+
+    #[test]
+    fn successful_empty_model_refresh_is_authoritative() {
+        let mut record = account(&["gpt-old"]);
+
+        apply_discovered_models(&mut record, Ok(Vec::new()));
+
+        assert_eq!(record.discovered_models, Some(Vec::new()));
+        assert!(record.effective_models().is_empty());
+        assert!(record.last_error_code.is_none());
+        assert_eq!(record.health, AccountHealthState::Healthy);
     }
 
     #[test]

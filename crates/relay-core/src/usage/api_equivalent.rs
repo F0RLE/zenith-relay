@@ -1,77 +1,13 @@
 use super::ApiEquivalentSummary;
-use crate::is_valid_model_id;
+use crate::{
+    is_valid_model_id,
+    pricing::{
+        PriceSource, PricingCatalog, PricingContext, ResolvedPrice, TokenPrice,
+        MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    },
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::OnceLock};
-
-pub const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageRequestPrice {
-    pub operation: String,
-    pub quality: String,
-    pub size: String,
-    pub micro_usd: u64,
-}
-
-/// Official OpenAI image output prices from the current API pricing guide.
-/// Prompt and input-image tokens for edits remain separate usage facts.
-pub fn official_image_request_prices(model: &str) -> Vec<ImageRequestPrice> {
-    let rows: &[(&str, u64, u64, u64)] = match model.trim().to_ascii_lowercase().as_str() {
-        "gpt-image-2" => &[
-            ("low", 6_000, 5_000, 5_000),
-            ("medium", 53_000, 41_000, 41_000),
-            ("high", 211_000, 165_000, 165_000),
-        ],
-        "gpt-image-1.5" => &[
-            ("low", 9_000, 13_000, 13_000),
-            ("medium", 34_000, 50_000, 50_000),
-            ("high", 133_000, 200_000, 200_000),
-        ],
-        "gpt-image-1" => &[
-            ("low", 11_000, 16_000, 16_000),
-            ("medium", 42_000, 63_000, 63_000),
-            ("high", 167_000, 250_000, 250_000),
-        ],
-        "gpt-image-1-mini" => &[
-            ("low", 5_000, 6_000, 6_000),
-            ("medium", 11_000, 15_000, 15_000),
-            ("high", 36_000, 52_000, 52_000),
-        ],
-        _ => return Vec::new(),
-    };
-    ["generation", "edit"]
-        .into_iter()
-        .flat_map(|operation| {
-            rows.iter()
-                .flat_map(move |(quality, square, portrait, landscape)| {
-                    [
-                        ("1024x1024", *square),
-                        ("1024x1536", *portrait),
-                        ("1536x1024", *landscape),
-                    ]
-                    .into_iter()
-                    .map(move |(size, micro_usd)| ImageRequestPrice {
-                        operation: operation.to_string(),
-                        quality: (*quality).to_string(),
-                        size: size.to_string(),
-                        micro_usd,
-                    })
-                })
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApiModelPrice {
-    pub catalog_rank: u32,
-    pub input_micro_usd_per_million: u64,
-    pub cached_input_micro_usd_per_million: u64,
-    pub cache_write_5m_micro_usd_per_million: Option<u64>,
-    pub cache_write_1h_micro_usd_per_million: Option<u64>,
-    pub output_micro_usd_per_million: u64,
-}
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,15 +24,34 @@ pub struct ApiModelPriceOverride {
 
 /// Price provenance for a compatible API source.
 ///
-/// Account usage never uses this type: account API-equivalent values come
-/// from the bundled official catalog only. For API sources, provider-discovered
-/// prices win, the official catalog is the next fallback, and an operator's
-/// manual value is used only when neither exists.
+/// Account usage never uses this type as a catalog: account API-equivalent
+/// values come from the declared-family LiteLLM snapshot. For API sources,
+/// provider-discovered prices win, LiteLLM exact/canonical records are the
+/// next fallbacks, and an operator's manual value is used only when neither
+/// exists.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiModelPriceSources {
     pub provider: Option<ApiModelPriceOverride>,
     pub manual: Option<ApiModelPriceOverride>,
+}
+
+/// Per-source price provenance indexed by source id and normalized model id.
+///
+/// This remains a storage-neutral representation so desktop telemetry and the
+/// user-managed server apply the same pricing policy without sharing a schema.
+pub type SourceModelPriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
+
+/// Token measurements required to estimate an API-equivalent value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ApiEquivalentUsage {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_5m_tokens: Option<u64>,
+    pub cache_write_1h_tokens: Option<u64>,
+    pub unknown_cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 impl ApiModelPriceOverride {
@@ -111,7 +66,7 @@ impl ApiModelPriceOverride {
             (Some(input), cached_input, cache_write_5m, cache_write_1h, Some(output)) => {
                 let price = Self {
                     input_micro_usd_per_million: input,
-                    cached_input_micro_usd_per_million: Some(cached_input.unwrap_or(input)),
+                    cached_input_micro_usd_per_million: cached_input,
                     cache_write_5m_micro_usd_per_million: cache_write_5m,
                     cache_write_1h_micro_usd_per_million: cache_write_1h,
                     output_micro_usd_per_million: output,
@@ -141,6 +96,32 @@ impl ApiModelPriceOverride {
     }
 }
 
+impl From<ApiModelPriceOverride> for TokenPrice {
+    fn from(price: ApiModelPriceOverride) -> Self {
+        Self {
+            input: price.input_micro_usd_per_million,
+            // An absent cache tariff is intentionally preserved. In
+            // particular, it must never inherit the ordinary input tariff.
+            cache_read: price.cached_input_micro_usd_per_million,
+            cache_write_5m: price.cache_write_5m_micro_usd_per_million,
+            cache_write_1h: price.cache_write_1h_micro_usd_per_million,
+            output: price.output_micro_usd_per_million,
+        }
+    }
+}
+
+impl From<TokenPrice> for ApiModelPriceOverride {
+    fn from(price: TokenPrice) -> Self {
+        Self {
+            input_micro_usd_per_million: price.input,
+            cached_input_micro_usd_per_million: price.cache_read,
+            cache_write_5m_micro_usd_per_million: price.cache_write_5m,
+            cache_write_1h_micro_usd_per_million: price.cache_write_1h,
+            output_micro_usd_per_million: price.output,
+        }
+    }
+}
+
 pub fn normalize_model_price_overrides(
     prices: BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<BTreeMap<String, ApiModelPriceOverride>, &'static str> {
@@ -155,299 +136,173 @@ pub fn normalize_model_price_overrides(
     Ok(normalized)
 }
 
-#[derive(Deserialize)]
-struct PriceCatalog {
-    schema_version: u32,
-    catalog_version: String,
-    source_url: String,
-    verified_at: String,
-    currency: String,
-    unit_tokens: u64,
-    models: Vec<ModelPrice>,
-}
-
-#[derive(Deserialize)]
-struct ModelPrice {
-    id: String,
-    input_micro_usd_per_million: u64,
-    cached_input_micro_usd_per_million: Option<u64>,
-    #[serde(alias = "cache_write_input_micro_usd_per_million")]
-    cache_write_5m_micro_usd_per_million: Option<u64>,
-    #[serde(default)]
-    cache_write_1h_micro_usd_per_million: Option<u64>,
-    output_micro_usd_per_million: u64,
-}
-
-pub fn estimate_api_equivalent(
-    model: Option<&str>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
+/// Estimates token usage from one complete quote. This is the single pure
+/// accounting path used by dynamic LiteLLM prices and compatibility overrides.
+/// Cache components remain independent: a missing cache tariff makes only the
+/// corresponding cache tokens unpriced instead of silently using input cost.
+pub fn estimate_api_equivalent_with_token_price(
+    usage: ApiEquivalentUsage,
+    quote: Option<TokenPrice>,
 ) -> ApiEquivalentSummary {
-    estimate_api_equivalent_with_cache_ttl(
-        model,
-        input_tokens,
-        cached_input_tokens,
-        None,
-        None,
-        cache_write_input_tokens,
-        output_tokens,
-        total_tokens,
-    )
-}
+    let input = usage.input_tokens;
+    let output = usage.output_tokens;
+    let cached = usage
+        .cached_input_tokens
+        .map(|value| value.min(input.unwrap_or(value)));
+    let write_5m = usage
+        .cache_write_5m_tokens
+        .map(|value| value.min(input.unwrap_or(value)));
+    let write_1h = usage
+        .cache_write_1h_tokens
+        .map(|value| value.min(input.unwrap_or(value)));
+    let unknown = usage
+        .unknown_cache_write_tokens
+        .map(|value| value.min(input.unwrap_or(value)));
 
-#[allow(clippy::too_many_arguments)]
-pub fn estimate_api_equivalent_with_cache_ttl(
-    model: Option<&str>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_5m_tokens: Option<u64>,
-    cache_write_1h_tokens: Option<u64>,
-    unknown_cache_write_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-) -> ApiEquivalentSummary {
-    estimate_api_equivalent_with_cache_ttl_and_price_override(
-        model,
-        input_tokens,
-        cached_input_tokens,
-        cache_write_5m_tokens,
-        cache_write_1h_tokens,
-        unknown_cache_write_tokens,
-        output_tokens,
-        total_tokens,
-        None,
-    )
-}
+    let (uncached, cached, write_5m, write_1h, unknown) = if let Some(input) = input {
+        let mut remaining = input;
+        let cached = cached.map(|value| value.min(remaining)).unwrap_or_default();
+        remaining = remaining.saturating_sub(cached);
+        let write_5m = write_5m
+            .map(|value| value.min(remaining))
+            .unwrap_or_default();
+        remaining = remaining.saturating_sub(write_5m);
+        let write_1h = write_1h
+            .map(|value| value.min(remaining))
+            .unwrap_or_default();
+        remaining = remaining.saturating_sub(write_1h);
+        let unknown = unknown
+            .map(|value| value.min(remaining))
+            .unwrap_or_default();
+        remaining = remaining.saturating_sub(unknown);
+        (Some(remaining), cached, write_5m, write_1h, unknown)
+    } else {
+        (
+            None,
+            cached.unwrap_or_default(),
+            write_5m.unwrap_or_default(),
+            write_1h.unwrap_or_default(),
+            unknown.unwrap_or_default(),
+        )
+    };
 
-pub fn estimate_api_equivalent_with_price_override(
-    model: Option<&str>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-    price_override: Option<ApiModelPriceOverride>,
-) -> ApiEquivalentSummary {
-    estimate_api_equivalent_with_cache_ttl_and_price_override(
-        model,
-        input_tokens,
-        cached_input_tokens,
-        None,
-        None,
-        cache_write_input_tokens,
-        output_tokens,
-        total_tokens,
-        price_override,
-    )
-}
+    let measured_input = if input.is_some() {
+        input.unwrap_or_default()
+    } else {
+        cached
+            .saturating_add(write_5m)
+            .saturating_add(write_1h)
+            .saturating_add(unknown)
+    };
+    let measured_tokens = measured_input.saturating_add(output.unwrap_or_default());
+    let total_tokens = usage
+        .total_tokens
+        .unwrap_or(measured_tokens)
+        .max(measured_tokens);
 
-#[allow(clippy::obfuscated_if_else, clippy::too_many_arguments)]
-pub fn estimate_api_equivalent_with_cache_ttl_and_price_override(
-    model: Option<&str>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_5m_tokens: Option<u64>,
-    cache_write_1h_tokens: Option<u64>,
-    unknown_cache_write_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-    price_override: Option<ApiModelPriceOverride>,
-) -> ApiEquivalentSummary {
-    let measured_tokens = input_tokens
-        .unwrap_or_default()
-        .saturating_add(output_tokens.unwrap_or_default());
-    let total_tokens = total_tokens.unwrap_or(measured_tokens).max(measured_tokens);
-    let catalog_price = model.and_then(api_model_price);
-    if price_override.is_none() && catalog_price.is_none() {
+    let Some(quote) = quote else {
         return ApiEquivalentSummary {
             unpriced_tokens: total_tokens,
             ..Default::default()
         };
+    };
+
+    let components = [
+        (uncached, Some(quote.input)),
+        (Some(cached), quote.cache_read),
+        (Some(write_5m), quote.cache_write_5m),
+        (Some(write_1h), quote.cache_write_1h),
+        (Some(unknown), None),
+        (output, Some(quote.output)),
+    ];
+    let mut priced_tokens = 0_u64;
+    let mut micro_usd = 0_u64;
+    for (tokens, price) in components {
+        if let (Some(tokens), Some(price)) = (tokens, price) {
+            priced_tokens = priced_tokens.saturating_add(tokens);
+            micro_usd = micro_usd.saturating_add(token_cost(tokens, price));
+        }
     }
-    let input_price = price_override
-        .map(|price| price.input_micro_usd_per_million)
-        .or_else(|| catalog_price.map(|price| price.input_micro_usd_per_million));
-    let cached_price = price_override
-        .and_then(|price| price.cached_input_micro_usd_per_million)
-        .or_else(|| catalog_price.map(|price| price.cached_input_micro_usd_per_million));
-    let cache_write_5m_price = price_override
-        .and_then(|price| price.cache_write_5m_micro_usd_per_million)
-        .or_else(|| catalog_price.and_then(|price| price.cache_write_5m_micro_usd_per_million));
-    let cache_write_1h_price = price_override
-        .and_then(|price| price.cache_write_1h_micro_usd_per_million)
-        .or_else(|| catalog_price.and_then(|price| price.cache_write_1h_micro_usd_per_million));
-    let output_price = price_override
-        .map(|price| price.output_micro_usd_per_million)
-        .or_else(|| catalog_price.map(|price| price.output_micro_usd_per_million));
-    let input_tokens = input_tokens.unwrap_or_default();
-    let cached_input_tokens = cached_input_tokens.map(|tokens| tokens.min(input_tokens));
-    let cache_write_5m_tokens = cache_write_5m_tokens.map(|tokens| {
-        tokens.min(input_tokens.saturating_sub(cached_input_tokens.unwrap_or_default()))
-    });
-    let cache_write_1h_tokens = cache_write_1h_tokens.map(|tokens| {
-        tokens.min(
-            input_tokens
-                .saturating_sub(cached_input_tokens.unwrap_or_default())
-                .saturating_sub(cache_write_5m_tokens.unwrap_or_default()),
-        )
-    });
-    let unknown_cache_write_tokens = unknown_cache_write_tokens.map(|tokens| {
-        tokens.min(
-            input_tokens
-                .saturating_sub(cached_input_tokens.unwrap_or_default())
-                .saturating_sub(cache_write_5m_tokens.unwrap_or_default())
-                .saturating_sub(cache_write_1h_tokens.unwrap_or_default()),
-        )
-    });
-    let uncached_input_tokens = cached_input_tokens.map(|cached| {
-        input_tokens
-            .saturating_sub(cached)
-            .saturating_sub(cache_write_5m_tokens.unwrap_or_default())
-            .saturating_sub(cache_write_1h_tokens.unwrap_or_default())
-            .saturating_sub(unknown_cache_write_tokens.unwrap_or_default())
-    });
-    let output_tokens = output_tokens.unwrap_or_default();
-    let priced_uncached = input_price.is_some() && uncached_input_tokens.is_some();
-    let priced_cached = cached_price.is_some() && cached_input_tokens.is_some();
-    let priced_5m = cache_write_5m_price.is_some() && cache_write_5m_tokens.is_some();
-    let priced_1h = cache_write_1h_price.is_some() && cache_write_1h_tokens.is_some();
-    let priced_output = output_price.is_some() && output_tokens > 0;
-    let priced_tokens = priced_uncached
-        .then_some(uncached_input_tokens.unwrap_or_default())
-        .unwrap_or_default()
-        .saturating_add(
-            priced_cached
-                .then_some(cached_input_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-        )
-        .saturating_add(
-            priced_5m
-                .then_some(cache_write_5m_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-        )
-        .saturating_add(
-            priced_1h
-                .then_some(cache_write_1h_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-        )
-        .saturating_add(priced_output.then_some(output_tokens).unwrap_or_default());
     ApiEquivalentSummary {
-        micro_usd: token_cost(
-            priced_uncached
-                .then_some(uncached_input_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-            input_price.unwrap_or_default(),
-        )
-        .saturating_add(token_cost(
-            priced_cached
-                .then_some(cached_input_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-            cached_price.unwrap_or_default(),
-        ))
-        .saturating_add(token_cost(
-            priced_5m
-                .then_some(cache_write_5m_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-            cache_write_5m_price.unwrap_or_default(),
-        ))
-        .saturating_add(token_cost(
-            priced_1h
-                .then_some(cache_write_1h_tokens.unwrap_or_default())
-                .unwrap_or_default(),
-            cache_write_1h_price.unwrap_or_default(),
-        ))
-        .saturating_add(token_cost(
-            priced_output.then_some(output_tokens).unwrap_or_default(),
-            output_price.unwrap_or_default(),
-        )),
+        micro_usd,
         priced_tokens,
         unpriced_tokens: total_tokens.saturating_sub(priced_tokens),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn estimate_api_equivalent_with_cache_ttl_and_price_sources(
+/// Resolves a candidate's price against one immutable catalog snapshot.
+/// Account candidates are restricted to their declared official family;
+/// source candidates may use provider evidence, an exact LiteLLM record, an
+/// explicitly confirmed canonical family, and finally a manual source value.
+pub fn resolve_candidate_price(
+    catalog: &PricingCatalog,
+    candidate_kind: &str,
     model: Option<&str>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_5m_tokens: Option<u64>,
-    cache_write_1h_tokens: Option<u64>,
-    unknown_cache_write_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-    price_sources: Option<ApiModelPriceSources>,
-) -> ApiEquivalentSummary {
-    let official_price_exists = model.and_then(api_model_price).is_some();
-    let price_override = price_sources.and_then(|sources| {
-        sources
-            .provider
-            .or_else(|| (!official_price_exists).then_some(sources.manual).flatten())
-    });
-    estimate_api_equivalent_with_cache_ttl_and_price_override(
+    provider_family: Option<&str>,
+    pricing_provider: Option<&str>,
+    provider_price: Option<ApiModelPriceOverride>,
+    manual_price: Option<ApiModelPriceOverride>,
+) -> ResolvedPrice {
+    let Some(model) = model else {
+        return ResolvedPrice {
+            quote: None,
+            source: PriceSource::Unpriced,
+            catalog_revision: catalog.revision.clone(),
+            catalog_fetched_at_ms: catalog.fetched_at_ms,
+            stale: catalog.stale,
+        };
+    };
+    if candidate_kind.eq_ignore_ascii_case("account") {
+        return catalog.resolve_account(model, provider_family.or(Some("openai")));
+    }
+    catalog.resolve_source(
         model,
-        input_tokens,
-        cached_input_tokens,
-        cache_write_5m_tokens,
-        cache_write_1h_tokens,
-        unknown_cache_write_tokens,
-        output_tokens,
-        total_tokens,
-        price_override,
+        pricing_provider,
+        provider_family,
+        provider_price.map(Into::into),
+        manual_price.map(Into::into),
     )
 }
 
-pub fn api_model_price(model: &str) -> Option<ApiModelPrice> {
-    price_catalog()?
-        .models
-        .iter()
-        .enumerate()
-        .find(|(_, price)| price.id.eq_ignore_ascii_case(model))
-        .and_then(|(rank, price)| {
-            Some(ApiModelPrice {
-                catalog_rank: u32::try_from(rank).ok()?,
-                input_micro_usd_per_million: price.input_micro_usd_per_million,
-                cached_input_micro_usd_per_million: price
-                    .cached_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-                cache_write_5m_micro_usd_per_million: price.cache_write_5m_micro_usd_per_million,
-                cache_write_1h_micro_usd_per_million: price.cache_write_1h_micro_usd_per_million,
-                output_micro_usd_per_million: price.output_micro_usd_per_million,
-            })
-        })
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_api_equivalent_with_catalog(
+    catalog: &PricingCatalog,
+    candidate_kind: &str,
+    model: Option<&str>,
+    usage: ApiEquivalentUsage,
+    provider_family: Option<&str>,
+    pricing_provider: Option<&str>,
+    provider_price: Option<ApiModelPriceOverride>,
+    manual_price: Option<ApiModelPriceOverride>,
+) -> (ApiEquivalentSummary, ResolvedPrice) {
+    let resolved = resolve_candidate_price(
+        catalog,
+        candidate_kind,
+        model,
+        provider_family,
+        pricing_provider,
+        provider_price,
+        manual_price,
+    );
+    let estimate = estimate_api_equivalent_with_token_price(usage, resolved.quote);
+    (estimate, resolved)
 }
 
-pub fn api_pricing_revision() -> &'static str {
-    price_catalog()
-        .map(|catalog| catalog.catalog_version.as_str())
-        .unwrap_or("unavailable")
-}
-
-fn price_catalog() -> Option<&'static PriceCatalog> {
-    static CATALOG: OnceLock<Option<PriceCatalog>> = OnceLock::new();
-    CATALOG
-        .get_or_init(|| {
-            serde_json::from_str(include_str!("../../data/openai-api-prices.json")).ok()
-        })
-        .as_ref()
-        .filter(|catalog| {
-            catalog.schema_version == 3
-                && catalog.unit_tokens == 1_000_000
-                && catalog.currency == "USD"
-                && !catalog.catalog_version.is_empty()
-                && !catalog.source_url.is_empty()
-                && !catalog.verified_at.is_empty()
-                && catalog.models.iter().all(|price| {
-                    price
-                        .cached_input_micro_usd_per_million
-                        .is_none_or(|cached| cached <= price.input_micro_usd_per_million)
-                        && price
-                            .cache_write_5m_micro_usd_per_million
-                            .is_none_or(|write| write > 0)
-                })
-        })
+/// Resolves and prices a persisted candidate using the host-provided
+/// redacted identity context.  This is the preferred entry point for desktop
+/// and server usage queries; all rows in one query should share the same
+/// `PricingCatalog` snapshot.
+pub fn estimate_candidate_api_equivalent_with_catalog(
+    catalog: &PricingCatalog,
+    context: &PricingContext,
+    candidate_kind: &str,
+    candidate_id: &str,
+    model: Option<&str>,
+    usage: ApiEquivalentUsage,
+) -> (ApiEquivalentSummary, ResolvedPrice) {
+    let resolved = context.candidate_price(catalog, candidate_kind, candidate_id, model);
+    let estimate = estimate_api_equivalent_with_token_price(usage, resolved.quote);
+    (estimate, resolved)
 }
 
 fn token_cost(tokens: u64, micro_usd_per_million: u64) -> u64 {
@@ -461,51 +316,67 @@ fn token_cost(tokens: u64, micro_usd_per_million: u64) -> u64 {
 mod pricing_tests {
     use super::*;
 
-    #[test]
-    fn official_image_prices_are_request_and_size_based() {
-        let prices = official_image_request_prices("GPT-IMAGE-2");
-        assert_eq!(prices.len(), 18);
-        assert_eq!(prices[0].operation, "generation");
-        assert_eq!(prices[0].quality, "low");
-        assert_eq!(prices[0].size, "1024x1024");
-        assert_eq!(prices[0].micro_usd, 6_000);
-        assert_eq!(prices[9].operation, "edit");
-        assert!(official_image_request_prices("gpt-5.6").is_empty());
+    fn fixture_catalog() -> PricingCatalog {
+        PricingCatalog::from_litellm_json(include_str!("../../tests/fixtures/litellm-prices.json"))
+            .expect("pricing fixture must be valid")
+    }
+
+    fn fixture_account_estimate(model: &str, usage: ApiEquivalentUsage) -> ApiEquivalentSummary {
+        estimate_api_equivalent_with_catalog(
+            &fixture_catalog(),
+            "account",
+            Some(model),
+            usage,
+            Some("openai"),
+            None,
+            None,
+            None,
+        )
+        .0
     }
 
     #[test]
-    fn official_catalog_prices_known_models_without_floating_point() {
-        let estimate = estimate_api_equivalent(
-            Some("gpt-5.4"),
-            Some(1_000_000),
-            Some(400_000),
-            None,
-            Some(100_000),
-            Some(1_100_000),
-        );
+    fn image_prices_come_from_the_litellm_fixture_without_invented_dimensions() {
+        let catalog = fixture_catalog();
+        let prices = catalog.image_request_prices("GPT-IMAGE-2");
+        assert_eq!(prices.len(), 2);
+        assert_eq!(prices[0].operation, "generation");
+        assert_eq!(prices[0].quality, "default");
+        assert_eq!(prices[0].size, "default");
+        assert_eq!(prices[0].micro_usd, 6_000);
+        assert_eq!(prices[1].operation, "edit");
+        assert!(catalog.image_request_prices("gpt-5.6").is_empty());
+    }
+
+    #[test]
+    fn litellm_catalog_prices_known_models_without_floating_point() {
+        let catalog = fixture_catalog();
+        let usage = ApiEquivalentUsage {
+            input_tokens: Some(1_000_000),
+            cached_input_tokens: Some(400_000),
+            output_tokens: Some(100_000),
+            total_tokens: Some(1_100_000),
+            ..Default::default()
+        };
+        let estimate = fixture_account_estimate("gpt-5.4", usage);
         assert_eq!(estimate.micro_usd, 3_100_000);
         assert_eq!(estimate.priced_tokens, 1_100_000);
         assert_eq!(estimate.unpriced_tokens, 0);
-        assert_eq!(api_model_price("GPT-5.4").unwrap().catalog_rank, 5);
+        assert!(catalog.rank_for("GPT-5.4").is_some());
         assert_eq!(
-            api_model_price("GPT-5.4")
+            catalog
+                .resolve_account("GPT-5.4", Some("openai"))
+                .quote
                 .unwrap()
-                .cached_input_micro_usd_per_million,
-            250_000
-        );
-        let catalog = price_catalog().unwrap();
-        assert_eq!(catalog.catalog_version, "openai-standard-2026-08-25");
-        assert_eq!(
-            catalog.source_url,
-            "https://developers.openai.com/api/docs/pricing/"
+                .cache_read,
+            Some(250_000)
         );
         assert_eq!(
             catalog
-                .models
-                .iter()
-                .find(|model| model.id == "gpt-5.4-mini")
+                .resolve_account("gpt-5.4-mini", Some("openai"))
+                .quote
                 .unwrap()
-                .cached_input_micro_usd_per_million,
+                .cache_read,
             Some(75_000)
         );
     }
@@ -518,38 +389,44 @@ mod pricing_tests {
             ("gpt-5.6-luna", 200_000, 20_000, 250_000, 1_200_000),
         ];
 
+        let catalog = fixture_catalog();
         for (model, input, cached_input, cache_write, output) in expected {
-            let price = api_model_price(model).expect("GPT-5.6 model is in the official catalog");
-            assert_eq!(price.input_micro_usd_per_million, input, "{model}");
+            let price = catalog
+                .resolve_account(model, Some("openai"))
+                .quote
+                .expect("GPT-5.6 model is in the fixture catalog");
+            assert_eq!(price.input, input, "{model}");
+            assert_eq!(price.cache_read, Some(cached_input), "{model} cached input");
             assert_eq!(
-                price.cached_input_micro_usd_per_million, cached_input,
-                "{model} cached input"
-            );
-            assert_eq!(
-                price.cache_write_5m_micro_usd_per_million,
+                price.cache_write_5m,
                 Some(cache_write),
                 "{model} cache write"
             );
-            assert_eq!(price.output_micro_usd_per_million, output, "{model}");
+            assert_eq!(price.output, output, "{model}");
         }
 
-        let legacy = api_model_price("gpt-5.5").expect("GPT-5.5 is in the official catalog");
-        assert_eq!(legacy.input_micro_usd_per_million, 5_000_000);
-        assert_eq!(legacy.cached_input_micro_usd_per_million, 500_000);
-        assert_eq!(legacy.cache_write_5m_micro_usd_per_million, None);
-        assert_eq!(legacy.output_micro_usd_per_million, 30_000_000);
+        let legacy = catalog
+            .resolve_account("gpt-5.5", Some("openai"))
+            .quote
+            .expect("GPT-5.5 is in the fixture catalog");
+        assert_eq!(legacy.input, 5_000_000);
+        assert_eq!(legacy.cache_read, Some(500_000));
+        assert_eq!(legacy.cache_write_5m, None);
+        assert_eq!(legacy.output, 30_000_000);
     }
 
     #[test]
     fn unknown_or_unsplit_usage_is_never_silently_priced() {
         assert_eq!(
-            estimate_api_equivalent(
-                Some("private-model"),
-                Some(2),
-                Some(1),
-                None,
-                Some(3),
-                Some(5)
+            fixture_account_estimate(
+                "private-model",
+                ApiEquivalentUsage {
+                    input_tokens: Some(2),
+                    cached_input_tokens: Some(1),
+                    output_tokens: Some(3),
+                    total_tokens: Some(5),
+                    ..Default::default()
+                },
             ),
             ApiEquivalentSummary {
                 micro_usd: 0,
@@ -558,7 +435,13 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(Some("gpt-5.4"), None, None, None, None, Some(9)),
+            fixture_account_estimate(
+                "gpt-5.4",
+                ApiEquivalentUsage {
+                    total_tokens: Some(9),
+                    ..Default::default()
+                },
+            ),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
@@ -566,45 +449,74 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(
-                Some("gpt-5.4"),
-                Some(10),
-                Some(100),
-                None,
-                Some(0),
-                Some(10)
+            fixture_account_estimate(
+                "gpt-5.4",
+                ApiEquivalentUsage {
+                    input_tokens: Some(10),
+                    cached_input_tokens: Some(100),
+                    output_tokens: Some(0),
+                    total_tokens: Some(10),
+                    ..Default::default()
+                },
             )
             .micro_usd,
             3
         );
         assert_eq!(
-            estimate_api_equivalent(
-                Some("gpt-5.6-sol"),
-                Some(1_000_000),
-                Some(100_000),
-                Some(200_000),
-                Some(0),
-                Some(1_000_000)
+            fixture_account_estimate(
+                "gpt-5.6-sol",
+                ApiEquivalentUsage {
+                    input_tokens: Some(1_000_000),
+                    cached_input_tokens: Some(100_000),
+                    cache_write_5m_tokens: Some(200_000),
+                    output_tokens: Some(0),
+                    total_tokens: Some(1_000_000),
+                    ..Default::default()
+                },
             )
             .micro_usd,
-            2_840_000
+            3_840_000
         );
         assert_eq!(
-            estimate_api_equivalent(
-                Some("gpt-5.6-sol"),
-                Some(100),
-                None,
-                Some(20),
-                Some(0),
-                Some(100)
+            fixture_account_estimate(
+                "gpt-5.6-sol",
+                ApiEquivalentUsage {
+                    input_tokens: Some(100),
+                    unknown_cache_write_tokens: Some(20),
+                    output_tokens: Some(0),
+                    total_tokens: Some(100),
+                    ..Default::default()
+                },
             ),
             ApiEquivalentSummary {
-                micro_usd: 0,
-                priced_tokens: 0,
-                unpriced_tokens: 100,
+                micro_usd: 320,
+                priced_tokens: 80,
+                unpriced_tokens: 20,
             }
         );
-        assert!(api_model_price("gpt-future-codex").is_none());
+        assert_eq!(
+            fixture_account_estimate(
+                "gpt-5.6-sol",
+                ApiEquivalentUsage {
+                    input_tokens: Some(100),
+                    cache_write_5m_tokens: Some(20),
+                    output_tokens: Some(0),
+                    total_tokens: Some(100),
+                    ..Default::default()
+                },
+            ),
+            ApiEquivalentSummary {
+                micro_usd: 420,
+                priced_tokens: 100,
+                unpriced_tokens: 0,
+            }
+        );
+        assert_eq!(
+            fixture_catalog()
+                .resolve_account("gpt-future-codex", Some("openai"))
+                .source,
+            PriceSource::Unpriced
+        );
     }
 
     #[test]
@@ -616,24 +528,25 @@ mod pricing_tests {
             cache_write_1h_micro_usd_per_million: Some(3_000_000),
             output_micro_usd_per_million: 2_500_000,
         };
-        for model in ["gpt-5.4", "private-model"] {
-            assert_eq!(
-                estimate_api_equivalent_with_price_override(
-                    Some(model),
-                    Some(1_000_000),
-                    Some(400_000),
-                    Some(100_000),
-                    Some(100_000),
-                    Some(1_100_000),
-                    Some(custom),
-                ),
-                ApiEquivalentSummary {
-                    micro_usd: 1_060_000,
-                    priced_tokens: 1_000_000,
-                    unpriced_tokens: 100_000,
-                }
-            );
-        }
+        assert_eq!(
+            estimate_api_equivalent_with_token_price(
+                ApiEquivalentUsage {
+                    input_tokens: Some(1_000_000),
+                    cached_input_tokens: Some(400_000),
+                    cache_write_5m_tokens: Some(100_000),
+                    cache_write_1h_tokens: Some(100_000),
+                    output_tokens: Some(100_000),
+                    total_tokens: Some(1_100_000),
+                    ..Default::default()
+                },
+                Some(custom.into()),
+            ),
+            ApiEquivalentSummary {
+                micro_usd: 1_397_500,
+                priced_tokens: 1_100_000,
+                unpriced_tokens: 0,
+            }
+        );
     }
 
     #[test]
@@ -650,16 +563,16 @@ mod pricing_tests {
         // tokens as input_tokens=160. Each component must be charged exactly
         // once rather than charging the aggregate input at the base rate too.
         assert_eq!(
-            estimate_api_equivalent_with_cache_ttl_and_price_override(
-                Some("private-model"),
-                Some(160),
-                Some(40),
-                Some(20),
-                None,
-                None,
-                Some(10),
-                Some(170),
-                Some(price),
+            estimate_api_equivalent_with_token_price(
+                ApiEquivalentUsage {
+                    input_tokens: Some(160),
+                    cached_input_tokens: Some(40),
+                    cache_write_5m_tokens: Some(20),
+                    output_tokens: Some(10),
+                    total_tokens: Some(170),
+                    ..Default::default()
+                },
+                Some(price.into()),
             ),
             ApiEquivalentSummary {
                 micro_usd: 174,
@@ -685,66 +598,136 @@ mod pricing_tests {
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 9_000_000,
         };
-        let usage = (Some(1_000_000), Some(0), Some(1_000_000), Some(2_000_000));
-        assert_eq!(
-            estimate_api_equivalent_with_cache_ttl_and_price_sources(
-                Some("gpt-5.4"),
-                usage.0,
-                usage.1,
-                None,
-                None,
-                None,
-                usage.2,
-                Some(usage.0.unwrap() + usage.2.unwrap()),
-                Some(ApiModelPriceSources {
-                    provider: Some(provider),
-                    manual: Some(manual),
-                }),
-            )
-            .micro_usd,
-            3_000_000
+        let catalog = fixture_catalog();
+        let usage = ApiEquivalentUsage {
+            input_tokens: Some(1_000_000),
+            cached_input_tokens: Some(0),
+            output_tokens: Some(1_000_000),
+            total_tokens: Some(2_000_000),
+            ..Default::default()
+        };
+        let (provider_estimate, provider_resolved) = estimate_api_equivalent_with_catalog(
+            &catalog,
+            "source",
+            Some("gpt-5.4"),
+            usage,
+            None,
+            None,
+            Some(provider),
+            Some(manual),
+        );
+        assert_eq!(provider_resolved.source, PriceSource::Provider);
+        assert_eq!(provider_estimate.micro_usd, 3_000_000);
+
+        let (exact_estimate, exact_resolved) = estimate_api_equivalent_with_catalog(
+            &catalog,
+            "source",
+            Some("gpt-5.4"),
+            usage,
+            None,
+            None,
+            None,
+            Some(manual),
+        );
+        assert_eq!(exact_resolved.source, PriceSource::LiteLlmExact);
+        assert_eq!(exact_estimate.micro_usd, 17_500_000);
+
+        let (manual_estimate, manual_resolved) = estimate_api_equivalent_with_catalog(
+            &catalog,
+            "source",
+            Some("private-model"),
+            usage,
+            None,
+            None,
+            None,
+            Some(manual),
+        );
+        assert_eq!(manual_resolved.source, PriceSource::Manual);
+        assert_eq!(manual_estimate.micro_usd, 18_000_000);
+    }
+
+    #[test]
+    fn candidate_pricing_keeps_account_and_source_rules_separate() {
+        let provider = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_000_000,
+            cached_input_micro_usd_per_million: Some(100_000),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 2_000_000,
+        };
+        let manual = ApiModelPriceOverride {
+            input_micro_usd_per_million: 9_000_000,
+            cached_input_micro_usd_per_million: Some(900_000),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 9_000_000,
+        };
+        let catalog = fixture_catalog();
+        let context = PricingContext {
+            source_evidence: BTreeMap::from([(
+                "source-1".to_string(),
+                BTreeMap::from([(
+                    "private-model".to_string(),
+                    crate::pricing::PriceEvidence {
+                        provider: Some(provider.into()),
+                        manual: None,
+                    },
+                )]),
+            )]),
+            global_manual_prices: BTreeMap::from([("private-model".to_string(), manual.into())]),
+            ..Default::default()
+        };
+        let usage = ApiEquivalentUsage {
+            input_tokens: Some(1_000_000),
+            cached_input_tokens: Some(0),
+            output_tokens: Some(1_000_000),
+            total_tokens: Some(2_000_000),
+            ..Default::default()
+        };
+
+        let source_price =
+            context.candidate_price(&catalog, "source", "source-1", Some("PRIVATE-MODEL"));
+        assert_eq!(source_price.source, PriceSource::Provider);
+        assert_eq!(source_price.quote, Some(provider.into()));
+        let fallback_price =
+            context.candidate_price(&catalog, "source", "missing-source", Some("private-model"));
+        assert_eq!(fallback_price.source, PriceSource::Manual);
+        assert_eq!(fallback_price.quote, Some(manual.into()));
+        let account_price =
+            context.candidate_price(&catalog, "account", "account-1", Some("private-model"));
+        assert_eq!(account_price.source, PriceSource::Unpriced);
+
+        let (source_estimate, _) = estimate_candidate_api_equivalent_with_catalog(
+            &catalog,
+            &context,
+            "source",
+            "source-1",
+            Some("private-model"),
+            usage,
         );
         assert_eq!(
-            estimate_api_equivalent_with_cache_ttl_and_price_sources(
-                Some("gpt-5.4"),
-                usage.0,
-                usage.1,
-                None,
-                None,
-                None,
-                usage.2,
-                Some(usage.0.unwrap() + usage.2.unwrap()),
-                Some(ApiModelPriceSources {
-                    provider: None,
-                    manual: Some(manual),
-                }),
-            ),
-            estimate_api_equivalent(
-                Some("gpt-5.4"),
-                usage.0,
-                usage.1,
-                None,
-                usage.2,
-                Some(2_000_000)
-            )
+            source_estimate,
+            ApiEquivalentSummary {
+                micro_usd: 3_000_000,
+                priced_tokens: 2_000_000,
+                unpriced_tokens: 0,
+            }
+        );
+        let (account_estimate, _) = estimate_candidate_api_equivalent_with_catalog(
+            &catalog,
+            &context,
+            "account",
+            "account-1",
+            Some("private-model"),
+            usage,
         );
         assert_eq!(
-            estimate_api_equivalent_with_cache_ttl_and_price_sources(
-                Some("private-model"),
-                usage.0,
-                usage.1,
-                None,
-                None,
-                None,
-                usage.2,
-                Some(usage.0.unwrap() + usage.2.unwrap()),
-                Some(ApiModelPriceSources {
-                    provider: None,
-                    manual: Some(manual),
-                }),
-            )
-            .micro_usd,
-            18_000_000
+            account_estimate,
+            ApiEquivalentSummary {
+                micro_usd: 0,
+                priced_tokens: 0,
+                unpriced_tokens: 2_000_000,
+            }
         );
     }
 
@@ -759,7 +742,7 @@ mod pricing_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(price.cached_input_micro_usd_per_million, Some(1_400_000));
+        assert_eq!(price.cached_input_micro_usd_per_million, None);
         assert!(ApiModelPriceOverride::from_optional_fields(
             Some(MAX_MODEL_PRICE_MICRO_USD_PER_MILLION + 1),
             None,

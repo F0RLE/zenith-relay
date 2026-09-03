@@ -19,16 +19,16 @@ const SENSITIVE_VALUE = new RegExp(`(${SENSITIVE_VALUE_FIELD}\\s*[:=]\\s*)("[^"]
 const SENSITIVE_QUERY_VALUE = new RegExp(`([?&]${SENSITIVE_VALUE_FIELD}=)[^&\\s]*`, "gi");
 
 export function sanitizeFeedbackError(error: unknown, fallbackCode = "general", fallbackMessage = ""): FeedbackError {
-  const envelope = isRecord(error) && isRecord(error.error) ? error.error : error;
-  const payload = isRecord(envelope) && isRecord(envelope.diagnostic)
-    ? { ...envelope, ...envelope.diagnostic }
+  const envelope = isRecord(error) && isRecord(error["error"]) ? error["error"] : error;
+  const payload = isRecord(envelope) && isRecord(envelope["diagnostic"])
+    ? { ...envelope, ...envelope["diagnostic"] }
     : envelope;
-  const rawCode = isRecord(payload) && typeof payload.code === "string"
-    ? payload.code
+  const rawCode = isRecord(payload) && typeof payload["code"] === "string"
+    ? payload["code"]
     : fallbackCode;
   const code = normalizeCode(rawCode, fallbackCode);
-  const rawMessage = isRecord(payload) && typeof payload.message === "string"
-    ? payload.message
+  const rawMessage = isRecord(payload) && typeof payload["message"] === "string"
+    ? payload["message"]
     : error instanceof Error
       ? error.message
       : typeof error === "string"
@@ -42,8 +42,8 @@ export function sanitizeFeedbackError(error: unknown, fallbackCode = "general", 
   const route = diagnosticText(payload, ["route", "endpoint", "wireApi"]);
   const requestId = diagnosticText(payload, ["requestId", "request_id"]);
   const status = diagnosticStatus(payload);
-  const retryable = isRecord(payload) && typeof payload.retryable === "boolean"
-    ? payload.retryable
+  const retryable = isRecord(payload) && typeof payload["retryable"] === "boolean"
+    ? payload["retryable"]
     : undefined;
 
   if (reason) diagnostic.reason = reason;
@@ -66,8 +66,9 @@ function normalizeCode(value: string, fallback: string) {
 function diagnosticText(value: unknown, fields: string[]) {
   if (!isRecord(value)) return undefined;
   for (const field of fields) {
-    if (typeof value[field] !== "string") continue;
-    const text = redactFeedbackText(value[field]).slice(0, MAX_FEEDBACK_FIELD_LENGTH);
+    const fieldValue = value[field];
+    if (typeof fieldValue !== "string") continue;
+    const text = redactFeedbackText(fieldValue).slice(0, MAX_FEEDBACK_FIELD_LENGTH);
     if (text) return text;
   }
   return undefined;
@@ -75,7 +76,7 @@ function diagnosticText(value: unknown, fields: string[]) {
 
 function diagnosticStatus(value: unknown) {
   if (!isRecord(value)) return undefined;
-  const candidate = value.status ?? value.statusCode ?? value.httpStatus;
+  const candidate = value["status"] ?? value["statusCode"] ?? value["httpStatus"];
   if (typeof candidate !== "number" || !Number.isInteger(candidate) || candidate < 100 || candidate > 599) {
     return undefined;
   }

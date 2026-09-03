@@ -1,9 +1,10 @@
 use crate::{
-    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, RoutingDiagnostics,
-    ToolUseDiagnostics, WireApi,
+    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
+    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, WireApi,
 };
 use serde::{Deserialize, Serialize};
 
+define_usage_request_contract! {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
@@ -16,22 +17,6 @@ pub struct UsageSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingDiagnostics>,
-    pub requested_model: Option<String>,
-    pub resolved_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_reasoning_effort: Option<String>,
-    pub wire_api: WireApi,
-    #[serde(default)]
-    pub service_tier: DefaultServiceTier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_service_tier: Option<DefaultServiceTier>,
-    pub success: bool,
-    pub http_status: u16,
-    pub error_category: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_origin: Option<ErrorOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use: Option<ToolUseDiagnostics>,
@@ -40,6 +25,20 @@ pub struct UsageSummary {
     pub ttft_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_ms: Option<u64>,
+    #[serde(flatten)]
+    pub tokens: UsageTokenBreakdown,
+    #[serde(default)]
+    pub api_equivalent: ApiEquivalentSummary,
+    pub created_at_ms: u64,
+}
+}
+
+/// Normalized token counters for one completed request. Cache counters remain
+/// part of input and reasoning remains part of output, so clients must not add
+/// either component to the reported totals a second time.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTokenBreakdown {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,9 +49,6 @@ pub struct UsageSummary {
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
-    #[serde(default)]
-    pub api_equivalent: ApiEquivalentSummary,
-    pub created_at_ms: u64,
 }
 
 fn default_attempt() -> u16 {
@@ -117,6 +113,8 @@ pub struct UsagePage {
     pub pool_members: Vec<UsageGroup>,
     #[serde(default)]
     pub buckets: Vec<UsageBucket>,
+    #[serde(default)]
+    pub pricing: PricingMetadata,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -145,6 +143,18 @@ pub struct UsageQuery {
     pub success: Option<bool>,
     pub error_category: Option<String>,
     pub request_id_query: Option<String>,
+    /// Include request event rows in the response. `None` preserves the
+    /// legacy behavior for API clients that do not send the projection hint.
+    #[serde(default)]
+    pub include_events: Option<bool>,
+    /// Include model aggregates in the response. `None` preserves the legacy
+    /// behavior for API clients that do not send the projection hint.
+    #[serde(default)]
+    pub include_models: Option<bool>,
+    /// Include pool-member aggregates in the response. `None` preserves the
+    /// legacy behavior for API clients that do not send the projection hint.
+    #[serde(default)]
+    pub include_pool_members: Option<bool>,
 }
 
 impl UsageQuery {
@@ -156,5 +166,17 @@ impl UsageQuery {
             self.page_size.clamp(1, 200)
         };
         self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
+    }
+
+    pub fn includes_models(&self) -> bool {
+        self.include_models != Some(false)
+    }
+
+    pub fn includes_events(&self) -> bool {
+        self.include_events != Some(false)
+    }
+
+    pub fn includes_pool_members(&self) -> bool {
+        self.include_pool_members != Some(false)
     }
 }

@@ -6,6 +6,7 @@ mod snapshot;
 
 pub(crate) use adapters::DesktopOAuthEvents;
 use coordination::wake_coordinator;
+pub(crate) use paths::migrate_recovery_layout;
 pub(crate) use snapshot::LocalRuntimeInputs;
 #[cfg(test)]
 use snapshot::{account_secret_available, SecretLookup};
@@ -26,7 +27,10 @@ use std::{
 };
 use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
 use zenith_relay_core::{
-    accounts::TokenAuthority, automations::WakeCoordinator, quota::QuotaRefreshQueue,
+    accounts::TokenAuthority,
+    automations::WakeCoordinator,
+    pricing::{CatalogStatus, PricingCatalog, PricingCatalogLoader},
+    quota::QuotaRefreshQueue,
 };
 
 pub(super) use zenith_relay_core::unix_time_ms as now_ms;
@@ -40,6 +44,7 @@ pub struct DesktopState {
     pub(crate) root: PathBuf,
     pub(crate) gateway: GatewayManager,
     pub(crate) telemetry: Arc<TelemetryDb>,
+    pricing: Arc<PricingCatalogLoader>,
     store: Arc<Mutex<LocalPoolStore>>,
     token_authority: Arc<TokenAuthority>,
     quota_refresh: Arc<Mutex<QuotaRefreshQueue>>,
@@ -71,8 +76,12 @@ impl DesktopState {
             });
         let mut store = LocalPoolStore::open(root.clone())?;
         let telemetry = store.database();
-        let mut quota_refresh =
-            QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES).map_err(invalid_core_state)?;
+        let pricing = Arc::new(
+            PricingCatalogLoader::open(root.join("data").join("litellm-prices.json"))
+                .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?,
+        );
+        let mut quota_refresh = QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES)
+            .map_err(LocalPoolError::invalid_state)?;
         let startup_due_at_ms = now_ms();
         for account in store.accounts().iter().filter(|account| {
             account.remote_location.is_none()
@@ -80,7 +89,7 @@ impl DesktopState {
         }) {
             quota_refresh
                 .upsert(&account.account.id, startup_due_at_ms)
-                .map_err(invalid_core_state)?;
+                .map_err(LocalPoolError::invalid_state)?;
         }
         let wake = wake_coordinator(store.automations())?;
         if &store.automations().state != wake.state() {
@@ -95,7 +104,7 @@ impl DesktopState {
         let (background_session_active, _) = watch::channel(false);
         let token_authority = Arc::new(
             TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
-                .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
+                .map_err(LocalPoolError::invalid_state)?,
         );
         let oauth_events = DesktopOAuthEvents::default();
         let oauth_flow = OAuthFlowManager::new(
@@ -107,6 +116,7 @@ impl DesktopState {
             root,
             gateway: GatewayManager::default(),
             telemetry,
+            pricing,
             store: Arc::new(Mutex::new(store)),
             token_authority,
             quota_refresh: Arc::new(Mutex::new(quota_refresh)),
@@ -133,6 +143,18 @@ impl DesktopState {
 
     pub(crate) fn token_authority(&self) -> Arc<TokenAuthority> {
         self.token_authority.clone()
+    }
+
+    pub(crate) fn pricing_loader(&self) -> Arc<PricingCatalogLoader> {
+        self.pricing.clone()
+    }
+
+    pub(crate) fn pricing_catalog(&self) -> Arc<PricingCatalog> {
+        self.pricing.snapshot()
+    }
+
+    pub(crate) fn pricing_status(&self) -> CatalogStatus {
+        self.pricing.status()
     }
 
     pub(crate) fn record_performance(
@@ -247,10 +269,6 @@ impl DesktopState {
             }
         }
     }
-}
-
-fn invalid_core_state(error: impl std::fmt::Display) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
 #[cfg(test)]
@@ -431,6 +449,8 @@ mod tests {
                 draining: false,
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
+                pricing_provider: None,
+                official_provider_family: None,
                 wire_api: WireApi::Responses,
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
@@ -1071,6 +1091,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            provider_family: Some("openai".into()),
             purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,

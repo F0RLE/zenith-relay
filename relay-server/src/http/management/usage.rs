@@ -19,7 +19,13 @@ pub async fn usage(
     normalize_usage_query(&mut query)?;
     let snapshot = state.snapshot().map_err(store_error)?;
     normalize_account_query(&mut query, &snapshot);
-    let mut page = state.store.usage_page(&query).map_err(store_error)?;
+    let catalog = state.pricing_catalog();
+    let pricing = state.pricing_context().map_err(store_error)?;
+    let mut page = state
+        .store
+        .usage_page_with_pricing(&query, &catalog, &pricing)
+        .map_err(store_error)?;
+    page.pricing.catalog_status = state.pricing_status();
     let labels = snapshot
         .accounts
         .into_iter()

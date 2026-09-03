@@ -33,8 +33,8 @@ export function useRelayOperations() {
       work,
       refresh,
       isCurrent: () => revision === operationRevision.current,
-      successKey,
-      options,
+      ...(successKey !== undefined ? { successKey } : {}),
+      ...(options !== undefined ? { options } : {}),
       resolveError: (cause) => {
         const code = typeof cause === "object" && cause && "code" in cause
           ? String(cause.code)

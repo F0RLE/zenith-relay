@@ -54,13 +54,15 @@ export function ProxyStorageView({ revision, onImport }: { revision: number; onI
     const message = assignedEntries.length
       ? t("proxies.deleteAssignedConfirm", { count: proxyIds.length, proxyCount: assignedEntries.length, accountCount: assignedAccounts.size })
       : t(proxyIds.length === 1 ? "proxies.deleteConfirm" : "proxies.deleteSelectedConfirm", { count: proxyIds.length });
-    if (!await confirm(message, { danger: true, confirmLabel: assignedEntries.length ? t("proxies.detachAndDelete") : undefined })) return;
+    if (!await confirm(message, { danger: true, ...(assignedEntries.length ? { confirmLabel: t("proxies.detachAndDelete") } : {}) })) return;
     let next: ProxyPoolSummary | null = null;
-    const operation = proxyIds.length === 1 ? `proxy-delete-${proxyIds[0]}` : "proxy-delete-selected";
+    const firstProxyId = proxyIds[0];
+    if (!firstProxyId) return;
+    const operation = proxyIds.length === 1 ? `proxy-delete-${firstProxyId}` : "proxy-delete-selected";
     const ok = await perform(operation, async () => {
       for (const entry of assignedEntries) await relayCommands.setStoredProxyAccounts(entry.id, []);
       next = proxyIds.length === 1
-        ? await relayCommands.deleteStoredProxy(proxyIds[0])
+        ? await relayCommands.deleteStoredProxy(firstProxyId)
         : await relayCommands.deleteStoredProxies(proxyIds);
     }, "feedback.deleted");
     if (ok && next) {
@@ -192,7 +194,7 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
       <ProxyRouteOption value="custom" selected={choice === "custom"} icon={<Plus aria-hidden />} label={t("proxies.addCustom")} hint={t("proxies.addCustomShortHint")} onSelect={choose} />
       {commonConfigured ? <ProxyRouteOption value="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} hint={t("proxies.useCommonHint")} onSelect={choose} /> : null}
     </div>
-    {choice === "stored" && available.length ? <div className="proxy-route-control"><OptionMenu className="field-option-menu" label={t("proxies.chooseStored")} value={proxyId || available[0].id} onChange={setProxyId} options={available.map((entry) => ({ value: entry.id, label: entry.endpoint }))} /></div> : null}
+    {choice === "stored" && available.length ? <div className="proxy-route-control"><OptionMenu className="field-option-menu" label={t("proxies.chooseStored")} value={proxyId || available[0]?.id || ""} onChange={setProxyId} options={available.map((entry) => ({ value: entry.id, label: entry.endpoint }))} /></div> : null}
     {choice === "custom" ? <div className="proxy-route-control"><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /></div> : null}
   </>}{unavailable ? <p role="alert" className="form-note error-text">{t("proxies.noStoredProxy")}</p> : null}</div></Dialog>;
 }

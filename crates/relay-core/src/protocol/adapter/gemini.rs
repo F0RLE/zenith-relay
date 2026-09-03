@@ -1,6 +1,6 @@
 use super::contracts::{
-    custom_tool_item_id, AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState,
-    MessagesReasoningMode, ResponsesToolKind,
+    custom_tool_item_id, request_tool_catalog, AdapterError, AdapterResult, ClientToolTarget,
+    MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
@@ -287,36 +287,6 @@ fn first_candidate(upstream: &Value) -> AdapterResult<&Value> {
         .and_then(Value::as_array)
         .and_then(|values| values.first())
         .ok_or_else(AdapterError::upstream_response_invalid)
-}
-
-fn request_tool_catalog(object: &Map<String, Value>) -> AdapterResult<Option<Vec<Value>>> {
-    let mut declared = false;
-    let mut tools = Vec::new();
-    if let Some(root) = object.get("tools") {
-        declared = true;
-        tools.extend(
-            root.as_array()
-                .ok_or_else(AdapterError::invalid_request)?
-                .iter()
-                .cloned(),
-        );
-    }
-    if let Some(input) = object.get("input").and_then(Value::as_array) {
-        for item in input {
-            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
-                continue;
-            }
-            declared = true;
-            tools.extend(
-                item.get("tools")
-                    .and_then(Value::as_array)
-                    .ok_or_else(AdapterError::invalid_request)?
-                    .iter()
-                    .cloned(),
-            );
-        }
-    }
-    Ok(declared.then_some(tools))
 }
 
 fn translate_tools(

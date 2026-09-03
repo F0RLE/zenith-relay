@@ -588,13 +588,14 @@
     border-left: 0;
   }
 
-  .gateway-setting-row {
+  .gateway-setting-row,
+  .gateway-api-connection-panel {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
   }
 
-  .gateway-port-control {
-    justify-content: start;
+  .gateway-api-key-actions {
+    justify-self: start;
   }
 
 }
@@ -694,11 +695,6 @@
 
   .oauth-binding-settings {
     grid-template-columns: 1fr;
-  }
-
-  .gateway-port-control {
-    grid-template-columns: minmax(0, 1fr);
-    justify-items: start;
   }
 
   .gateway-runtime-panel {

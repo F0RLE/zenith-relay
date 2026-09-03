@@ -10,18 +10,26 @@ const API_SOURCE_RESERVE_PRIORITY = -1_000_000;
 
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   const positions = new Map<string, number>();
+  const sourcePositions = new Map<string, { index: number; active: boolean }>();
   for (const [index, candidate] of order.entries()) {
     positions.set(candidate.candidateId, index);
     if (candidate.kind !== "api_source") continue;
     const separator = candidate.candidateId.indexOf("::");
     if (separator > 0) {
       const sourceId = candidate.candidateId.slice(0, separator);
-      // A source card represents all of its protocol candidates. Use the
-      // first live route as its stable position; request admission still
-      // filters the selected candidate by the caller's wire API.
-      if (!positions.has(sourceId)) positions.set(sourceId, index);
+      // A source card represents all of its protocol candidates. Prefer the
+      // protocol route that is actually carrying traffic, then fall back to
+      // the first route supplied by the scheduler. This keeps a multi-
+      // protocol source card aligned with the active route instead of pinning
+      // it to whichever binding happened to be serialized first.
+      const active = activeRequestCount(candidate) > 0;
+      const previous = sourcePositions.get(sourceId);
+      if (!previous || (active && !previous.active) || (active === previous.active && index < previous.index)) {
+        sourcePositions.set(sourceId, { index, active });
+      }
     }
   }
+  for (const [sourceId, { index }] of sourcePositions) positions.set(sourceId, index);
   return positions;
 }
 
@@ -42,7 +50,8 @@ export function runtimeCandidateForMember(
         && (protocol === "all" || isResponsesCandidate(candidate.candidateId, legacyWireApi))
   ));
   if (!candidates.length) return undefined;
-  if (candidates.length === 1 && candidates[0].candidateId === memberId) return candidates[0];
+  const firstCandidate = candidates[0];
+  if (candidates.length === 1 && firstCandidate?.candidateId === memberId) return firstCandidate;
   return {
     candidateId: memberId,
     kind,
@@ -93,14 +102,38 @@ export function activeRequestCount(candidate: CandidateRuntimeSnapshot | undefin
   return candidate?.activeRequestCount ?? candidate?.inFlight ?? 0;
 }
 
+/** Returns only currently active per-model cooldowns in their display order. */
+export function upcomingModelRetries(candidate: CandidateRuntimeSnapshot | undefined, nowMs: number) {
+  return [...(candidate?.modelRetries ?? [])]
+    .filter((retry) => retry.retryAtMs > nowMs)
+    .sort((left, right) => left.retryAtMs - right.retryAtMs);
+}
+
 /** Apply a host activity event without waiting for the next full snapshot. */
 export function applyRuntimeActivity(
   order: CandidateRuntimeSnapshot[],
   activity: RuntimeActivitySnapshot,
 ) {
+  return applyRuntimeActivities(order, [activity]);
+}
+
+export function applyRuntimeActivities(
+  order: CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  const updates = new Map<string, RuntimeActivitySnapshot>();
+  for (const activity of activities) {
+    const previous = updates.get(activity.candidateId);
+    if (!previous || activity.revision > previous.revision) {
+      updates.set(activity.candidateId, activity);
+    }
+  }
+  if (!updates.size) return order;
+
   let changed = false;
   const next = order.map((candidate) => {
-    if (candidate.candidateId !== activity.candidateId) return candidate;
+    const activity = updates.get(candidate.candidateId);
+    if (!activity) return candidate;
     changed = true;
     return {
       ...candidate,
@@ -109,16 +142,19 @@ export function applyRuntimeActivity(
       activeModels: activity.activeModels,
     };
   });
-  return changed ? next : order;
-}
+  if (!changed) return order;
 
-export function applyRuntimeActivities(
-  order: CandidateRuntimeSnapshot[],
-  activities: Iterable<RuntimeActivitySnapshot>,
-) {
-  let next = order;
-  for (const activity of activities) next = applyRuntimeActivity(next, activity);
-  return next;
+  // `PoolScheduler::runtime_order` puts leased candidates first. Apply the
+  // whole burst before sorting once; this keeps activity updates linear in the
+  // number of candidates instead of sorting the complete order per event.
+  return next
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => {
+      const leftActive = activeRequestCount(left.candidate) > 0;
+      const rightActive = activeRequestCount(right.candidate) > 0;
+      return Number(rightActive) - Number(leftActive) || left.index - right.index;
+    })
+    .map(({ candidate }) => candidate);
 }
 
 export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {

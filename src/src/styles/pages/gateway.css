@@ -61,6 +61,31 @@
   margin-top: 16px;
 }
 
+.gateway-page > .relay-tabs {
+  margin-top: 14px;
+}
+
+.gateway-tab-panel {
+  min-width: 0;
+}
+
+.gateway-page:has(> .gateway-empty-tab-panel) {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.gateway-empty-tab-panel {
+  min-height: 240px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.gateway-empty-tab-panel > .relay-empty {
+  flex: 1;
+}
+
 .codex-background-tasks-control {
   min-width: 0;
   display: grid;
@@ -213,6 +238,112 @@
   box-shadow: var(--relay-shadow-soft);
 }
 
+.gateway-api-connection-panel {
+  min-width: 0;
+  min-height: 104px;
+  display: grid;
+  grid-template-columns: minmax(190px, 0.42fr) minmax(0, 0.58fr);
+  align-items: center;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
+}
+
+.gateway-api-connection-panel > header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gateway-api-connection-panel > header > div {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.gateway-api-connection-panel h2 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 19px;
+}
+
+.gateway-endpoint-value {
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+}
+
+.gateway-endpoint-value code {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  color: var(--relay-text);
+  font-family: var(--relay-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gateway-api-connection-controls {
+  min-width: 0;
+  width: min(100%, 620px);
+  justify-self: end;
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
+.gateway-api-key-control {
+  min-width: 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 6px 5px 12px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.gateway-api-key-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.gateway-api-key-label > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: var(--relay-accent-hover);
+}
+
+.gateway-api-key-actions {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gateway-api-key-action,
+.gateway-api-key-rotate {
+  white-space: nowrap;
+}
+
 .gateway-setting-row {
   min-width: 0;
   min-height: 104px;
@@ -254,6 +385,19 @@
 .gateway-config-icon svg {
   width: 16px;
   height: 16px;
+}
+
+.opencode-provider-status {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gateway-setting-row.opencode-client-setup {
+  min-height: 72px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .gateway-runtime-panel {
@@ -344,38 +488,31 @@
   font-weight: 700;
 }
 
-.gateway-port-section > header {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.gateway-port-section > header h2,
-.gateway-port-section > header p {
+.gateway-api-port-control {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
+  padding-left: 10px;
+  border-left: 1px solid var(--relay-border);
 }
 
-.gateway-port-section > header p {
-  margin-top: 3px;
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.gateway-port-control {
-  display: grid;
-  grid-template-columns: minmax(140px, 160px) auto;
-  align-items: end;
-  justify-content: end;
-  gap: 10px;
-  margin: 0;
-}
-
-.gateway-port-control label {
-  width: 100%;
-  display: grid;
-  gap: 5px;
+.gateway-api-port-control label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--relay-secondary);
   font-size: 12px;
+}
+
+.gateway-api-port-control input {
+  width: 92px;
+}
+
+.gateway-api-port-save {
+  flex: 0 0 auto;
 }
 
 .endpoint-line {

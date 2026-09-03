@@ -260,22 +260,7 @@ fn parse_portable_bundle(object: &Map<String, Value>) -> Result<ParsedEntries, I
                 "portable account bundle has no account list",
             )
         })?;
-    check_item_count(accounts.len())?;
-    let entries = accounts
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(ordinal, value)| InputEntry {
-            ordinal,
-            value: Some(value),
-            issue: None,
-        })
-        .collect();
-    let proxy_count = object.get("proxies").map(container_count).unwrap_or(0);
-    let warnings = (proxy_count > 0)
-        .then(|| ImportWarning::count(ImportWarningCode::ProxiesIgnored, proxy_count))
-        .into_iter()
-        .collect();
+    let (entries, warnings) = parse_account_container_items(object, accounts)?;
     Ok((
         ImportFormat::PortableAccountBundleV1,
         entries,
@@ -289,6 +274,14 @@ fn parse_account_container(object: &Map<String, Value>) -> Result<ParsedEntries,
         .get("accounts")
         .and_then(Value::as_array)
         .expect("account container checked by caller");
+    let (entries, warnings) = parse_account_container_items(object, accounts)?;
+    Ok((ImportFormat::JsonArray, entries, warnings, None))
+}
+
+fn parse_account_container_items(
+    object: &Map<String, Value>,
+    accounts: &[Value],
+) -> Result<(Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
     check_item_count(accounts.len())?;
     let entries = accounts
         .iter()
@@ -305,7 +298,7 @@ fn parse_account_container(object: &Map<String, Value>) -> Result<ParsedEntries,
         .then(|| ImportWarning::count(ImportWarningCode::ProxiesIgnored, proxy_count))
         .into_iter()
         .collect();
-    Ok((ImportFormat::JsonArray, entries, warnings, None))
+    Ok((entries, warnings))
 }
 
 fn bundle_version(value: &Value) -> Option<u64> {

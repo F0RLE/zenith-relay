@@ -1,4 +1,5 @@
 import type { ApiEquivalentSummary, QuotaSnapshot, QuotaWindowUsage } from "./api/types";
+import { formatNumber } from "./numberFormatting";
 
 const MIN_OBSERVED_USAGE_BASIS_POINTS = 500;
 const MIN_PRICING_COVERAGE_BASIS_POINTS = 8_000;
@@ -18,6 +19,12 @@ export type AccountValueProjection = {
   payback: number | null;
   approximate: boolean;
 };
+
+export function formatAccountPayback(payback: number | null, locale: string, approximate = false) {
+  if (payback == null) return "—";
+  const formatted = formatNumber(payback, locale, { style: "percent", maximumFractionDigits: 0 });
+  return `${approximate ? "≈" : ""}${formatted}`;
+}
 
 /**
  * Builds the shared display projection for account usage cards.

@@ -780,6 +780,10 @@ async fn confirm_one_account_import(
         draining: existing.as_ref().is_some_and(|value| value.draining),
         source_id: "openai_codex".to_string(),
         secret_ref: pending.secret_ref.clone(),
+        provider_family: existing
+            .as_ref()
+            .and_then(|value| value.provider_family.clone())
+            .or_else(|| Some("openai".to_string())),
         auth_state: preview.auth_state,
         health: AccountHealthState::Healthy,
         models: existing

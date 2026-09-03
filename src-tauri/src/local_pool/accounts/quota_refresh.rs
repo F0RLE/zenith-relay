@@ -450,8 +450,7 @@ pub(super) async fn prepare_account_credentials_with_remote_policy(
             )
         })?;
     let oauth = Arc::new(
-        CodexOAuthClient::new_with_proxy(proxy.as_ref())
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
+        CodexOAuthClient::new_with_proxy(proxy.as_ref()).map_err(LocalPoolError::invalid_state)?,
     );
     let refresh = StoredRefreshAdapter::new(
         state.transient_root(),
@@ -729,10 +728,9 @@ pub(crate) async fn refresh_account_quota_once(
 
 /// Refresh only the account's upstream model catalog.
 ///
-/// Model discovery has its own lifecycle: it runs when an active background
-/// session starts and every eight hours afterwards. Keeping it outside the
-/// quota queue prevents a long quota window from delaying discovery and avoids
-/// issuing a quota request merely because the model catalog is due.
+/// This is used for startup and membership-triggered discovery. Regular
+/// automatic quota refreshes can request the same discovery inline so the
+/// account's quota and model list stay current after one scheduled pass.
 pub(crate) async fn refresh_account_models_once(
     state: &DesktopState,
     account_id: &str,
@@ -1083,7 +1081,7 @@ pub(super) fn account_requires_reauthentication(
         .account(account_id)
         .map(|account| account.account.auth_state)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    Ok(matches!(auth_state, AccountAuthState::RequiresReauth(_)))
+    Ok(auth_state.requires_fresh_login())
 }
 
 pub(super) fn account_auth_is_access_only(
@@ -1194,11 +1192,7 @@ pub(crate) fn record_model_refresh_error(
     // A token-expiry transition has a more actionable auth state than a
     // generic preparation error. Leave that state to the auth UI instead of
     // replacing it with `models_prepare`.
-    if matches!(
-        account.account.auth_state,
-        AccountAuthState::RequiresReauth(_)
-    ) && code == "models_prepare"
-    {
+    if account.account.auth_state.requires_fresh_login() && code == "models_prepare" {
         return Ok(());
     }
     apply_model_discovery_failure(&mut account, code, retryable);
@@ -1241,10 +1235,7 @@ pub(crate) fn next_quota_refresh_at(
             Some(reset_due.map_or(idle_due, |due_at_ms| due_at_ms.min(idle_due)))
         }
         AccountQuotaOutcome::Failed { retryable, .. } => {
-            if matches!(
-                response.account.account.auth_state,
-                AccountAuthState::RequiresReauth(_)
-            ) {
+            if response.account.account.auth_state.requires_fresh_login() {
                 None
             } else if *retryable {
                 Some(now_ms.saturating_add(QUOTA_REFRESH_RETRY_MS))

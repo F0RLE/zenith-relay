@@ -5,6 +5,7 @@ mod gateway;
 mod imports;
 mod keys;
 mod models;
+mod pricing;
 mod proxies;
 mod quota;
 mod routing;
@@ -47,6 +48,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .merge(proxies::routes())
         .merge(keys::routes())
         .merge(quota::routes())
+        .merge(pricing::routes())
         .merge(routing::routes())
         .merge(models::routes())
         .merge(usage::routes())

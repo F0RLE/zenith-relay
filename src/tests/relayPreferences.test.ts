@@ -3,9 +3,11 @@ import {
   RELAY_STORAGE_KEYS,
   readAccountValueVisibility,
   readCodexPoolOauthSelection,
+  readLaunchApplicationAfterConnect,
   readRelayPreference,
   removeRelayPreference,
   writeAccountValueVisibility,
+  writeLaunchApplicationAfterConnect,
   writeRelayPreference,
   type RelayStorage,
 } from "../src/features/relay/state/relayPreferences";
@@ -86,5 +88,17 @@ describe("relay preferences", () => {
 
     writeAccountValueVisibility(true, storage);
     expect(storage.values[RELAY_STORAGE_KEYS.accountValueVisible]).toBe("true");
+  });
+
+  test("persists the launch-after-connect preference", () => {
+    const storage = fakeStorage();
+
+    expect(readLaunchApplicationAfterConnect(storage)).toBe(false);
+    writeLaunchApplicationAfterConnect(true, storage);
+    expect(readLaunchApplicationAfterConnect(storage)).toBe(true);
+    expect(storage.values[RELAY_STORAGE_KEYS.launchApplicationAfterConnect]).toBe("1");
+
+    writeLaunchApplicationAfterConnect(false, storage);
+    expect(readLaunchApplicationAfterConnect(storage)).toBe(false);
   });
 });

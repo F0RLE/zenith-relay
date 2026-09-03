@@ -1,10 +1,15 @@
 use super::Capabilities;
+use crate::pricing::{
+    ImageRequestPrice, PriceSource, PricingCatalog, PricingContext, PricingMetadata,
+    PricingSourceSummary, ResolvedPrice,
+};
 use crate::{
-    api_model_price,
     automations::{WakeHistory, WakeTask},
-    codex_model_display_name, codex_model_is_picker_eligible, official_image_request_prices,
-    ApiModelPriceOverride, DefaultServiceTier, ModelRules, RoutingStrategy, SourceProtocolBinding,
-    WireApi,
+    codex_model_display_name, codex_model_is_picker_eligible, normalize_image_base_model,
+    normalize_model_ids, normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
+    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
+    normalize_subscription_plan_order, ApiModelPriceOverride, DefaultServiceTier, ModelRules,
+    RoutingStrategy, SourceProtocolBinding, TokenPrice, WireApi,
 };
 mod account;
 mod model;
@@ -17,8 +22,8 @@ pub use account::{
 };
 pub use model::{
     apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
-    model_has_api_source_route, pooled_source_runtime_available, source_runtime_available,
-    GatewaySummary, ModelSummary,
+    apply_pool_model_configuration, model_has_api_source_route, pool_candidate_count,
+    pooled_source_runtime_available, source_runtime_available, GatewaySummary, ModelSummary,
 };
 pub use routing::{
     account_candidate_enabled, account_operational_state, operational_status, quota_refresh_status,
@@ -26,7 +31,8 @@ pub use routing::{
     ProxyMode, QuotaRefreshStatus,
 };
 pub use usage::{
-    UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTotals,
+    UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown,
+    UsageTotals,
 };
 
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
@@ -100,6 +106,10 @@ impl fmt::Debug for ProfileKeyRotation {
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
 pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 3;
+const MIN_CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
+const MAX_PRESET_MEMBERS: usize = 2_048;
+const MAX_PRESET_MODELS: usize = 4_096;
+const MAX_SOURCE_RECOVERY_DELAY_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -107,6 +117,262 @@ pub struct ConfigurationPreset {
     pub format: String,
     pub schema_version: u16,
     pub settings: ConfigurationPresetSettings,
+}
+
+/// Validates and canonicalizes a portable configuration preset before either
+/// the desktop or server resolves its references to local credentials.
+///
+/// # Errors
+///
+/// Returns a redacted validation message when the schema, member references,
+/// routing policy, model policy, or endpoint metadata is invalid.
+pub fn normalize_configuration_preset(
+    mut preset: ConfigurationPreset,
+) -> Result<ConfigurationPreset, String> {
+    if preset.format != CONFIGURATION_PRESET_FORMAT {
+        return Err("configuration preset format is unsupported".into());
+    }
+    if !(MIN_CONFIGURATION_PRESET_SCHEMA_VERSION..=CONFIGURATION_PRESET_SCHEMA_VERSION)
+        .contains(&preset.schema_version)
+    {
+        return Err(format!(
+            "configuration preset schema {} is unsupported",
+            preset.schema_version
+        ));
+    }
+    normalize_source_preset_rules(&mut preset.settings.sources)?;
+    normalize_account_preset_rules(&mut preset.settings.accounts)?;
+    preset.settings.routing.subscription_plan_order =
+        normalize_subscription_plan_order(preset.settings.routing.subscription_plan_order)
+            .map_err(str::to_string)?;
+    preset.settings.routing.image_base_model =
+        normalize_image_base_model(preset.settings.routing.image_base_model)
+            .map_err(|error| error.to_string())?;
+    if !(1..=8).contains(&preset.settings.routing.max_retry_candidates)
+        || !(1..=8).contains(&preset.settings.routing.cooldown_after_failures)
+        || !(10..=20).contains(&preset.settings.quota.request_timeout_seconds)
+    {
+        return Err("configuration preset policy is invalid".into());
+    }
+    preset.settings.hidden_models = normalize_preset_model_ids(preset.settings.hidden_models)?;
+    preset.settings.model_price_overrides =
+        normalize_model_price_overrides(preset.settings.model_price_overrides)
+            .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_reasoning_allowed_levels =
+        normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
+            .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_service_tier_overrides =
+        normalize_model_service_tier_overrides(preset.settings.model_service_tier_overrides)
+            .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_display_order = normalize_model_ids(preset.settings.model_display_order);
+    Ok(preset)
+}
+
+/// Applies the portable part of a preset to the matching members in the
+/// current configuration. Credentials and endpoint identity stay owned by the
+/// desktop or server that resolves those references before calling this.
+///
+/// # Errors
+///
+/// Returns a redacted message when a requested source or account does not
+/// exist in the current configuration.
+pub fn merge_configuration_preset_settings(
+    current: &ConfigurationPresetSettings,
+    requested: &ConfigurationPresetSettings,
+) -> Result<ConfigurationPresetSettings, String> {
+    let mut merged = current.clone();
+    replace_preset_members(
+        &mut merged.sources,
+        &requested.sources,
+        |rule| &rule.id,
+        "source",
+    )?;
+    replace_preset_members(
+        &mut merged.accounts,
+        &requested.accounts,
+        |rule| &rule.id,
+        "account",
+    )?;
+    merged.routing.clone_from(&requested.routing);
+    merged.quota.clone_from(&requested.quota);
+    merged.hidden_models.clone_from(&requested.hidden_models);
+    merged
+        .model_price_overrides
+        .clone_from(&requested.model_price_overrides);
+    if requested.model_reasoning_allowed_levels_present {
+        merged
+            .model_reasoning_allowed_levels
+            .clone_from(&requested.model_reasoning_allowed_levels);
+    }
+    if requested.model_service_tier_overrides_present {
+        merged
+            .model_service_tier_overrides
+            .clone_from(&requested.model_service_tier_overrides);
+    }
+    if requested.model_display_order_present {
+        merged
+            .model_display_order
+            .clone_from(&requested.model_display_order);
+    }
+    merged.model_reasoning_allowed_levels_present = true;
+    merged.model_service_tier_overrides_present = true;
+    merged.model_display_order_present = true;
+    Ok(merged)
+}
+
+/// Verifies that reference resolution did not collapse multiple portable
+/// members onto the same local source or account.
+///
+/// # Errors
+///
+/// Returns a redacted validation message when multiple portable members resolve
+/// to one local member.
+pub fn validate_resolved_configuration_preset_members(
+    settings: &ConfigurationPresetSettings,
+) -> Result<(), String> {
+    validate_unique_preset_member_ids(&settings.sources, |rule| &rule.id, "source")?;
+    validate_unique_preset_member_ids(&settings.accounts, |rule| &rule.id, "account")
+}
+
+fn validate_unique_preset_member_ids<T, F>(members: &[T], id: F, kind: &str) -> Result<(), String>
+where
+    F: Fn(&T) -> &String,
+{
+    let unique_count = members.iter().map(id).collect::<BTreeSet<_>>().len();
+    if unique_count != members.len() {
+        return Err(format!(
+            "configuration preset resolves multiple {kind} rules to one local {kind}"
+        ));
+    }
+    Ok(())
+}
+
+fn replace_preset_members<T, F>(
+    current: &mut [T],
+    requested: &[T],
+    id: F,
+    kind: &str,
+) -> Result<(), String>
+where
+    T: Clone,
+    F: Fn(&T) -> &String,
+{
+    let indexes = current
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| (id(rule).clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for rule in requested {
+        let member_id = id(rule);
+        let index = indexes
+            .get(member_id)
+            .copied()
+            .ok_or_else(|| format!("referenced {kind} {member_id} does not exist"))?;
+        current[index] = rule.clone();
+    }
+    Ok(())
+}
+
+fn normalize_source_preset_rules(rules: &mut [SourcePresetRule]) -> Result<(), String> {
+    if rules.len() > MAX_PRESET_MEMBERS {
+        return Err("configuration preset contains too many sources".into());
+    }
+    let mut ids = BTreeSet::new();
+    for rule in rules.iter_mut() {
+        validate_preset_reference(&rule.id, "source")?;
+        rule.name = rule.name.trim().to_string();
+        rule.base_url = rule.base_url.trim().trim_end_matches('/').to_string();
+        let valid_url = url::Url::parse(&rule.base_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
+        if !ids.insert(rule.id.clone())
+            || rule.weight == 0
+            || rule.recovery_delay_seconds > MAX_SOURCE_RECOVERY_DELAY_SECONDS
+            || rule.name.is_empty()
+            || rule.name.len() > 256
+            || rule.name.chars().any(char::is_control)
+            || !valid_url
+        {
+            return Err("configuration preset source rule is invalid".into());
+        }
+        rule.allowed_models = normalize_preset_model_ids(std::mem::take(&mut rule.allowed_models))?;
+        rule.excluded_models =
+            normalize_preset_model_ids(std::mem::take(&mut rule.excluded_models))?;
+        rule.model_price_overrides =
+            normalize_model_price_overrides(std::mem::take(&mut rule.model_price_overrides))
+                .map_err(|message| format!("configuration preset {message}"))?;
+        if !rule.protocol_bindings.is_empty() {
+            rule.protocol_bindings = normalize_source_protocol_bindings(
+                std::mem::take(&mut rule.protocol_bindings),
+                rule.wire_api,
+                &[],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    rules.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(())
+}
+
+fn normalize_account_preset_rules(rules: &mut [AccountPresetRule]) -> Result<(), String> {
+    if rules.len() > MAX_PRESET_MEMBERS {
+        return Err("configuration preset contains too many accounts".into());
+    }
+    let mut ids = BTreeSet::new();
+    for rule in rules.iter_mut() {
+        validate_preset_reference(&rule.id, "account")?;
+        if !ids.insert(rule.id.clone())
+            || rule.weight == 0
+            || invalid_preset_reference(&rule.identity_hint)
+            || rule
+                .proxy_id
+                .as_deref()
+                .is_some_and(invalid_preset_reference)
+            || rule.proxy_id.is_some() && rule.bypass_common_proxy
+        {
+            return Err("configuration preset account rule is invalid".into());
+        }
+        rule.allowed_models = normalize_preset_model_ids(std::mem::take(&mut rule.allowed_models))?;
+        rule.excluded_models =
+            normalize_preset_model_ids(std::mem::take(&mut rule.excluded_models))?;
+    }
+    rules.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(())
+}
+
+fn validate_preset_reference(value: &str, kind: &str) -> Result<(), String> {
+    if invalid_preset_reference(value) {
+        return Err(format!("configuration preset {kind} reference is invalid"));
+    }
+    Ok(())
+}
+
+fn invalid_preset_reference(value: &str) -> bool {
+    value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn normalize_preset_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
+    if models.len() > MAX_PRESET_MODELS {
+        return Err("configuration preset model list is too large".into());
+    }
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if !crate::is_valid_model_id(model) {
+            return Err("configuration preset model id is invalid".into());
+        }
+        if seen.insert(model.to_ascii_lowercase()) {
+            normalized.push(model.to_string());
+        }
+    }
+    Ok(normalized)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,6 +493,10 @@ pub struct SourcePresetRule {
     pub id: String,
     pub name: String,
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -347,13 +617,95 @@ pub struct RuntimeStateSnapshot {
     pub automations: Vec<WakeTask>,
     pub wake_history: Vec<WakeHistory>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub pricing: PricingMetadata,
 }
 
+#[cfg(test)]
 pub fn pool_model_summaries(
     sources: &[SourceSummary],
     accounts: &[AccountSummary],
     hidden_models: &[String],
 ) -> Vec<ModelSummary> {
+    let catalog =
+        PricingCatalog::from_litellm_json(include_str!("../../tests/fixtures/litellm-prices.json"))
+            .expect("pricing fixture must be valid");
+    pool_model_summaries_with_pricing(
+        sources,
+        accounts,
+        hidden_models,
+        &catalog,
+        &PricingContext::default(),
+    )
+}
+
+/// Builds pool model rows from the immutable LiteLLM snapshot and explicit
+/// source/account pricing context.
+pub fn pool_model_summaries_with_pricing(
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    hidden_models: &[String],
+    catalog: &PricingCatalog,
+    context: &PricingContext,
+) -> Vec<ModelSummary> {
+    let models = collect_pool_models(sources, accounts);
+    let mut summaries = models
+        .into_values()
+        .map(|model| {
+            let id = model.id.clone();
+            let resolved = resolve_pool_model_price(&model, &id, catalog, context);
+            let quote = resolved.as_ref().and_then(|price| price.quote);
+            let enabled = !hidden_models
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(&id));
+            (
+                model.upstream_order,
+                model_summary(
+                    id.clone(),
+                    model.members.len(),
+                    enabled,
+                    quote,
+                    catalog.rank_for(&id),
+                    catalog.image_request_prices(&id),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by_key(|(upstream_order, _)| *upstream_order);
+    summaries.into_iter().map(|(_, summary)| summary).collect()
+}
+
+/// Returns the provenance represented by the currently eligible pool models.
+/// A snapshot can contain several source/account policies, so selecting the
+/// first model's source would be misleading; every resolved member contributes
+/// to the aggregate and mixed provenance is reported explicitly.
+pub fn pool_pricing_source_summary(
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    catalog: &PricingCatalog,
+    context: &PricingContext,
+) -> PricingSourceSummary {
+    let mut resolved_sources = Vec::new();
+    for model in collect_pool_models(sources, accounts).values() {
+        for member in &model.members {
+            let Some((kind, candidate_id)) = member.split_once(':') else {
+                continue;
+            };
+            let resolved = context.candidate_price(catalog, kind, candidate_id, Some(&model.id));
+            if resolved.quote.is_some() {
+                resolved_sources.push(resolved.source);
+            } else {
+                resolved_sources.push(PriceSource::Unpriced);
+            }
+        }
+    }
+    PricingSourceSummary::from_sources(resolved_sources)
+}
+
+fn collect_pool_models(
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+) -> BTreeMap<String, PoolModel> {
     let mut models = BTreeMap::<String, PoolModel>::new();
     let mut upstream_order = 0usize;
     for source in sources.iter().filter(|source| {
@@ -386,49 +738,69 @@ pub fn pool_model_summaries(
         );
     }
 
-    let mut summaries = models
-        .into_values()
-        .map(|model| {
-            let id = model.id.clone();
-            let price = api_model_price(&id);
-            let image_request_prices = official_image_request_prices(&id);
-            let enabled = !hidden_models
-                .iter()
-                .any(|hidden| hidden.eq_ignore_ascii_case(&id));
+    models
+}
+
+fn model_summary(
+    id: String,
+    member_count: usize,
+    enabled: bool,
+    quote: Option<TokenPrice>,
+    catalog_rank: Option<u32>,
+    image_request_prices: Vec<ImageRequestPrice>,
+) -> ModelSummary {
+    let (input, cached, cache_write_5m, cache_write_1h, output) =
+        quote.map_or((None, None, None, None, None), |price| {
             (
-                model.upstream_order,
-                ModelSummary {
-                    enabled,
-                    codex_visible: enabled && codex_model_is_picker_eligible(&id),
-                    codex_display_name: codex_model_display_name(&id),
-                    id,
-                    member_count: model.members.len(),
-                    catalog_rank: price.map(|price| price.catalog_rank),
-                    input_micro_usd_per_million: price
-                        .map(|price| price.input_micro_usd_per_million),
-                    cached_input_micro_usd_per_million: price
-                        .map(|price| price.cached_input_micro_usd_per_million),
-                    cache_write_5m_micro_usd_per_million: price
-                        .and_then(|price| price.cache_write_5m_micro_usd_per_million),
-                    cache_write_1h_micro_usd_per_million: price
-                        .and_then(|price| price.cache_write_1h_micro_usd_per_million),
-                    output_micro_usd_per_million: price
-                        .map(|price| price.output_micro_usd_per_million),
-                    image_request_prices,
-                    custom_price: false,
-                    reasoning_levels: Vec::new(),
-                    reasoning_supported_levels: Vec::new(),
-                    reasoning_allowed_levels: Vec::new(),
-                    reasoning_configurable: false,
-                    speed_supported: false,
-                    speed_tier: DefaultServiceTier::Standard,
-                    speed_configurable: false,
-                },
+                Some(price.input),
+                price.cache_read,
+                price.cache_write_5m,
+                price.cache_write_1h,
+                Some(price.output),
             )
-        })
-        .collect::<Vec<_>>();
-    summaries.sort_by_key(|(upstream_order, _)| *upstream_order);
-    summaries.into_iter().map(|(_, summary)| summary).collect()
+        });
+    ModelSummary {
+        enabled,
+        codex_visible: enabled && codex_model_is_picker_eligible(&id),
+        codex_display_name: codex_model_display_name(&id),
+        id,
+        member_count,
+        catalog_rank,
+        input_micro_usd_per_million: input,
+        cached_input_micro_usd_per_million: cached,
+        cache_write_5m_micro_usd_per_million: cache_write_5m,
+        cache_write_1h_micro_usd_per_million: cache_write_1h,
+        output_micro_usd_per_million: output,
+        image_request_prices,
+        custom_price: false,
+        reasoning_levels: Vec::new(),
+        reasoning_supported_levels: Vec::new(),
+        reasoning_allowed_levels: Vec::new(),
+        reasoning_configurable: false,
+        speed_supported: false,
+        speed_tier: DefaultServiceTier::Standard,
+        speed_configurable: false,
+    }
+}
+
+fn resolve_pool_model_price(
+    model: &PoolModel,
+    model_id: &str,
+    catalog: &PricingCatalog,
+    context: &PricingContext,
+) -> Option<ResolvedPrice> {
+    let mut fallback = None;
+    for member in &model.members {
+        let Some((kind, candidate_id)) = member.split_once(':') else {
+            continue;
+        };
+        let resolved = context.candidate_price(catalog, kind, candidate_id, Some(model_id));
+        if resolved.quote.is_some() {
+            return Some(resolved);
+        }
+        fallback = Some(resolved);
+    }
+    fallback
 }
 
 struct PoolModel {
@@ -499,7 +871,7 @@ mod tests {
     };
     use crate::{
         ActiveModelRuntime, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
-        MessagesReasoningMode, SourceAdapter,
+        MessagesReasoningMode, PriceEvidence, SourceAdapter,
     };
 
     fn runtime_candidate(
@@ -527,6 +899,7 @@ mod tests {
             id: "account".into(),
             label: "Account".into(),
             identity_hint: "account".into(),
+            provider_family: None,
             enabled: true,
             in_pool,
             draining: false,
@@ -551,6 +924,43 @@ mod tests {
             proxy_id: None,
             routing_block_reason: None,
             last_error_code: None,
+        }
+    }
+
+    fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
+        SourceSummary {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: models.iter().map(ToString::to_string).collect(),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        }
+    }
+
+    fn test_token_price(input: u64, output: u64) -> TokenPrice {
+        TokenPrice {
+            input,
+            cache_read: Some(input / 10),
+            cache_write_5m: None,
+            cache_write_1h: None,
+            output,
         }
     }
 
@@ -712,6 +1122,8 @@ mod tests {
             draining: false,
             operational_status: OperationalStatus::Rotation,
             base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
@@ -767,6 +1179,8 @@ mod tests {
             draining: false,
             operational_status: OperationalStatus::Rotation,
             base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec![
@@ -806,6 +1220,371 @@ mod tests {
     }
 
     #[test]
+    fn pool_pricing_summary_reports_provider_evidence() {
+        let source = source_summary("provider", &["gpt-test"]);
+        let price = test_token_price(1_000_000, 2_000_000);
+        let context = PricingContext {
+            source_evidence: BTreeMap::from([(
+                "provider".into(),
+                BTreeMap::from([(
+                    "gpt-test".into(),
+                    PriceEvidence {
+                        provider: Some(price),
+                        manual: None,
+                    },
+                )]),
+            )]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pool_pricing_source_summary(&[source], &[], &PricingCatalog::empty(), &context),
+            PricingSourceSummary::Provider
+        );
+    }
+
+    #[test]
+    fn pool_pricing_summary_reports_manual_evidence_when_catalog_is_unpriced() {
+        let source = source_summary("manual", &["private-model"]);
+        let price = test_token_price(3_000_000, 4_000_000);
+        let context = PricingContext {
+            source_evidence: BTreeMap::from([(
+                "manual".into(),
+                BTreeMap::from([(
+                    "private-model".into(),
+                    PriceEvidence {
+                        provider: None,
+                        manual: Some(price),
+                    },
+                )]),
+            )]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pool_pricing_source_summary(&[source], &[], &PricingCatalog::empty(), &context),
+            PricingSourceSummary::Manual
+        );
+    }
+
+    #[test]
+    fn pool_pricing_summary_reports_mixed_provenance_and_unpriced_pool() {
+        let provider = source_summary("provider", &["gpt-test"]);
+        let manual = source_summary("manual", &["private-model"]);
+        let unknown = source_summary("unknown", &["future-model"]);
+        let context = PricingContext {
+            source_evidence: BTreeMap::from([
+                (
+                    "provider".into(),
+                    BTreeMap::from([(
+                        "gpt-test".into(),
+                        PriceEvidence {
+                            provider: Some(test_token_price(1_000_000, 2_000_000)),
+                            manual: None,
+                        },
+                    )]),
+                ),
+                (
+                    "manual".into(),
+                    BTreeMap::from([(
+                        "private-model".into(),
+                        PriceEvidence {
+                            provider: None,
+                            manual: Some(test_token_price(3_000_000, 4_000_000)),
+                        },
+                    )]),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let catalog = PricingCatalog::empty();
+
+        assert_eq!(
+            pool_pricing_source_summary(
+                &[provider.clone(), manual.clone()],
+                &[],
+                &catalog,
+                &context,
+            ),
+            PricingSourceSummary::Mixed
+        );
+        assert_eq!(
+            pool_pricing_source_summary(&[unknown], &[], &catalog, &context),
+            PricingSourceSummary::Unpriced
+        );
+    }
+
+    #[test]
+    fn pool_pricing_summary_ignores_non_eligible_members() {
+        let eligible = source_summary("eligible", &["gpt-test"]);
+        let mut disabled = source_summary("disabled", &["disabled-model"]);
+        disabled.enabled = false;
+        let mut outside_pool = source_summary("outside", &["outside-model"]);
+        outside_pool.in_pool = false;
+        let mut draining = source_summary("draining", &["draining-model"]);
+        draining.draining = true;
+        let mut missing_secret = source_summary("missing-secret", &["missing-model"]);
+        missing_secret.secret_available = false;
+        let context = PricingContext {
+            source_evidence: BTreeMap::from([(
+                "eligible".into(),
+                BTreeMap::from([(
+                    "gpt-test".into(),
+                    PriceEvidence {
+                        provider: Some(test_token_price(1_000_000, 2_000_000)),
+                        manual: None,
+                    },
+                )]),
+            )]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pool_pricing_source_summary(
+                &[eligible, disabled, outside_pool, draining, missing_secret],
+                &[],
+                &PricingCatalog::empty(),
+                &context,
+            ),
+            PricingSourceSummary::Provider
+        );
+    }
+
+    #[test]
+    fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
+        let mut settings = ConfigurationPresetSettings {
+            sources: vec![SourcePresetRule {
+                id: "source".into(),
+                name: "Source".into(),
+                base_url: "https://example.test/v1".into(),
+                pricing_provider: None,
+                official_provider_family: None,
+                wire_api: WireApi::Responses,
+                protocol_bindings: Vec::new(),
+                enabled: true,
+                in_pool: true,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                priority: 0,
+                weight: 1,
+                recovery_delay_seconds: 0,
+                model_price_overrides: BTreeMap::new(),
+            }],
+            accounts: Vec::new(),
+            routing: PresetRoutingPolicy {
+                max_retry_candidates: 3,
+                cooldown_after_failures: 3,
+                keep_last_candidate_available: true,
+                routing_strategy: RoutingStrategy::Adaptive,
+                subscription_plan_order: Vec::new(),
+                default_service_tier: DefaultServiceTier::Standard,
+                image_base_model: None,
+            },
+            quota: PresetQuotaPolicy {
+                request_timeout_seconds: 30,
+                account_proxy_required: false,
+                common_proxy_id: None,
+            },
+            hidden_models: Vec::new(),
+            model_price_overrides: BTreeMap::new(),
+            model_reasoning_allowed_levels: BTreeMap::new(),
+            model_service_tier_overrides: BTreeMap::new(),
+            model_display_order: Vec::new(),
+            model_reasoning_allowed_levels_present: true,
+            model_service_tier_overrides_present: true,
+            model_display_order_present: true,
+        };
+        let mut legacy = serde_json::to_value(ConfigurationPreset {
+            format: CONFIGURATION_PRESET_FORMAT.into(),
+            schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
+            settings: settings.clone(),
+        })
+        .unwrap();
+        let source = legacy["settings"]["sources"][0].as_object_mut().unwrap();
+        source.remove("pricingProvider");
+        source.remove("officialProviderFamily");
+
+        let decoded: ConfigurationPreset = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.settings.sources[0].pricing_provider, None);
+        assert_eq!(decoded.settings.sources[0].official_provider_family, None);
+        settings.sources[0].pricing_provider = None;
+        settings.sources[0].official_provider_family = None;
+        assert_eq!(decoded.settings.sources, settings.sources);
+
+        let encoded = serde_json::to_value(decoded).unwrap();
+        let source = encoded["settings"]["sources"][0].as_object().unwrap();
+        assert!(!source.contains_key("pricingProvider"));
+        assert!(!source.contains_key("officialProviderFamily"));
+    }
+
+    fn valid_configuration_preset() -> ConfigurationPreset {
+        serde_json::from_value(serde_json::json!({
+            "format": CONFIGURATION_PRESET_FORMAT,
+            "schemaVersion": CONFIGURATION_PRESET_SCHEMA_VERSION,
+            "settings": {
+                "sources": [{
+                    "id": "source_1", "name": "Source", "baseUrl": "https://example.test/v1",
+                    "wireApi": "responses", "enabled": true, "inPool": true,
+                    "allowedModels": [], "excludedModels": [], "priority": 0, "weight": 1
+                }],
+                "accounts": [],
+                "routing": {
+                    "maxRetryCandidates": 3, "cooldownAfterFailures": 3,
+                    "keepLastCandidateAvailable": true, "routingStrategy": "adaptive",
+                    "subscriptionPlanOrder": [], "defaultServiceTier": "standard", "imageBaseModel": null
+                },
+                "quota": { "requestTimeoutSeconds": 20, "accountProxyRequired": false, "commonProxyId": null },
+                "hiddenModels": [], "modelPriceOverrides": {}, "modelReasoningAllowedLevels": {},
+                "modelServiceTierOverrides": {}, "modelDisplayOrder": []
+            }
+        }))
+        .expect("static configuration preset is valid")
+    }
+
+    #[test]
+    fn configuration_preset_validation_rejects_untrusted_identity_and_endpoint() {
+        let mut preset = valid_configuration_preset();
+        preset.format = "other-product".into();
+        assert!(normalize_configuration_preset(preset).is_err());
+
+        let mut preset = valid_configuration_preset();
+        preset.schema_version = CONFIGURATION_PRESET_SCHEMA_VERSION + 1;
+        assert!(normalize_configuration_preset(preset).is_err());
+
+        let mut preset = valid_configuration_preset();
+        preset.settings.sources[0].base_url = "file:///not-an-api".into();
+        assert!(normalize_configuration_preset(preset).is_err());
+    }
+
+    #[test]
+    fn configuration_preset_validation_normalizes_source_policy() {
+        let mut preset = valid_configuration_preset();
+        let source = &mut preset.settings.sources[0];
+        source.base_url = " https://example.test/v1/ ".into();
+        source.allowed_models = vec!["gpt-test".into(), "GPT-TEST".into()];
+
+        let normalized = normalize_configuration_preset(preset).unwrap();
+        assert_eq!(
+            normalized.settings.sources[0].base_url,
+            "https://example.test/v1"
+        );
+        assert_eq!(normalized.settings.sources[0].allowed_models, ["gpt-test"]);
+    }
+
+    #[test]
+    fn sparse_configuration_preset_keeps_newer_model_policy() {
+        let current = valid_configuration_preset().settings;
+        let mut current = ConfigurationPresetSettings {
+            model_reasoning_allowed_levels: BTreeMap::from([(
+                "gpt-test".into(),
+                vec!["high".into()],
+            )]),
+            model_service_tier_overrides: BTreeMap::from([(
+                "gpt-test".into(),
+                DefaultServiceTier::Fast,
+            )]),
+            model_display_order: vec!["gpt-test".into()],
+            ..current
+        };
+        current.model_reasoning_allowed_levels_present = true;
+        current.model_service_tier_overrides_present = true;
+        current.model_display_order_present = true;
+        let mut sparse = current.clone();
+        sparse.model_reasoning_allowed_levels.clear();
+        sparse.model_service_tier_overrides.clear();
+        sparse.model_display_order.clear();
+        sparse.model_reasoning_allowed_levels_present = false;
+        sparse.model_service_tier_overrides_present = false;
+        sparse.model_display_order_present = false;
+
+        let merged = merge_configuration_preset_settings(&current, &sparse).unwrap();
+
+        assert_eq!(
+            merged.model_reasoning_allowed_levels,
+            current.model_reasoning_allowed_levels
+        );
+        assert_eq!(
+            merged.model_service_tier_overrides,
+            current.model_service_tier_overrides
+        );
+        assert_eq!(merged.model_display_order, current.model_display_order);
+    }
+
+    #[test]
+    fn resolved_configuration_preset_rejects_duplicate_local_members() {
+        let mut settings = valid_configuration_preset().settings;
+        settings.sources.push(settings.sources[0].clone());
+
+        assert!(validate_resolved_configuration_preset_members(&settings).is_err());
+    }
+
+    #[test]
+    fn pool_snapshot_configuration_uses_one_shared_policy() {
+        let source = SourceSummary {
+            id: "source_1".into(),
+            name: "Synthetic".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        };
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        let price_overrides = BTreeMap::from([(
+            "gpt-test".to_string(),
+            ApiModelPriceOverride {
+                input_micro_usd_per_million: 12,
+                cached_input_micro_usd_per_million: None,
+                cache_write_5m_micro_usd_per_million: Some(18),
+                cache_write_1h_micro_usd_per_million: Some(9),
+                output_micro_usd_per_million: 34,
+            },
+        )]);
+        let reasoning_allowed_levels =
+            BTreeMap::from([("gpt-test".to_string(), vec!["high".to_string()])]);
+        let service_tier_overrides =
+            BTreeMap::from([("gpt-test".to_string(), DefaultServiceTier::Fast)]);
+
+        apply_pool_model_configuration(
+            &mut models,
+            std::slice::from_ref(&source),
+            &[],
+            &price_overrides,
+            &reasoning_allowed_levels,
+            &service_tier_overrides,
+            None,
+        );
+
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert!(model.custom_price);
+        assert_eq!(model.input_micro_usd_per_million, Some(12));
+        assert_eq!(model.cached_input_micro_usd_per_million, None);
+        assert_eq!(model.cache_write_5m_micro_usd_per_million, Some(18));
+        assert_eq!(model.cache_write_1h_micro_usd_per_million, Some(9));
+        assert_eq!(model.output_micro_usd_per_million, Some(34));
+        assert_eq!(model.reasoning_levels, ["high"]);
+        assert_eq!(model.speed_tier, DefaultServiceTier::Fast);
+        assert!(model.speed_supported);
+        assert_eq!(pool_candidate_count(&[source], &[]), 1);
+    }
+
+    #[test]
     fn pool_model_summaries_include_the_runtime_messages_bridge() {
         let source = SourceSummary {
             id: "source_1".into(),
@@ -815,6 +1594,8 @@ mod tests {
             draining: false,
             operational_status: OperationalStatus::Rotation,
             base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: vec![
                 SourceProtocolBinding {
@@ -845,7 +1626,16 @@ mod tests {
             last_error_code: None,
         };
 
-        let models = pool_model_summaries(&[source], &[], &[]);
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        apply_pool_model_configuration(
+            &mut models,
+            std::slice::from_ref(&source),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("claude-native".to_string(), DefaultServiceTier::Fast)]),
+            None,
+        );
 
         assert_eq!(
             models
@@ -854,6 +1644,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-routed", "claude-native"]
         );
+        assert!(models[0].speed_supported);
+        assert!(!models[1].speed_supported);
+        assert_eq!(models[1].speed_tier, DefaultServiceTier::Standard);
     }
 
     #[test]
@@ -866,6 +1659,8 @@ mod tests {
             draining: false,
             operational_status: OperationalStatus::Rotation,
             base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["gpt-legacy".into()],
@@ -977,7 +1772,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(summary.reasoning_tokens, None);
+        assert_eq!(summary.tokens.reasoning_tokens, None);
         assert_eq!(summary.ttft_ms, None);
         assert!(!serde_json::to_value(&summary)
             .unwrap()

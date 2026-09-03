@@ -214,6 +214,12 @@ pub(super) fn classify_upstream_error_value(
     status: StatusCode,
     value: &Value,
 ) -> UpstreamErrorClassification {
+    if zenith_gateway_invalid_request_value(value) {
+        return UpstreamErrorClassification {
+            category: "upstream_invalid_request",
+            message: upstream_failure_message("upstream_invalid_request"),
+        };
+    }
     classify_upstream_error_text(status, &upstream_error_text(value))
 }
 
@@ -246,6 +252,11 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         ],
     ) {
         "response_affinity_miss"
+    } else if text_has_any(text, &["refresh_token_reused"]) {
+        // A refresh-token race is transient. The token authority retries it
+        // without changing account authentication state, and a proxied
+        // upstream response must follow the same rule.
+        "upstream_refresh_token_reused"
     } else if text_has_any(
         text,
         &[
@@ -376,7 +387,6 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
             "token_expired",
             "token_invalidated",
             "token_revoked",
-            "refresh_token_reused",
             "invalid or expired token",
             "invalid_grant",
         ],
@@ -406,7 +416,28 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         ],
     ) {
         "upstream_content_policy"
-    } else if text_has_any(text, &["invalid_prompt"]) {
+    } else if text_has_any(
+        text,
+        &[
+            "invalid_prompt",
+            "invalid call_id for function_call_output",
+            "invalid call id for function_call_output",
+            "invalid_call_id_for_function_call_output",
+            "invalid_function_call_output_call_id",
+        ],
+    ) || (text.contains("input[")
+        && text.contains(".id")
+        && text_has_any(
+            text,
+            &[
+                "expected an id that begins with 'fc'",
+                "expected an id that begins with 'ctc'",
+                "expected an id that begins with 'ctc_'",
+                "expected an id that starts with 'ctc'",
+                "expected an id that begins with 'msg'",
+            ],
+        ))
+    {
         "upstream_invalid_request"
     } else if status == StatusCode::PAYLOAD_TOO_LARGE
         || text_has_any(
@@ -513,17 +544,6 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         )
     {
         "upstream_edge_challenge"
-    } else if text_has_any(
-        text,
-        &[
-            "invalid_request",
-            "invalid request",
-            "request is invalid",
-            "bad_request",
-            "bad request",
-        ],
-    ) {
-        "upstream_invalid_request"
     } else if status == StatusCode::FORBIDDEN {
         "upstream_forbidden"
     } else if status == StatusCode::NOT_FOUND {
@@ -532,8 +552,6 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         "upstream_request_timeout"
     } else if status == StatusCode::CONFLICT {
         "upstream_conflict"
-    } else if status == StatusCode::UNPROCESSABLE_ENTITY {
-        "upstream_invalid_request"
     } else if status == StatusCode::TOO_MANY_REQUESTS {
         "upstream_rate_limited"
     } else if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -544,8 +562,8 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         "upstream_unavailable"
     } else if status == StatusCode::GATEWAY_TIMEOUT {
         "upstream_gateway_timeout"
-    } else if status == StatusCode::BAD_REQUEST {
-        "upstream_invalid_request"
+    } else if status.is_client_error() {
+        "upstream_candidate_rejected"
     } else if status.is_server_error() {
         "upstream_server_error"
     } else {
@@ -586,6 +604,7 @@ pub(super) fn upstream_failure_message(category: &str) -> &'static str {
         "upstream_request_timeout" => "upstream request timed out",
         "upstream_conflict" => "upstream request conflicted with current state",
         "upstream_invalid_request" => "upstream rejected the request",
+        "upstream_candidate_rejected" => "upstream source rejected this model request",
         "upstream_overloaded" => "upstream service is overloaded",
         "upstream_server_error" => "upstream service failed",
         "upstream_bad_gateway" => "upstream gateway failed",
@@ -621,6 +640,7 @@ pub(super) fn upstream_failure_status(category: &str) -> StatusCode {
         | "upstream_content_policy"
         | "upstream_unsupported_request"
         | "upstream_invalid_request" => StatusCode::BAD_REQUEST,
+        "upstream_candidate_rejected" => StatusCode::SERVICE_UNAVAILABLE,
         "upstream_model_capacity"
         | "upstream_overloaded"
         | "upstream_unavailable"

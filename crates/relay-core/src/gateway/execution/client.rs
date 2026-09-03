@@ -4,10 +4,10 @@ use super::super::now_ms;
 use super::super::request::{
     candidate_protocols, chat_request_is_text_or_image_only, chat_request_uses_tools,
     client_context_fingerprint, codex_background_request_kind, forwarded_codex_headers,
-    forwarded_messages_headers, request_id, CODEX_RESPONSES_LITE_HEADER,
-    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    forwarded_messages_headers, is_managed_codex_client, request_id, ServiceTierPolicy,
+    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
-use super::request::execute_request;
+use super::request::{execute_request, RequestExecution};
 use crate::protocol::ClientWireApi;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
@@ -90,6 +90,11 @@ async fn execute_client_request_inner(
                 "invalid_request",
             )
         }
+    };
+    let service_tier_policy = if is_managed_codex_client(&headers) {
+        ServiceTierPolicy::pool_owned()
+    } else {
+        ServiceTierPolicy::client_owned()
     };
     if wire_api == WireApi::ChatCompletions && chat_request_uses_tools(&request) {
         return api_error(
@@ -183,10 +188,11 @@ async fn execute_client_request_inner(
         }
         WireApi::Gemini => super::super::request::forwarded_bridge_gemini_headers(&headers),
     };
-    execute_request(
+    execute_request(RequestExecution {
         runtime,
         key,
         request,
+        service_tier_policy,
         requested_model,
         resolved_model,
         stream,
@@ -196,9 +202,9 @@ async fn execute_client_request_inner(
         response_affinity_key,
         wire_api,
         responses_lite,
-        true,
-        0,
-    )
+        allow_previous_response_reset: true,
+        attempt_offset: 0,
+    })
     .await
 }
 

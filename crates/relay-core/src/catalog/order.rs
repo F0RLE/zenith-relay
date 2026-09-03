@@ -106,6 +106,13 @@ pub fn reasoning_policy_key(model: &str) -> String {
     }
 }
 
+/// Returns whether Relay can apply its Standard/Fast request policy to a
+/// model. The policy maps to OpenAI service tiers, so provider namespaces are
+/// ignored but non-OpenAI model families remain in Standard mode.
+pub fn model_supports_fast_service_tier(model: &str) -> bool {
+    is_openai_model(&model_leaf(model).to_ascii_lowercase())
+}
+
 /// Looks up the shared policy first, then preserves a saved model-specific
 /// setting from earlier Relay versions until the user edits that model.
 ///
@@ -626,6 +633,14 @@ mod tests {
             Some(vec!["low".to_string()])
         );
         assert_eq!(reasoning_policy_levels(&policies, "vendor/private-b"), None);
+    }
+
+    #[test]
+    fn fast_service_tier_is_limited_to_openai_model_families() {
+        assert!(model_supports_fast_service_tier("gpt-5.6-sol"));
+        assert!(model_supports_fast_service_tier("provider/o3"));
+        assert!(!model_supports_fast_service_tier("claude-opus-5"));
+        assert!(!model_supports_fast_service_tier("provider/gemini-3-pro"));
     }
 
     #[test]

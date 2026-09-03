@@ -8,20 +8,17 @@ use crate::{
     state::{identity_hint, SERVER_SCHEMA_VERSION},
     store::configuration_revision,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::atomic::Ordering,
-};
+use std::{collections::HashMap, sync::atomic::Ordering};
 use zenith_relay_core::{
+    pricing::{PricingCatalog, PricingContext, PricingMetadata},
     protocol::{
-        apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
-        model_has_api_source_route, model_has_native_account_route,
+        apply_model_display_order, apply_pool_model_configuration, pool_candidate_count,
+        pool_model_summaries_with_pricing, pool_pricing_source_summary,
         pooled_source_runtime_available, source_runtime_available, AccountSummary, GatewaySummary,
-        ModelSummary, OperationalStatus, ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot,
-        RuntimeTargetSummary, SourceSummary, UsageQuery,
+        ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+        UsageQuery,
     },
-    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime,
-    QUOTA_STALE_AFTER_MS,
+    ApiEquivalentSummary, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
 };
 
 #[derive(Clone, Copy)]
@@ -51,7 +48,11 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
     let model_display_order = state.store.model_display_order()?;
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
-    let equivalents = state.store.api_equivalents()?;
+    let pricing_catalog = state.pricing_catalog();
+    let pricing_context = state.pricing_context()?;
+    let equivalents = state
+        .store
+        .api_equivalents_with_pricing(&pricing_catalog, &pricing_context)?;
     let runtime = state.runtime()?;
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
@@ -74,12 +75,21 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &accounts,
         proxy_settings,
         &equivalents,
+        &pricing_catalog,
+        &pricing_context,
         &mut warnings,
     )?;
-    let mut models = model_summaries(
+    let mut models = pool_model_summaries_with_pricing(
         &source_summaries,
         &account_summaries,
         &hidden_models,
+        &pricing_catalog,
+        &pricing_context,
+    );
+    apply_pool_model_configuration(
+        &mut models,
+        &source_summaries,
+        &account_summaries,
         &model_price_overrides,
         &model_reasoning_allowed_levels,
         &model_service_tier_overrides,
@@ -91,6 +101,20 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         .filter(|model| model.enabled)
         .map(|model| model.id.clone())
         .collect();
+    let pricing_metadata = PricingMetadata::for_catalog_with_status(
+        &pricing_catalog,
+        state.pricing_status(),
+        pool_pricing_source_summary(
+            &source_summaries,
+            &account_summaries,
+            &pricing_catalog,
+            &pricing_context,
+        ),
+        equivalents
+            .values()
+            .map(|value| value.unpriced_tokens)
+            .sum(),
+    );
 
     Ok(RuntimeStateSnapshot {
         schema_version: SERVER_SCHEMA_VERSION,
@@ -108,7 +132,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
                 "{}/v1",
                 state.config.public_base_url.as_str().trim_end_matches('/')
             ),
-            candidate_count: candidate_count(&source_summaries, &account_summaries),
+            candidate_count: pool_candidate_count(&source_summaries, &account_summaries),
             visible_model_ids,
             max_retry_candidates: routing_policy.max_retry_candidates,
             cooldown_after_failures: routing_policy.cooldown_after_failures,
@@ -141,6 +165,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             .cloned()
             .collect(),
         warnings,
+        pricing: pricing_metadata,
     })
 }
 
@@ -191,6 +216,8 @@ fn account_summaries(
     records: &[ServerAccountRecord],
     proxy_settings: AccountProxySettings,
     equivalents: &HashMap<String, ApiEquivalentSummary>,
+    pricing_catalog: &PricingCatalog,
+    pricing_context: &PricingContext,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<AccountSummary>, String> {
     records
@@ -215,7 +242,8 @@ fn account_summaries(
                     )
                 })
                 .unwrap_or((ProxyMode::Direct, false));
-            let quota_window_usage = account_quota_window_usage(state, record)?;
+            let quota_window_usage =
+                account_quota_window_usage(state, record, pricing_catalog, pricing_context)?;
             Ok(account_summary(
                 record,
                 secret_available,
@@ -235,6 +263,8 @@ fn account_summaries(
 fn account_quota_window_usage(
     state: &AppState,
     record: &ServerAccountRecord,
+    pricing_catalog: &PricingCatalog,
+    pricing_context: &PricingContext,
 ) -> Result<Option<QuotaWindowUsage>, String> {
     let Some(window) = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)
     else {
@@ -242,14 +272,18 @@ fn account_quota_window_usage(
     };
     let window_start_ms = window.window_start_ms.unwrap_or_default();
     let window_minutes = window.window_minutes.unwrap_or_default();
-    let usage = state.store.usage_page(&UsageQuery {
-        page: 1,
-        page_size: 1,
-        from_ms: Some(window_start_ms),
-        to_ms: Some(window.observed_at_ms),
-        source_or_account_query: Some(identity_hint(&record.id)),
-        ..UsageQuery::default()
-    })?;
+    let usage = state.store.usage_page_with_pricing(
+        &UsageQuery {
+            page: 1,
+            page_size: 1,
+            from_ms: Some(window_start_ms),
+            to_ms: Some(window.observed_at_ms),
+            source_or_account_query: Some(identity_hint(&record.id)),
+            ..UsageQuery::default()
+        },
+        pricing_catalog,
+        pricing_context,
+    )?;
     Ok(Some(QuotaWindowUsage {
         kind: window.kind,
         window_start_ms,
@@ -257,69 +291,4 @@ fn account_quota_window_usage(
         window_minutes,
         api_equivalent: usage.totals.api_equivalent,
     }))
-}
-
-fn model_summaries(
-    source_summaries: &[SourceSummary],
-    account_summaries: &[AccountSummary],
-    hidden_models: &[String],
-    model_price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
-    model_reasoning_allowed_levels: &BTreeMap<String, Vec<String>>,
-    model_service_tier_overrides: &BTreeMap<String, zenith_relay_core::DefaultServiceTier>,
-    runtime: Option<&GatewayRuntime>,
-) -> Vec<ModelSummary> {
-    let mut models = zenith_relay_core::protocol::pool_model_summaries(
-        source_summaries,
-        account_summaries,
-        hidden_models,
-    );
-    for model in &mut models {
-        let model_id = model.id.clone();
-        if let Some(price) = model_price_overrides.get(&model_id.to_ascii_lowercase()) {
-            model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
-            model.cached_input_micro_usd_per_million = Some(
-                price
-                    .cached_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-            );
-            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
-            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
-            model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
-            model.custom_price = true;
-        }
-        let has_api_source_route = model_has_api_source_route(source_summaries, &model_id);
-        let has_pool_route =
-            has_api_source_route || model_has_native_account_route(account_summaries, &model_id);
-        apply_model_reasoning_summary(
-            model,
-            runtime.and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
-            zenith_relay_core::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
-            has_pool_route,
-        );
-        apply_model_speed_summary(
-            model,
-            runtime.is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model_id)),
-            model_service_tier_overrides
-                .get(&model_id.to_ascii_lowercase())
-                .copied(),
-        );
-    }
-    models
-}
-
-fn candidate_count(sources: &[SourceSummary], accounts: &[AccountSummary]) -> usize {
-    sources
-        .iter()
-        .filter(|record| {
-            record.in_pool
-                && record.supports_any_wire_api()
-                && record.operational_status == OperationalStatus::Rotation
-        })
-        .count()
-        + accounts
-            .iter()
-            .filter(|record| {
-                record.in_pool && record.operational_status == OperationalStatus::Rotation
-            })
-            .count()
 }

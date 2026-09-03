@@ -1,7 +1,10 @@
 use super::{current_time_ms, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
-        credentials::{CredentialError, CredentialStore, StoredCodexCredentials},
+        credentials::{
+            credential_invalid_state_error as credential_error, CredentialStore,
+            StoredCodexCredentials,
+        },
         proxy::{ProxyPool, ProxyPoolSummary},
         NativeSecretBackend,
     },
@@ -354,8 +357,4 @@ fn normalize_ids(values: Vec<String>, allow_empty: bool) -> Result<Vec<String>> 
         ));
     }
     Ok(values)
-}
-
-fn credential_error(error: CredentialError) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }

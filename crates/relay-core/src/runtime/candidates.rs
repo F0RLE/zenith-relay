@@ -204,28 +204,12 @@ impl GatewayRuntime {
         }
 
         match category {
-            "upstream_quota_exhausted" => {
-                let reset_at_ms = {
-                    let mut quotas = self
-                        .passive_quotas
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    quotas.get_mut(candidate_id).and_then(|state| {
-                        state.snapshot.limit_reached = true;
-                        state.snapshot.updated_at_ms = Some(observed_at_ms);
-                        state.snapshot.error = None;
-                        state.dirty = true;
-                        state.force_persist = true;
-                        state.snapshot.limiting_reset_at_ms()
-                    })
-                };
-                self.lock_scheduler().update_candidate_quota_at(
-                    candidate_id,
-                    CandidateQuota::Exhausted,
-                    Some(observed_at_ms),
-                    reset_at_ms,
-                );
-            }
+            // The gateway already applied a candidate-scoped cooldown before
+            // emitting this event. A bare 429 is not a durable quota snapshot:
+            // treating it as `Exhausted` keeps an otherwise healthy slot out
+            // of rotation until a separate refresh happens to run. Only an
+            // actual quota snapshot above may mark the candidate exhausted.
+            "upstream_quota_exhausted" => {}
             "upstream_unauthorized" | "account_auth" => {
                 self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
             }
@@ -447,7 +431,14 @@ impl GatewayRuntime {
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
-        let removed = self.lock_scheduler().remove(candidate_id).is_some();
+        // Scheduler removal is graceful when a lease is active: keep the
+        // executor alive until the request reaches its terminal outcome.
+        let (removed, deferred) = {
+            let mut scheduler = self.lock_scheduler();
+            let removed = scheduler.remove(candidate_id).is_some();
+            let deferred = scheduler.candidate(candidate_id).is_some();
+            (removed, deferred)
+        };
         self.model_metadata
             .codex_manifests
             .lock()
@@ -479,16 +470,18 @@ impl GatewayRuntime {
                 &BTreeMap::new(),
             );
         }
-        self.passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(candidate_id);
-        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
-            account.active.store(false, Ordering::Release);
-            *account
-                .agent_identity
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        if !deferred {
+            self.passive_quotas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(candidate_id);
+            if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+                account.active.store(false, Ordering::Release);
+                *account
+                    .agent_identity
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
         }
         if let Some(store) = self.response_affinity_store.as_ref() {
             let _ = store.delete_candidate(candidate_id);

@@ -1,10 +1,11 @@
-use super::images::select_image_main_model;
+use super::images::select_image_main_model_with_catalog;
 use super::{
     all_native_wire_apis, client_wire_apis_to_native, model_rules, normalize_client_wire_api,
     normalize_prefix, normalized_responses_url, normalized_set, require_runtime_value,
     source_candidate_id, ChatGptAccountExecutor, GatewayRuntimeOptions, PassiveQuotaState,
     RuntimeHttpClients, RuntimeKey, RuntimeSource, SourceCandidateBinding, IMAGE_API_MODEL,
 };
+use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::{
@@ -172,6 +173,7 @@ pub(super) fn build_accounts(
     accounts: Vec<RuntimeChatGptAccount>,
     account_auth: Option<&RuntimeChatGptAuth>,
     image_base_model: Option<&str>,
+    image_pricing_catalog: Option<&PricingCatalog>,
     sources: &SourceRuntimeParts,
     registry: &mut ModelRegistry,
     scheduler: &mut PoolScheduler,
@@ -218,7 +220,8 @@ pub(super) fn build_accounts(
             .map_err(|message| Error::Validation(message.to_string()))?;
         let mut published_models = account.models.clone();
         let models = normalized_set(account.models.iter());
-        let image_main_model = select_image_main_model(&models, image_base_model);
+        let image_main_model =
+            select_image_main_model_with_catalog(&models, image_base_model, image_pricing_catalog);
         let mut candidate_models = models.clone();
         if image_main_model.is_some() {
             candidate_models.insert(IMAGE_API_MODEL.to_string());

@@ -34,10 +34,11 @@ pub async fn discover_source_models_for_protocol_bindings(
 /// `protocol_bindings` entry normally contains the models advertised for that
 /// binding after its explicit allow-list is applied. A successful automatic
 /// source-wide binding is preserved with an empty `model_ids`; `models` still
-/// holds its current discovered catalog. A failed or empty non-automatic
-/// binding is omitted. A successful `/models` response is catalog evidence,
-/// not a completion capability probe; operators must assign a model only to
-/// routes the upstream documents or has safely verified.
+/// holds its current discovered catalog. A successful `/models` response is
+/// catalog evidence, not a completion capability probe; operators must assign
+/// a model only to routes the upstream documents or has safely verified. A
+/// valid empty response is still success and is represented by a binding with
+/// an empty `model_ids` list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceDiscovery {
     pub models: Vec<String>,
@@ -61,8 +62,9 @@ pub struct SourceDiscovery {
 /// prior source catalog, or the native Responses remainder beside an explicit
 /// Responses bridge, is recognized as an automatic source-wide route. An empty
 /// single binding also uses the catalog returned under that binding's
-/// authentication. The function succeeds when at least one binding has a
-/// non-empty catalog.
+/// authentication. The function succeeds when at least one binding returns a
+/// valid catalog response, even when that catalog is empty; it fails only when
+/// every binding request fails or is malformed.
 pub async fn discover_source_models_and_protocol_bindings(
     source: &ProviderSource,
     protocol_bindings: &[SourceProtocolBinding],
@@ -178,6 +180,7 @@ async fn discover_protocol_bindings_with_client(
     let mut discovered_bindings = Vec::new();
     let mut detected_model_prices = BTreeMap::new();
     let mut conflicting_model_prices = HashSet::new();
+    let mut successful_responses = 0usize;
 
     for binding in bindings {
         let (authorization_name, authorization) = source.authorization_for_binding(binding);
@@ -247,6 +250,7 @@ async fn discover_protocol_bindings_with_client(
                     continue;
                 }
             };
+        successful_responses += 1;
 
         // An explicitly supplied model list is scoped to this protocol unless
         // the route is a source-wide catalog fallback. The normalized legacy
@@ -293,10 +297,6 @@ async fn discover_protocol_bindings_with_client(
                     .is_none_or(|allowed| allowed.contains(&model.to_ascii_lowercase()))
             })
             .collect::<Vec<_>>();
-        if models.is_empty() {
-            continue;
-        }
-
         for (model, price) in &models {
             let model_key = model.to_ascii_lowercase();
             if discovered_model_keys.insert(model_key.clone()) {
@@ -326,9 +326,9 @@ async fn discover_protocol_bindings_with_client(
         });
     }
 
-    if discovered_bindings.is_empty() {
+    if successful_responses == 0 {
         return Err(last_error.unwrap_or(Error::InvalidUpstreamResponse(
-            "source did not expose any confirmed models",
+            "source did not return a valid model catalog",
         )));
     }
     Ok(SourceDiscovery {
@@ -386,6 +386,9 @@ fn parse_upstream_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WireApi;
+    use axum::{routing::get, Json, Router};
+    use tokio::net::TcpListener;
 
     #[test]
     fn native_gemini_catalog_requires_generate_content_capability() {
@@ -399,5 +402,34 @@ mod tests {
         .unwrap();
         assert_eq!(models[0].0, "gemini-usable");
         assert_eq!(models.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn valid_empty_catalog_is_successful() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"data": []})) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let source = ProviderSource {
+            id: "source-empty".into(),
+            name: "Empty source".into(),
+            base_url: format!("http://{address}/v1"),
+            api_key: "secret".into(),
+            wire_api: WireApi::Responses,
+            models: Vec::new(),
+        };
+
+        let discovery = discover_source_models_and_protocol_bindings(&source, &[])
+            .await
+            .unwrap();
+        assert!(discovery.models.is_empty());
+        assert_eq!(discovery.protocol_bindings.len(), 1);
+        assert!(discovery.protocol_bindings[0].model_ids.is_empty());
+        server.abort();
     }
 }

@@ -3,14 +3,32 @@ name = "zenith-relay-core"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
+rust-version = "1.97"
+
+[lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_imports = "deny"
+unused_must_use = "deny"
+unused_variables = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+pedantic = { level = "allow", priority = -1 }
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
-base64 = "0.23.0"
+base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crypto_box = { version = "0.9.1", features = ["seal"] }
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
-futures-util = "0.3.33"
+futures-util = "0.3.34"
 httpdate = "1.0.3"
 hex = "0.4.3"
 multer = "3.1.0"
@@ -18,11 +36,11 @@ reqwest = { version = "0.13.4", default-features = false, features = ["http2", "
 reqwest-websocket = "0.6.0"
 ring = "0.17.14"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 sha2 = "0.11.0"
 subtle = "2.6.1"
-tokio = { version = "1.53.0", features = ["macros", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "time"] }
 url = "2.5.8"
 
 [dev-dependencies]
-tokio = { version = "1.53.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

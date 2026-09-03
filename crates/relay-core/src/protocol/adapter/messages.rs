@@ -1,7 +1,7 @@
 use super::contracts::{
-    custom_tool_item_id, AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest,
-    MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
-    TranslatedTools,
+    custom_tool_item_id, request_tool_catalog, AdapterError, AdapterResult, ClientToolTarget,
+    MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode,
+    ResponsesToolKind, TranslatedTools,
 };
 use crate::CacheWriteTtl;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -327,46 +327,6 @@ pub(super) fn set_message_output_id(output: &mut [Value], response_id: &str) {
             message_index = message_index.saturating_add(1);
         }
     }
-}
-
-/// Collects the complete client-side tool catalog for one Responses request.
-///
-/// Codex can place newly loaded client tools in `input.additional_tools`.
-/// Anthropic has no matching deferred-tool wire item, so the bridge loads these
-/// functions into the current Messages request together with root `tools`.
-/// Hosted-only tools are filtered later by [`translate_tools`], never injected
-/// into the Anthropic contract.
-fn request_tool_catalog(object: &Map<String, Value>) -> AdapterResult<Option<Vec<Value>>> {
-    let mut declared = false;
-    let mut tools = Vec::new();
-    if let Some(root) = object.get("tools") {
-        declared = true;
-        tools.extend(
-            root.as_array()
-                .ok_or_else(AdapterError::invalid_request)?
-                .iter()
-                .cloned(),
-        );
-    }
-    if let Some(input) = object.get("input").and_then(Value::as_array) {
-        for item in input {
-            let Some(item) = item.as_object() else {
-                continue;
-            };
-            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
-                continue;
-            }
-            declared = true;
-            tools.extend(
-                item.get("tools")
-                    .and_then(Value::as_array)
-                    .ok_or_else(AdapterError::invalid_request)?
-                    .iter()
-                    .cloned(),
-            );
-        }
-    }
-    Ok(declared.then_some(tools))
 }
 
 fn append_system_value(state: &mut MessagesBridgeState, value: &Value) -> AdapterResult<()> {

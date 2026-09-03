@@ -6,7 +6,8 @@ use super::errors::{
 use super::execution::execute_client_request;
 use super::now_ms;
 use super::request::{
-    client_context_fingerprint, forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
+    apply_codex_routing_hint, client_context_fingerprint, forwarded_codex_headers,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event};
 use super::streaming::{has_output_delta, parse_sse_event};
@@ -268,6 +269,11 @@ async fn serve_http_fallback_request(
             request
         })?;
     let response = execute_client_request(runtime, http_request, WireApi::Responses).await;
+    // The HTTP executor already knows whether the selected route belongs to an
+    // account or an API provider. Preserve that attribution across the
+    // WebSocket bridge instead of turning every fallback response into a Relay
+    // error merely because the bridge is the component reading it.
+    let response_origin = fallback_response_origin(&response);
     if !response.status().is_success() {
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), MAX_WEBSOCKET_ERROR_BYTES)
@@ -276,14 +282,16 @@ async fn serve_http_fallback_request(
         return Err(GatewayFailure::upstream_status(
             status,
             body.as_deref(),
-            ErrorOrigin::Relay,
+            response_origin,
         ));
     }
+
+    let stream_origin = response_origin;
 
     let mut body = response.into_body().into_data_stream();
     let mut pending = Vec::new();
     while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|_| GatewayFailure::transport(ErrorOrigin::Relay))?;
+        let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
         if pending.len().saturating_add(chunk.len()) > MAX_WEBSOCKET_ERROR_BYTES {
             return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
         }
@@ -292,11 +300,11 @@ async fn serve_http_fallback_request(
             let event = pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
-                return Err(GatewayFailure::transport(ErrorOrigin::Relay));
+                return Err(GatewayFailure::transport(stream_origin));
             }
             if let Some(payload) = terminal.payload {
                 let payload = serde_json::to_string(&payload)
-                    .map_err(|_| GatewayFailure::transport(ErrorOrigin::Relay))?;
+                    .map_err(|_| GatewayFailure::transport(stream_origin))?;
                 if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
                     return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
                 }
@@ -310,7 +318,20 @@ async fn serve_http_fallback_request(
             }
         }
     }
-    Err(GatewayFailure::closed(ErrorOrigin::Relay))
+    Err(GatewayFailure::closed(stream_origin))
+}
+
+const RELAY_ERROR_ORIGIN_HEADER: &str = "x-zenith-relay-error-origin";
+const RELAY_UPSTREAM_ORIGIN_HEADER: &str = "x-zenith-relay-upstream-origin";
+
+fn fallback_response_origin(response: &Response<Body>) -> ErrorOrigin {
+    response
+        .headers()
+        .get(RELAY_ERROR_ORIGIN_HEADER)
+        .or_else(|| response.headers().get(RELAY_UPSTREAM_ORIGIN_HEADER))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(ErrorOrigin::Relay)
 }
 
 fn websocket_transport_fallback_status(status: StatusCode) -> bool {
@@ -437,6 +458,7 @@ async fn connect_upstream(
                 request.responses_lite_for(&route),
                 &request.request_id,
             );
+            apply_codex_routing_hint(&mut headers, &route.source_model, route.service_tier);
             if let Some(account_id) = route.account_id.as_deref() {
                 guard_account_request(runtime, &key.id, &mut headers, account_id, now_ms());
             } else {
@@ -562,6 +584,9 @@ async fn connect_upstream(
                 failure.category,
                 request.has_previous_response_id(),
             ) {
+                if response_affinity_hit {
+                    runtime.invalidate_response_affinity(request.response_affinity_key.as_deref());
+                }
                 record_connect_failure_with_hint(
                     runtime,
                     key,
@@ -718,6 +743,11 @@ async fn connect_upstream(
                             Some(&terminal.headers),
                             terminal.body_hint,
                         );
+                        if response_affinity_hit {
+                            runtime.invalidate_response_affinity(
+                                request.response_affinity_key.as_deref(),
+                            );
+                        }
                     }
                     last_failure = Some(failure);
                     if affinity_miss
@@ -812,7 +842,7 @@ async fn first_application_message(
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout(ErrorOrigin::Relay)),
+            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout(origin)),
             _ = heartbeat.tick() => {
                 upstream
                     .send(UpstreamMessage::Ping(Default::default()))
@@ -1135,7 +1165,7 @@ async fn bridge(
                 finish_incomplete(&runtime, &mut state, "stream_semantic_timeout");
                 send_gateway_error(
                     &mut downstream,
-                    &GatewayFailure::semantic_timeout(ErrorOrigin::Relay),
+                    &GatewayFailure::semantic_timeout(state.upstream_origin),
                     request_id.as_deref(),
                 ).await;
                 break;
@@ -1147,7 +1177,7 @@ async fn bridge(
                 if active_request {
                     send_gateway_error(
                         &mut downstream,
-                        &GatewayFailure::idle_timeout(ErrorOrigin::Relay),
+                        &GatewayFailure::idle_timeout(state.upstream_origin),
                         request_id.as_deref(),
                     ).await;
                 } else {
@@ -1674,19 +1704,20 @@ fn finish_terminal(
     let Some(mut in_flight) = state.in_flight.take() else {
         return true;
     };
-    let delivered = matches!(
-        outcome,
-        EventTerminalOutcome::Success | EventTerminalOutcome::Incomplete
-    );
-    let success = matches!(outcome, EventTerminalOutcome::Success);
+    // `response.incomplete` is a terminal event for this request, so the
+    // client WebSocket may carry its next independent request. It is not a
+    // successful response: do not retain response/session affinity or reset
+    // slot health from a partially completed stream.
+    let terminal_success = matches!(outcome, EventTerminalOutcome::Success);
+    let keep_client_socket = !matches!(outcome, EventTerminalOutcome::Failure);
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     in_flight.event.generation_ms = in_flight
         .event
         .ttft_ms
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
-    in_flight.event.success = success;
-    if success {
+    in_flight.event.success = terminal_success;
+    if terminal_success {
         in_flight.event.tool_use.finish();
     }
     if matches!(outcome, EventTerminalOutcome::Incomplete) {
@@ -1708,8 +1739,16 @@ fn finish_terminal(
         &terminal.headers,
         now_ms(),
     );
-    if delivered {
+    // A continuation may legitimately reference an incomplete response (for
+    // example after max_output_tokens). Keep that id only for this live
+    // WebSocket; durable response/prompt affinity still requires success.
+    if matches!(
+        outcome,
+        EventTerminalOutcome::Success | EventTerminalOutcome::Incomplete
+    ) {
         state.last_response_id = in_flight.response_id.clone();
+    }
+    if terminal_success {
         let recovered = runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
@@ -1731,7 +1770,7 @@ fn finish_terminal(
             now_ms(),
         );
         in_flight.event.consecutive_failures = recovered.then_some(0);
-    } else {
+    } else if matches!(outcome, EventTerminalOutcome::Failure) {
         let category = terminal.error_category.unwrap_or_else(|| {
             super::errors::classify_upstream_error(terminal_failure_status(terminal.status), None)
                 .category
@@ -1764,7 +1803,7 @@ fn finish_terminal(
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();
-    delivered
+    keep_client_socket
 }
 
 fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category: &str) {
@@ -1783,10 +1822,10 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
         .ttft_ms
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
-    // A direct API source can serve independent requests concurrently. A
-    // failed WebSocket stream must not cool the whole source and make an
-    // unrelated response-affinity continuation fail with 409.
-    if incomplete_requires_cooldown(category) && in_flight.route.account_id.is_some() {
+    // Cool only this physical slot and model. A stream failure on one
+    // credential must not make unrelated routes unavailable, regardless of
+    // whether the selected route is an OAuth account or a direct API source.
+    if incomplete_requires_cooldown(category) {
         let cooldown_context = CooldownContext {
             scope: &in_flight.route.scope,
             allowed_protocols: &in_flight.route.allowed_protocols,
@@ -1809,14 +1848,16 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
 mod tests {
     use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
     use super::{
-        event_terminal, incomplete_requires_cooldown, terminal_failure_status, ClientRequest,
-        EventTerminalOutcome, GatewayFailure, WEBSOCKET_PROTOCOLS,
+        event_terminal, fallback_response_origin, incomplete_requires_cooldown,
+        terminal_failure_status, ClientRequest, EventTerminalOutcome, GatewayFailure,
+        RELAY_ERROR_ORIGIN_HEADER, RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS,
     };
     use crate::{
         ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
         RuntimeLocalKey, RuntimeSource, WireApi,
     };
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::body::Body;
+    use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -1856,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn response_incomplete_is_delivered_without_failure_outcome() {
+    fn response_incomplete_is_terminal_but_not_slot_success() {
         let terminal = event_terminal(&json!({
             "type": "response.incomplete",
             "response": {
@@ -1957,6 +1998,40 @@ mod tests {
             event["error"]["zenith_relay"]["request_id"],
             "relay-request-3"
         );
+    }
+
+    #[test]
+    fn http_fallback_preserves_provider_and_account_error_origins() {
+        let provider = Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header(RELAY_ERROR_ORIGIN_HEADER, "provider")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(fallback_response_origin(&provider), ErrorOrigin::Provider);
+
+        let account = Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(RELAY_ERROR_ORIGIN_HEADER, "account")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(fallback_response_origin(&account), ErrorOrigin::Account);
+    }
+
+    #[test]
+    fn http_fallback_rejects_unknown_or_untrusted_error_origins() {
+        let unknown = Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header(RELAY_ERROR_ORIGIN_HEADER, "external")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(fallback_response_origin(&unknown), ErrorOrigin::Relay);
+
+        let upstream = Response::builder()
+            .status(StatusCode::OK)
+            .header(RELAY_UPSTREAM_ORIGIN_HEADER, "provider")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(fallback_response_origin(&upstream), ErrorOrigin::Provider);
     }
 
     #[test]

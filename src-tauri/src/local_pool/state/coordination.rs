@@ -1,4 +1,4 @@
-use super::{invalid_core_state, now_ms, DesktopState};
+use super::{now_ms, DesktopState};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::AutomationRecords,
@@ -18,7 +18,7 @@ impl DesktopState {
         let changed = self
             .quota_refresh_queue()?
             .mark_dirty(account_id, due_at_ms)
-            .map_err(invalid_core_state)?;
+            .map_err(LocalPoolError::invalid_state)?;
         if changed {
             self.quota_refresh_notify.notify_one();
         }
@@ -239,5 +239,5 @@ impl DesktopState {
 }
 
 pub(super) fn wake_coordinator(automations: &AutomationRecords) -> Result<WakeCoordinator> {
-    WakeCoordinator::from_state(automations.state.clone()).map_err(invalid_core_state)
+    WakeCoordinator::from_state(automations.state.clone()).map_err(LocalPoolError::invalid_state)
 }

@@ -5,9 +5,98 @@ use crate::accounts::{
 };
 use crate::catalog::source_reasoning_capabilities;
 use crate::{CandidateHealth, CandidateQuota, ToolUseDiagnostics, QUOTA_STALE_AFTER_MS};
+use axum::extract::State;
+use axum::routing::get;
+use axum::{Json, Router};
 use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+
+#[derive(Clone)]
+struct MetadataServerState {
+    response: serde_json::Value,
+    request_count: Arc<AtomicUsize>,
+    release: Option<Arc<AtomicBool>>,
+}
+
+struct MetadataTestServer {
+    url: String,
+    request_count: Arc<AtomicUsize>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for MetadataTestServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn metadata_models(State(state): State<MetadataServerState>) -> Json<serde_json::Value> {
+    state.request_count.fetch_add(1, AtomicOrdering::AcqRel);
+    if let Some(release) = state.release {
+        while !release.load(AtomicOrdering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    }
+    Json(state.response)
+}
+
+async fn spawn_metadata_server(
+    response: serde_json::Value,
+    release: Option<Arc<AtomicBool>>,
+) -> MetadataTestServer {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let state = MetadataServerState {
+        response,
+        request_count: request_count.clone(),
+        release: release.clone(),
+    };
+    let app = Router::new()
+        .route("/v1/models", get(metadata_models))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    MetadataTestServer {
+        url: format!("http://{address}"),
+        request_count,
+        task,
+    }
+}
+
+fn runtime_for_metadata_server(server: &MetadataTestServer) -> GatewayRuntime {
+    let mut provider = source("source-1", "upstream-secret", &["provider/fable"]);
+    provider.base_url = format!("{}/v1", server.url);
+    GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(provider)],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap()
+}
+
+fn runtime_for_metadata_sources(server: &MetadataTestServer) -> GatewayRuntime {
+    let mut first = source("source-1", "upstream-secret", &["provider/fable"]);
+    first.base_url = format!("{}/v1", server.url);
+    let mut second = source("source-2", "upstream-secret", &["provider/ember"]);
+    second.base_url = format!("{}/v1", server.url);
+    GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(first),
+            RuntimeSource::unrestricted(second),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap()
+}
 
 struct NeverRefresh;
 
@@ -295,6 +384,56 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
     assert!(runtime
         .take_passive_quota_snapshot("account-1", 3_001)
         .is_none());
+}
+
+#[test]
+fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    runtime.apply_usage_event(
+        &UsageEvent {
+            request_id: "request".into(),
+            attempt: 1,
+            local_key_id: "key-1".into(),
+            source_id: "openai-codex".into(),
+            candidate_id: Some("account-1".into()),
+            account_id: Some("account-1".into()),
+            client_context_id: None,
+            routing: None,
+            requested_model: Some("gpt-test".into()),
+            resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: false,
+            http_status: reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            error_category: Some("upstream_quota_exhausted".into()),
+            tool_use: ToolUseDiagnostics::default(),
+            cooldown_scope: Some("*".into()),
+            retry_at_ms: Some(2_000),
+            consecutive_failures: Some(1),
+            latency_ms: 1,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            cache_write_ttl: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            quota_snapshot: None,
+        },
+        1_000,
+    );
+
+    let snapshot = runtime
+        .candidate_runtime_order()
+        .into_iter()
+        .find(|candidate| candidate.candidate_id == "account-1")
+        .unwrap();
+    assert!(snapshot.available);
 }
 
 #[derive(Default)]
@@ -1094,11 +1233,11 @@ async fn generic_source_reasoning_metadata_survives_a_codex_catalog_cache_update
 }
 
 #[test]
-fn fast_service_tier_requires_explicit_upstream_catalog_evidence() {
+fn fast_service_tier_is_applied_only_to_openai_models() {
     let runtime = GatewayRuntime::from_pool(
         vec![
-            RuntimeSource::unrestricted(source("source-1", "upstream-secret", &["provider/model"])),
-            RuntimeSource::unrestricted(source("source-2", "other-secret", &["provider/model"])),
+            RuntimeSource::unrestricted(source("source-1", "upstream-secret", &["provider/gpt-5"])),
+            RuntimeSource::unrestricted(source("source-2", "other-secret", &["provider/claude-5"])),
         ],
         vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
         GatewayRuntimeOptions::default(),
@@ -1106,35 +1245,35 @@ fn fast_service_tier_requires_explicit_upstream_catalog_evidence() {
     )
     .unwrap();
 
-    assert!(!runtime.model_supports_fast_service_tier("provider/model"));
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/model",
-                "additional_speed_tiers": ["priority"]
-            }]
-        }),
-        current_time_ms(),
-    );
-    assert!(runtime.model_supports_fast_service_tier("provider/model"));
-    assert!(runtime.candidate_supports_fast_service_tier("source-1", "provider/model"));
-    assert!(!runtime.candidate_supports_fast_service_tier("source-2", "provider/model"));
     runtime
         .set_model_service_tier_overrides(BTreeMap::from([(
-            "provider/model".to_string(),
+            "provider/gpt-5".to_string(),
             DefaultServiceTier::Fast,
         )]))
         .unwrap();
     assert_eq!(
-        runtime.model_service_tier_for_candidate("source-1", "provider/model"),
+        runtime.model_service_tier("provider/gpt-5"),
         DefaultServiceTier::Fast
     );
+    runtime.set_default_service_tier(DefaultServiceTier::Fast);
     assert_eq!(
-        runtime.model_service_tier_for_candidate("source-2", "provider/model"),
+        runtime.model_service_tier("provider/claude-5"),
         DefaultServiceTier::Standard
     );
-    assert!(!runtime.model_supports_fast_service_tier("provider/other"));
+}
+
+#[test]
+fn service_tier_normalization_discards_legacy_non_openai_overrides() {
+    let normalized = normalize_model_service_tier_overrides(BTreeMap::from([
+        ("provider/gpt-5".to_string(), DefaultServiceTier::Fast),
+        ("provider/claude-5".to_string(), DefaultServiceTier::Fast),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        normalized,
+        BTreeMap::from([("provider/gpt-5".to_string(), DefaultServiceTier::Fast)])
+    );
 }
 
 #[tokio::test]
@@ -1177,6 +1316,127 @@ async fn fresh_source_metadata_does_not_wait_for_another_refresh() {
     assert!(metadata
         .reasoning_catalog_templates
         .contains_key("provider/fable"));
+}
+
+#[tokio::test]
+async fn explicit_source_metadata_refresh_bypasses_active_prefetch_throttle() {
+    let server = spawn_metadata_server(
+        serde_json::json!({
+            "data": [{
+                "id": "provider/fable",
+                "reasoningEffortModes": ["low", "high"]
+            }]
+        }),
+        None,
+    )
+    .await;
+    let runtime = Arc::new(runtime_for_metadata_server(&server));
+    let now_ms = current_time_ms();
+    runtime
+        .model_metadata
+        .prefetch_not_before_ms
+        .store(now_ms.saturating_add(60_000), AtomicOrdering::Release);
+
+    runtime.refresh_source_model_metadata().await;
+
+    assert_eq!(
+        server.request_count.load(AtomicOrdering::Acquire),
+        1,
+        "an explicit refresh must ignore the background prefetch throttle"
+    );
+    assert_eq!(
+        runtime.declared_source_reasoning_levels("provider/fable"),
+        vec!["low".to_string(), "high".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn explicit_source_metadata_refresh_only_discovers_the_selected_source() {
+    let server = spawn_metadata_server(
+        serde_json::json!({
+            "data": [
+                { "id": "provider/fable", "reasoningEffortModes": ["low"] },
+                { "id": "provider/ember", "reasoningEffortModes": ["high"] }
+            ]
+        }),
+        None,
+    )
+    .await;
+    let runtime = Arc::new(runtime_for_metadata_sources(&server));
+
+    runtime
+        .refresh_source_model_metadata_for_source("source-1")
+        .await;
+
+    assert_eq!(server.request_count.load(AtomicOrdering::Acquire), 1);
+    assert_eq!(
+        runtime.declared_source_reasoning_levels("provider/fable"),
+        vec!["low".to_string()]
+    );
+    assert!(runtime
+        .declared_source_reasoning_levels("provider/ember")
+        .is_empty());
+
+    runtime
+        .refresh_source_model_metadata_for_source("source-2")
+        .await;
+
+    assert_eq!(server.request_count.load(AtomicOrdering::Acquire), 2);
+    assert_eq!(
+        runtime.declared_source_reasoning_levels("provider/ember"),
+        vec!["high".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn simultaneous_explicit_source_refreshes_share_one_upstream_request() {
+    let release = Arc::new(AtomicBool::new(false));
+    let server = spawn_metadata_server(
+        serde_json::json!({
+            "data": [{
+                "id": "provider/fable",
+                "reasoningEffortModes": ["medium"]
+            }]
+        }),
+        Some(release.clone()),
+    )
+    .await;
+    let runtime = Arc::new(runtime_for_metadata_server(&server));
+
+    let first_runtime = runtime.clone();
+    let first = tokio::spawn(async move {
+        first_runtime.refresh_source_model_metadata().await;
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while server.request_count.load(AtomicOrdering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first refresh reaches the upstream server");
+
+    let second_runtime = runtime.clone();
+    let second = tokio::spawn(async move {
+        second_runtime.refresh_source_model_metadata().await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        server.request_count.load(AtomicOrdering::Acquire),
+        1,
+        "a refresh waiting for the lock must not start a duplicate request"
+    );
+
+    release.store(true, AtomicOrdering::Release);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        first.await.unwrap();
+        second.await.unwrap();
+    })
+    .await
+    .expect("both refresh callers complete");
+    assert_eq!(
+        runtime.declared_source_reasoning_levels("provider/fable"),
+        vec!["medium".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -1989,9 +2249,39 @@ fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
         .iter()
         .collect::<Vec<_>>(),
     );
+    // Automatic selection uses the immutable LiteLLM snapshot when one is
+    // available.  Keep the fixture explicit so this test does not depend on
+    // the shared LiteLLM fixture catalog.
+    let catalog = crate::pricing::PricingCatalog::from_litellm_json(
+        r#"{
+            "gpt-5.6-terra": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": "0.000002",
+                "output_cost_per_token": "0.000012"
+            },
+            "gpt-5.6-sol": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": "0.000004",
+                "output_cost_per_token": "0.000020"
+            },
+            "gpt-5.4-mini": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": "0.000001",
+                "output_cost_per_token": "0.000006"
+            }
+        }"#,
+    )
+    .unwrap();
     assert_eq!(
-        cheapest_image_main_model(&models).as_deref(),
+        super::images::cheapest_image_main_model_with_catalog(&models, Some(&catalog)).as_deref(),
         Some("gpt-5.4-mini")
+    );
+    // An empty/offline snapshot must still allow a deterministic runtime
+    // build; its choice is a stable fallback, not an implicit price claim.
+    let empty = crate::pricing::PricingCatalog::empty();
+    assert_eq!(
+        super::images::cheapest_image_main_model_with_catalog(&models, Some(&empty)).as_deref(),
+        Some("gpt-5.6-sol")
     );
     let terra = normalized_set(["gpt-5.6-terra".to_string()].iter());
     assert_eq!(

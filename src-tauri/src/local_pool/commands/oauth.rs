@@ -2,7 +2,8 @@ use super::sync_accounts_or_rollback;
 use crate::local_pool::{
     accounts::{
         credentials::{
-            CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
+            credential_local_error as credential_error, CredentialError, CredentialStore,
+            StoredCodexCredentials,
         },
         import_session::SecretBackend,
         oauth::{
@@ -33,7 +34,6 @@ use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
     providers::chatgpt::{
         AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
-        ModelDiscoveryFailureCode,
     },
     quota::{QuotaRefreshFailure, SubscriptionStatus},
     ProxyConfig,
@@ -260,16 +260,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             )
             .await
         {
-            Ok(models) if !models.is_empty() => (models, None),
-            Ok(_) => (
-                previous_models,
-                Some(InitialModelIssue {
-                    code: "models_empty",
-                    retryable: false,
-                    auth_error: false,
-                    blocked: false,
-                }),
-            ),
+            Ok(models) => (models, None),
             Err(error) => (previous_models, Some(initial_model_issue(&error))),
         },
         Err(error) => (previous_models, Some(initial_model_issue(&error))),
@@ -282,6 +273,12 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
+    let model_discovery_succeeded = model_issue.is_none();
+    if model_discovery_succeeded {
+        // Preserve an explicit empty discovery result. It is different from
+        // a failed probe and must suppress an older configured catalog.
+        record.discovered_models = Some(record.models.clone());
+    }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
         record.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -872,12 +869,15 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.purchase_cost_micro_usd = current.purchase_cost_micro_usd;
     next.remote_location = current.remote_location.clone();
     let fresh_models = std::mem::take(&mut next.models);
+    let fresh_discovered_models = next.discovered_models.take();
     next.models = current.models.clone();
-    next.discovered_models = if fresh_models.is_empty() {
-        current.discovered_models.clone()
-    } else {
-        Some(fresh_models)
-    };
+    next.discovered_models = fresh_discovered_models.or_else(|| {
+        if fresh_models.is_empty() {
+            current.discovered_models.clone()
+        } else {
+            Some(fresh_models)
+        }
+    });
     if next.account.subscription.plan_type.is_none() {
         next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
     }
@@ -978,43 +978,15 @@ fn flow_error(error: OAuthFlowError) -> LocalPoolError {
 }
 
 fn oauth_error(error: OAuthError) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
-}
-
-fn credential_error(error: CredentialError) -> LocalPoolError {
-    let code = match error.code {
-        CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
-        CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
-        _ => ErrorCode::InvalidState,
-    };
-    LocalPoolError::new(code, error.to_string())
+    LocalPoolError::invalid_state(error)
 }
 
 fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModelIssue {
-    let (code, auth_error, blocked) = match error.code {
-        ModelDiscoveryFailureCode::AgentTaskInvalid => ("models_agent_task_invalid", false, false),
-        ModelDiscoveryFailureCode::Forbidden => ("models_forbidden", false, true),
-        ModelDiscoveryFailureCode::HttpStatus => ("models_http_status", false, false),
-        ModelDiscoveryFailureCode::InvalidAccessToken => {
-            ("models_invalid_access_token", true, false)
-        }
-        ModelDiscoveryFailureCode::InvalidAccountId => ("models_invalid_account_id", true, false),
-        ModelDiscoveryFailureCode::InvalidClientVersion => {
-            ("models_invalid_client_version", false, false)
-        }
-        ModelDiscoveryFailureCode::InvalidEndpoint => ("models_invalid_endpoint", false, false),
-        ModelDiscoveryFailureCode::InvalidResponse => ("models_invalid_response", false, false),
-        ModelDiscoveryFailureCode::RateLimited => ("models_rate_limited", false, false),
-        ModelDiscoveryFailureCode::ResponseTooLarge => ("models_response_too_large", false, false),
-        ModelDiscoveryFailureCode::Transport => ("models_transport", false, false),
-        ModelDiscoveryFailureCode::Unauthorized => ("models_unauthorized", true, false),
-        ModelDiscoveryFailureCode::Upstream => ("models_upstream", false, false),
-    };
     InitialModelIssue {
-        code,
+        code: error.code.management_code(),
         retryable: error.retryable,
-        auth_error,
-        blocked,
+        auth_error: error.code.is_authentication_failure(),
+        blocked: error.code.blocks_account(),
     }
 }
 
@@ -1040,6 +1012,7 @@ fn apply_initial_model_issue(record: &mut LocalAccountRecord, issue: InitialMode
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zenith_relay_core::providers::chatgpt::ModelDiscoveryFailureCode;
 
     // Synthetic PKCS#8 bytes used only to exercise Agent Identity formatting.
     // This is not a credential and is never registered with a provider.
@@ -1261,6 +1234,20 @@ mod tests {
         assert_eq!(next.models, vec!["gpt-test"]);
         assert_eq!(next.discovered_models, Some(vec!["new-model".into()]));
         assert_eq!(next.effective_models(), ["new-model"]);
+    }
+
+    #[test]
+    fn duplicate_identity_preserves_a_successful_empty_model_snapshot() {
+        let current = account("account_empty_models", "provider-account", "old-refresh");
+        let mut next = account("account_empty_models", "provider-account", "new-refresh");
+        next.models.clear();
+        next.discovered_models = Some(Vec::new());
+
+        preserve_existing_settings(&mut next, &current);
+
+        assert_eq!(next.models, current.models);
+        assert_eq!(next.discovered_models, Some(Vec::new()));
+        assert!(next.effective_models().is_empty());
     }
 
     #[test]

@@ -16,14 +16,17 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-Dwarnings"
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
-          toolchain: 1.97.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-audit
@@ -47,6 +50,12 @@ jobs:
         working-directory: src
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Agent guardrails
+        shell: pwsh
+        run: ./scripts/check-agent-guardrails.ps1
+      - name: No new duplicate code
+        shell: pwsh
+        run: ./scripts/check-duplicate-code.ps1
       - run: cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked
@@ -73,6 +82,8 @@ jobs:
     permissions:
       contents: write
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: "-Dwarnings"
     strategy:
       fail-fast: false
       matrix:
@@ -95,9 +106,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: bun install --frozen-lockfile
         working-directory: src
@@ -140,10 +149,10 @@ jobs:
           $notes = ""
           if ($env:GITHUB_REF -like "refs/tags/*") {
             $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
-            $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
+            $changelog = Get-Content -Raw -LiteralPath "docs/releases/CHANGELOG.md"
             $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
             if (-not $releaseSection.Success) {
-              throw "CHANGELOG.md must contain a user-facing section for release $version"
+              throw "docs/releases/CHANGELOG.md must contain a user-facing section for release $version"
             }
             $notes = $releaseSection.Value.Trim()
           }

@@ -1,12 +1,14 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CircleAlert, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, Server, SkipForward, Upload, UserRoundCheck, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { setI18nLanguage } from "../../../i18n";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
 import { sourceSupportsNativeResponses } from "../sourceProtocolBindings";
 import { Button, IconButton, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
+import { secondsUntil, useRelativeTimeClock } from "../hooks/useRelativeTimeClock";
 import { useRelayState } from "../state/RelayStateProvider";
 
 const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ImportDialog")).ImportDialog }));
@@ -35,10 +37,12 @@ export function QuickSetupWizard() {
   const [importSession, setImportSession] = useState<ImportSession | null>(null);
   const [currentProfileAvailable, setCurrentProfileAvailable] = useState(false);
   const [currentProfileImport, setCurrentProfileImport] = useState<CurrentProfileImportState>({ kind: "idle" });
-  const [currentProfileCountdown, setCurrentProfileCountdown] = useState(CURRENT_PROFILE_CONTINUE_SECONDS);
+  const [currentProfileContinueAtMs, setCurrentProfileContinueAtMs] = useState(0);
   const [oauthPending, setOauthPending] = useState(false);
   const currentProfileImportRun = useRef(0);
   const currentProfileImportSession = useRef<string | null>(null);
+  const currentProfileClockMs = useRelativeTimeClock([currentProfileImport.kind === "complete" ? currentProfileContinueAtMs : null]);
+  const currentProfileCountdown = secondsUntil(currentProfileContinueAtMs, Math.max(currentProfileClockMs, Date.now()));
 
   useEffect(() => {
     if (step !== 2) return;
@@ -67,7 +71,7 @@ export function QuickSetupWizard() {
     currentProfileImportSession.current = null;
     if (sessionId) void relayCommands.cancelImport(sessionId).catch(() => undefined);
     setCurrentProfileImport({ kind: "idle" });
-    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileContinueAtMs(0);
   }, [mode, step]);
 
   useEffect(() => () => {
@@ -81,12 +85,7 @@ export function QuickSetupWizard() {
     if (currentProfileImport.kind !== "complete" || step !== 2 || mode !== "local") return;
     if (currentProfileCountdown <= 0) {
       setStep(3);
-      return;
     }
-    const timeout = window.setTimeout(() => {
-      setCurrentProfileCountdown((seconds) => seconds - 1);
-    }, 1_000);
-    return () => window.clearTimeout(timeout);
   }, [currentProfileCountdown, currentProfileImport.kind, mode, step]);
 
   const selectMode = (value: RelayMode) => {
@@ -114,7 +113,7 @@ export function QuickSetupWizard() {
       return;
     }
     setConnectionReady(true);
-    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileContinueAtMs(Date.now() + CURRENT_PROFILE_CONTINUE_SECONDS * 1_000);
     setCurrentProfileImport({ kind: "complete", importedCount });
   };
 
@@ -129,7 +128,7 @@ export function QuickSetupWizard() {
       current: ImportSession | null;
       confirmation: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null;
     } = { current: null, confirmation: null };
-    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileContinueAtMs(0);
     setCurrentProfileImport({ kind: "importing" });
     const ok = await perform("onboarding-current-profile", async () => {
       result.current = await relayCommands.previewCurrentCodexImport();
@@ -174,7 +173,7 @@ export function QuickSetupWizard() {
     currentProfileImportRun.current += 1;
     void cancelCurrentProfileImport();
     setConnectionReady(false);
-    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileContinueAtMs(0);
     setCurrentProfileImport({ kind: "idle" });
   };
 
@@ -249,7 +248,7 @@ export function QuickSetupWizard() {
       {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p></div> : null}
     </section>
     <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 4 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>
-    {showImport ? <Suspense fallback={null}><ImportDialog initialSession={importSession ?? undefined} modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={closeImport} /></Suspense> : null}
+    {showImport ? <Suspense fallback={null}><ImportDialog {...(importSession ? { initialSession: importSession } : {})} modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={closeImport} /></Suspense> : null}
   </main>;
 }
 
@@ -321,7 +320,7 @@ function LanguageSelect() {
     icon={<Languages aria-hidden />}
     label={t("settings.language")}
     value={i18n.language.startsWith("ru") ? "ru" : "en"}
-    onChange={(value) => void i18n.changeLanguage(value)}
+    onChange={(value) => void setI18nLanguage(value)}
     options={[{ value: "ru", label: "Русский", shortLabel: "RU" }, { value: "en", label: "English", shortLabel: "EN" }]}
   />;
 }

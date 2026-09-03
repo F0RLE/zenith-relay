@@ -2,8 +2,8 @@ use super::{
     accounts::{
         quota_refresh::{
             next_quota_refresh_at, prepare_account_credentials, record_model_refresh_error,
-            record_quota_refresh_error, refresh_account_quota_once, AccountQuotaOutcome,
-            AccountQuotaRefreshResponse,
+            record_quota_refresh_error, refresh_account_models_once, refresh_account_quota_once,
+            AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
         reset_credits::consume_local_reset_credit_for_account,
         wake::{completion_from_execution, CodexWakeClient},
@@ -11,15 +11,18 @@ use super::{
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
-    accounts::AccountAuthState,
     automations::{
         verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
         WakeVerificationOutcome,
     },
+    pricing::pricing_refresh_delay,
     providers::chatgpt::CodexQuotaClient,
     unix_time_ms as current_time_ms,
 };
@@ -59,8 +62,72 @@ pub(crate) fn start(app: AppHandle) {
     let _account_model_worker = tauri::async_runtime::spawn(async move {
         account_model_loop(account_model_app).await;
     });
+    let pricing_app = app.clone();
+    let _pricing_worker = tauri::async_runtime::spawn(async move {
+        pricing_loop(pricing_app).await;
+    });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_loop(app).await;
+    });
+}
+
+async fn pricing_loop(app: AppHandle) {
+    let instance_id = app
+        .state::<DesktopState>()
+        .root
+        .to_string_lossy()
+        .into_owned();
+    loop {
+        let state = app.state::<DesktopState>();
+        let loader = state.pricing_loader();
+        let now_ms = current_time_ms();
+        let deadline = loader.next_refresh_deadline(now_ms);
+        let delay = pricing_refresh_delay(&instance_id, deadline, now_ms);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = loader.wait_for_schedule_change() => continue,
+        }
+
+        let state = app.state::<DesktopState>();
+        let loader = state.pricing_loader();
+        if loader.refresh_due(current_time_ms()) {
+            let _ = loader.refresh(false).await;
+            // Refresh failures update the catalog status too. Notify the UI
+            // for every attempt so snapshot consumers can recalculate derived
+            // pricing data without waiting for another background event.
+            let _ = app.emit("zenith-state-changed", ());
+        }
+    }
+}
+
+/// Start a one-shot model discovery for accounts that have just become local
+/// pool members.
+///
+/// A membership change needs immediate model discovery, otherwise the UI can
+/// show a fresh quota together with an empty model list until the user
+/// manually refreshes it. Keep this one-shot work off the command path and
+/// reuse the per-account lock shared by the regular quota/model workers.
+pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: Vec<String>) {
+    let account_ids = account_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if account_ids.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<DesktopState>();
+        for account_id in account_ids {
+            let result = refresh_account_models_once(&state, &account_id).await;
+            if let Err(error) = result {
+                let _ = record_model_refresh_error(&state, &account_id, &error);
+            }
+            // The model list and any persisted discovery error are both part
+            // of the runtime snapshot, so notify the frontend after each
+            // account rather than waiting for a bulk operation to finish.
+            let _ = app.emit("zenith-state-changed", ());
+        }
     });
 }
 
@@ -88,7 +155,7 @@ async fn quota_loop(app: AppHandle) {
         if !state.background_session_active() {
             continue;
         }
-        if run_due_quota_refreshes(&app, false).await.is_err() {
+        if run_due_quota_refreshes(&app, true).await.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
     }
@@ -160,7 +227,9 @@ async fn source_model_loop(app: AppHandle) {
                     break;
                 }
                 let _ = super::commands::connections::refresh_local_source_models(
-                    &state, &source_id, false,
+                    &state,
+                    &source_id,
+                    super::commands::connections::SourceRefreshMode::Background,
                 )
                 .await;
                 let _ = app.emit("zenith-state-changed", ());
@@ -389,12 +458,10 @@ fn terminal_quota_refresh_error(
     if matches!(error.code, ErrorCode::NotFound) {
         return Ok(true);
     }
-    Ok(state.store()?.account(account_id).is_none_or(|account| {
-        matches!(
-            account.account.auth_state,
-            AccountAuthState::RequiresReauth(_)
-        )
-    }))
+    Ok(state
+        .store()?
+        .account(account_id)
+        .is_none_or(|account| account.account.auth_state.requires_fresh_login()))
 }
 
 fn evaluate_updated_transitions(
@@ -808,6 +875,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            provider_family: Some("openai".into()),
             purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,

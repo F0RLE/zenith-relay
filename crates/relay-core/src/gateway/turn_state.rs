@@ -6,6 +6,7 @@ use reqwest::header::HeaderMap as UpstreamHeaderMap;
 pub(super) const CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 const SESSION_HEADERS: &[&str] = &[
+    "x-codex-session-id",
     "x-codex-parent-thread-id",
     "x-session-id",
     "session_id",
@@ -92,14 +93,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_id_uses_codex_thread_before_fallbacks() {
+    fn session_id_uses_native_codex_session_before_fallbacks() {
         let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-session-id",
+            HeaderValue::from_static("codex-session-9"),
+        );
         headers.insert("x-session-id", HeaderValue::from_static("session-42"));
         headers.insert(
             "x-codex-parent-thread-id",
             HeaderValue::from_static("thread-7"),
         );
-        assert_eq!(client_session_id(&headers).as_deref(), Some("thread-7"));
+        assert_eq!(
+            client_session_id(&headers).as_deref(),
+            Some("codex-session-9")
+        );
     }
 
     #[test]

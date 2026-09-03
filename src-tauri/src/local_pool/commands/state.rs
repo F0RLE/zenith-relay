@@ -3,24 +3,24 @@ use crate::local_pool::{
         credentials::StoredCodexCredentials,
         proxy::{common_proxy_available, effective_proxy_config, proxy_status},
     },
-    error::CommandError,
+    error::{CommandError, ErrorCode, LocalPoolError},
     models::{GatewaySettings, LocalAccountRecord, LocalPoolSnapshot, ProviderSourceRecord},
     state::DesktopState,
 };
 use crate::platform;
 use std::collections::BTreeMap;
 use std::time::Instant;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use zenith_relay_core::protocol::{
-    account_operational_state, apply_model_display_order, apply_model_reasoning_summary,
-    apply_model_speed_summary, model_has_api_source_route, model_has_native_account_route,
-    operational_status, pool_model_summaries, pooled_source_runtime_available,
-    source_runtime_available, AccountOperationalInput, AccountSummary, Capabilities,
-    GatewaySummary, OperationalStatus, QuotaWindowUsage, RuntimeStateSnapshot,
-    RuntimeTargetSummary, SourceSummary, UsageQuery,
+    account_operational_state, apply_model_display_order, apply_pool_model_configuration,
+    operational_status, pool_candidate_count, pool_model_summaries_with_pricing,
+    pool_pricing_source_summary, pooled_source_runtime_available, source_runtime_available,
+    AccountOperationalInput, AccountSummary, Capabilities, GatewaySummary, QuotaWindowUsage,
+    RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
-    unix_time_ms, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
+    pricing::{CatalogRefreshOutcome, PricingError},
+    unix_time_ms, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, PricingMetadata,
     QUOTA_STALE_AFTER_MS,
 };
 
@@ -31,9 +31,46 @@ pub async fn get_local_pool_state(
     state.snapshot().await.map_err(Into::into)
 }
 
+/// Force a LiteLLM catalog refresh without returning the catalog payload.
+///
+/// The loader keeps the previous valid snapshot when the network or cache
+/// fails, while the state event makes the resulting freshness state visible to
+/// all renderer consumers.
+#[tauri::command]
+pub async fn refresh_local_pricing_catalog(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<CatalogRefreshOutcome, CommandError> {
+    let result = state.pricing_loader().refresh(true).await;
+    let _ = app.emit("zenith-state-changed", ());
+    result.map_err(pricing_error).map_err(Into::into)
+}
+
+fn pricing_error(error: PricingError) -> LocalPoolError {
+    let code = match error {
+        PricingError::Network | PricingError::HttpStatus(_) => ErrorCode::GatewayUnavailable,
+        PricingError::InvalidCatalog | PricingError::InvalidCache => ErrorCode::InvalidState,
+        PricingError::InvalidAmount
+        | PricingError::Overflow
+        | PricingError::InvalidRecord
+        | PricingError::CacheTooLarge
+        | PricingError::Io => ErrorCode::Io,
+    };
+    LocalPoolError::new(code, error.to_string())
+}
+
 #[tauri::command]
 pub async fn get_local_runtime_state(
     state: State<'_, DesktopState>,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    build_local_runtime_state(&state).await
+}
+
+/// Build the same prepared runtime projection exposed to the UI. Consumers
+/// that generate integrations (for example OpenCode) must use this projection
+/// instead of rebuilding a second model catalog from raw pool records.
+pub(crate) async fn build_local_runtime_state(
+    state: &DesktopState,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let started = Instant::now();
     let inputs = state.runtime_inputs().await?;
@@ -45,62 +82,53 @@ pub async fn get_local_runtime_state(
         .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
-    let source_price_overrides = inputs
-        .sources
+    let catalog = state.pricing_catalog();
+    let pricing = super::pricing_context(&inputs.gateway, &inputs.sources, &inputs.accounts);
+    let equivalents = state
+        .telemetry
+        .api_equivalents_with_pricing(&catalog, &pricing)?;
+    let quota_windows = inputs
+        .accounts
         .iter()
-        .map(|source| {
-            let mut prices = BTreeMap::new();
-            for model in source
-                .model_price_overrides
-                .keys()
-                .chain(source.detected_model_prices.keys())
-            {
-                prices.entry(model.clone()).or_insert_with(|| {
-                    zenith_relay_core::ApiModelPriceSources {
-                        provider: source.detected_model_prices.get(model).copied(),
-                        manual: source.model_price_overrides.get(model).copied(),
-                    }
-                });
-            }
-            (source.id.clone(), prices)
+        .filter_map(|record| {
+            let window = zenith_relay_core::protocol::api_equivalent_projection_window(
+                &record.account.quota,
+            )?;
+            Some((
+                record.account.id.clone(),
+                window.window_start_ms.unwrap_or_default(),
+                window.observed_at_ms,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let quota_equivalents =
+        state
+            .telemetry
+            .account_api_equivalents_with_pricing(&quota_windows, &catalog, &pricing)?;
+    let quota_window_usages = inputs
+        .accounts
+        .iter()
+        .filter_map(|record| {
+            let window = zenith_relay_core::protocol::api_equivalent_projection_window(
+                &record.account.quota,
+            )?;
+            let window_start_ms = window.window_start_ms.unwrap_or_default();
+            let window_minutes = window.window_minutes.unwrap_or_default();
+            Some((
+                record.account.id.clone(),
+                QuotaWindowUsage {
+                    kind: window.kind,
+                    window_start_ms,
+                    observed_at_ms: window.observed_at_ms,
+                    window_minutes,
+                    api_equivalent: quota_equivalents
+                        .get(&record.account.id)
+                        .copied()
+                        .unwrap_or_default(),
+                },
+            ))
         })
         .collect::<BTreeMap<_, _>>();
-    let equivalents = state.telemetry.api_equivalents_with_price_overrides(
-        &inputs.gateway.model_price_overrides,
-        &source_price_overrides,
-    )?;
-    let mut quota_window_usages = BTreeMap::new();
-    for record in &inputs.accounts {
-        let Some(window) =
-            zenith_relay_core::protocol::api_equivalent_projection_window(&record.account.quota)
-        else {
-            continue;
-        };
-        let window_start_ms = window.window_start_ms.unwrap_or_default();
-        let window_minutes = window.window_minutes.unwrap_or_default();
-        let usage = state.telemetry.usage_page_with_price_overrides(
-            &UsageQuery {
-                page: 1,
-                page_size: 1,
-                from_ms: Some(window_start_ms),
-                to_ms: Some(window.observed_at_ms),
-                source_or_account_query: Some(record.account.id.clone()),
-                ..UsageQuery::default()
-            },
-            &inputs.gateway.model_price_overrides,
-            &source_price_overrides,
-        )?;
-        quota_window_usages.insert(
-            record.account.id.clone(),
-            QuotaWindowUsage {
-                kind: window.kind,
-                window_start_ms,
-                observed_at_ms: window.observed_at_ms,
-                window_minutes,
-                api_equivalent: usage.totals.api_equivalent,
-            },
-        );
-    }
     let source_summaries = inputs
         .sources
         .iter()
@@ -172,78 +200,43 @@ pub async fn get_local_runtime_state(
             }
         }
     }
-    let mut models = pool_model_summaries(
+    let mut models = pool_model_summaries_with_pricing(
         &source_summaries,
         &account_summaries,
         &inputs.gateway.hidden_models,
+        &catalog,
+        &pricing,
     );
-    for model in &mut models {
-        let model_id = model.id.clone();
-        if let Some(price) = inputs
-            .gateway
-            .model_price_overrides
-            .get(&model_id.to_ascii_lowercase())
-        {
-            model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
-            model.cached_input_micro_usd_per_million = Some(
-                price
-                    .cached_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-            );
-            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
-            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
-            model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
-            model.custom_price = true;
-        }
-        let has_api_source_route = model_has_api_source_route(&source_summaries, &model_id);
-        let has_pool_route =
-            has_api_source_route || model_has_native_account_route(&account_summaries, &model_id);
-        apply_model_reasoning_summary(
-            model,
-            runtime
-                .as_ref()
-                .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
-            zenith_relay_core::reasoning_policy_levels(
-                &inputs.gateway.model_reasoning_allowed_levels,
-                &model_id,
-            ),
-            has_pool_route,
-        );
-        apply_model_speed_summary(
-            model,
-            runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model_id)),
-            inputs
-                .gateway
-                .model_service_tier_overrides
-                .get(&model_id.to_ascii_lowercase())
-                .copied(),
-        );
-    }
+    apply_pool_model_configuration(
+        &mut models,
+        &source_summaries,
+        &account_summaries,
+        &inputs.gateway.model_price_overrides,
+        &inputs.gateway.model_reasoning_allowed_levels,
+        &inputs.gateway.model_service_tier_overrides,
+        runtime.as_deref(),
+    );
     apply_model_display_order(&mut models, &inputs.gateway.model_display_order);
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
         .map(|model| model.id.clone())
         .collect();
-    let candidate_count = source_summaries
-        .iter()
-        .filter(|record| {
-            record.in_pool
-                && record.supports_any_wire_api()
-                && record.operational_status == OperationalStatus::Rotation
-        })
-        .count()
-        + account_summaries
-            .iter()
-            .filter(|record| {
-                record.in_pool && record.operational_status == OperationalStatus::Rotation
-            })
-            .count();
+    let candidate_count = pool_candidate_count(&source_summaries, &account_summaries);
     let base_url = format!(
         "http://{}:{}/v1",
         inputs.gateway.client_host, inputs.gateway.port
+    );
+    let pricing_metadata = PricingMetadata::for_catalog_with_status(
+        &catalog,
+        state.pricing_status(),
+        pool_pricing_source_summary(&source_summaries, &account_summaries, &catalog, &pricing),
+        equivalents
+            .accounts
+            .values()
+            .chain(equivalents.sources.values())
+            .map(|value| value.unpriced_tokens)
+            .sum(),
     );
     let response = RuntimeStateSnapshot {
         schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
@@ -290,6 +283,7 @@ pub async fn get_local_runtime_state(
         automations: inputs.automations.tasks,
         wake_history: inputs.automations.state.history().iter().cloned().collect(),
         warnings,
+        pricing: pricing_metadata,
     };
     state.record_performance_async(
         "full_snapshot_native",
@@ -342,6 +336,8 @@ fn local_source_summary(
             runtime_available,
         ),
         base_url: record.base_url.clone(),
+        pricing_provider: record.pricing_provider.clone(),
+        official_provider_family: record.official_provider_family.clone(),
         wire_api: record.wire_api,
         protocol_bindings: record.protocol_bindings.clone(),
         models: record.models.clone(),
@@ -410,6 +406,7 @@ fn local_account_summary(
             .chars()
             .take(12)
             .collect(),
+        provider_family: record.provider_family.clone(),
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
@@ -527,6 +524,7 @@ mod parity_tests {
             automations: Vec::new(),
             wake_history: Vec::new(),
             warnings: Vec::new(),
+            pricing: PricingMetadata::default(),
         })
         .unwrap();
         let remote = local.clone();

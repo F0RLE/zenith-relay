@@ -6,6 +6,118 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+Changes for the next release will be listed here.
+
+## [1.1.2] - 2026-09-03
+
+Zenith Relay 1.1.2 improves provider failover, usage visibility, application
+integration, recovery, and the local-first desktop workflow.
+
+### Security
+
+- Local and user-managed server API keys are fetched only after an explicit
+  **Copy API key** action. Relay does not render or retain them in the desktop
+  interface.
+- API keys can be reissued from the API page. The replacement is copied
+  directly, and the previous key is invalidated only after the new one is ready.
+
+### Routing, availability, and usage
+
+- Relay preserves a ChatGPT session's preferred healthy route to retain upstream
+  prompt-cache affinity, while still allowing bounded fallback when capacity,
+  quota, or health requires it.
+- Pool activity now follows the runtime's reported candidate, including a
+  lower-priority stabilizer, and remains visible across concurrent state
+  refreshes instead of predicting a "next choice" from the card order.
+- A confirmed quota exhaustion cools down only the affected account/source and
+  model route instead of taking the whole provider out of rotation.
+- Namespaced API models stay on their declared API source; Relay no longer
+  silently falls back to a ChatGPT subscription route for those requests.
+- Unclassified provider rejections before response data reaches the client now
+  cool only the affected source/model route and continue with the next eligible
+  source. Known request, tool-call, context, and continuation errors remain
+  terminal, and an active response is never switched mid-stream.
+- Source capability refreshes use the live upstream catalog. OAuth refresh-token
+  reuse is treated as a temporary recovery state rather than forcing an
+  unnecessary sign-in.
+- Adding an account or refreshing quotas now updates its available models in
+  the same operation. API-source refresh updates balance, models, prices, and
+  reasoning capabilities together, including an authoritative empty catalog.
+- Temporary network and provider failures no longer label an account as
+  blocked. Usage history keeps a stable, redacted label for removed accounts
+  and reports the service tier observed from the upstream response.
+- The pool now exposes two request-speed states: Standard and Fast. Pool-managed
+  OpenAI requests follow the selected state, while external API clients retain
+  their explicit tier; the upstream-reported tier remains a diagnostic value.
+  The speed control and persisted per-model policy are limited to OpenAI-family
+  models; legacy Fast overrides for other families are ignored safely.
+
+### Pricing
+
+- Replaced the hand-maintained OpenAI price file with one validated LiteLLM
+  catalog shared by desktop and Relay Server. Account estimates use only an
+  exact record in the account's declared official family; API sources resolve
+  provider evidence, LiteLLM exact, declared-family canonical, then a manual
+  source value.
+- Kept input, cache-read, cache-write (5m/1h), output, and image/request
+  tariffs independent. Missing components remain unpriced instead of falling
+  back to another tariff or displaying `$0`.
+- Usage now normalizes OpenAI-style inclusive cached input and
+  Anthropic-style separate cache reads/writes into one breakdown. Cached and
+  reasoning tokens are shown as subsets where required, zero-only rows are
+  omitted, and totals no longer double-count those components.
+- Added immutable catalog snapshots, local ETag/Last-Modified cache metadata,
+  stale/offline fallback, atomic replacement, and revision-aware invalidation
+  for usage and API-equivalent totals. Pricing remains informational and never
+  changes routing or quota decisions.
+
+### Desktop UI
+
+- ChatGPT recovery provides named, protected snapshots of `config.toml` and
+  sign-in state with confirmed restore and deletion. Managed profile switching
+  still preserves unrelated settings, rejects a newer manual sign-in, and uses
+  reversible history repair in both directions.
+- Pool connections now include OpenCode. Connecting writes a managed
+  `zenith-relay` OpenCode provider with the currently enabled pool models and
+  preserves the previous OpenCode configuration for one-click recovery. An
+  authoritative empty pool now replaces stale OpenCode models with a zero-model
+  catalog instead of leaving an obsolete selection behind.
+- Relay-managed OpenCode models now advertise image attachments, so image
+  inputs can be selected and forwarded through the pool.
+- OpenCode reasoning variants follow the model's explicit Relay reasoning
+  policy, so unsupported effort choices are not advertised to the client.
+- The application picker remembers whether a connected application should be
+  launched immediately, and its compact layout remains consistent across
+  desktop window sizes.
+- API setup separates the local endpoint, ChatGPT, and OpenCode responsibilities
+  while keeping address, port, and copy-only key actions together. ChatGPT and
+  OpenCode launch only when the user enables the remembered launch option.
+- Tooltips now wait briefly for pointer hover, appear immediately for keyboard
+  focus, and remain available for disabled actions without browser-native
+  `title` popups.
+- Usage refreshes no longer wait on an extra UI delay, while sign-in, setup,
+  and snapshot countdowns share one deadline-based clock instead of separate
+  polling intervals.
+- The Usage view warms its default report after the runtime is ready and keeps
+  a small per-query result cache, so returning to the page renders immediately
+  while the latest aggregates refresh in the background.
+- Update discovery starts with the application instead of an arbitrary startup
+  delay, and compact icon-only controls keep their accessible action names.
+- Runtime and usage refreshes are limited to the pages that consume them;
+  revision checks, coalesced events, cached aggregates, and bounded clocks avoid
+  rebuilding long request tables or blanking Overview during background work.
+- OpenCode recovery now mirrors the ChatGPT recovery view with an explicit
+  original-config snapshot, creation date, path, and confirmed restore action.
+- Relay-owned recovery files now use an application-first layout under
+  `recovery/applications`, while legacy recovery directories migrate safely on
+  startup without overwriting conflicts.
+- Pool configuration can be exported without credentials, previewed as a diff,
+  and applied only to unambiguous existing accounts and sources. Desktop and
+  user-managed server imports share the same validation and legacy-field merge
+  behavior.
+- Help, planning, and release documentation now describe the current ChatGPT
+  and OpenCode integrations and the actual local storage boundaries.
+
 ## [1.1.1] - 2026-08-28
 
 Zenith Relay 1.1.1 is the maintenance release after 1.1.0. It improves
@@ -77,6 +189,9 @@ local-first security boundary.
 
 ### Desktop workflow
 
+- Reopening ChatGPT and switching within the same adapter no longer rescans the
+  full history. History repair now runs only when a profile crosses between
+  OAuth, Relay, and API sources.
 - API-source editing separates connection settings, model and format routing,
   and per-source pricing into focused tabs. Refresh checks only the saved
   source and stays beside its connection summary.
@@ -134,9 +249,12 @@ account pool.
   Responses-to-Gemini compatibility, including tool-call continuations.
 - Added source model discovery, clear price provenance, image generation/edit
   prices, semantic model ordering, and declared reasoning catalog modes.
-- Catalog refresh runs at startup and every eight hours during an active app
-  session. Catalog failures stay visible after restart; reasoning modes remain
-  catalog metadata and changing a reasoning setting does not probe a provider.
+- Catalog refresh runs as an asynchronous conditional check at startup and
+  approximately every 24 hours during an active app session. A deterministic
+  spread prevents synchronized daily checks, while 5/30/120-minute retry
+  deadlines remain exact after failures. Catalog failures stay visible after
+  restart; reasoning modes remain catalog metadata and changing a reasoning
+  setting does not probe a provider.
 - Reasoning policies apply only to pooled API sources. Native OAuth models keep
   their provider capabilities unchanged.
 - Added native WebSocket support and an HTTP/SSE compatibility path for
@@ -242,7 +360,8 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.1...main
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...main
+[1.1.2]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.2
 [1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1
 [1.1.0]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0
 [1.1.0-beta.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0-beta.1

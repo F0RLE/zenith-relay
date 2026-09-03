@@ -236,17 +236,6 @@ pub(super) fn external_model_catalog(
     }
 }
 
-pub(super) fn model_catalog_to_restore(
-    document: &DocumentMut,
-    backup: &ProfileBackup,
-) -> Option<String> {
-    if backup.managed_model_catalog_path.is_some() {
-        backup.previous_model_catalog_json.clone()
-    } else {
-        root_model_catalog_json(document)
-    }
-}
-
 pub(super) fn root_openai_base_url(document: &DocumentMut) -> Option<String> {
     document
         .get("openai_base_url")
@@ -277,6 +266,17 @@ pub(super) fn managed_config_matches(document: &DocumentMut, backup: &ProfileBac
 pub(super) fn previous_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document) == backup.previous_model_provider
         && root_model_catalog_json(document) == backup.previous_model_catalog_json
+}
+
+pub(super) fn model_catalog_to_restore(
+    document: &DocumentMut,
+    backup: &ProfileBackup,
+) -> Option<String> {
+    if backup.managed_model_catalog_path.is_some() {
+        backup.previous_model_catalog_json.clone()
+    } else {
+        root_model_catalog_json(document)
+    }
 }
 
 pub(super) fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {

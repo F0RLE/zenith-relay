@@ -16,7 +16,7 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string; m
   { value: "9router", label: "9router", multiple: true },
   { value: "codex", label: "ChatGPT", multiple: false },
   { value: "axon_hub", label: "AxonHub", multiple: false },
-  { value: "codex_manager", label: "Codex-Manager", multiple: true },
+  { value: "codex_manager", label: "Bulk JSON", multiple: true },
 ];
 export function AccountExportDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
   const { t } = useTranslation();
@@ -28,6 +28,7 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
   const markdownFileInput = useRef<HTMLInputElement>(null);
   const formats = accountExportFormats.filter((option) => accountIds.length === 1 || option.multiple);
   const selectedFormat = formats.find((option) => option.value === format) ?? formats[0];
+  if (!selectedFormat) return null;
   const loadMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];

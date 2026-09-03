@@ -1,4 +1,4 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 import type {
   LocalUsagePage,
   PageId,
@@ -8,10 +8,12 @@ import type {
   RemoteUsage,
   RemoteUsagePage,
   RemoteUsageQuery,
+  RuntimeActivityState,
   RuntimeSnapshot,
 } from "../api/types";
 import type { UiState } from "../api/commands";
 import type { Feedback, PerformOptions } from "./relayOperationModel";
+import type { UsageLoadOptions } from "./useRelayUsage";
 
 export type { Feedback, PerformOptions } from "./relayOperationModel";
 
@@ -22,7 +24,6 @@ export type RelayContextValue = {
   setPage: (page: PageId) => void;
   runtime: RuntimeSnapshot | null;
   runtimeRevision: number;
-  usageRevision: number;
   accountIdentitiesVisible: boolean;
   accountIdentitiesBusy: boolean;
   canRevealAccountIdentities: boolean;
@@ -30,11 +31,6 @@ export type RelayContextValue = {
   accountValueVisible: boolean;
   setAccountValueVisible: (visible: boolean) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
-  localUsagePage: LocalUsagePage | null;
-  loadLocalUsage: (query: RemoteUsageQuery) => Promise<LocalUsagePage>;
-  remoteUsage: RemoteUsage[];
-  remoteUsagePage: RemoteUsagePage | null;
-  loadRemoteUsage: (query: RemoteUsageQuery) => Promise<RemoteUsagePage | null>;
   readyState: UiState | null;
   loading: boolean;
   busy: string | null;
@@ -59,10 +55,51 @@ export type RelayContextValue = {
   setCodexWebsocketsEnabled: (enabled: boolean) => Promise<boolean>;
 };
 
+export type RelayUsageContextValue = {
+  localUsagePage: LocalUsagePage | null;
+  loadLocalUsage: (query: RemoteUsageQuery, options?: UsageLoadOptions) => Promise<LocalUsagePage>;
+  remoteUsage: RemoteUsage[];
+  remoteUsagePage: RemoteUsagePage | null;
+  loadRemoteUsage: (query: RemoteUsageQuery, options?: UsageLoadOptions) => Promise<RemoteUsagePage | null>;
+  revision: number;
+};
+
 export const RelayContext = createContext<RelayContextValue | null>(null);
+const RelayActivityContext = createContext<RuntimeActivityState | null>(null);
+const RelayUsageContext = createContext<RelayUsageContextValue | null>(null);
+
+export function RelayStateContexts({
+  value,
+  activity,
+  usage,
+  children,
+}: {
+  value: RelayContextValue;
+  activity: RuntimeActivityState;
+  usage: RelayUsageContextValue;
+  children: ReactNode;
+}) {
+  return <RelayContext.Provider value={value}>
+    <RelayActivityContext.Provider value={activity}>
+      <RelayUsageContext.Provider value={usage}>{children}</RelayUsageContext.Provider>
+    </RelayActivityContext.Provider>
+  </RelayContext.Provider>;
+}
 
 export function useRelayState() {
   const value = useContext(RelayContext);
+  if (!value) throw new Error("RelayStateProvider is missing");
+  return value;
+}
+
+export function useRelayActivity() {
+  const value = useContext(RelayActivityContext);
+  if (!value) throw new Error("RelayStateProvider is missing");
+  return value;
+}
+
+export function useRelayUsageContext() {
+  const value = useContext(RelayUsageContext);
   if (!value) throw new Error("RelayStateProvider is missing");
   return value;
 }

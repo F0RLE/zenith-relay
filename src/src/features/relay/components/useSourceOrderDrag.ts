@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useRef, useState, type PointerEvent } from "react";
 import type { ApiSourceRole } from "../routingOrder";
+import { usePointerDragListeners } from "../hooks/usePointerDragListeners";
 
 type SourceOrderDragInput = {
   memberId: string;
@@ -47,7 +48,7 @@ export function useSourceOrderDrag({
       return;
     }
     const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId ?? null;
+    const targetId = row?.dataset["sourceId"] ?? null;
     setDropRole(null);
     setDropTarget(targetId && targetId !== sourceId ? targetId : null);
     if (targetId && targetId !== sourceId && row) {
@@ -69,7 +70,7 @@ export function useSourceOrderDrag({
       return;
     }
     const row = target?.closest<HTMLElement>("[data-source-id]");
-    const targetId = row?.dataset.sourceId;
+    const targetId = row?.dataset["sourceId"];
     if (targetId && targetId !== sourceId && row) {
       const bounds = row.getBoundingClientRect();
       onSourceDrop(sourceId, targetId, clientY >= bounds.top + bounds.height / 2);
@@ -77,41 +78,13 @@ export function useSourceOrderDrag({
     clearSourceDrag();
   }, [clearSourceDrag, memberId, onRoleDrop, onSourceDrop]);
 
-  useEffect(() => {
-    const drag = dragRef.current;
-    if (!drag || draggedSource !== drag.sourceId) return;
-    const onPointerMove = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      drag.clientX = event.clientX;
-      drag.clientY = event.clientY;
-      updateSourceDragAt(event.clientX, event.clientY);
-    };
-    const onPointerUp = (event: globalThis.PointerEvent) => {
-      if (event.pointerId !== drag.pointerId) return;
-      finishSourceDragAt(event.clientX, event.clientY);
-    };
-    const onPointerCancel = (event: globalThis.PointerEvent) => {
-      if (event.pointerId === drag.pointerId) clearSourceDrag();
-    };
-    const onWheel = () => {
-      // Scrolling is allowed during a drag; refresh the indicator after the
-      // row positions have been laid out again.
-      requestAnimationFrame(() => {
-        if (dragRef.current !== drag) return;
-        updateSourceDragAt(drag.clientX, drag.clientY);
-      });
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
-    window.addEventListener("wheel", onWheel, { passive: true });
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      window.removeEventListener("wheel", onWheel);
-    };
-  }, [clearSourceDrag, draggedSource, finishSourceDragAt, updateSourceDragAt]);
+  usePointerDragListeners({
+    dragRef,
+    activeKey: draggedSource ? `source:${draggedSource}` : null,
+    onMove: (_drag, clientX, clientY) => updateSourceDragAt(clientX, clientY),
+    onDrop: (_drag, clientX, clientY) => finishSourceDragAt(clientX, clientY),
+    onCancel: clearSourceDrag,
+  });
 
   const startSourceDrag = useCallback((event: PointerEvent<HTMLButtonElement>, sourceId: string) => {
     if (event.button !== 0) return;
@@ -139,6 +112,6 @@ export function useSourceOrderDrag({
 }
 
 function sourceRoleAt(target: Element | null): ApiSourceRole | null {
-  const role = target?.closest<HTMLElement>("[data-source-role]")?.dataset.sourceRole;
+  const role = target?.closest<HTMLElement>("[data-source-role]")?.dataset["sourceRole"];
   return role === "primary" || role === "stabilizer" || role === "reserve" ? role : null;
 }

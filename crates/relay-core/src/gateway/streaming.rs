@@ -12,7 +12,7 @@ use super::response::{
     CompletionCallback,
 };
 use crate::protocol::sse_event_end;
-use crate::runtime::{CandidateLease, DefaultServiceTier, ExecutorRoute};
+use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
     AdapterStreamBridge, GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge,
@@ -216,9 +216,11 @@ impl StreamExecution {
         let completion_allowed_protocols = route.allowed_protocols.clone();
         let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
             lease.release();
-            let response_delivered =
-                event.success || event.error_category.as_deref() == Some("response_incomplete");
-            if response_delivered {
+            // A response is healthy only after the upstream has emitted its
+            // successful terminal event. An incomplete response may have
+            // delivered bytes to the client, but it must not warm affinity or
+            // reset the selected slot's failure state.
+            if event.success {
                 let recovered = completion_runtime.record_success_with_metrics(
                     &completion_source,
                     &completion_model,
@@ -947,7 +949,7 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
                 requested_reasoning_effort: None,
                 effective_reasoning_effort: None,
                 wire_api: crate::WireApi::Responses,
-                service_tier: DefaultServiceTier::Standard,
+                service_tier: crate::DefaultServiceTier::Standard,
                 applied_service_tier: None,
                 success: true,
                 http_status: 200,
@@ -1128,10 +1130,7 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
         assert_eq!(events[0].reasoning_tokens, Some(4));
         assert_eq!(events[0].output_tokens, Some(6));
         assert_eq!(events[0].total_tokens, Some(38));
-        assert_eq!(
-            events[0].applied_service_tier,
-            Some(DefaultServiceTier::Standard)
-        );
+        assert_eq!(events[0].applied_service_tier, Some("default".to_string()));
     }
 
     #[test]

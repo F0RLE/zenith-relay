@@ -1,25 +1,16 @@
 import type { LocalUsage, RemoteUsage, UsageBucket, UsageTotals } from "../../api/types";
-import { measureTokenSpeed } from "../../usageSpeed";
-import { emptyUsageTotals } from "../../usageTotals";
+import { formatUsd as formatCurrencyUsd } from "../../currencyFormatting";
+import {
+  emptyUsageTotals,
+  totalsFromUsageSamples,
+  type UsageTotalsSample,
+} from "../../usageTotals";
 
 export type Range = "today" | "week" | "month";
 export type AnalyticsScope = "" | `source:${string}` | `account:${string}`;
 export type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
 export type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
-export type UsageSample = {
-  createdAtMs: number;
-  success: boolean;
-  latencyMs: number;
-  ttftMs: number | null;
-  generationMs: number | null;
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  cacheWriteInputTokens?: number | null;
-  reasoningTokens: number | null;
-  outputTokens: number | null;
-  totalTokens: number | null;
-  apiEquivalent?: UsageTotals["apiEquivalent"] | null;
-};
+export type UsageSample = UsageTotalsSample & { createdAtMs: number };
 
 export const HOUR_MS = 60 * 60 * 1_000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -58,6 +49,31 @@ export function analyticsFromPage(
 }
 
 export function bucketsFromSamples(windows: WindowBucket[], samples: UsageSample[]) {
+  const firstWindow = windows[0];
+  if (!firstWindow) return [];
+
+  // Chart windows are fixed-width and contiguous. Indexing them in one pass
+  // avoids scanning the complete sample list once for every bucket.
+  const bucketMs = firstWindow.endMs - firstWindow.startMs + 1;
+  const fixedWindows = bucketMs > 0 && windows.every((window, index) => {
+    const previous = windows[index - 1];
+    return window.endMs === window.startMs + bucketMs - 1
+      && (index === 0 || (previous !== undefined && window.startMs === previous.startMs + bucketMs));
+  });
+  if (fixedWindows) {
+    const samplesByBucket = windows.map(() => [] as UsageSample[]);
+    const firstStartMs = firstWindow.startMs;
+    for (const sample of samples) {
+      const index = Math.floor((sample.createdAtMs - firstStartMs) / bucketMs);
+      if (index < 0 || index >= samplesByBucket.length) continue;
+      const window = windows[index];
+      const bucket = samplesByBucket[index];
+      if (window && bucket && sample.createdAtMs >= window.startMs && sample.createdAtMs <= window.endMs) bucket.push(sample);
+    }
+    return windows.map((window, index) => ({ startMs: window.startMs, totals: totalsFromSamples(samplesByBucket[index] ?? []) }));
+  }
+
+  // Keep the inclusive behavior for callers that provide irregular windows.
   return windows.map((window) => ({
     startMs: window.startMs,
     totals: totalsFromSamples(samples.filter((sample) => sample.createdAtMs >= window.startMs && sample.createdAtMs <= window.endMs)),
@@ -65,34 +81,7 @@ export function bucketsFromSamples(windows: WindowBucket[], samples: UsageSample
 }
 
 export function totalsFromSamples(samples: UsageSample[]) {
-  return samples.reduce<UsageTotals>((totals, sample) => {
-    const outputTokens = sample.success ? Math.max(0, sample.outputTokens ?? 0) : 0;
-    totals.requests += 1;
-    totals.successfulRequests += Number(sample.success);
-    totals.latencyMs += sample.latencyMs;
-    if (sample.ttftMs != null) { totals.ttftMs += sample.ttftMs; totals.ttftSamples += 1; }
-    const generation = measureTokenSpeed({ success: sample.success, outputTokens: sample.outputTokens, reasoningTokens: sample.reasoningTokens, durationMs: sample.generationMs });
-    if (generation) {
-      totals.generationMs += generation.durationMs;
-      totals.generationSamples += 1;
-      totals.generationOutputTokens += generation.outputTokens;
-    }
-    totals.inputTokens += sample.inputTokens ?? 0;
-    if (sample.cachedInputTokens != null) { totals.cachedInputTokens += sample.cachedInputTokens; totals.cachedInputSamples += 1; }
-    if (sample.cacheWriteInputTokens != null) { totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens; totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1; }
-    totals.reasoningTokens += sample.reasoningTokens ?? 0;
-    totals.outputTokens += sample.outputTokens ?? 0;
-    totals.totalTokens += sample.totalTokens ?? 0;
-    if (sample.apiEquivalent) {
-      totals.apiEquivalent.microUsd += sample.apiEquivalent.microUsd;
-      totals.apiEquivalent.pricedTokens += sample.apiEquivalent.pricedTokens;
-      totals.apiEquivalent.unpricedTokens += sample.apiEquivalent.unpricedTokens;
-    } else {
-      totals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
-    }
-    if (outputTokens > 0 && sample.latencyMs > 0) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += sample.latencyMs; }
-    return totals;
-  }, emptyUsageTotals());
+  return totalsFromUsageSamples(samples);
 }
 
 export function localSamples(events: LocalUsage[]): UsageSample[] {
@@ -130,13 +119,8 @@ export function formatApiEquivalent(value: number | null, locale: string) {
 }
 
 export function formatUsd(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value < 0.01 ? 6 : value < 1 ? 4 : 2 }).format(value);
-}
-
-export function sourceHost(value: string) {
-  try {
-    return new URL(value).host;
-  } catch {
-    return value;
-  }
+  return formatCurrencyUsd(value, locale, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: value < 0.01 ? 6 : value < 1 ? 4 : 2,
+  });
 }

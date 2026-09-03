@@ -169,6 +169,38 @@ pub enum ModelDiscoveryFailureCode {
     Upstream,
 }
 
+impl ModelDiscoveryFailureCode {
+    /// Stable management identifier shared by desktop and server account flows.
+    pub fn management_code(self) -> &'static str {
+        match self {
+            Self::AgentTaskInvalid => "models_agent_task_invalid",
+            Self::Forbidden => "models_forbidden",
+            Self::HttpStatus => "models_http_status",
+            Self::InvalidAccessToken => "models_invalid_access_token",
+            Self::InvalidAccountId => "models_invalid_account_id",
+            Self::InvalidClientVersion => "models_invalid_client_version",
+            Self::InvalidEndpoint => "models_invalid_endpoint",
+            Self::InvalidResponse => "models_invalid_response",
+            Self::RateLimited => "models_rate_limited",
+            Self::ResponseTooLarge => "models_response_too_large",
+            Self::Transport => "models_transport",
+            Self::Unauthorized => "models_unauthorized",
+            Self::Upstream => "models_upstream",
+        }
+    }
+
+    pub fn is_authentication_failure(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidAccessToken | Self::InvalidAccountId | Self::Unauthorized
+        )
+    }
+
+    pub fn blocks_account(self) -> bool {
+        self == Self::Forbidden
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelDiscoveryFailure {
     pub code: ModelDiscoveryFailureCode,
@@ -325,6 +357,96 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
+
+    #[test]
+    fn discovery_failure_codes_keep_the_management_contract_stable() {
+        let cases = [
+            (
+                ModelDiscoveryFailureCode::AgentTaskInvalid,
+                "models_agent_task_invalid",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::Forbidden,
+                "models_forbidden",
+                false,
+                true,
+            ),
+            (
+                ModelDiscoveryFailureCode::HttpStatus,
+                "models_http_status",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::InvalidAccessToken,
+                "models_invalid_access_token",
+                true,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::InvalidAccountId,
+                "models_invalid_account_id",
+                true,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::InvalidClientVersion,
+                "models_invalid_client_version",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::InvalidEndpoint,
+                "models_invalid_endpoint",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::InvalidResponse,
+                "models_invalid_response",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::RateLimited,
+                "models_rate_limited",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::ResponseTooLarge,
+                "models_response_too_large",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::Transport,
+                "models_transport",
+                false,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::Unauthorized,
+                "models_unauthorized",
+                true,
+                false,
+            ),
+            (
+                ModelDiscoveryFailureCode::Upstream,
+                "models_upstream",
+                false,
+                false,
+            ),
+        ];
+
+        for (code, management_code, authentication_failure, blocks_account) in cases {
+            assert_eq!(code.management_code(), management_code);
+            assert_eq!(code.is_authentication_failure(), authentication_failure);
+            assert_eq!(code.blocks_account(), blocks_account);
+        }
+    }
 
     #[tokio::test]
     async fn discovers_unique_supported_slugs_with_codex_request_contract() {

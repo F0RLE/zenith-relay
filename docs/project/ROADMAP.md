@@ -1,6 +1,6 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-08-23.
+Last reviewed: 2026-09-03.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
@@ -19,13 +19,15 @@ user operates, after an explicit management confirmation. State, usage,
 telemetry, diagnostics, exports, and API snapshots must remain redacted. Any
 future feature that cannot prove this boundary is out of scope.
 
-## Release baseline - v1.1.0
+## Implementation status
 
-The product implementation gate is closed for the 1.1.0 release: the local
-desktop surface, provider-neutral routing contracts, profile recovery, quota
-automation, model availability handling, redaction rules, and responsive UI
+The current product implementation gate is closed for the shipped desktop
+scope: the local desktop surface, provider-neutral routing contracts, profile
+recovery, quota automation, model availability handling, redaction rules, and
+responsive UI
 are covered by the implementation checks and review required by the release
-process. The user-visible scope is recorded in [CHANGELOG.md](CHANGELOG.md);
+process. The user-visible scope is recorded in
+[CHANGELOG.md](../releases/CHANGELOG.md);
 test counts and CI evidence are deliberately kept out of that document.
 
 This does not turn mocked or local checks into a production claim. Live P0
@@ -35,16 +37,17 @@ step and must be tested after the local desktop path, not in parallel with it.
 
 ## Current order
 
-1. The v1.1.0 implementation baseline is complete; no live production claim is
+1. The shipped implementation baseline is complete; no live production claim is
    made without the deferred P0 evidence below.
 2. P0 live acceptance is deferred until permitted real accounts are available;
    the user-managed server path is last.
-3. P1 is in progress: explain the reported slow pool switch with warm timing
-   and disk-I/O evidence before changing the loading architecture.
-4. P2 is in progress: keep the shared reliability contracts and close the
-   remaining `repair` consistency risks.
-5. P3 is in progress: the catalog, reasoning, usage, and adapter foundations
-   are implemented, but real client/provider acceptance evidence is still open.
+3. P1 is in progress: measure warm startup, page open, and pool-switch disk I/O
+   before changing the loading architecture, then replace source roles with a
+   unified adaptive pool scheduler and explicit manual ordering.
+4. P2 is in progress: preserve reliability contracts and validate the new
+   application recovery layout on upgraded installations.
+5. P3 is in progress: catalog, reasoning, usage, adapter, ChatGPT, and OpenCode
+   foundations are implemented; real client/provider acceptance remains open.
 6. P4 and P5 remain demand-gated. Do not add speculative account connectors or
    multi-server coordination ahead of the existing acceptance gates.
 7. P6 through P8 are long-term design records only. Do not start named-profile,
@@ -52,7 +55,7 @@ step and must be tested after the local desktop path, not in parallel with it.
    the current Zenith production Gateway/Control API path is stable.
 8. P9 remains the release-evidence gate for any production claim.
 
-## Review record — 2026-08-20
+## Implementation review — 2026-09-03
 
 The previous review was stale by one implementation cycle. The current tree
 already contains the following foundations, so they are no longer described as
@@ -68,6 +71,10 @@ unstarted work:
   rebuild, and rollback.
 - incremental API-equivalent totals backed by the existing usage rollup,
   including migration-safe handling of retained request logs.
+- OpenCode connection, live pool model projection, image/reasoning metadata,
+  and one-shot original-config recovery.
+- Application-first recovery storage with an idempotent migration from the
+  previous `recovery/profiles` and sibling-directory layout.
 
 These are implementation and fixture results, not production acceptance. The
 remaining release blockers are real-account pool/server runs, real
@@ -80,15 +87,20 @@ stop after partially deleting the batch. Both implementation follow-ups are
 now closed; live provider and client acceptance
 remains open.
 
-The profile-recovery follow-up is now closed in the implementation: the first
-local startup creates one durable original snapshot and orders it first;
-manual snapshots remain available at any time; restore is full-only and never
-creates a hidden pre-restore copy; and deletion uses an explicit ten-second
-confirmation cooldown. Snapshot metadata also stores portable Windows paths.
-The history-repair path now preserves its rollback handle during cleanup,
-updates only SQLite threads whose rollout was actually processed, rewrites
-every relevant session metadata record, and normalizes extended Windows paths
+The profile-recovery follow-up is now closed in the implementation: managed
+ChatGPT switching restores only Relay-owned configuration and authentication,
+preserving unrelated settings and rejecting a newer manual sign-in. Separate
+named recovery points capture only `config.toml` and authentication for an
+explicit, confirmed restore. The history-repair path preserves its rollback
+handle during cleanup, updates only SQLite threads whose rollout was actually
+processed, rewrites every relevant session metadata record in either direction
+between ChatGPT and Relay/API providers, and normalizes extended Windows paths
 in preview and backup validation.
+
+The remaining recovery acceptance is client-level: verify that a running
+OpenCode desktop/CLI process reloads after connect, that a failed config write
+leaves the original file intact, and that restore works for JSON and JSONC
+files on each supported platform.
 
 ## P0 - Prove the personal pool in production (deferred)
 
@@ -161,6 +173,235 @@ or representative local/remote disk-I/O baseline has been accepted yet.
 The goal is a responsive application, not speculative caching or background
 work that makes account state stale.
 
+### Unified adaptive pool routing
+
+Replace the API-first, stabilizer, and reserve source roles with one routing
+contract shared by subscription accounts and API sources. The scheduler must
+remain provider-neutral: a logical pool member owns routing policy, while any
+protocol-specific candidates derived from that member remain internal runtime
+details. The redesign must preserve the current response-ownership, streaming,
+failure-isolation, and redaction guarantees.
+
+#### Routing modes and ordering
+
+Expose three user-facing routing modes:
+
+1. **Smart** is the default adaptive mode. It combines manual preference,
+   quota headroom, capacity, observed reliability, latency, reset timing, and
+   optional cost evidence without allowing one noisy sample to monopolize the
+   pool.
+2. **In order** selects the first eligible member in the saved manual order and
+   proceeds to the next member only when the current request can safely fail
+   over.
+3. **Round robin** distributes new sessions across eligible members. Requests
+   belonging to an already assigned session remain on their affinity owner
+   while that owner is usable.
+
+Store one atomic order containing tagged member references such as
+`account:<id>` and `source:<id>`. Accounts and sources appear in the same list,
+can be reordered together, and do not expose magic numeric role thresholds.
+An API source with multiple protocol bindings inherits its logical source
+position; its internal candidates must not become separate user-visible rows.
+
+New members are appended deterministically. Deleted references are ignored and
+removed on the next successful policy save. A temporarily unavailable member
+keeps its position so that recovery does not silently rewrite user policy.
+Reordering applies immediately to new sessions and safe retry selection, but
+never interrupts an in-flight request or moves an upstream-owned continuation.
+
+#### Selection pipeline
+
+Apply routing in this order:
+
+1. Resolve mandatory response ownership and active connection affinity.
+2. Filter candidates by enabled and draining state, secret and proxy
+   availability, requested model, client and upstream protocol, adapter
+   capability, request lane, quota, concurrency, cooldown, and circuit state.
+3. Apply explicit cache-key and session affinity when the bound candidate still
+   has sufficient health, quota, and capacity.
+4. Rank the remaining eligible candidates with the selected routing mode.
+5. Attempt bounded fallback only while no response bytes have been committed
+   and the request or continuation contract permits another candidate.
+
+`previous_response_id` ownership and an active WebSocket connection are hard
+affinities. Prompt-cache and ordinary session affinity are strong preferences
+with guarded escape conditions. Create or replace a soft affinity binding only
+after a request has reached a verified successful response boundary, so a
+failed first attempt cannot pin the session to a bad candidate.
+
+Key every affinity by the minimum complete routing scope, including the client
+scope, canonical public model, request lane, and protocol where required. A
+candidate recovering at a higher preference may receive new sessions
+immediately, but it must not steal an existing healthy session from another
+candidate.
+
+#### Smart score
+
+Maintain normalized `0..1` factors for each eligible candidate and calculate a
+bounded score from:
+
+- manual priority;
+- reported quota headroom;
+- free parallel capacity and queue depth;
+- error-rate EWMA;
+- time-to-first-output EWMA;
+- quota or subscription reset urgency;
+- confirmed upstream cost evidence when the active profile explicitly enables
+  cost-aware routing;
+- response, cache, connection, and session affinity bonuses.
+
+Record operational observations at candidate, canonical model, protocol, and
+request-lane scope so that a slow or failing route cannot penalize an unrelated
+model or binding from the same logical source. Clamp samples, require a minimum
+observation count, decay stale data, and add hysteresis before moving a soft
+affinity. Unknown quota, latency, cost, or reset data is neutral rather than
+zero; incomplete evidence must neither win nor lose a route by accident.
+
+Offer routing profiles instead of exposing raw coefficients by default:
+
+- **Cache** emphasizes affinity and stability and is the Relay default;
+- **Balanced** combines quota, capacity, reliability, latency, and manual
+  preference;
+- **Speed** emphasizes first-output latency, error rate, and available
+  capacity;
+- **Economy** enables confirmed cost and reset-use factors;
+- **Custom** exposes validated bounded coefficients in advanced settings.
+
+The current contract that prices do not affect routing remains true until the
+Economy/Custom implementation, evidence rules, UI disclosure, tests, and
+stable documentation are complete. Provider-discovered cost, reference API
+price, account API-equivalent estimates, and user purchase cost must remain
+separate facts; purchase cost and payback never become scheduler inputs.
+
+#### Top-K distribution
+
+Smart routing ranks the eligible set, retains a bounded Top-K, and distributes
+new assignments inside that set so that the current highest score does not
+receive all traffic indefinitely. The default Top-K is three and is bounded by
+the actual eligible count.
+
+Use a stable session-derived choice when a trustworthy session key exists, so
+the same session returns to the same candidate and availability changes remap
+only affected sessions. Use smooth weighted round robin for unscoped requests.
+Candidate weight defaults to one, is validated and bounded, and affects only
+distribution inside the selected Top-K; zero weight excludes a candidate from
+normal selection without replacing the explicit enabled state. Weight changes
+must reset or safely rebase accumulated rotation credit.
+
+#### Failure feedback and recovery
+
+Classify every failed attempt before mutating scheduler state:
+
+- client/request validation failures are terminal and do not penalize a
+  candidate;
+- unsupported or disabled models cool down only the exact candidate and model;
+- quota, authentication, payment, or credential failures cool down the exact
+  physical slot at the narrowest proven scope;
+- safe pre-response overload, timeout, transport, and generic upstream
+  rejection may continue to the next eligible candidate;
+- failures after response commitment never start a transparent replay;
+- upstream-owned continuations move only after an explicitly proven recoverable
+  affinity miss.
+
+Track circuit state as `closed`, `open`, and `half-open`. An expired cooldown
+admits a bounded probe before the candidate re-enters normal Top-K selection.
+Persist enough timestamped cooldown and recent-health state to avoid a restart
+storm, but expire stale observations and never let an old snapshot disable a
+candidate indefinitely. Provider/model storm protection remains scoped so that
+one failing credential, model, or binding cannot disable unrelated routes.
+
+#### Runtime metrics and diagnostics
+
+Maintain bounded rolling state for dispatches, active requests, queue depth,
+success and error EWMA, first-output EWMA, circuit state, affinity hits and
+escapes, fallback attempts, and score inputs. Hot policy changes must update the
+running scheduler without reopening the listener or discarding active leases,
+affinity, or safe health state.
+
+For every request, expose a redacted routing trace containing:
+
+- selected logical member and physical candidate;
+- selection mode, profile, final score, and decisive factors;
+- affinity type and hit, miss, or escape reason;
+- attempted fallback chain and classified rejection reasons;
+- cooldown and half-open transitions;
+- the policy and runtime revisions used for the decision.
+
+Never retain prompts, response bodies, credentials, cookies, authorization
+headers, or raw provider error bodies. Replace the unconditional **Next
+candidate** presentation with factual **In use** activity and a model-scoped
+**Expected route** preview. A preview must accept a concrete model, protocol,
+lane, and client scope and clearly remain a simulation rather than a promise
+about the next request.
+
+#### Desktop and server UI
+
+Move all cross-member routing controls into the pool distribution dialog. Show
+one draggable list containing accounts and API sources with name, kind,
+availability, supported-model count, active-request state, cooldown, and manual
+position. Keep source protocol, model, price, and recovery settings in the
+source editor; remove source-role selection and API-only order controls from
+the member editor.
+
+The distribution dialog contains the Smart, In order, and Round robin mode
+control; the Smart profile control; the unified order; and an advanced section
+for Top-K, bounded traffic weight, affinity escape thresholds, and Custom
+coefficients. The default surface must stay understandable without opening the
+advanced section. Local and user-managed server modes render and mutate the
+same versioned routing contract, subject to negotiated server capabilities.
+
+#### Migration and compatibility
+
+Add an append-only schema migration and a versioned management contract. Derive
+the first unified order from the existing effective path: API-first sources in
+their saved order, subscription accounts, stabilizer sources, then reserve
+sources. Preserve existing account behavior during migration rather than
+turning a formerly balanced account set into an accidental strict chain.
+
+Continue accepting legacy role priorities and routing-strategy values in old
+imports and older server payloads long enough to produce an explicit preview,
+but emit only the new contract after a successful conversion. Import preview,
+revision CAS, runtime rebuild, rollback, backup, restore, and redacted export
+must cover the unified order and all scheduler settings. A failed conversion or
+runtime rebuild leaves the previous verified policy active.
+
+After local/server compatibility is complete, remove the API role constants,
+role inference, source-role UI, stale diagnostic reason variants, unused CSS
+and translations, and any legacy weight path that is not connected to the new
+Top-K implementation. Do not retain two schedulers or two active routing
+contracts.
+
+#### Implementation and acceptance order
+
+1. Specify the versioned routing contract, score semantics, affinity scopes,
+   error classes, migration mapping, and rollback behavior.
+2. Add shared protocol types and append-only local/server migrations with
+   round-trip, old-import, backup, restore, and interrupted-upgrade tests.
+3. Refactor eligibility into a provider-neutral candidate pipeline shared by
+   every routing mode.
+4. Implement normalized observations, EWMA decay, routing profiles, scoring,
+   Top-K selection, stable session assignment, and smooth weighted rotation.
+5. Implement typed failure feedback, scoped circuit breakers, persisted
+   cooldown recovery, half-open probes, and affinity escape hysteresis.
+6. Add atomic management operations and hot-apply behavior for desktop and
+   user-managed server runtimes.
+7. Replace the role UI with the unified order, routing modes, profiles,
+   advanced controls, model-scoped route preview, and factual activity state.
+8. Add deterministic unit and property tests for ordering, score bounds,
+   unknown evidence, weight changes, Top-K membership, minimal remapping,
+   concurrency, quota refresh, cooldown recovery, and live policy updates.
+9. Add gateway tests for every error class, bounded fallback, partial streams,
+   Responses ownership, WebSocket affinity, adapter routes, and one unhealthy
+   slot among otherwise healthy members.
+10. Add local/server integration, configuration migration, redaction,
+    performance, and Playwright coverage; then remove the superseded role and
+    scheduler legacy in the same delivery series.
+
+Do not claim this P1 routing work complete until local and user-managed server
+runtimes produce the same deterministic decisions from the same snapshot and
+policy, cache-affinity behavior has measurable evidence, and no policy-only
+change restarts the listener or loses active runtime state.
+
 ## P2 - Preserve reliability and ownership boundaries
 
 The broad ownership cleanup is complete. Do not reopen it for cosmetic module
@@ -211,8 +452,9 @@ evidence.
 1. Run source discovery against real Responses and Messages endpoints and prove
    that model availability, protocol bindings, reasoning hints, discovered
    prices, and manual price overrides remain separate across refreshes. Keep
-   account API-equivalent estimates on the official account catalog path, while
-   API sources resolve provider evidence, official fallback, then manual price.
+   account API-equivalent estimates on the LiteLLM exact-record path within
+   the declared official family, while API sources resolve provider evidence,
+   LiteLLM exact, declared-family canonical, then manual price.
 2. Keep native passthrough as the provider contract and use a named adapter for
    every protocol conversion. A confirmed native Messages binding may derive
    the existing Responses-to-Messages runtime route; it must not be treated as
@@ -251,10 +493,12 @@ restores the previous profile catalog on recovery. Remaining release gates:
 
 ### Additional client applications
 
-Add a client integration only where users need it and the program supports a
-safe reversible configuration path. Each integration must use the shared pool
-endpoint and server authentication boundary; it must not fork routing or
-secret storage.
+OpenCode configuration integration is shipped. The remaining acceptance work is
+to run it against supported desktop/CLI installations on each platform and
+prove model refresh, image input, reasoning variants, restart behavior, and
+restore after a failed write. Future applications must use the same shared pool
+endpoint and reversible storage boundary; they must not fork routing or secret
+storage.
 
 ## P4 - Additional subscription account connectors (deferred)
 
@@ -361,6 +605,11 @@ complete alias contract; keep those distinctions explicit.
    reports prices, retain evidence, currency/unit, freshness, and the manual
    override separately. Relay personal API-equivalent values remain
    informational, not customer billing prices.
+6. Keep LiteLLM catalog refresh independent from request execution: load the
+   last valid local snapshot before the first runtime snapshot, use stale data
+   offline, validate before atomic replacement, and invalidate derived totals
+   by catalog/policy revision. Never reintroduce a hand-maintained OpenAI price
+   file or let a missing price become `$0`.
 
 ## P8 - Optional Zenith runtime convergence (future)
 
@@ -386,11 +635,12 @@ multi-user billing gateway. Convergence proceeds only through explicit gates:
 
 ## P9 - Localization, documentation, and release evidence
 
-1. For every new UI locale, add the localized overview and three mode-specific
-   Help documents, then register the mode documents in Help Center.
+1. For every new UI locale, add one sequential Help guide at
+   `docs/help/<locale>/README.md`, register it in Help Center, and keep its
+   section order aligned with the application.
 2. Regenerate screenshots from Playwright after a material layout or
    terminology change.
-3. Keep [CHANGELOG.md](CHANGELOG.md) current: describe review-ready work under
+3. Keep [CHANGELOG.md](../releases/CHANGELOG.md) current: describe review-ready work under
    `Unreleased`, then move only shipped behavior into a dated tag section.
 4. Run all relevant checks, review generated assets, and perform the P0 live
    acceptance before a release claim.

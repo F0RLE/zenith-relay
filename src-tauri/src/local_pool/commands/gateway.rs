@@ -1,4 +1,6 @@
-use super::{restart_or_rollback, runtime_from_store, sync_gateway_or_rollback};
+use super::{
+    restart_after_secret_change, restart_or_rollback, runtime_from_store, sync_gateway_or_rollback,
+};
 use crate::local_pool::{
     accounts::proxy::COMMON_PROXY_SECRET_REF,
     error::{CommandError, ErrorCode, ErrorDiagnostics, LocalPoolError},
@@ -128,6 +130,36 @@ pub async fn update_local_gateway_port(
     state.store()?.replace_gateway(gateway)?;
     sync_gateway_or_rollback(&state, old_gateway).await?;
     state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reveal_local_gateway_api_key(
+    state: State<'_, DesktopState>,
+) -> Result<String, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let key = super::pool::ensure_system_gateway_key(&state)?;
+    Ok(super::pool::ensure_local_gateway_key_secret(&key)?)
+}
+
+#[tauri::command]
+pub async fn rotate_local_gateway_api_key(
+    state: State<'_, DesktopState>,
+) -> Result<String, CommandError> {
+    let _mutation = state.setup_guard().await;
+    rotate_system_gateway_api_key(&state)
+        .await
+        .map_err(Into::into)
+}
+
+async fn rotate_system_gateway_api_key(
+    state: &DesktopState,
+) -> crate::local_pool::error::Result<String> {
+    let key = super::pool::ensure_system_gateway_key(state)?;
+    let old_secret = super::pool::ensure_local_gateway_key_secret(&key)?;
+    let new_secret = super::pool::new_local_gateway_api_key();
+    secret_store::save(&key.secret_ref, &new_secret)?;
+    restart_after_secret_change(state, &key.secret_ref, &old_secret).await?;
+    Ok(new_secret)
 }
 
 #[tauri::command]
@@ -484,5 +516,26 @@ mod tests {
         assert!(!valid_diagnostic_response(
             br#"{"error":{"message":"failed"}}"#
         ));
+    }
+
+    #[tokio::test]
+    async fn rotating_the_local_gateway_key_replaces_the_stored_secret() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-key-rotation-{id}"));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let key = super::super::pool::ensure_system_gateway_key(&state).unwrap();
+        let old_secret = super::super::pool::ensure_local_gateway_key_secret(&key).unwrap();
+
+        let new_secret = rotate_system_gateway_api_key(&state).await.unwrap();
+
+        assert_ne!(new_secret, old_secret);
+        assert_eq!(
+            secret_store::load(&key.secret_ref).unwrap().as_deref(),
+            Some(new_secret.as_str())
+        );
+
+        secret_store::delete(&key.secret_ref).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

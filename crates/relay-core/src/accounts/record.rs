@@ -33,7 +33,6 @@ pub fn provider_account_failure(code: &str) -> Option<ProviderAccountFailure> {
         | "invalid_refresh_token"
         | "refresh_token_expired"
         | "refresh_token_invalidated"
-        | "refresh_token_reused"
         | "token_invalidated"
         | "token_revoked" => Some(ProviderAccountFailure::Authentication),
         "account_deactivated"
@@ -61,6 +60,17 @@ pub enum AccountAuthState {
     RequiresReauth(ReauthReason),
 }
 
+impl AccountAuthState {
+    /// Kept for backward-compatible account records. A reused refresh token
+    /// indicates a concurrent rotation, not a credential that needs login.
+    pub fn requires_fresh_login(self) -> bool {
+        matches!(
+            self,
+            Self::RequiresReauth(reason) if !matches!(reason, ReauthReason::ReusedRefreshToken)
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountHealthState {
@@ -73,7 +83,68 @@ pub enum AccountHealthState {
 }
 
 pub fn automatic_quota_monitoring_eligible(enabled: bool, auth_state: AccountAuthState) -> bool {
-    enabled && !matches!(auth_state, AccountAuthState::RequiresReauth(_))
+    enabled && !auth_state.requires_fresh_login()
+}
+
+/// Applies the common terminal state for a failed account model discovery.
+/// Callers retain ownership of their catalog storage and only share the account
+/// status transition.
+pub fn apply_model_discovery_failure(
+    auth_state: &mut AccountAuthState,
+    health: &mut AccountHealthState,
+    last_error_code: &mut Option<String>,
+    code: &str,
+    retryable: bool,
+) {
+    *last_error_code = Some(code.to_string());
+    match code {
+        "models_unauthorized" | "models_invalid_access_token" | "models_invalid_account_id" => {
+            // A user-actionable reauthentication state must survive a later
+            // model probe while the last good catalog remains available.
+            if !auth_state.requires_fresh_login() {
+                *auth_state = AccountAuthState::Error;
+            }
+            *health = AccountHealthState::Unhealthy;
+        }
+        "models_forbidden" => {
+            // A model catalog endpoint can be forbidden while the account's
+            // normal inference and quota endpoints remain usable. Keep this
+            // scoped to discovery so a catalog permission issue does not
+            // remove an otherwise working account from the pool. Preserve a
+            // stronger, independently observed account state.
+            if !matches!(
+                *health,
+                AccountHealthState::Blocked | AccountHealthState::Unhealthy
+            ) {
+                *health = AccountHealthState::Degraded;
+            }
+        }
+        _ if retryable => *health = AccountHealthState::Degraded,
+        _ => *health = AccountHealthState::Unhealthy,
+    }
+}
+
+/// Clears a stale model-discovery error after a successful catalog refresh.
+pub fn recover_model_discovery_state(
+    auth_state: &mut AccountAuthState,
+    health: &mut AccountHealthState,
+    last_error_code: &mut Option<String>,
+) -> bool {
+    let recovered = last_error_code
+        .as_deref()
+        .is_some_and(|code| code.starts_with("models_"));
+    if !recovered {
+        return false;
+    }
+
+    *last_error_code = None;
+    if !auth_state.requires_fresh_login() {
+        if *auth_state == AccountAuthState::Error {
+            *auth_state = AccountAuthState::Active;
+        }
+        *health = AccountHealthState::Healthy;
+    }
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,8 +211,8 @@ pub fn reduce_account_usage(
         };
     }
 
-    let explicit_state = matches!(state.auth_state, AccountAuthState::RequiresReauth(_))
-        || state.health == AccountHealthState::Blocked;
+    let explicit_state =
+        state.auth_state.requires_fresh_login() || state.health == AccountHealthState::Blocked;
     let failure_category = observation
         .error_category
         .filter(|category| *category != "upstream_status");
@@ -158,7 +229,7 @@ pub fn reduce_account_usage(
                 );
             }
             Some(AccountAccessState::AccessOnly) => {
-                if !matches!(state.auth_state, AccountAuthState::RequiresReauth(_)) {
+                if !state.auth_state.requires_fresh_login() {
                     state.auth_state = AccountAuthState::Error;
                 }
                 state.health = AccountHealthState::Unhealthy;
@@ -384,6 +455,85 @@ mod tests {
             true,
             AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
         ));
+        assert!(automatic_quota_monitoring_eligible(
+            true,
+            AccountAuthState::RequiresReauth(ReauthReason::ReusedRefreshToken),
+        ));
+    }
+
+    #[test]
+    fn refresh_token_reused_is_not_a_provider_authentication_failure() {
+        assert_eq!(provider_account_failure("refresh_token_reused"), None);
+        assert_eq!(
+            provider_account_failure("refresh_token_expired"),
+            Some(ProviderAccountFailure::Authentication)
+        );
+    }
+
+    #[test]
+    fn model_discovery_state_transitions_keep_user_reauthentication_intact() {
+        let mut auth_state = AccountAuthState::Active;
+        let mut health = AccountHealthState::Healthy;
+        let mut last_error_code = None;
+
+        apply_model_discovery_failure(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+            "models_transport",
+            true,
+        );
+        assert_eq!(auth_state, AccountAuthState::Active);
+        assert_eq!(health, AccountHealthState::Degraded);
+        assert_eq!(last_error_code.as_deref(), Some("models_transport"));
+        assert!(recover_model_discovery_state(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+        ));
+        assert_eq!(health, AccountHealthState::Healthy);
+        assert!(last_error_code.is_none());
+
+        auth_state = AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant);
+        apply_model_discovery_failure(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+            "models_unauthorized",
+            false,
+        );
+        assert!(auth_state.requires_fresh_login());
+        assert_eq!(health, AccountHealthState::Unhealthy);
+        assert!(recover_model_discovery_state(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+        ));
+        assert_eq!(health, AccountHealthState::Unhealthy);
+
+        auth_state = AccountAuthState::Active;
+        health = AccountHealthState::Healthy;
+        last_error_code = None;
+        apply_model_discovery_failure(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+            "models_forbidden",
+            false,
+        );
+        assert_eq!(health, AccountHealthState::Degraded);
+
+        // A previously confirmed account block must not be cleared by a
+        // separate model-discovery permission failure.
+        health = AccountHealthState::Blocked;
+        apply_model_discovery_failure(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+            "models_forbidden",
+            false,
+        );
+        assert_eq!(health, AccountHealthState::Blocked);
     }
 
     fn usage_state() -> AccountUsageState {

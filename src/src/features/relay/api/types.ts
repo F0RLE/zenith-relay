@@ -1,6 +1,7 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
 export type DefaultServiceTier = "standard" | "fast";
+export type ObservedServiceTier = string;
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
 export type QuotaWindow = {
@@ -41,6 +42,32 @@ export type ApiEquivalentSummary = {
   microUsd: number;
   pricedTokens: number;
   unpricedTokens: number;
+};
+
+export type PricingSourceSummary =
+  | "provider"
+  | "liteLlmExact"
+  | "liteLlmCanonical"
+  | "manual"
+  | "mixed"
+  | "unpriced";
+
+export type CatalogStatus = "current" | "stale" | "updating" | "unloaded" | "error";
+
+export type CatalogRefreshOutcome =
+  | { kind: "updated"; revision: string }
+  | { kind: "notModified"; revision: string }
+  | { kind: "skipped" };
+
+/** Freshness and provenance of the LiteLLM-backed API-equivalent estimate. */
+export type PricingMetadata = {
+  catalogRevision?: string | null;
+  catalogFetchedAtMs?: number | null;
+  /** Optional so snapshots produced before the pricing contract remain readable. */
+  catalogStale?: boolean;
+  catalogStatus?: CatalogStatus;
+  priceSource?: PricingSourceSummary;
+  unpricedTokens?: number;
 };
 
 export type QuotaWindowUsage = {
@@ -86,6 +113,8 @@ export type SourceSummary = {
   draining: boolean;
   operationalStatus: OperationalStatus;
   baseUrl: string;
+  pricingProvider?: string | null;
+  officialProviderFamily?: string | null;
   wireApi: SourceWireApi;
   protocolBindings?: SourceProtocolBinding[];
   models: string[];
@@ -205,6 +234,19 @@ export type RuntimeActivitySnapshot = {
   }>;
 };
 
+/**
+ * Ephemeral routing facts maintained by the local runtime event stream.
+ *
+ * The persisted runtime snapshot is still the source of truth for policy and
+ * availability. This small overlay bridges the interval between a
+ * reserve/release event and the next snapshot refresh; its latest release
+ * marker also prevents a stale poll from bringing a completed route back.
+ */
+export type RuntimeActivityState = {
+  revision: number;
+  lastCandidateId: string | null;
+};
+
 export type WakeTask = {
   id: string;
   name: string;
@@ -268,6 +310,31 @@ export type RuntimeSnapshot = {
   automations: WakeTask[];
   wakeHistory: WakeHistory[];
   warnings: string[];
+  pricing?: PricingMetadata;
+};
+
+export type OpenCodeConfigStatus = {
+  configured: boolean;
+  modelCount: number;
+  hasBackup: boolean;
+  backupCreatedAtMs?: number | null;
+  backupName?: string | null;
+  path: string;
+};
+
+export type ProfileSnapshot = {
+  id: string;
+  name: string;
+  profileDir: string;
+  createdAtMs: number;
+  configAvailable: boolean;
+  authAvailable: boolean;
+  isOriginal?: boolean;
+};
+
+export type ProfileSnapshotList = {
+  snapshots: ProfileSnapshot[];
+  invalidCount: number;
 };
 
 type ConfigurationPresetMemberRule = {
@@ -283,6 +350,8 @@ type ConfigurationPresetMemberRule = {
 export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
   name: string;
   baseUrl: string;
+  pricingProvider?: string | null;
+  officialProviderFamily?: string | null;
   wireApi: SourceWireApi;
   protocolBindings?: SourceProtocolBinding[];
   serviceTier?: DefaultServiceTier;
@@ -421,14 +490,11 @@ export type ToolUseDiagnostics = {
 export type ErrorOrigin = "provider" | "account" | "relay";
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
-export type LocalUsage = {
+/** Fields shared by local SQLite and remote Relay usage events. */
+type UsageEventRecord = {
   id: number;
-  createdAt: string;
   requestId: string;
   attempt: number;
-  sourceId: string;
-  accountId?: string | null;
-  clientContextId?: string | null;
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
@@ -436,15 +502,15 @@ export type LocalUsage = {
   effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages" | "gemini";
   serviceTier?: DefaultServiceTier;
-  appliedServiceTier?: DefaultServiceTier | null;
+  appliedServiceTier?: ObservedServiceTier | null;
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
   errorOrigin?: ErrorOrigin | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
-  ttftMs: number | null;
-  generationMs: number | null;
+  ttftMs?: number | null;
+  generationMs?: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
@@ -453,6 +519,15 @@ export type LocalUsage = {
   outputTokens: number | null;
   totalTokens: number | null;
   apiEquivalent?: ApiEquivalentSummary;
+};
+
+export type LocalUsage = UsageEventRecord & {
+  createdAt: string;
+  sourceId: string;
+  accountId?: string | null;
+  clientContextId?: string | null;
+  ttftMs: number | null;
+  generationMs: number | null;
 };
 
 export type UsageTotals = {
@@ -498,6 +573,7 @@ export type LocalUsagePage = {
   models: UsageGroup[];
   poolMembers: UsageGroup[];
   buckets?: UsageBucket[];
+  pricing?: PricingMetadata;
 };
 
 export type UsageExportRow = {
@@ -521,7 +597,7 @@ export type UsageExportRow = {
   errorCategory: string | null;
   errorOrigin?: ErrorOrigin | null;
   serviceTier?: DefaultServiceTier;
-  appliedServiceTier?: DefaultServiceTier | null;
+  appliedServiceTier?: ObservedServiceTier | null;
 };
 
 export type SupportExportContext = {
@@ -535,37 +611,10 @@ export type SupportExportContext = {
   warningCount: number;
 };
 
-export type RemoteUsage = {
-  id: number;
-  requestId: string;
-  attempt: number;
+export type RemoteUsage = UsageEventRecord & {
   candidateKind: "account" | "source";
   candidateHint: string;
   candidateLabel?: string | null;
-  routing?: RoutingDiagnostics | null;
-  requestedModel: string | null;
-  resolvedModel: string | null;
-  requestedReasoningEffort?: ReasoningEffort | null;
-  effectiveReasoningEffort?: ReasoningEffort | null;
-  wireApi: "responses" | "chat_completions" | "messages" | "gemini";
-  serviceTier?: DefaultServiceTier;
-  appliedServiceTier?: DefaultServiceTier | null;
-  success: boolean;
-  httpStatus: number;
-  errorCategory: string | null;
-  errorOrigin?: ErrorOrigin | null;
-  toolUse?: ToolUseDiagnostics;
-  latencyMs: number;
-  ttftMs?: number | null;
-  generationMs?: number | null;
-  inputTokens: number | null;
-  cachedInputTokens: number | null;
-  cacheWriteInputTokens?: number | null;
-  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
-  reasoningTokens: number | null;
-  outputTokens: number | null;
-  totalTokens: number | null;
-  apiEquivalent?: ApiEquivalentSummary;
   createdAtMs: number;
 };
 
@@ -582,6 +631,10 @@ export type RemoteUsageQuery = {
   success?: boolean;
   errorCategory?: string;
   requestIdQuery?: string;
+  /** Optional response projections; omitted keeps compatibility with older hosts. */
+  includeEvents?: boolean;
+  includeModels?: boolean;
+  includePoolMembers?: boolean;
 };
 
 export type RemoteUsagePage = {
@@ -594,6 +647,7 @@ export type RemoteUsagePage = {
   models?: UsageGroup[];
   poolMembers?: UsageGroup[];
   buckets?: UsageBucket[];
+  pricing?: PricingMetadata;
 };
 
 export type ImportSession = {
@@ -686,21 +740,6 @@ export type ProfileBinding = {
 
 export type ProfileActivation = {
   binding: ProfileBinding;
-};
-
-export type ProfileSnapshot = {
-  id: string;
-  name: string;
-  profileDir: string;
-  createdAtMs: number;
-  configAvailable: boolean;
-  authAvailable: boolean;
-  isOriginal?: boolean;
-};
-
-export type ProfileSnapshotList = {
-  snapshots: ProfileSnapshot[];
-  invalidCount: number;
 };
 
 export type SupportBundlePreview = {

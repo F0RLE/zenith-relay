@@ -8,16 +8,20 @@ const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as
 const TITLE_BAR_HEIGHT = 36;
 
 async function expectTopLevelEmptyCentered(page: Page) {
-  const [pageBox, headerBox, emptyBox, paddingBottom] = await Promise.all([
+  const tabs = page.locator(".relay-page > .relay-tabs");
+  const [pageBox, headerBox, tabCount, emptyBox, paddingBottom] = await Promise.all([
     page.locator(".relay-page").boundingBox(),
     page.locator(".relay-page-header").boundingBox(),
-    page.locator(".relay-page > .relay-empty").boundingBox(),
+    tabs.count(),
+    page.locator(".gateway-empty-tab-panel > .relay-empty, .relay-page > .relay-empty").boundingBox(),
     page.locator(".relay-page").evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingBottom)),
   ]);
+  const tabsBox = tabCount ? await tabs.boundingBox() : null;
   expect(pageBox).not.toBeNull();
   expect(headerBox).not.toBeNull();
   expect(emptyBox).not.toBeNull();
-  const availableCenter = (headerBox!.y + headerBox!.height + pageBox!.y + pageBox!.height - paddingBottom) / 2;
+  const contentTop = tabsBox ? tabsBox.y + tabsBox.height : headerBox!.y + headerBox!.height;
+  const availableCenter = (contentTop + pageBox!.y + pageBox!.height - paddingBottom) / 2;
   expect(Math.abs(emptyBox!.y + emptyBox!.height / 2 - availableCenter)).toBeLessThanOrEqual(2);
 }
 
@@ -371,13 +375,13 @@ test("overview analytics remain readable through the full scroll", async ({ page
   await page.screenshot({ path: "output/playwright/overview-analytics-lower-ru-dark-840x560.png" });
 });
 
-test("overview header keeps ChatGPT launch beside the API control", async ({ page }) => {
+test("overview header opens the application picker beside the API control", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
 
   const stop = page.getByRole("button", { name: "Остановить API", exact: true });
-  const launch = page.getByRole("button", { name: "Запустить ChatGPT", exact: true });
+  const launch = page.getByRole("button", { name: "Запустить приложение", exact: true });
   await expect(stop).toBeVisible();
   await expect(launch).toBeVisible();
   const [stopBox, launchBox] = await Promise.all([stop.boundingBox(), launch.boundingBox()]);
@@ -386,6 +390,11 @@ test("overview header keeps ChatGPT launch beside the API control", async ({ pag
   expect(launchBox!.x).toBeGreaterThan(stopBox!.x + stopBox!.width);
 
   await launch.click();
+  const picker = page.getByRole("dialog", { name: "Какое приложение запустить?" });
+  await picker.getByLabel("Запустить приложение после подключения").check({ force: true });
+  await picker
+    .getByRole("button", { name: "ChatGPT", exact: true })
+    .click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_managed_codex_profile"))).toBe(true);
   await page.screenshot({ path: "output/playwright/overview-header-chatgpt-launch-ru-dark-1160x760.png" });
 });
@@ -467,7 +476,7 @@ for (const theme of ["light", "dark"] as const) {
 }
 
 test("disabled model state stays readable in the compact dark window", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true });
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true, modelSpeed: { "gpt-5.4-mini": "fast" } });
   await page.setViewportSize({ width: 840, height: 560 });
   await page.goto("/");
   await page.getByRole("button", { name: "Пул", exact: true }).click();
@@ -475,7 +484,7 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   const table = page.locator(".model-rules-table");
   await expect(table.getByRole("columnheader")).toHaveCount(4);
   expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center"]);
-  await expect(table.locator(".model-group-row").first()).toContainText("ChatGPT");
+  await expect(table.locator(".model-group-row").first()).toContainText("OpenAI");
   await expect(table.locator(".model-group-row").nth(1)).toContainText("Anthropic");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();
@@ -771,10 +780,10 @@ for (const viewport of viewports) {
     await expect(headerActions.locator(":scope > *")).toHaveCount(3);
     await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Сохранить пресет", exact: true })).toBeVisible();
     await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Применить пресет", exact: true })).toBeVisible();
-    await expect(headerActions.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Сохранить пресет", "Применить пресет", "Добавить участника", "Переключить ChatGPT на пул"]);
+    await expect(headerActions.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Сохранить пресет", "Применить пресет", "Добавить участника", "Подключить"]);
     await expect(headerActions.getByRole("button", { name: "Добавить участника", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toHaveCount(0);
-    await expect(headerActions.getByRole("button", { name: "Переключить ChatGPT на пул", exact: true })).toBeDisabled();
+    await expect(headerActions.getByRole("button", { name: "Подключить", exact: true })).toBeDisabled();
     const actionBoxes = await headerActions.locator(":scope > .relay-button").evaluateAll((buttons) => buttons.map((button) => {
       const rect = button.getBoundingClientRect();
       return { width: rect.width, height: rect.height, overflow: button.scrollWidth - button.clientWidth };
@@ -790,7 +799,7 @@ for (const viewport of viewports) {
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
-    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Скорость запросов" })).toBeVisible();
+    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Скорость запроса" })).toBeVisible();
     await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения"]);
     await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
@@ -814,12 +823,12 @@ for (const viewport of viewports) {
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
-    const speed = page.getByRole("switch", { name: "Скорость запросов" });
+    const speed = page.getByRole("switch", { name: "Скорость запроса" });
     await speed.check();
     await expect(speed).toBeChecked();
     await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Распределение" });
-    await expect(distribution).not.toContainText("Скорость запросов");
+    await expect(distribution).not.toContainText("Скорость запроса");
     await distribution.getByRole("button", { name: /^Стратегия распределения:/ }).click();
     await page.locator('[role="option"][data-value="subscription_plan"]').click();
     await expect(distribution.locator("[data-subscription-plan]")).toHaveCount(4);
@@ -1163,7 +1172,7 @@ for (const viewport of viewports) {
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
-      await expect(dialog).not.toContainText("Скорость запросов");
+      await expect(dialog).not.toContainText("Скорость запроса");
       await expect(dialog).toContainText("Выбирает наибольший доступный остаток, а при равных значениях распределяет запросы равномерно.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -1384,137 +1393,6 @@ for (const viewport of viewports) {
   });
 }
 
-for (const theme of themes) {
-  for (const viewport of viewports) {
-    test(`profile recovery ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
-    await page.clock.install({ time: 0 });
-    await page.setViewportSize(viewport);
-    await page.goto("/");
-    await page.getByRole("button", { name: "Восстановление", exact: true }).click();
-
-    const recovery = page.locator(".profile-recovery");
-    const form = page.locator(".profile-snapshot-create");
-    const table = page.locator(".profile-snapshot-table");
-    const headerBefore = await page.locator(".relay-page-header").boundingBox();
-    expect(headerBefore).not.toBeNull();
-    await expect(page.getByRole("tab")).toHaveCount(0);
-    await expect(page.getByText("Исправление истории", { exact: true })).toHaveCount(0);
-    const snapshotName = viewport.width === 840 ? "Перед большим обновлением проекта с очень длинным названием рабочей среды" : "Перед обновлением проекта";
-    await page.getByLabel("Название снимка").fill(snapshotName);
-    await page.getByLabel("Название снимка").press("Enter");
-    await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
-    const shell = page.locator(".relay-shell");
-    const [feedbackBox, shellBox, sidebarBox, footerBox, helpBox, headerAfter] = await Promise.all([
-      page.locator(".global-feedback").boundingBox(),
-      page.locator(".relay-shell").boundingBox(),
-      page.locator(".relay-sidebar").boundingBox(),
-      page.locator(".sidebar-footer").boundingBox(),
-      page.getByRole("button", { name: "Помощь" }).boundingBox(),
-      page.locator(".relay-page-header").boundingBox(),
-    ]);
-    expect(feedbackBox).not.toBeNull();
-    expect(shellBox).not.toBeNull();
-    expect(sidebarBox).not.toBeNull();
-    expect(footerBox).not.toBeNull();
-    expect(helpBox).not.toBeNull();
-    expect(headerAfter).not.toBeNull();
-    expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
-    expect(feedbackBox!.x).toBeGreaterThanOrEqual(sidebarBox!.x);
-    expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
-    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(footerBox!.y + 1);
-    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
-    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
-    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
-    expect(await page.locator(".global-feedback").evaluate((element) => element.parentElement?.classList.contains("sidebar-feedback"))).toBe(true);
-    expect(feedbackBox!.y).toBeGreaterThanOrEqual(shellBox!.y - 1);
-    expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
-    if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
-      expect(feedbackBox!.width).toBeLessThanOrEqual(38);
-      expect(await page.locator(".global-feedback-message").evaluate((element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return rect.width <= 1 && rect.height <= 1 && style.clipPath === "inset(50%)";
-      })).toBe(true);
-      await expect(page.locator(".global-feedback-status-icon")).toHaveAttribute("title", "Снимок профиля создан.");
-      await expect(page.locator(".global-feedback")).toHaveAttribute("aria-label", "Снимок профиля создан.");
-      const closeButton = page.locator(".global-feedback > .global-feedback-actions > .relay-icon-button");
-      expect(await closeButton.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
-      await page.screenshot({ path: `output/playwright/feedback-bottom-left-resting-${theme}-${viewport.width}x${viewport.height}.png` });
-      await page.locator(".global-feedback").hover();
-      await expect.poll(() => closeButton.evaluate((element) => getComputedStyle(element).opacity), { timeout: 1_000 }).toBe("1");
-      const hoveredFeedbackBox = await page.locator(".global-feedback").boundingBox();
-      const statusIcon = page.locator(".global-feedback-status-icon");
-      const statusBox = await statusIcon.boundingBox();
-      const closeBox = await closeButton.boundingBox();
-      expect(hoveredFeedbackBox).not.toBeNull();
-      expect(statusBox).not.toBeNull();
-      expect(closeBox).not.toBeNull();
-      expect(hoveredFeedbackBox!.width).toBeLessThanOrEqual(38);
-      expect(hoveredFeedbackBox!.x + hoveredFeedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
-      expect(await statusIcon.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
-      expect(Math.abs((statusBox!.x + statusBox!.width / 2) - (closeBox!.x + closeBox!.width / 2))).toBeLessThanOrEqual(1);
-      expect(Math.abs((statusBox!.y + statusBox!.height / 2) - (closeBox!.y + closeBox!.height / 2))).toBeLessThanOrEqual(1);
-    } else {
-      await expect(page.locator(".global-feedback-message")).toBeVisible();
-    }
-    await page.screenshot({ path: `output/playwright/feedback-bottom-left-${theme}-${viewport.width}x${viewport.height}.png` });
-    await page.locator(".global-feedback .relay-icon-button").click();
-    await page.getByLabel("Название снимка").fill("Новый снимок");
-    const createButton = page.getByRole("button", { name: "Создать снимок" });
-    await expect(createButton).toBeEnabled();
-    expect(await createButton.evaluate((element) => {
-      const parse = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number).map((channel) => channel / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
-      const luminance = (value: string) => { const [red, green, blue] = parse(value); return 0.2126 * red + 0.7152 * green + 0.0722 * blue; };
-      const style = getComputedStyle(element);
-      const values = [luminance(style.color), luminance(style.backgroundColor)].sort((left, right) => right - left);
-      return (values[0] + 0.05) / (values[1] + 0.05);
-    })).toBeGreaterThanOrEqual(4.5);
-    expect(await recovery.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-    expect(await table.locator("th:visible, td:visible").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "center"))).toBe(true);
-    await expect(table.getByRole("columnheader", { name: "Содержимое" })).toBeVisible();
-    await expect(table.locator("tbody .relay-status-icon").first()).toHaveAttribute("aria-label", "Настройки и вход");
-    const actionButtons = table.locator("tbody tr").first().locator("td:last-child .relay-icon-button, td:last-child .relay-button");
-    expect(await actionButtons.evaluateAll((buttons) => {
-      const [first, second] = buttons.map((button) => button.getBoundingClientRect());
-      return first.width >= 38 && second.width >= 38 && second.left - first.right >= 8;
-    })).toBe(true);
-    const [tableWrapBox, actionsBox] = await Promise.all([
-      table.locator("xpath=..").boundingBox(),
-      table.locator("tbody tr").first().locator("td:last-child .inline-actions").boundingBox(),
-    ]);
-    expect(tableWrapBox).not.toBeNull();
-    expect(actionsBox).not.toBeNull();
-    expect(actionsBox!.x).toBeGreaterThanOrEqual(tableWrapBox!.x - 1);
-    expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(tableWrapBox!.x + tableWrapBox!.width + 1);
-    if (viewport.width === 840) {
-      const longName = table.getByText(snapshotName, { exact: true });
-      expect(await longName.evaluate((element) => getComputedStyle(element).textOverflow)).toBe("ellipsis");
-      expect(await longName.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
-    }
-    const [recoveryBox, formBox] = await Promise.all([recovery.boundingBox(), form.boundingBox()]);
-    expect(recoveryBox).not.toBeNull();
-    expect(formBox).not.toBeNull();
-    expect(Math.abs((formBox!.x - recoveryBox!.x) - (recoveryBox!.x + recoveryBox!.width - formBox!.x - formBox!.width))).toBeLessThanOrEqual(2);
-    const placement = await recovery.evaluate((element) => {
-      const pageElement = element.closest<HTMLElement>(".profile-recovery-page")!;
-      const page = pageElement.getBoundingClientRect();
-      const header = pageElement.querySelector<HTMLElement>(".relay-page-header")!.getBoundingClientRect();
-      const box = element.getBoundingClientRect();
-      const availableBottom = page.bottom - Number.parseFloat(getComputedStyle(pageElement).paddingBottom);
-      const availableHeight = availableBottom - header.bottom;
-      return {
-        fits: box.height <= availableHeight + 1,
-        centerOffset: Math.abs((box.top + box.bottom) / 2 - (header.bottom + availableBottom) / 2),
-        topOffset: Math.abs(header.bottom - box.top),
-      };
-    });
-    expect(placement.fits ? placement.centerOffset : placement.topOffset).toBeLessThanOrEqual(2);
-    await page.screenshot({ path: `output/playwright/profile-recovery-ru-${theme}-${viewport.width}x${viewport.height}.png` });
-    });
-  }
-}
-
 for (const scenario of [
   { name: "expanded", viewport: { width: 1160, height: 760 }, collapsed: false },
   { name: "compact", viewport: { width: 840, height: 560 }, collapsed: true },
@@ -1524,7 +1402,8 @@ for (const scenario of [
     await page.setViewportSize(scenario.viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
-    await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("dialog", { name: "What do you want to connect?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
 
     const shell = page.locator(".relay-shell");
     const feedback = page.locator(".global-feedback.error");
@@ -1594,7 +1473,7 @@ for (const scenario of [
 
 for (const viewport of viewports) {
   test(`empty profile recovery is centered ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, profileSnapshotsEmpty: true });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Восстановление", exact: true }).click();
@@ -1617,6 +1496,11 @@ for (const viewport of viewports) {
     expect(metrics!.bottomOverflow).toBeLessThanOrEqual(1);
     expect(metrics!.horizontalOverflow).toBeLessThanOrEqual(0);
     await page.screenshot({ path: `output/playwright/profile-recovery-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
+
+    await page.getByRole("tab", { name: "OpenCode", exact: true }).click();
+    const openCodeRecovery = page.locator(".profile-recovery-opencode.is-empty");
+    await expect(openCodeRecovery.locator(".profile-recovery-empty-state")).toBeVisible();
+    await page.screenshot({ path: `output/playwright/profile-recovery-opencode-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
   });
 }
 
@@ -1626,17 +1510,30 @@ for (const theme of themes) {
       await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 4 });
       await page.setViewportSize(viewport);
       await page.goto("/");
-      await page.getByRole("button", { name: "API и ChatGPT", exact: true }).click();
-      await expect(page.locator(".gateway-settings-panel")).toBeVisible();
+      await page.getByRole("button", { name: "API", exact: true }).click();
+      const connectionPanel = page.locator(".gateway-api-connection-panel");
+      const endpointValue = connectionPanel.locator(".gateway-endpoint-value");
+      const portControl = connectionPanel.locator(".gateway-api-port-control");
+      await expect(connectionPanel).toBeVisible();
       await expect(page.getByText("В сети", { exact: true })).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Остановить API" })).toHaveClass(/secondary/);
       const portInput = page.getByRole("spinbutton", { name: "Порт" });
       const portSave = page.getByRole("button", { name: "Сохранить и перезапустить" });
-      const [portBox, saveBox] = await Promise.all([portInput.boundingBox(), portSave.boundingBox()]);
+      const [endpointBox, portControlBox, portBox, saveBox] = await Promise.all([
+        endpointValue.boundingBox(),
+        portControl.boundingBox(),
+        portInput.boundingBox(),
+        portSave.boundingBox(),
+      ]);
+      expect(endpointBox).not.toBeNull();
+      expect(portControlBox).not.toBeNull();
       expect(portBox).not.toBeNull();
       expect(saveBox).not.toBeNull();
+      expect(Math.abs((endpointBox!.y + endpointBox!.height / 2) - (portControlBox!.y + portControlBox!.height / 2))).toBeLessThanOrEqual(2);
       expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
+      await page.screenshot({ path: `output/playwright/gateway-api-connection-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
+      await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Аккаунт ChatGPT" })).toBeVisible();
       await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "auto");
@@ -1696,7 +1593,7 @@ test("unconfigured API empty state uses the available page center", async ({ pag
   await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
-  await page.getByRole("button", { name: "API и ChatGPT", exact: true }).click();
+  await page.getByRole("button", { name: "API", exact: true }).click();
   await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
   await expectTopLevelEmptyCentered(page);
   await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });

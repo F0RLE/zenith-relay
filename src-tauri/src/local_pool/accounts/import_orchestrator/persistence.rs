@@ -19,7 +19,6 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     let (old_accounts, old_keys) = current_account_records(state).map_err(|_| {
         ImportItemError::new("account_store_failed", "account store is unavailable")
     })?;
-    let sync_gateway = !account.effective_models().is_empty();
     credential_store
         .save(credentials)
         .map_err(credential_item_error)?;
@@ -38,10 +37,9 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             "failed to save account record",
         ));
     }
-    if sync_gateway
-        && sync_accounts_or_rollback(state, old_accounts.clone(), old_keys.clone())
-            .await
-            .is_err()
+    if sync_accounts_or_rollback(state, old_accounts.clone(), old_keys.clone())
+        .await
+        .is_err()
     {
         restore_credential_item(
             credential_store,

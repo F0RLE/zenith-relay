@@ -44,6 +44,18 @@ impl WireApi {
             Self::Gemini => "gemini",
         }
     }
+
+    /// Parses canonical and legacy persisted values without accepting a new
+    /// user-facing protocol spelling.
+    pub fn from_storage_value(value: &str) -> Option<Self> {
+        match value {
+            "responses" => Some(Self::Responses),
+            "chat_completions" | "chatcompletions" => Some(Self::ChatCompletions),
+            "messages" => Some(Self::Messages),
+            "gemini" => Some(Self::Gemini),
+            _ => None,
+        }
+    }
 }
 
 /// Explicit Anthropic prompt-cache write lifetime for a Messages upstream.
@@ -288,6 +300,68 @@ pub fn runtime_source_models_for_wire_api(
     .filter(|binding| binding.wire_api == wire_api)
     .flat_map(|binding| binding.model_ids)
     .collect())
+}
+
+/// Returns the deduplicated source catalog reachable through every confirmed
+/// client protocol. The output keeps the public protocol order and then the
+/// provider-provided order within each route.
+pub fn runtime_source_models_for_any_wire_api(
+    protocol_bindings: &[SourceProtocolBinding],
+    fallback_wire_api: WireApi,
+    source_models: &[String],
+) -> Result<Vec<String>> {
+    let bindings = runtime_source_protocol_bindings(
+        protocol_bindings.to_vec(),
+        fallback_wire_api,
+        source_models,
+    )?;
+    let mut seen = BTreeSet::new();
+    let mut models = Vec::new();
+    for wire_api in WireApi::ALL {
+        for binding in bindings
+            .iter()
+            .filter(|binding| binding.wire_api == wire_api)
+        {
+            for model in &binding.model_ids {
+                if seen.insert(model.to_ascii_lowercase()) {
+                    models.push(model.clone());
+                }
+            }
+        }
+    }
+    Ok(models)
+}
+
+/// Reports whether a confirmed route exposes at least one model through the
+/// requested client protocol.
+pub fn runtime_source_supports_wire_api(
+    protocol_bindings: &[SourceProtocolBinding],
+    fallback_wire_api: WireApi,
+    source_models: &[String],
+    wire_api: WireApi,
+) -> Result<bool> {
+    Ok(!runtime_source_models_for_wire_api(
+        protocol_bindings,
+        fallback_wire_api,
+        source_models,
+        wire_api,
+    )?
+    .is_empty())
+}
+
+/// Reports whether a confirmed route exposes at least one model through any
+/// supported client protocol.
+pub fn runtime_source_supports_any_wire_api(
+    protocol_bindings: &[SourceProtocolBinding],
+    fallback_wire_api: WireApi,
+    source_models: &[String],
+) -> Result<bool> {
+    Ok(!runtime_source_models_for_any_wire_api(
+        protocol_bindings,
+        fallback_wire_api,
+        source_models,
+    )?
+    .is_empty())
 }
 
 #[derive(Clone)]
@@ -838,6 +912,11 @@ mod tests {
         assert_eq!(WireApi::Messages.as_str(), "messages");
         assert_eq!(WireApi::Gemini.as_str(), "gemini");
         assert_eq!(
+            WireApi::from_storage_value("chatcompletions"),
+            Some(WireApi::ChatCompletions)
+        );
+        assert_eq!(WireApi::from_storage_value("unknown"), None);
+        assert_eq!(
             source_models_for_wire_api(
                 &bindings,
                 WireApi::Responses,
@@ -847,6 +926,24 @@ mod tests {
             .unwrap(),
             ["gpt-test", "claude-test"]
         );
+        assert_eq!(
+            runtime_source_models_for_any_wire_api(&bindings, WireApi::Responses, &source_models,)
+                .unwrap(),
+            ["gpt-test", "claude-test"]
+        );
+        assert!(runtime_source_supports_wire_api(
+            &bindings,
+            WireApi::Responses,
+            &source_models,
+            WireApi::Responses,
+        )
+        .unwrap());
+        assert!(runtime_source_supports_any_wire_api(
+            &bindings,
+            WireApi::Responses,
+            &source_models,
+        )
+        .unwrap());
         assert!(is_loopback_url(&Url::parse("http://localhost").unwrap()));
         assert!(is_loopback_url(&Url::parse("http://[::1]").unwrap()));
         assert!(!is_loopback_url(

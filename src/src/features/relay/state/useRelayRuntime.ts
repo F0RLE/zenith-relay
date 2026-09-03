@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
-import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, applyRuntimeActivity } from "../routingOrder";
+import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
+import { applyRuntimeActivities } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
@@ -12,8 +12,9 @@ import {
   ROUTING_REFRESH_INTERVAL_MS,
   RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
   RUNTIME_REFRESH_INTERVAL_MS,
-  USAGE_EVENT_REFRESH_DEBOUNCE_MS,
   isRuntimeRefreshPage,
+  isUsageRefreshPage,
+  usageRefreshDebounceMs,
 } from "./refreshPolicy";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
 
@@ -23,6 +24,8 @@ type RelayRuntimeDependencies = {
   resetUsage: () => void;
   reportErrorFeedback: (cause: unknown, key: string, fallbackCode: string) => void;
 };
+
+type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"]>;
 
 /** Own mode navigation, runtime snapshots, event synchronization, and refresh timing. */
 export function useRelayRuntime({
@@ -37,16 +40,28 @@ export function useRelayRuntime({
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [usageRevision, setUsageRevision] = useState(0);
   const [readyState, setReadyState] = useState<UiState | null>(null);
+  const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivityState>({
+    revision: 0,
+    lastCandidateId: null,
+  });
   const [loading, setLoading] = useState(true);
   const modeRef = useRef(mode);
   const pageRef = useRef(page);
   const stateRevision = useRef(1);
   const refreshedRevision = useRef(0);
   const backgroundRefreshPending = useRef(new Set<RelayMode>());
+  const backgroundRefreshRetryTimers = useRef(new Map<RelayMode, number>());
   const runtimeRefreshPage = useRef<PageId>("overview");
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
+  // Keep the scheduler order separate from the activity facts. The map also
+  // retains the latest zero-count event: a routing poll can finish while a
+  // request is in flight, and that stale snapshot must not resurrect the
+  // candidate after its release event arrives.
+  const runtimeRoutingOrderBase = useRef<RuntimeRoutingOrder>([]);
+  const runtimeRoutingSupported = mode !== "remote"
+    || Boolean(runtime?.capabilities.features.includes("runtime_routing"));
 
   const setPage = useCallback((next: PageId) => {
     if (pageRef.current === next) return;
@@ -61,6 +76,8 @@ export function useRelayRuntime({
     modeRef.current = next;
     stateRevision.current += 1;
     runtimeActivityOverlay.current.clear();
+    runtimeRoutingOrderBase.current = [];
+    setRuntimeActivity({ revision: 0, lastCandidateId: null });
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
     resetUsage();
@@ -82,12 +99,15 @@ export function useRelayRuntime({
     void recordPerformance("full_snapshot", performance.now() - startedAt, requestedMode);
     if (modeRef.current !== requestedMode) return;
     if (requestedMode === "zenith") setReadyState(loaded.readyState);
+    if (requestedMode === "local") {
+      runtimeRoutingOrderBase.current = loaded.snapshot?.gateway.routingOrder ?? [];
+    }
     const snapshot = loaded.snapshot && requestedMode === "local"
       ? {
         ...loaded.snapshot,
         gateway: {
           ...loaded.snapshot.gateway,
-          routingOrder: applyRuntimeActivities(loaded.snapshot.gateway.routingOrder ?? [], runtimeActivityOverlay.current.values()),
+          routingOrder: visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current),
         },
       }
       : loaded.snapshot;
@@ -102,19 +122,35 @@ export function useRelayRuntime({
     if (
       !isRuntimeRefreshPage(pageRef.current)
       || backgroundRefreshPending.current.has(refreshMode)
+      || backgroundRefreshRetryTimers.current.has(refreshMode)
       || modeRef.current !== refreshMode
     ) return;
     backgroundRefreshPending.current.add(refreshMode);
     void (async () => {
       try {
-        do {
-          await refresh(false);
-        } while (
+        await refresh(false);
+        // A state event may arrive while the snapshot is in flight. Keep one
+        // trailing retry, but let a short settling window coalesce a burst of
+        // writes instead of spinning through full snapshots back-to-back.
+        if (
           modeRef.current === refreshMode
           && isRuntimeRefreshPage(pageRef.current)
           && document.visibilityState === "visible"
           && refreshedRevision.current !== stateRevision.current
-        );
+          && !backgroundRefreshRetryTimers.current.has(refreshMode)
+        ) {
+          const timer = window.setTimeout(() => {
+            backgroundRefreshRetryTimers.current.delete(refreshMode);
+            if (
+              modeRef.current === refreshMode
+              && isRuntimeRefreshPage(pageRef.current)
+              && document.visibilityState === "visible"
+            ) {
+              runBackgroundRefresh();
+            }
+          }, RUNTIME_EVENT_REFRESH_DEBOUNCE_MS);
+          backgroundRefreshRetryTimers.current.set(refreshMode, timer);
+        }
       } catch {
         // The next state event, focus, or periodic refresh retries the snapshot.
       } finally {
@@ -145,8 +181,7 @@ export function useRelayRuntime({
   }, [refresh, reportErrorFeedback]);
 
   useEffect(() => {
-    if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith") return;
-    if (mode === "remote" && !runtime.capabilities.features.includes("runtime_routing")) return;
+    if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith" || !runtimeRoutingSupported) return;
     let active = true;
     let pending = false;
     const refreshRouting = async () => {
@@ -157,8 +192,9 @@ export function useRelayRuntime({
           ? await relayCommands.localRuntimeOrder()
           : await relayCommands.remoteRuntimeOrder();
         if (!active || routingOrder == null) return;
+        if (mode === "local") runtimeRoutingOrderBase.current = routingOrder;
         const visibleRoutingOrder = mode === "local"
-          ? applyRuntimeActivities(routingOrder, runtimeActivityOverlay.current.values())
+          ? visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current)
           : routingOrder;
         setRuntime((snapshot) => snapshot ? {
           ...snapshot,
@@ -176,7 +212,7 @@ export function useRelayRuntime({
       active = false;
       window.clearInterval(interval);
     };
-  }, [mode, page, runtime?.gateway.running, runtime?.capabilities.features]);
+  }, [mode, page, runtime?.gateway.running, runtimeRoutingSupported]);
 
   useEffect(() => {
     const enteredRuntimeRefreshPage = isRuntimeRefreshPage(page) && !isRuntimeRefreshPage(runtimeRefreshPage.current);
@@ -201,6 +237,13 @@ export function useRelayRuntime({
     };
   }, [page, runBackgroundRefresh]);
 
+  useEffect(() => () => {
+    for (const timer of backgroundRefreshRetryTimers.current.values()) {
+      window.clearTimeout(timer);
+    }
+    backgroundRefreshRetryTimers.current.clear();
+  }, []);
+
   useEffect(() => {
     let active = true;
     let runtimeRefreshQueued = false;
@@ -209,21 +252,69 @@ export function useRelayRuntime({
     let unlisten: (() => void) | undefined;
     let unlistenUsage: (() => void) | undefined;
     let unlistenRuntimeActivity: (() => void) | undefined;
+    let runtimeActivityFrame: number | undefined;
+    let runtimeActivityFallbackTimer: number | undefined;
+    let runtimeActivityFlushQueued = false;
+    let pendingRuntimeActivity: RuntimeActivityState | null = null;
+    const flushRuntimeActivity = () => {
+      runtimeActivityFrame = undefined;
+      runtimeActivityFallbackTimer = undefined;
+      runtimeActivityFlushQueued = false;
+      if (!active || modeRef.current !== "local") {
+        pendingRuntimeActivity = null;
+        return;
+      }
+      const pending = pendingRuntimeActivity;
+      pendingRuntimeActivity = null;
+      if (pending) {
+        setRuntimeActivity((current) => pending.revision > current.revision ? pending : current);
+      }
+      if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
+      setRuntime((snapshot) => {
+        if (!snapshot) return snapshot;
+        const currentOrder = snapshot.gateway.routingOrder ?? [];
+        const baseOrder = runtimeRoutingOrderBase.current.length
+          ? runtimeRoutingOrderBase.current
+          : currentOrder;
+        const nextOrder = visibleLocalRoutingOrder(baseOrder, runtimeActivityOverlay.current);
+        return nextOrder === currentOrder
+          ? snapshot
+          : { ...snapshot, gateway: { ...snapshot.gateway, routingOrder: nextOrder } };
+      });
+    };
+    const scheduleRuntimeActivityFlush = () => {
+      if (runtimeActivityFlushQueued) return;
+      runtimeActivityFlushQueued = true;
+      if (document.visibilityState === "visible") {
+        runtimeActivityFrame = window.requestAnimationFrame(flushRuntimeActivity);
+      } else {
+        // Background documents may throttle animation frames indefinitely.
+        runtimeActivityFallbackTimer = window.setTimeout(flushRuntimeActivity, 16);
+      }
+    };
+    const handleActivityVisibilityChange = () => {
+      if (document.visibilityState === "hidden" && runtimeActivityFrame !== undefined) {
+        window.cancelAnimationFrame(runtimeActivityFrame);
+        runtimeActivityFrame = undefined;
+        flushRuntimeActivity();
+      }
+    };
+    document.addEventListener("visibilitychange", handleActivityVisibilityChange);
     const scheduleUsageRefresh = () => {
-      if (!active || document.visibilityState !== "visible" || pageRef.current !== "usage" || usageRefreshTimer !== undefined) return;
+      const targetPage = pageRef.current;
+      if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(targetPage) || usageRefreshTimer !== undefined) return;
       usageRefreshTimer = window.setTimeout(() => {
         usageRefreshTimer = undefined;
-        if (!active || pageRef.current !== "usage" || document.visibilityState !== "visible") return;
+        if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(pageRef.current)) return;
         setUsageRevision((current) => current + 1);
-      }, USAGE_EVENT_REFRESH_DEBOUNCE_MS);
+      }, usageRefreshDebounceMs(targetPage));
     };
     void relayCommands.onStateChanged(() => {
       stateRevision.current += 1;
-      runtimeActivityOverlay.current.clear();
       if (!active || document.visibilityState !== "visible") return;
-      if (pageRef.current === "usage") {
+      if (isUsageRefreshPage(pageRef.current)) {
         scheduleUsageRefresh();
-        return;
+        if (pageRef.current === "usage") return;
       }
       if (runtimeRefreshQueued || !isRuntimeRefreshPage(pageRef.current)) return;
       runtimeRefreshQueued = true;
@@ -242,15 +333,17 @@ export function useRelayRuntime({
       if (!active || modeRef.current !== "local") return;
       const previous = runtimeActivityOverlay.current.get(activity.candidateId);
       if (previous && activity.revision <= previous.revision) return;
+      // Keep both active and zero-count snapshots. A zero-count snapshot is a
+      // tombstone for an older live poll state and must be applied to the next
+      // base order as well as the current one.
       runtimeActivityOverlay.current.set(activity.candidateId, activity);
-      if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
-      setRuntime((snapshot) => snapshot ? {
-        ...snapshot,
-        gateway: {
-          ...snapshot.gateway,
-          routingOrder: applyRuntimeActivity(snapshot.gateway.routingOrder ?? [], activity),
-        },
-      } : snapshot);
+      if (!pendingRuntimeActivity || activity.revision > pendingRuntimeActivity.revision) {
+        pendingRuntimeActivity = {
+          revision: activity.revision,
+          lastCandidateId: activity.candidateId,
+        };
+      }
+      scheduleRuntimeActivityFlush();
     }).then((stop) => {
       if (active) unlistenRuntimeActivity = stop;
       else stop();
@@ -258,7 +351,7 @@ export function useRelayRuntime({
       // The short routing poll remains the fallback when activity events are unavailable.
     });
     void relayCommands.onUsageRecorded(() => {
-      if (modeRef.current === "local") scheduleUsageRefresh();
+      if (modeRef.current === "local" && isUsageRefreshPage(pageRef.current)) scheduleUsageRefresh();
     }).then((stop) => {
       if (active) unlistenUsage = stop;
       else stop();
@@ -269,6 +362,10 @@ export function useRelayRuntime({
       active = false;
       if (runtimeRefreshTimer !== undefined) window.clearTimeout(runtimeRefreshTimer);
       if (usageRefreshTimer !== undefined) window.clearTimeout(usageRefreshTimer);
+      if (runtimeActivityFrame !== undefined) window.cancelAnimationFrame(runtimeActivityFrame);
+      if (runtimeActivityFallbackTimer !== undefined) window.clearTimeout(runtimeActivityFallbackTimer);
+      pendingRuntimeActivity = null;
+      document.removeEventListener("visibilitychange", handleActivityVisibilityChange);
       unlisten?.();
       unlistenUsage?.();
       unlistenRuntimeActivity?.();
@@ -319,6 +416,17 @@ export function useRelayRuntime({
     usageRevision,
     readyState,
     loading,
+    runtimeActivity,
     refresh,
   };
+}
+
+function visibleLocalRoutingOrder(
+  base: RuntimeRoutingOrder,
+  overlay: ReadonlyMap<string, RuntimeActivitySnapshot>,
+) {
+  return applyRuntimeActivities(
+    base,
+    overlay.values(),
+  );
 }

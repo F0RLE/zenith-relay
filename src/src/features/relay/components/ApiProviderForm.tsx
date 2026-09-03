@@ -2,7 +2,7 @@ import { Cloud, ExternalLink, Route, Settings2, Sparkles, X } from "lucide-react
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { openApiKeyPage } from "../../../platform/desktop";
-import { SourceProtocolRoutingDisclosure } from "./SourceProtocolRoutingDisclosure";
+import { SourceProtocolBindingsEditor } from "./SourceProtocolBindingsEditor";
 import { SecretField } from "./Ui";
 import {
   addApiProviderModel,
@@ -173,7 +173,7 @@ export function ApiProviderForm({
             </label>
           </>}
       </section> : null}
-      {!onboarding && showRouting ? <SourceProtocolRoutingDisclosure
+      {!onboarding && showRouting ? <SourceProtocolBindingsEditor
         models={modelCatalogMode === "manual" ? (value.models ?? []) : []}
         value={value.protocolBindings}
         showSimplePicker={allowManualModels}

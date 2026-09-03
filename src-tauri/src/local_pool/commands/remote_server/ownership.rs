@@ -533,7 +533,7 @@ async fn remove_remote_account_for_return(
             return Err(LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
                 error.to_string(),
-            ))
+            ));
         }
     }
     if remote_account_exists(client, remote_account_id).await? {

@@ -1,4 +1,5 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
@@ -9,6 +10,7 @@ import { accountErrorTranslationKey } from "../accountStatus";
 import { formatDetailedRemainingTime, formatSupplementalQuotaLabel, isFastSupplementalQuota, quotaWindowLabel } from "../quotaFormatting";
 import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
 import type { FeedbackError } from "../state/feedback";
+import { useTransientFlag } from "../hooks/useTransientFlag";
 
 export { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../quotaFormatting";
 
@@ -79,27 +81,54 @@ export function useConfirm() {
   return confirm;
 }
 
-export function Button({ children, icon, variant = "secondary", busy, className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
-  return <button type={props.type ?? "button"} className={`relay-button ${variant}${className ? ` ${className}` : ""}`} {...props} disabled={busy || props.disabled}>{busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span></button>;
+export function Button({ children, icon, variant = "secondary", busy, className, title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
+  const tooltip = useTooltip<HTMLElement>(title ?? "");
+  const hasTooltip = Boolean(title);
+  const disabled = Boolean(busy || props.disabled);
+  const button = <button
+    ref={hasTooltip && !disabled ? (node) => { tooltip.anchorRef.current = node; } : undefined}
+    type={props.type ?? "button"}
+    className={`relay-button ${variant}${className ? ` ${className}` : ""}`}
+    aria-describedby={hasTooltip ? tooltip.describedBy : props["aria-describedby"]}
+    {...props}
+    disabled={disabled}
+    onMouseEnter={disabled ? undefined : (event) => { if (hasTooltip) tooltip.show(); onMouseEnter?.(event); }}
+    onMouseLeave={disabled ? undefined : (event) => { if (hasTooltip) tooltip.hideAfterHover(); onMouseLeave?.(event); }}
+    onFocus={disabled ? undefined : (event) => { if (hasTooltip) tooltip.showAfterFocus(); onFocus?.(event); }}
+    onBlur={disabled ? undefined : (event) => { if (hasTooltip) tooltip.hide(); onBlur?.(event); }}
+    onPointerDown={disabled ? undefined : (event) => { if (hasTooltip) tooltip.pointerStart(); onPointerDown?.(event); }}
+  >
+    {busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span>
+  </button>;
+  return <>
+    {hasTooltip && disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hide}>{button}</span> : button}
+    {hasTooltip ? tooltip.tooltip : null}
+  </>;
 }
 
-function useTooltip<T extends HTMLElement>(label: string) {
+export function useTooltip<T extends HTMLElement>(label: string) {
   const anchorRef = useRef<T>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
-  const pointerDown = useRef(false);
   const tooltipId = useId();
   const [visible, setVisible] = useState(false);
+  const [instant, setInstant] = useState(false);
   const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom"; arrowLeft: number } | null>(null);
 
-  const show = () => {
+  const showNow = () => {
+    setInstant(true);
     setPosition(null);
     setVisible(true);
   };
-  const hide = () => setVisible(false);
+  const show = () => {
+    setInstant(false);
+    setPosition(null);
+    setVisible(true);
+  };
+  const hide = () => {
+    setVisible(false);
+  };
   const pointerStart = () => {
-    pointerDown.current = true;
     hide();
-    window.setTimeout(() => { pointerDown.current = false; }, 0);
   };
 
   useLayoutEffect(() => {
@@ -151,6 +180,7 @@ function useTooltip<T extends HTMLElement>(label: string) {
       role="tooltip"
       data-placement={position?.placement}
       data-positioned={Boolean(position)}
+      data-instant={instant}
       style={position ? {
         left: position.left,
         top: position.top,
@@ -168,31 +198,32 @@ function useTooltip<T extends HTMLElement>(label: string) {
     hide,
     hideAfterHover: () => { if (document.activeElement !== anchorRef.current) hide(); },
     show,
-    showAfterFocus: () => { if (!pointerDown.current && anchorRef.current?.matches(":focus-visible")) show(); },
+    showAfterFocus: () => { if (anchorRef.current?.matches(":focus-visible")) showNow(); },
     pointerStart,
     tooltip,
   };
 }
 
 export function IconButton({ label, icon, className = "", title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode }) {
-  const tooltip = useTooltip<HTMLButtonElement>(title ?? label);
+  const tooltip = useTooltip<HTMLElement>(title ?? label);
+  const disabled = Boolean(props.disabled);
+  const button = <button
+    ref={disabled ? undefined : (node) => { tooltip.anchorRef.current = node; }}
+    type={props.type ?? "button"}
+    className={`relay-icon-button ${className}`.trim()}
+    aria-label={label}
+    aria-describedby={tooltip.describedBy}
+    {...props}
+    onMouseEnter={disabled ? undefined : (event) => { tooltip.show(); onMouseEnter?.(event); }}
+    onMouseLeave={disabled ? undefined : (event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
+    onFocus={disabled ? undefined : (event) => { tooltip.showAfterFocus(); onFocus?.(event); }}
+    onBlur={disabled ? undefined : (event) => { tooltip.hide(); onBlur?.(event); }}
+    onPointerDown={disabled ? undefined : (event) => { tooltip.pointerStart(); onPointerDown?.(event); }}
+  >
+    {icon}
+  </button>;
   return <>
-    <button
-      ref={tooltip.anchorRef}
-      type={props.type ?? "button"}
-      className={`relay-icon-button ${className}`.trim()}
-      aria-label={label}
-      aria-describedby={tooltip.describedBy}
-      title={props.disabled ? title ?? label : undefined}
-      {...props}
-      onMouseEnter={(event) => { tooltip.show(); onMouseEnter?.(event); }}
-      onMouseLeave={(event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
-      onFocus={(event) => { tooltip.showAfterFocus(); onFocus?.(event); }}
-      onBlur={(event) => { tooltip.hide(); onBlur?.(event); }}
-      onPointerDown={(event) => { tooltip.pointerStart(); onPointerDown?.(event); }}
-    >
-      {icon}
-    </button>
+    {disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hide}>{button}</span> : button}
     {tooltip.tooltip}
   </>;
 }
@@ -212,9 +243,27 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
   return <details className={`relay-action-menu ${className}`.trim()}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div role="menu">{children}</div></details>;
 }
 
-export function ActionMenuItem({ children, icon, danger = false, className = "", onClick, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
+export function ActionMenuItem({ children, icon, danger = false, className = "", title, onClick, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
+  const tooltip = useTooltip<HTMLButtonElement>(title ?? "");
+  const hasTooltip = Boolean(title);
   const classes = [danger ? "danger" : "", className].filter(Boolean).join(" ");
-  return <button type="button" role="menuitem" className={classes || undefined} {...props} onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}>{icon}<span>{children}</span></button>;
+  return <>
+    <button
+      ref={hasTooltip ? tooltip.anchorRef : undefined}
+      type="button"
+      role="menuitem"
+      className={classes || undefined}
+      aria-describedby={hasTooltip ? tooltip.describedBy : props["aria-describedby"]}
+      {...props}
+      onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}
+      onMouseEnter={(event) => { if (hasTooltip) tooltip.show(); onMouseEnter?.(event); }}
+      onMouseLeave={(event) => { if (hasTooltip) tooltip.hideAfterHover(); onMouseLeave?.(event); }}
+      onFocus={(event) => { if (hasTooltip) tooltip.showAfterFocus(); onFocus?.(event); }}
+      onBlur={(event) => { if (hasTooltip) tooltip.hide(); onBlur?.(event); }}
+      onPointerDown={(event) => { if (hasTooltip) tooltip.pointerStart(); onPointerDown?.(event); }}
+    >{icon}<span>{children}</span></button>
+    {hasTooltip ? tooltip.tooltip : null}
+  </>;
 }
 
 export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false }: {
@@ -374,7 +423,9 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
     const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;
     if (nextIndex < 0) return;
     event.preventDefault();
-    onChange(items[nextIndex].id);
+    const nextItem = items[nextIndex];
+    if (!nextItem) return;
+    onChange(nextItem.id);
     event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus();
   };
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
@@ -440,6 +491,7 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
       }
       const first = items[0];
       const last = items[items.length - 1];
+      if (!first || !last) return;
       const active = document.activeElement;
       if (active === dialog || !dialog.contains(active)) {
         event.preventDefault();
@@ -469,14 +521,14 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
 
 export function ErrorDetailsDialog({ error, message, onClose }: { error: FeedbackError; message: string; onClose: () => void }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
+  const [copied, showCopied, clearCopied] = useTransientFlag(1_500);
   const details = JSON.stringify(error, null, 2);
   const copyError = async () => {
     try {
       await copyText(details);
-      setCopied(true);
+      showCopied();
     } catch {
-      setCopied(false);
+      clearCopied();
     }
   };
   return <Dialog
@@ -517,7 +569,7 @@ export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { wi
   const resolvedLabel = label ?? quotaWindowLabel(window, windowKind, t);
   if (!window?.availableBasisPoints && window?.availableBasisPoints !== 0) {
     const unavailable = window ? t("common.unknown") : t("quota.notReported");
-    return <div className="quota-meter unavailable"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={unavailable}>{unavailable}</small><strong>-</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${unavailable}`} /></div>;
+    return <div className="quota-meter unavailable"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small>{unavailable}</small><strong>-</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${unavailable}`} /></div>;
   }
   const percent = Math.round(window.availableBasisPoints / 100);
   const reset = window.resetAtMs
@@ -528,7 +580,7 @@ export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { wi
   const resetLabel = concise ? reset : t("quota.reset", { value: reset });
   const remainingLabel = concise ? `${percent}%` : t("quota.remainingPercent", { value: percent });
   const level = percent <= 5 ? "critical" : percent <= 20 ? "low" : "normal";
-  return <div className="quota-meter" data-level={level}><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{remainingLabel}</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${remainingLabel}`}><span style={{ width: `${percent}%` }} /></div></div>;
+  return <div className="quota-meter" data-level={level}><div className="quota-meter-heading"><span>{resolvedLabel}</span><small>{resetLabel}</small><strong>{remainingLabel}</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${remainingLabel}`}><span style={{ width: `${percent}%` }} /></div></div>;
 }
 
 export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: QuotaSnapshot; nowMs?: number; concise?: boolean }) {
@@ -541,12 +593,12 @@ export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: Quo
     ...(["primary", "secondary"] as const).flatMap((kind) => {
       const window = snapshot[kind];
       if (!window) return [];
-      return [{ id: kind, label: "", serviceTier: undefined, window }];
+      return [{ id: kind, label: "", serviceTier: null, window }];
     }),
     ...supplemental,
   ];
-  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} concise={concise} /></div>;
-  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${formatSupplementalQuotaLabel(item.label, item.serviceTier, t)} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} concise={concise} />)}</div>;
+  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} concise={concise} {...(nowMs !== undefined ? { nowMs } : {})} /></div>;
+  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} concise={concise} {...(item.label ? { label: `${formatSupplementalQuotaLabel(item.label, item.serviceTier, t)} · ${quotaWindowLabel(item.window, item.window.kind, t)}` } : {})} {...(nowMs !== undefined ? { nowMs } : {})} />)}</div>;
 }
 
 export function SecretField({
@@ -584,6 +636,7 @@ export async function copyText(value: string) {
 }
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
-  return <IconButton label={copied ? `${label}: copied` : label} icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />} onClick={async () => { await copyText(value); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }} />;
+  const { t } = useTranslation();
+  const [copied, showCopied] = useTransientFlag(1_500);
+  return <IconButton label={copied ? `${label}: ${t("feedback.copied")}` : label} icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />} onClick={async () => { await copyText(value); showCopied(); }} />;
 }

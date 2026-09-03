@@ -1,13 +1,10 @@
 mod api_equivalent;
 
 pub use api_equivalent::{
-    api_model_price, api_pricing_revision, estimate_api_equivalent,
-    estimate_api_equivalent_with_cache_ttl,
-    estimate_api_equivalent_with_cache_ttl_and_price_override,
-    estimate_api_equivalent_with_cache_ttl_and_price_sources,
-    estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
-    official_image_request_prices, ApiModelPrice, ApiModelPriceOverride, ApiModelPriceSources,
-    ImageRequestPrice, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
+    estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
+    resolve_candidate_price, ApiEquivalentUsage, ApiModelPriceOverride, ApiModelPriceSources,
+    SourceModelPriceOverrides,
 };
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.
@@ -54,6 +51,26 @@ impl UsageValue {
 /// Compatibility name used by the management and desktop DTOs. New provider
 /// code should use `UsageValue` so it does not imply an OpenAI-only source.
 pub type ApiEquivalentSummary = UsageValue;
+
+/// A safe, provider-reported service-tier diagnostic.
+///
+/// It intentionally remains separate from [`DefaultServiceTier`], which is
+/// Relay's Normal/Fast pool policy. Upstreams can add tier names, so Relay
+/// stores safe normalized text instead of silently discarding a new value.
+pub type ObservedServiceTier = String;
+
+pub fn normalize_observed_service_tier(value: &str) -> Option<ObservedServiceTier> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 48
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
 
 /// Whitelisted reasoning effort metadata for one Usage event.
 ///
@@ -367,6 +384,7 @@ impl std::str::FromStr for ErrorOrigin {
     }
 }
 
+define_usage_request_contract! {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageEvent {
@@ -380,22 +398,6 @@ pub struct UsageEvent {
     pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_context_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingDiagnostics>,
-    pub requested_model: Option<String>,
-    pub resolved_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_reasoning_effort: Option<String>,
-    pub wire_api: WireApi,
-    #[serde(default)]
-    pub service_tier: DefaultServiceTier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_service_tier: Option<DefaultServiceTier>,
-    pub success: bool,
-    pub http_status: u16,
-    pub error_category: Option<String>,
     #[serde(default)]
     pub tool_use: ToolUseDiagnostics,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -418,6 +420,7 @@ pub struct UsageEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_snapshot: Option<QuotaSnapshot>,
 }
+}
 
 impl UsageEvent {
     /// Attributes a failed attempt to the component that produced its error.
@@ -428,7 +431,7 @@ impl UsageEvent {
             return None;
         }
         let category = self.error_category.as_deref().unwrap_or_default();
-        if relay_error_category(category) || category.starts_with("adapter_") {
+        if relay_error_category(category) || adapter_error_category_is_relay(category) {
             return Some(ErrorOrigin::Relay);
         }
         if self.account_id.is_some() {
@@ -480,9 +483,11 @@ fn relay_error_category(category: &str) -> bool {
             | "client_websocket"
             | "response_affinity_miss"
             | "stream_event_too_large"
-            | "stream_semantic_timeout"
-            | "websocket_idle_timeout"
     )
+}
+
+fn adapter_error_category_is_relay(category: &str) -> bool {
+    category.starts_with("adapter_") && !category.starts_with("adapter_upstream_")
 }
 
 #[cfg(test)]
@@ -539,11 +544,27 @@ mod tests {
             Some(ErrorOrigin::Account)
         );
         assert_eq!(
+            failed_usage_event("websocket_idle_timeout", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("stream_semantic_timeout", None).error_origin(),
+            Some(ErrorOrigin::Provider)
+        );
+        assert_eq!(
             failed_usage_event("invalid_request", Some("account")).error_origin(),
             Some(ErrorOrigin::Relay)
         );
         assert_eq!(
             failed_usage_event("adapter_upstream_error", None).error_origin(),
+            Some(ErrorOrigin::Provider)
+        );
+        assert_eq!(
+            failed_usage_event("adapter_upstream_response_invalid", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("adapter_invalid_request", Some("account")).error_origin(),
             Some(ErrorOrigin::Relay)
         );
     }
@@ -558,6 +579,28 @@ mod tests {
             assert_eq!(origin.as_str().parse(), Ok(origin));
         }
         assert!("unknown".parse::<ErrorOrigin>().is_err());
+    }
+
+    #[test]
+    fn observed_service_tier_preserves_safe_upstream_values() {
+        assert_eq!(
+            normalize_observed_service_tier("priority"),
+            Some("priority".to_string())
+        );
+        assert_eq!(
+            normalize_observed_service_tier("flex"),
+            Some("flex".to_string())
+        );
+        assert_eq!(
+            normalize_observed_service_tier("ultrafast"),
+            Some("ultrafast".to_string())
+        );
+        assert_eq!(
+            normalize_observed_service_tier(" Standard "),
+            Some("standard".to_string())
+        );
+        assert_eq!(normalize_observed_service_tier("bad value"), None);
+        assert_eq!(normalize_observed_service_tier("bad\nvalue"), None);
     }
 
     #[test]

@@ -119,6 +119,7 @@ impl TelemetryDb {
         }
         transaction.commit().map_err(db_error)?;
         if !account_ids.is_empty() {
+            self.clear_cached_usage_totals()?;
             self.invalidate_usage_cache();
         }
         Ok(())

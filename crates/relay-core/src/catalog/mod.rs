@@ -20,8 +20,9 @@ pub(crate) use context::{
 };
 pub use order::{
     anthropic_max_implies_ultra, canonicalize_model_ids, canonicalize_reasoning_levels,
-    is_valid_model_id, is_valid_model_token, known_model_reasoning_levels, normalize_model_ids,
-    reasoning_policy_key, reasoning_policy_levels,
+    is_valid_model_id, is_valid_model_token, known_model_reasoning_levels,
+    model_supports_fast_service_tier, normalize_model_ids, reasoning_policy_key,
+    reasoning_policy_levels,
 };
 pub use registry::ModelRegistry;
 pub use rules::ModelRules;

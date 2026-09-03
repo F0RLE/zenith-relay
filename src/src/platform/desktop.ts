@@ -77,18 +77,27 @@ export function recordPerformance(name: string, durationMs: number, context?: st
 }
 
 async function getPortableUpdateTarget(): Promise<string | null> {
-  const bundleType = await getBundleType().catch(() => undefined);
+  const bundleType = await getBundleType();
+  if (bundleType === undefined) {
+    throw new Error("Unable to determine the current bundle type");
+  }
   if (bundleType !== null) return null;
-  return invoke<string | null>("get_portable_update_target").catch(() => null);
+  return invoke<string | null>("get_portable_update_target");
+}
+
+function isMissingPortableTarget(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:portable|update\s+target)[^\n]*(?:404|not found|unavailable|missing)|(?:404|not found|unavailable|missing)[^\n]*(?:portable|update\s+target)/i.test(message);
 }
 
 async function checkPortableUpdate(target: string) {
   try {
     return await check({ target });
-  } catch {
+  } catch (error) {
     // A stale but otherwise valid manifest can predate the portable target.
     // A generic check proves that the manifest is reachable and verified, but
     // its installer update must never be offered to a portable executable.
+    if (!isMissingPortableTarget(error)) throw error;
     const genericUpdate = await check();
     await genericUpdate?.close();
     return null;
@@ -99,11 +108,11 @@ export async function checkForUpdate(): Promise<AppUpdate | null> {
   const portableTarget = await getPortableUpdateTarget();
   const update = portableTarget ? await checkPortableUpdate(portableTarget) : await check();
   if (!update) return null;
-  const metadata = {
+  const metadata: AppUpdate = {
     currentVersion: update.currentVersion,
     version: update.version,
-    date: update.date,
-    body: update.body,
+    ...(update.date !== undefined ? { date: update.date } : {}),
+    ...(update.body !== undefined ? { body: update.body } : {}),
     portable: Boolean(portableTarget),
   };
   await update.close();

@@ -417,6 +417,18 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
 }
 
 #[test]
+fn successful_empty_model_refresh_is_authoritative() {
+    let mut account = account_record("account_empty_models");
+
+    assert!(apply_model_discovery(&mut account, Ok(Vec::new())));
+
+    assert_eq!(account.discovered_models, Some(Vec::new()));
+    assert!(account.effective_models().is_empty());
+    assert!(account.account.last_error_code.is_none());
+    assert_eq!(account.account.health, AccountHealthState::Healthy);
+}
+
+#[test]
 fn successful_model_refresh_recovers_a_transient_auth_error() {
     let mut account = account_record("account_models_recovered_auth");
     account.account.auth_state = AccountAuthState::Error;
@@ -933,6 +945,8 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         draining: true,
         base_url: "https://api.example.test/v1".into(),
         secret_ref: "source:source_existing".into(),
+        pricing_provider: None,
+        official_provider_family: None,
         wire_api: WireApi::ChatCompletions,
         protocol_bindings: Vec::new(),
         models: vec!["old-model".into()],
@@ -1163,6 +1177,18 @@ fn failed_account_without_models_remains_manageable() {
     account.account.health = zenith_relay_core::accounts::AccountHealthState::Healthy;
     assert!(!account_model_state_is_valid(&account));
 }
+
+#[test]
+fn successful_empty_account_catalog_remains_manageable() {
+    let mut account = account_record("account_empty_catalog");
+    account.models.clear();
+    account.discovered_models = Some(Vec::new());
+    account.account.health = AccountHealthState::Healthy;
+    account.account.last_error_code = None;
+
+    assert!(account_model_state_is_valid(&account));
+}
+
 #[test]
 fn deleting_account_prunes_explicit_selectors_without_rewriting_wake_state() {
     let mut automations = AutomationRecords::default();

@@ -1,6 +1,7 @@
+use super::usage::{usage_totals_from_event, usage_totals_from_sample, UsageTotalsSample};
 use super::{
-    db_error, sql_u64, DefaultServiceTier, ErrorCode, LocalPoolError, Result, TelemetryDb,
-    UsageEvent, ARCHIVE_USAGE_SQL,
+    db_error, sql_u64, ErrorCode, LocalPoolError, Result, TelemetryDb, UsageEvent,
+    ARCHIVE_USAGE_SQL,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::atomic::Ordering;
@@ -217,7 +218,8 @@ impl TelemetryDb {
                     CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                     COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
                     input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
-                    output_tokens, total_tokens
+                    output_tokens, total_tokens, success, latency_ms, ttft_ms, generation_ms,
+                    reasoning_tokens
                  FROM request_logs WHERE request_id = ?1",
                 [event.request_id.as_str()],
                 |row| {
@@ -225,6 +227,34 @@ impl TelemetryDb {
                         row.get::<_, i64>(0)?,
                         row.get::<_, bool>(1)?,
                         UsageAggregate::from_row(row, 2)?,
+                        UsageTotalsSample {
+                            success: row.get(11)?,
+                            latency_ms: row.get::<_, i64>(12)?.max(0) as u64,
+                            ttft_ms: row
+                                .get::<_, Option<i64>>(13)?
+                                .map(|value| value.max(0) as u64),
+                            generation_ms: row
+                                .get::<_, Option<i64>>(14)?
+                                .map(|value| value.max(0) as u64),
+                            reasoning_tokens: row
+                                .get::<_, Option<i64>>(15)?
+                                .map(|value| value.max(0) as u64),
+                            input_tokens: row
+                                .get::<_, Option<i64>>(5)?
+                                .map(|value| value.max(0) as u64),
+                            cached_input_tokens: row
+                                .get::<_, Option<i64>>(6)?
+                                .map(|value| value.max(0) as u64),
+                            cache_write_input_tokens: row
+                                .get::<_, Option<i64>>(7)?
+                                .map(|value| value.max(0) as u64),
+                            output_tokens: row
+                                .get::<_, Option<i64>>(9)?
+                                .map(|value| value.max(0) as u64),
+                            total_tokens: row
+                                .get::<_, Option<i64>>(10)?
+                                .map(|value| value.max(0) as u64),
+                        },
                     ))
                 },
             )
@@ -232,7 +262,7 @@ impl TelemetryDb {
             .map_err(db_error)?;
         let accepted = previous
             .as_ref()
-            .is_none_or(|(attempt, _, _)| i64::from(event.attempt) >= *attempt);
+            .is_none_or(|(attempt, _, _, _)| i64::from(event.attempt) >= *attempt);
         let changed = accepted
             && transaction
                 .execute(
@@ -301,7 +331,7 @@ impl TelemetryDb {
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
                     event.service_tier.as_str(),
-                    event.applied_service_tier.map(DefaultServiceTier::as_str),
+                    event.applied_service_tier.as_deref(),
                     routing_json,
                     tool_use_json,
                     event.error_origin().map(|origin| origin.as_str()),
@@ -314,21 +344,35 @@ impl TelemetryDb {
             .map_err(db_error)?
             > 0;
         if changed {
-            if let Some((_, _was_aggregated, previous)) =
-                previous.as_ref().filter(|(_, aggregated, _)| *aggregated)
+            if let Some((_, _was_aggregated, previous, _)) = previous
+                .as_ref()
+                .filter(|(_, aggregated, _, _)| *aggregated)
             {
                 apply_aggregate_delta(&transaction, previous, -1)?;
             }
             apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
         }
-        if transaction.last_insert_rowid() % 256 == 0 {
+        // `last_insert_rowid` is unchanged by an upsert that takes the
+        // conflict-update path. Only run retention after a new request row;
+        // otherwise replacing a request whose old id is divisible by 256
+        // would rescan and rewrite the usage database repeatedly.
+        let archived = previous.is_none() && changed && transaction.last_insert_rowid() % 256 == 0;
+        if archived {
             transaction
                 .execute_batch(ARCHIVE_USAGE_SQL)
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
+        if archived {
+            self.clear_cached_usage_totals()?;
+        } else if changed {
+            let previous_totals = previous
+                .as_ref()
+                .map(|(_, _, _, sample)| usage_totals_from_sample(*sample));
+            self.update_cached_usage_totals(previous_totals, usage_totals_from_event(event))?;
+        }
         drop(connection);
-        if changed {
+        if changed || archived {
             self.invalidate_usage_cache();
         }
         Ok(())
@@ -340,6 +384,7 @@ impl TelemetryDb {
             .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
             .execute_batch("DELETE FROM request_logs; DELETE FROM usage_candidate_rollups;")
             .map_err(db_error)?;
+        self.clear_cached_usage_totals()?;
         self.invalidate_usage_cache();
         Ok(())
     }
@@ -347,6 +392,9 @@ impl TelemetryDb {
     pub(super) fn invalidate_usage_cache(&self) {
         self.usage_revision.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut cached) = self.api_equivalent_cache.lock() {
+            *cached = None;
+        }
+        if let Ok(mut cached) = self.quota_equivalent_cache.lock() {
             *cached = None;
         }
     }

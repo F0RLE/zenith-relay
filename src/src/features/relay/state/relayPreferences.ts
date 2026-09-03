@@ -10,6 +10,7 @@ export const RELAY_STORAGE_KEYS = {
   accountIdentitiesVisible: "relay.accountIdentitiesVisible",
   accountValueVisible: "relay.accountValueVisible",
   legacyPoolEconomicsVisible: "relay.poolEconomicsVisible",
+  launchApplicationAfterConnect: "relay.launchApplicationAfterConnect",
 } as const;
 
 export function readRelayPreference(
@@ -71,6 +72,19 @@ export function writeAccountValueVisibility(
 ) {
   writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, String(visible), storage);
   removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
+}
+
+export function readLaunchApplicationAfterConnect(
+  storage: RelayStorage | undefined = browserStorage(),
+) {
+  return readRelayPreference(RELAY_STORAGE_KEYS.launchApplicationAfterConnect, "0", storage) === "1";
+}
+
+export function writeLaunchApplicationAfterConnect(
+  enabled: boolean,
+  storage: RelayStorage | undefined = browserStorage(),
+) {
+  writeRelayPreference(RELAY_STORAGE_KEYS.launchApplicationAfterConnect, enabled ? "1" : "0", storage);
 }
 
 function browserStorage(): RelayStorage | undefined {

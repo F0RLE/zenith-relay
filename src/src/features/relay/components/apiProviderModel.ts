@@ -9,6 +9,10 @@ export type ApiProviderValue = {
   wireApi: SourceWireApi;
   protocolBindings: SourceProtocolBinding[];
   apiKey: string;
+  /** Explicit LiteLLM namespace used for source pricing, when confirmed. */
+  pricingProvider?: string | null;
+  /** Explicit official family allowed as a canonical pricing fallback. */
+  officialProviderFamily?: string | null;
   /** Optional manual catalog for providers that do not expose GET /models. */
   models?: string[];
   /** Whether the model catalog comes from discovery or manual entry. */
@@ -27,6 +31,8 @@ export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = 
     kind: "zenith",
     name: "Zenith API",
     baseUrl: "https://api.zenithmarket.dev/v1",
+    pricingProvider: null,
+    officialProviderFamily: null,
     wireApi: "responses",
     protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
   },
@@ -34,6 +40,8 @@ export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = 
     kind: "openai",
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
+    pricingProvider: "openai",
+    officialProviderFamily: "openai",
     wireApi: "responses",
     protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
   },
@@ -41,6 +49,8 @@ export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = 
     kind: "openrouter",
     name: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
+    pricingProvider: "openrouter",
+    officialProviderFamily: null,
     wireApi: "responses",
     protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
   },
@@ -48,6 +58,8 @@ export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = 
     kind: "custom",
     name: "",
     baseUrl: "",
+    pricingProvider: null,
+    officialProviderFamily: null,
     wireApi: "responses",
     protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
   },
@@ -61,6 +73,8 @@ export function defaultApiProviderValue(): ApiProviderValue {
     wireApi: "responses",
     protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
     apiKey: "",
+    pricingProvider: null,
+    officialProviderFamily: null,
     models: [],
     modelCatalogMode: "automatic",
     autoAssignModels: true,
@@ -73,6 +87,8 @@ export function selectApiProvider(value: ApiProviderValue, kind: ApiProviderKind
     ...definition,
     protocolBindings: definition.protocolBindings.map(cloneBinding),
     apiKey: value.apiKey,
+    pricingProvider: definition.pricingProvider ?? null,
+    officialProviderFamily: definition.officialProviderFamily ?? null,
     models: value.models ?? [],
     modelCatalogMode: value.modelCatalogMode ?? "automatic",
     autoAssignModels: value.autoAssignModels !== false,
@@ -174,6 +190,8 @@ export function apiProviderSourceInput(value: ApiProviderValue) {
     name: value.name.trim(),
     baseUrl: value.baseUrl.trim(),
     apiKey: value.apiKey.trim(),
+    pricingProvider: value.pricingProvider?.trim() || null,
+    officialProviderFamily: value.officialProviderFamily?.trim() || null,
     wireApi: protocolBindings[0]?.wireApi ?? value.wireApi,
     protocolBindings,
     models,

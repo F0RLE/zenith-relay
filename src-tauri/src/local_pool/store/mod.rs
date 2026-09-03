@@ -374,7 +374,7 @@ impl LocalPoolStore {
             normalize_subscription_plan_order(gateway.subscription_plan_order)
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+            .map_err(LocalPoolError::invalid_state)?;
         if gateway == self.gateway {
             return Ok(());
         }
@@ -954,6 +954,8 @@ mod tests {
                 draining: false,
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
+                pricing_provider: None,
+                official_provider_family: None,
                 wire_api: WireApi::Responses,
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
@@ -1027,6 +1029,8 @@ mod tests {
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
@@ -1153,6 +1157,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            provider_family: Some("openai".into()),
             purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,
