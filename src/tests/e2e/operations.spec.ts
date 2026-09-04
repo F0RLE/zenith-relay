@@ -3933,6 +3933,10 @@ test("usage records refresh only the visible Usage page", async ({ page }) => {
   await page.goto("/");
   const stateReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_runtime_state").length);
   const usageReads = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_local_usage_page").length);
+  await expect.poll(stateReads).toBeGreaterThan(0);
+  // The overview snapshot is asynchronous. Let it settle before attributing
+  // subsequent reads to the usage-recorded event under test.
+  await page.waitForTimeout(300);
   const overviewStateReads = await stateReads();
   const overviewUsageReads = await usageReads();
 
