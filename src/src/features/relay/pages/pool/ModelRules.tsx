@@ -206,7 +206,7 @@ export function ModelRulesView() {
       ] : [];
       const displayName = formatModelDisplayName(model.codexDisplayName || model.id);
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
-      const hasReasoningModes = !isImageModel && ((model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0);
+      const hasReasoningModes = !isImageModel && ((model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true);
       const canEditReasoning = !isImageModel && Boolean(model.reasoningConfigurable);
       const speedTier = model.speedTier ?? "standard";
       const canEditSpeed = modelProviderGroup(model.id) === "openai"

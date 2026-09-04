@@ -34,7 +34,7 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": "all",
+    "targets": ["deb", "rpm", "appimage", "nsis", "app", "dmg"],
     "copyright": "Copyright (C) 2026 FORLE",
     "license": "AGPL-3.0-only",
     "licenseFile": "../LICENSE",

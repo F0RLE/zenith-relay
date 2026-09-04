@@ -1,0 +1,135 @@
+Checking rust clones introduced after HEAD
+Clone found (rust)
+ - relay-core\src\automations\quota_wake.rs [1154:73 - 1171:14] (18 lines, 113 tokens)
+   relay-core\src\automations\quota_wake.rs [1205:80 - 1220:41]
+Clone found (rust)
+ - relay-core\src\gateway\execution\account.rs [235:28 - 262:59] (28 lines, 146 tokens)
+   relay-core\src\gateway\execution\request.rs [349:22 - 377:59]
+Clone found (rust)
+ - relay-core\src\gateway\execution\account.rs [237:38 - 259:14] (23 lines, 110 tokens)
+   relay-core\src\gateway\execution\account.rs [272:38 - 294:10]
+Clone found (rust)
+ - relay-core\src\gateway\execution\account.rs [241:21 - 263:12] (23 lines, 123 tokens)
+   relay-core\src\gateway\execution\request.rs [355:21 - 378:11]
+Clone found (rust)
+ - relay-core\src\gateway\execution\account.rs [461:37 - 491:2] (31 lines, 138 tokens)
+   relay-core\src\gateway\execution\request.rs [1011:28 - 1041:2]
+Clone found (rust)
+ - relay-core\src\gateway\execution\request.rs [469:13 - 501:16] (33 lines, 164 tokens)
+   relay-core\src\gateway\execution\request.rs [894:17 - 926:20]
+Clone found (rust)
+ - relay-core\src\gateway\execution\request.rs [677:25 - 706:69] (30 lines, 144 tokens)
+   relay-core\src\gateway\execution\request.rs [937:17 - 966:61]
+Clone found (rust)
+ - relay-core\src\gateway\images.rs [1066:44 - 1077:6] (12 lines, 101 tokens)
+   relay-core\src\gateway\streaming\events.rs [89:74 - 100:6]
+Clone found (rust)
+ - relay-core\src\gateway\images.rs [1066:12 - 1078:22] (13 lines, 122 tokens)
+   relay-core\src\protocol\adapter\stream.rs [1669:18 - 1681:22]
+Clone found (rust)
+ - relay-core\src\gateway\request.rs [759:65 - 781:12] (23 lines, 179 tokens)
+   relay-core\src\gateway\request.rs [871:57 - 893:12]
+Clone found (rust)
+ - relay-core\src\gateway\request.rs [767:60 - 781:12] (15 lines, 109 tokens)
+   relay-core\src\gateway\request.rs [928:17 - 942:12]
+Clone found (rust)
+ - relay-core\src\gateway\request.rs [767:53 - 781:64] (15 lines, 125 tokens)
+   relay-core\src\gateway\request.rs [1062:39 - 1077:20]
+Clone found (rust)
+ - relay-core\src\gateway\request.rs [927:30 - 943:20] (17 lines, 126 tokens)
+   relay-core\src\gateway\request.rs [1008:34 - 1025:25]
+Clone found (rust)
+ - relay-core\src\gateway\websocket.rs [1342:5 - 1385:19] (44 lines, 216 tokens)
+   relay-core\src\gateway\websocket.rs [1556:5 - 1599:19]
+Clone found (rust)
+ - relay-core\src\protocol\adapter\gemini.rs [82:5 - 97:65] (16 lines, 177 tokens)
+   relay-core\src\protocol\adapter\messages.rs [67:5 - 83:65]
+Clone found (rust)
+ - relay-core\src\protocol\adapter\gemini.rs [406:5 - 420:3] (15 lines, 126 tokens)
+   relay-core\src\protocol\adapter\messages.rs [962:44 - 976:3]
+Clone found (rust)
+ - relay-core\src\protocol\adapter\stream.rs [99:28 - 121:10] (23 lines, 120 tokens)
+   relay-core\src\protocol\adapter\stream.rs [1099:33 - 1121:10]
+Clone found (rust)
+ - relay-core\src\protocol\adapter\stream.rs [1004:40 - 1030:2] (27 lines, 164 tokens)
+   relay-core\src\protocol\adapter\stream.rs [1625:50 - 1651:2]
+Clone found (rust)
+ - relay-core\src\providers\chatgpt\models.rs [579:57 - 589:33] (11 lines, 104 tokens)
+   relay-core\src\providers\chatgpt\quota_usage.rs [1079:54 - 1089:33]
+Clone found (rust)
+ - relay-core\src\providers\chatgpt\quota_usage.rs [809:74 - 828:12] (20 lines, 100 tokens)
+   relay-core\src\providers\chatgpt\quota_usage.rs [860:13 - 878:12]
+Clone found (rust)
+ - relay-core\src\providers\chatgpt\quota_usage.rs [809:73 - 828:49] (20 lines, 109 tokens)
+   relay-core\src\providers\chatgpt\quota_usage.rs [916:70 - 935:29]
+Clone found (rust)
+ - relay-core\src\providers\chatgpt\quota_usage.rs [1079:53 - 1089:33] (11 lines, 105 tokens)
+   src\local_pool\accounts\oauth.rs [943:73 - 953:30]
+Clone found (rust)
+ - relay-core\src\quota\refresh.rs [361:43 - 381:67] (21 lines, 113 tokens)
+   relay-core\src\quota\refresh.rs [391:28 - 411:67]
+Clone found (rust)
+ - src\http\management\automations.rs [251:31 - 274:7] (24 lines, 111 tokens)
+   src\store\automations.rs [171:76 - 194:7]
+Clone found (rust)
+ - src\store\vault.rs [57:9 - 79:11] (23 lines, 144 tokens)
+   src\local_pool\store\vault.rs [68:9 - 90:11]
+Clone found (rust)
+ - src\store\vault.rs [76:54 - 93:93] (18 lines, 149 tokens)
+   src\local_pool\store\vault.rs [91:55 - 108:93]
+Clone found (rust)
+ - src\store\vault.rs [94:9 - 111:25] (18 lines, 171 tokens)
+   src\local_pool\store\vault.rs [112:9 - 129:25]
+Clone found (rust)
+ - src\local_pool\accounts\import_orchestrator\identity.rs [93:61 - 107:8] (15 lines, 109 tokens)
+   src\local_pool\accounts\records.rs [116:21 - 130:8]
+Clone found (rust)
+ - src\local_pool\commands\remote_server\ownership.rs [125:5 - 139:13] (15 lines, 108 tokens)
+   src\local_pool\commands\remote_server\ownership.rs [179:5 - 193:13]
+Clone found (rust)
+ - src\local_pool\host\local_server.rs [198:75 - 213:33] (16 lines, 111 tokens)
+   src\local_pool\host\local_server.rs [238:62 - 253:33]
+Clone found (rust)
+ - src\local_pool\profiles\codex.rs [1613:40 - 1628:10] (16 lines, 101 tokens)
+   src\local_pool\profiles\snapshots.rs [412:44 - 427:10]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db.rs [749:14 - 780:26] (32 lines, 192 tokens)
+   src\local_pool\store\telemetry_db.rs [942:47 - 972:26]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db.rs [1245:38 - 1264:24] (20 lines, 121 tokens)
+   src\local_pool\store\telemetry_db.rs [1603:34 - 1622:24]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db.rs [1477:59 - 1504:15] (28 lines, 162 tokens)
+   src\local_pool\store\telemetry_db.rs [1550:45 - 1577:15]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db.rs [1662:46 - 1691:14] (30 lines, 174 tokens)
+   src\local_pool\store\telemetry_db.rs [1745:46 - 1774:10]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db\migrations.rs [316:1 - 334:18] (19 lines, 206 tokens)
+   src\local_pool\store\telemetry_db\migrations.rs [390:1 - 408:18]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db\migrations.rs [335:1 - 349:60] (15 lines, 123 tokens)
+   src\local_pool\store\telemetry_db\migrations.rs [411:1 - 425:60]
+Clone found (rust)
+ - src\local_pool\store\telemetry_db\migrations.rs [336:1 - 349:59] (14 lines, 115 tokens)
+   src\local_pool\store\telemetry_db\record.rs [132:14 - 145:71]
+┌────────┬────────────────┬─────────────┬──────────────┬──────────────┬──────────────────┬───────────────────┐
+│ Format │ Files analyzed │ Total lines │ Total tokens │ Clones found │ Duplicated lines │ Duplicated tokens │
+├────────┼────────────────┼─────────────┼──────────────┼──────────────┼──────────────────┼───────────────────┤
+│ rust   │ 256            │ 106106      │ 671498       │ 38           │ 754 (0.71%)      │ 5131 (0.76%)      │
+├────────┼────────────────┼─────────────┼──────────────┼──────────────┼──────────────────┼───────────────────┤
+│ Total: │ 256            │ 106106      │ 671498       │ 38           │ 754 (0.71%)      │ 5131 (0.76%)      │
+└────────┴────────────────┴─────────────┴──────────────┴──────────────┴──────────────────┴───────────────────┘
+Found 38 clones.
+time: 897.157ms
+Checking typescript clones introduced after HEAD
+No duplicates found.
+┌────────────┬────────────────┬─────────────┬──────────────┬──────────────┬──────────────────┬───────────────────┐
+│ Format     │ Files analyzed │ Total lines │ Total tokens │ Clones found │ Duplicated lines │ Duplicated tokens │
+├────────────┼────────────────┼─────────────┼──────────────┼──────────────┼──────────────────┼───────────────────┤
+│ typescript │ 59             │ 9826        │ 57532        │ 0            │ 0 (0.00%)        │ 0 (0.00%)         │
+├────────────┼────────────────┼─────────────┼──────────────┼──────────────┼──────────────────┼───────────────────┤
+│ Total:     │ 59             │ 9826        │ 57532        │ 0            │ 0 (0.00%)        │ 0 (0.00%)         │
+└────────────┴────────────────┴─────────────┴──────────────┴──────────────┴──────────────────┴───────────────────┘
+Found 0 clones.
+time: 525.315ms

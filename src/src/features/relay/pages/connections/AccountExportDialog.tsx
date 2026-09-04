@@ -5,7 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountExportFormat } from "../../api/types";
 import { Button, Dialog, IconButton, copyText } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { MarkdownPreview } from "./MarkdownPreview";
+import { MarkdownPreview } from "../../components/MarkdownPreview";
 
 const MAX_ZENITH_EXPORT_DESCRIPTION_LENGTH = 2_000;
 const accountExportFormats: Array<{ value: AccountExportFormat; label: string; multiple: boolean }> = [

@@ -191,6 +191,7 @@ export type ModelSummary = {
   reasoningSupportedLevels?: string[];
   reasoningAllowedLevels?: string[];
   reasoningConfigurable?: boolean;
+  reasoningManualFallback?: boolean;
   speedSupported?: boolean;
   speedTier?: DefaultServiceTier;
   speedConfigurable?: boolean;

@@ -391,7 +391,7 @@ test("overview header opens the application picker beside the API control", asyn
 
   await launch.click();
   const picker = page.getByRole("dialog", { name: "Какое приложение запустить?" });
-  await picker.getByLabel("Запустить приложение после подключения").check({ force: true });
+  await expect(picker.getByLabel("Запустить приложение после подключения")).toHaveCount(0);
   await picker
     .getByRole("button", { name: "ChatGPT", exact: true })
     .click();
@@ -1274,24 +1274,75 @@ for (const viewport of viewports) {
   });
 }
 
-for (const theme of themes) {
-  test(`manual update dialog ${theme}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, bundleType: null, updateVersion: "1.1.0", updateBody: "<!-- relay-notes:en -->\nFaster parallel routing\nUpdated settings\n<!-- relay-notes:ru -->\nУскорена параллельная маршрутизация\nОбновлён экран настроек" });
-    await page.setViewportSize({ width: 840, height: 560 });
+for (const scenario of [
+  { locale: "en" as const, theme: "light" as const, viewport: viewports[0], section: "Routing", note: "Faster parallel fallback" },
+  { locale: "en" as const, theme: "dark" as const, viewport: viewports[1], section: "Routing", note: "Faster parallel fallback" },
+  { locale: "ru" as const, theme: "light" as const, viewport: viewports[0], section: "Маршрутизация", note: "Ускорено параллельное переключение" },
+  { locale: "ru" as const, theme: "dark" as const, viewport: viewports[1], section: "Маршрутизация", note: "Ускорено параллельное переключение" },
+]) {
+  test(`manual update dialog ${scenario.locale} ${scenario.theme} ${scenario.viewport.width}x${scenario.viewport.height}`, async ({ page }) => {
+    const updateBody = [
+      "## Downloads",
+      "",
+      "Installer links are not part of the in-app changelog.",
+      "<!-- relay-notes:en -->",
+      "## [1.1.3] - 2026-09-04",
+      "",
+      "A clearer and more reliable update experience.",
+      "",
+      "### Routing",
+      "",
+      "- Faster parallel fallback",
+      "- More accurate availability",
+      "<!-- relay-notes:ru -->",
+      "## [1.1.3] - 2026-09-04",
+      "",
+      "Обновление стало понятнее и надёжнее.",
+      "",
+      "### Маршрутизация",
+      "",
+      "- Ускорено параллельное переключение",
+      "- Точнее отображается доступность",
+    ].join("\n");
+    await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true, bundleType: null, updateVersion: "1.1.3", updateBody });
+    await page.setViewportSize(scenario.viewport);
     await page.goto("/");
-    const updateButton = page.getByRole("button", { name: "Открыть обновление 1.1.0" });
+    const openLabel = scenario.locale === "ru" ? "Открыть обновление 1.1.3" : "Open update 1.1.3";
+    const updateButton = page.getByRole("button", { name: openLabel });
     await expect(updateButton).toBeVisible();
+    await expect(updateButton).toHaveText(scenario.locale === "ru" ? "Доступно обновление" : "Update available");
+    await expect(updateButton).not.toContainText("1.1.3");
+    expect(await page.locator(".sidebar-bottom").evaluate((element) => {
+      const feedback = element.querySelector(".sidebar-feedback")?.getBoundingClientRect();
+      const update = element.querySelector(".sidebar-update-row")?.getBoundingClientRect();
+      const footer = element.querySelector(".sidebar-footer")?.getBoundingClientRect();
+      return Boolean(update && footer && update.bottom <= footer.top && (!feedback || feedback.bottom <= update.top));
+    })).toBe(true);
+    if (scenario.locale === "ru" && scenario.theme === "dark" && scenario.viewport.width === 840) {
+      const collapse = page.locator(".sidebar-footer .relay-icon-button");
+      await expect(page.locator(".relay-shell")).toHaveClass(/sidebar-collapsed/);
+      expect(await updateButton.evaluate((element) => getComputedStyle(element, "::after").content)).toBe("none");
+      await page.screenshot({ path: "output/playwright/sidebar-update-collapsed-ru-dark-840x560.png" });
+      await collapse.click();
+      await expect(page.locator(".relay-shell")).not.toHaveClass(/sidebar-collapsed/);
+      await page.screenshot({ path: "output/playwright/sidebar-update-ru-dark-840x560.png" });
+    }
     await updateButton.click();
-    const dialog = page.getByRole("dialog", { name: "Обновление 1.1.0" });
-    await expect(dialog).toContainText("Ускорена параллельная маршрутизация");
-    await expect(dialog).not.toContainText("Faster parallel routing");
-    await expect(dialog.getByRole("button", { name: "Пропустить 1.1.0" })).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "Обновить", exact: true })).toBeVisible();
+    const dialogName = scenario.locale === "ru" ? "Обновление 1.1.3" : "Update 1.1.3";
+    const dialog = page.getByRole("dialog", { name: dialogName });
+    await expect(dialog.getByRole("heading", { name: scenario.section })).toBeVisible();
+    await expect(dialog.getByRole("listitem").first()).toHaveText(scenario.note);
+    await expect(dialog).not.toContainText("Installer links");
+    await expect(dialog).not.toContainText("## [1.1.3]");
+    await expect(dialog.getByRole("button", { name: scenario.locale === "ru" ? "Пропустить 1.1.3" : "Skip 1.1.3" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: scenario.locale === "ru" ? "Обновить" : "Update", exact: true })).toBeVisible();
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+      const body = element.querySelector(".relay-dialog-body");
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
+        && Boolean(body && body.scrollWidth <= body.clientWidth);
     })).toBe(true);
-    await page.screenshot({ path: `output/playwright/update-dialog-ru-${theme}-840x560.png` });
+    await page.screenshot({ path: `output/playwright/update-dialog-${scenario.locale}-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
   });
 }
 

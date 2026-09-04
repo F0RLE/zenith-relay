@@ -1354,7 +1354,7 @@ test("Overview connects OpenCode without launching it by default", async ({ page
   await page.goto("/");
   await page.getByRole("button", { name: "Launch application" }).click();
   const dialog = page.getByRole("dialog", { name: "Which application do you want to launch?" });
-  await expect(dialog.getByLabel("Launch application after connecting")).not.toBeChecked();
+  await expect(dialog.getByLabel("Launch application after connecting")).toHaveCount(0);
   await dialog.getByRole("button", { name: "OpenCode", exact: true }).click();
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "connect_opencode_to_local_gateway"))).toBe(true);
@@ -3310,6 +3310,28 @@ test("every native pool model exposes backend reasoning settings", async ({ page
   await dialog.getByRole("checkbox", { name: "High" }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
     input: { modelId: "gpt-5.4", allowedLevels: ["low", "medium"] },
+  });
+});
+
+test("unknown models offer manual reasoning candidates only when the backend permits discovery", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    serverModelOrder: ["claude-fable-5-1"],
+    manualReasoningFallbackModels: ["claude-fable-5-1"],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const model = page.locator('.model-rules tbody tr[data-model-id="claude-fable-5-1"]');
+  await model.getByRole("button", { name: "Set reasoning modes for claude-fable-5-1" }).click();
+  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Extra high", "Max"]);
+  await dialog.getByRole("checkbox", { name: "High", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
+    input: { modelId: "claude-fable-5-1", allowedLevels: ["high"] },
   });
 });
 
