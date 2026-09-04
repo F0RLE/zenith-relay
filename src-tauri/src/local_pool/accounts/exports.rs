@@ -43,9 +43,7 @@ pub fn finish_account_export(
     destination: AccountExportDestination,
     app: &AppHandle,
 ) -> Result<AccountExportResult, CommandError> {
-    document
-        .validate()
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    document.validate().map_err(LocalPoolError::invalid_state)?;
     let (content, path) = match destination {
         AccountExportDestination::Copy => (Some(document.content.clone()), None),
         AccountExportDestination::Download => (None, write_account_export(&document, app)?),
@@ -97,7 +95,7 @@ mod tests {
 
     #[test]
     fn every_export_format_round_trips_through_the_account_import_parser() {
-        for format in formats() {
+        for format in AccountExportFormat::all() {
             let document =
                 build_account_export(format, &[fixture()], 1_788_000_000_000, None).unwrap();
             let parsed = parse_import(&document.content, None, &[]).unwrap();
@@ -116,19 +114,6 @@ mod tests {
         assert!(normalize_account_ids(vec!["account_safe".into(), "account_safe".into()]).is_err());
         assert!(normalize_account_ids(vec!["../account".into()]).is_err());
         assert!(normalize_account_ids(Vec::new()).is_err());
-    }
-
-    fn formats() -> [AccountExportFormat; 8] {
-        [
-            AccountExportFormat::Zenith,
-            AccountExportFormat::Cpa,
-            AccountExportFormat::Sub2api,
-            AccountExportFormat::Cockpit,
-            AccountExportFormat::NineRouter,
-            AccountExportFormat::Codex,
-            AccountExportFormat::AxonHub,
-            AccountExportFormat::CodexManager,
-        ]
     }
 
     fn fixture() -> AccountExportCredential {

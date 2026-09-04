@@ -2,8 +2,8 @@ use super::{AccountRoutingBlockReason, OperationalStatus, ProxyMode, QuotaRefres
 use crate::{
     accounts::AccountAuthState,
     quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
-    runtime_source_models_for_wire_api, ApiEquivalentSummary, ApiModelPriceOverride,
-    SourceProtocolBinding, WireApi,
+    runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
+    ApiEquivalentSummary, ApiModelPriceOverride, SourceProtocolBinding, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
@@ -22,6 +22,10 @@ pub struct SourceSummary {
     pub draining: bool,
     pub operational_status: OperationalStatus,
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -68,12 +72,8 @@ impl SourceSummary {
     /// Native Gemini and Chat Completions sources must remain visible even
     /// though the desktop profile itself normally speaks Responses.
     pub fn models_for_any_wire_api(&self) -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::new();
-        WireApi::ALL
-            .into_iter()
-            .flat_map(|wire_api| self.models_for_wire_api(wire_api))
-            .filter(|model| seen.insert(model.to_ascii_lowercase()))
-            .collect()
+        runtime_source_models_for_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+            .unwrap_or_default()
     }
 
     pub fn supports_any_wire_api(&self) -> bool {
@@ -178,6 +178,8 @@ pub struct AccountSummary {
     pub id: String,
     pub label: String,
     pub identity_hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_family: Option<String>,
     pub enabled: bool,
     #[serde(default)]
     pub in_pool: bool,

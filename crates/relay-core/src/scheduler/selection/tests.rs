@@ -60,6 +60,43 @@ fn select_image(scheduler: &mut PoolScheduler, tried: &HashSet<String>) -> Optio
 }
 
 #[test]
+fn namespaced_api_model_never_falls_back_to_a_bare_oauth_model() {
+    let mut scheduler = PoolScheduler::new();
+    let mut api = candidate("api-slot");
+    api.models = ["cpa/gpt-5.5".to_string()].into();
+    api.cooldowns.insert("*".to_string(), 200);
+    scheduler.upsert(api);
+
+    let mut oauth = oauth_candidate("oauth-slot");
+    oauth.models = ["gpt-5.5".to_string()].into();
+    scheduler.upsert(oauth);
+
+    let namespaced = scheduler.select(SelectionRequest {
+        model: "cpa/gpt-5.5",
+        allowed_protocols: &[WireApi::Responses],
+        scope: &CandidateScope::default(),
+        tried: &HashSet::new(),
+        response_affinity_key: None,
+        prompt_affinity_key: None,
+        now_ms: 100,
+    });
+    assert!(namespaced.is_none());
+
+    let bare = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5.5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: 100,
+        })
+        .unwrap();
+    assert_eq!(bare.candidate_id, "oauth-slot");
+}
+
+#[test]
 fn runtime_snapshot_keeps_the_management_wire_shape() {
     let snapshot = CandidateRuntimeSnapshot {
         candidate_id: "source".into(),
@@ -584,6 +621,24 @@ fn sticky_prompt_affinity_does_not_rebind_to_spillover_candidate() {
 }
 
 #[test]
+fn removing_a_busy_candidate_drains_its_lease_before_final_removal() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("busy"));
+    assert!(scheduler.reserve_for("busy", "gpt-5", 100));
+
+    assert!(scheduler.remove("busy").is_some());
+    // The candidate is no longer selectable, but its activity remains visible
+    // so the in-flight request can release its lease normally.
+    assert!(scheduler.candidate("busy").is_some());
+    assert_eq!(scheduler.runtime_activity_for("busy").1, 1);
+    assert!(select(&mut scheduler, &HashSet::new()).is_none());
+
+    assert!(scheduler.release_for("busy", Some("gpt-5")));
+    assert!(scheduler.candidate("busy").is_none());
+    assert_eq!(scheduler.runtime_activity_for("busy").1, 0);
+}
+
+#[test]
 fn oauth_equal_quota_uses_stable_order_without_last_use() {
     let mut scheduler = PoolScheduler::new();
     let mut high_priority = oauth_candidate("high-priority");
@@ -1094,6 +1149,36 @@ fn response_affinity_is_mandatory() {
         None,
         "a continuation cannot move to a candidate that did not create the response"
     );
+}
+
+#[test]
+fn invalidated_response_affinity_allows_retry_on_another_candidate() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    let mut fallback = candidate("fallback");
+    fallback.priority = 10;
+    scheduler.upsert(fallback);
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+    scheduler.set_cooldown("owner", "gpt-5", 10);
+
+    // Retryable provider failures invalidate the owner binding before the
+    // next selection. The tried set then excludes the cooled owner and lets
+    // the scheduler use the next eligible candidate.
+    assert!(scheduler.invalidate_response_affinity("response"));
+    let tried = HashSet::from(["owner".to_string()]);
+    let selection = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &tried,
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: None,
+            now_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(selection.candidate_id, "fallback");
+    assert!(!selection.response_affinity_hit);
 }
 
 #[test]

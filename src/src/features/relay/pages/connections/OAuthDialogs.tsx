@@ -1,23 +1,21 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Check, Clock3, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { OAuthFlow } from "../../api/types";
 import { Button, Dialog, copyText } from "../../components/Ui";
+import { secondsUntil, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
+import { useTransientFlag } from "../../hooks/useTransientFlag";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useProxyPool } from "./ProxyDialogs";
 export function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () => Promise<void> }) {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
-  const [now, setNow] = useState(Date.now);
   const [reopenAt, setReopenAt] = useState(0);
-  const [linkCopied, setLinkCopied] = useState(false);
-  useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(interval);
-  }, []);
-  const secondsRemaining = Math.max(0, Math.ceil((flow.expiresAtMs - now) / 1_000));
-  const reopenIn = Math.max(0, Math.ceil((reopenAt - now) / 1_000));
+  const [linkCopied, showLinkCopied] = useTransientFlag(1_500);
+  const now = useRelativeTimeClock([flow.expiresAtMs, reopenAt || null]);
+  const secondsRemaining = secondsUntil(flow.expiresAtMs, now);
+  const reopenIn = secondsUntil(reopenAt, now);
   const callbackReceived = flow.status === "callback_received" || busy === "oauth-complete";
   const flowFailed = flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed";
   const flowUnavailable = secondsRemaining === 0 || flow.status !== "pending";
@@ -27,8 +25,7 @@ export function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () 
   };
   const copyLink = async () => {
     await copyText(flow.authorizationUrl);
-    setLinkCopied(true);
-    window.setTimeout(() => setLinkCopied(false), 1_500);
+    showLinkCopied();
   };
   return <Dialog
     title={t("accounts.signIn")}

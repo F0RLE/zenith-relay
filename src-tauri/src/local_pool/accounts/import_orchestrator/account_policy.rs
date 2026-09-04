@@ -74,7 +74,7 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     if !account_model_state_is_valid(account) {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "a healthy account must expose at least one model",
+            "account must have a configured or discovered model catalog",
         ));
     }
     normalize_models(account.models.clone())?;

@@ -97,6 +97,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             default_service_tier: routing_policy.default_service_tier,
             quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            image_pricing_catalog: Some(state.pricing_catalog()),
             model_reasoning_allowed_levels,
             response_affinity_store: Some(state.store.clone()),
             provider_storm_breaker: true,

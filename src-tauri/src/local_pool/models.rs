@@ -9,9 +9,10 @@ use zenith_relay_core::{
     normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
-    runtime_source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
-    SourceProtocolBinding, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, RuntimeCandidatePolicy,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding, WireApi,
+    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
@@ -229,6 +230,13 @@ pub struct ProviderSourceRecord {
     pub draining: bool,
     pub base_url: String,
     pub secret_ref: String,
+    /// Explicit LiteLLM namespace used for source pricing.  Legacy records
+    /// leave this unset and therefore only use provider evidence/manual data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provider: Option<String>,
+    /// Opt-in canonical family fallback (for example `openai`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -271,6 +279,10 @@ pub struct LocalGatewayKeyRecord {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAccountRecord {
     pub account: AccountRecord,
+    /// Explicit official pricing family. Older ChatGPT accounts default to
+    /// `openai` in the resolver without requiring a migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_family: Option<String>,
     #[serde(default)]
     pub purchase_cost_micro_usd: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,24 +316,22 @@ impl LocalAccountRecord {
             location.remote_account_id = location.remote_account_id.trim().to_string();
         }
         self.models = normalized_values(std::mem::take(&mut self.models));
-        self.discovered_models = self
-            .discovered_models
-            .take()
-            .map(normalized_values)
-            .filter(|models| !models.is_empty());
+        self.discovered_models = self.discovered_models.take().map(normalized_values);
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
         self.weight = self.weight.max(1);
+        self.provider_family = self
+            .provider_family
+            .take()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
     }
 
     /// Returns the catalog used by runtime and management views. A successful
     /// discovery snapshot wins, while legacy/imported `models` remains the
     /// safe fallback when discovery has not completed yet.
     pub fn effective_models(&self) -> &[String] {
-        self.discovered_models
-            .as_deref()
-            .filter(|models| !models.is_empty())
-            .unwrap_or(&self.models)
+        self.discovered_models.as_deref().unwrap_or(&self.models)
     }
 }
 
@@ -449,6 +459,16 @@ impl ProviderSourceRecord {
     pub fn normalize(&mut self) {
         self.name = self.name.trim().to_string();
         self.base_url = self.base_url.trim().to_string();
+        self.pricing_provider = self
+            .pricing_provider
+            .take()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        self.official_provider_family = self
+            .official_provider_family
+            .take()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
@@ -515,17 +535,26 @@ impl ProviderSourceRecord {
         .map_err(|error| error.to_string())
     }
 
-    pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
-        Ok(!self.models_for_wire_api(wire_api)?.is_empty())
-    }
-
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        for wire_api in WireApi::ALL {
-            if self.supports_wire_api(wire_api)? {
-                return Ok(true);
-            }
+        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl RuntimeSourcePolicyRecord for ProviderSourceRecord {
+    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate {
+        RuntimeSourcePolicyUpdate {
+            source_id: self.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: self.enabled,
+                draining: self.draining,
+                priority: self.priority,
+                weight: self.weight,
+                allowed_models: self.allowed_models.clone(),
+                excluded_models: self.excluded_models.clone(),
+            },
+            recovery_delay_seconds: self.recovery_delay_seconds,
         }
-        Ok(false)
     }
 }
 

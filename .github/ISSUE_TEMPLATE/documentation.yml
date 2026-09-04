@@ -9,7 +9,7 @@ body:
     attributes:
       label: Documentation location
       description: Link to the page or name the file and section.
-      placeholder: docs/help/en/choose-api.md
+      placeholder: docs/help/en/README.md
     validations:
       required: true
   - type: textarea

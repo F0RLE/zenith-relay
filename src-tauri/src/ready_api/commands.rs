@@ -218,16 +218,25 @@ pub(super) fn activate_ready_api_with_history(
     save_key: bool,
     state: &local_pool::DesktopState,
 ) -> Result<(), String> {
+    let sync_history = local_pool::commands::profiles::history_provider_changed(
+        state,
+        &default_codex_home(),
+        local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
+    )?;
     enable_provider(api_key, &state.ready_api_backup_root())?;
     let result = (|| {
         if save_key {
             save_app_key(api_key)?;
         }
-        let backup = local_pool::commands::profiles::synchronize_codex_history(
-            state,
-            &default_codex_home(),
-            local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
-        )?;
+        let backup = if sync_history {
+            local_pool::commands::profiles::synchronize_codex_history(
+                state,
+                &default_codex_home(),
+                local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
+            )?
+        } else {
+            None
+        };
         local_pool::commands::profiles::discard_codex_history_backup(state, backup.as_deref());
         Ok(())
     })();
@@ -241,22 +250,31 @@ pub(super) fn deactivate_ready_api_with_history(
     forget_key: bool,
     state: &local_pool::DesktopState,
 ) -> Result<(), String> {
+    let sync_history = local_pool::commands::profiles::history_provider_changed(
+        state,
+        &default_codex_home(),
+        local_pool::commands::profiles::CodexHistoryProvider::ChatGpt,
+    )?;
     if forget_key {
         reset_provider(&state.ready_api_backup_root())?;
     } else {
         deactivate_provider(&state.ready_api_backup_root())?;
     }
-    let backup = local_pool::commands::profiles::synchronize_codex_history(
-        state,
-        &default_codex_home(),
-        local_pool::commands::profiles::CodexHistoryProvider::ChatGpt,
-    )
-    .map_err(|error| {
-        profile_change_with_rollback(
-            error,
-            enable_provider(api_key, &state.ready_api_backup_root()),
+    let backup = if sync_history {
+        local_pool::commands::profiles::synchronize_codex_history(
+            state,
+            &default_codex_home(),
+            local_pool::commands::profiles::CodexHistoryProvider::ChatGpt,
         )
-    })?;
+        .map_err(|error| {
+            profile_change_with_rollback(
+                error,
+                enable_provider(api_key, &state.ready_api_backup_root()),
+            )
+        })?
+    } else {
+        None
+    };
     local_pool::commands::profiles::discard_codex_history_backup(state, backup.as_deref());
     Ok(())
 }
@@ -276,14 +294,6 @@ pub(super) fn launch_saved_codex(
     let _ = ensure_provider_on_launch(&state.ready_api_backup_root());
     if !provider_has_token() {
         return Err("Сначала сохраните API key.".to_string());
-    }
-    if !is_codex_running() {
-        let backup = local_pool::commands::profiles::synchronize_codex_history(
-            &state,
-            &default_codex_home(),
-            local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
-        )?;
-        local_pool::commands::profiles::discard_codex_history_backup(&state, backup.as_deref());
     }
     let message = launch_codex();
     close_main_window(&app);

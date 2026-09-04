@@ -126,6 +126,7 @@ pub(crate) fn api_error_code(code: &str) -> &str {
         "upstream_request_timeout" => "request_timeout",
         "upstream_conflict" => "conflict",
         "upstream_invalid_request" => "invalid_request",
+        "upstream_candidate_rejected" => "source_rejected",
         "upstream_overloaded" => "server_is_overloaded",
         "upstream_server_error" => "internal_server_error",
         "upstream_bad_gateway" => "bad_gateway",

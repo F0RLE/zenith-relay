@@ -2,9 +2,11 @@ use crate::local_pool::accounts::credentials::{CredentialError, CredentialErrorC
 use crate::local_pool::accounts::import_session::{ImportSessionError, ImportSessionErrorCode};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
 use zenith_relay_core::normalize_error_code;
-use zenith_relay_core::providers::chatgpt::{ModelDiscoveryFailure, ModelDiscoveryFailureCode};
+use zenith_relay_core::providers::chatgpt::ModelDiscoveryFailure;
 
 pub(in crate::local_pool::accounts) type ItemResult<T> = std::result::Result<T, ImportItemError>;
+
+pub(in crate::local_pool::accounts) use crate::local_pool::accounts::credentials::credential_local_error;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,17 +53,6 @@ pub(in crate::local_pool::accounts) fn import_item_command_error(
     LocalPoolError::new(code, error.message).into()
 }
 
-pub(in crate::local_pool::accounts) fn credential_local_error(
-    error: CredentialError,
-) -> LocalPoolError {
-    let code = match error.code {
-        CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
-        CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
-        _ => ErrorCode::InvalidState,
-    };
-    LocalPoolError::new(code, error.message)
-}
-
 pub(in crate::local_pool::accounts) fn proxy_item_error(error: LocalPoolError) -> ImportItemError {
     ImportItemError::new("proxy_unavailable", &error.message)
 }
@@ -75,21 +66,7 @@ pub(in crate::local_pool::accounts) fn model_item_error(
 pub(in crate::local_pool::accounts) fn model_failure_code(
     error: &ModelDiscoveryFailure,
 ) -> &'static str {
-    match error.code {
-        ModelDiscoveryFailureCode::AgentTaskInvalid => "models_agent_task_invalid",
-        ModelDiscoveryFailureCode::Forbidden => "models_forbidden",
-        ModelDiscoveryFailureCode::HttpStatus => "models_http_status",
-        ModelDiscoveryFailureCode::InvalidAccessToken => "models_invalid_access_token",
-        ModelDiscoveryFailureCode::InvalidAccountId => "models_invalid_account_id",
-        ModelDiscoveryFailureCode::InvalidClientVersion => "models_invalid_client_version",
-        ModelDiscoveryFailureCode::InvalidEndpoint => "models_invalid_endpoint",
-        ModelDiscoveryFailureCode::InvalidResponse => "models_invalid_response",
-        ModelDiscoveryFailureCode::RateLimited => "models_rate_limited",
-        ModelDiscoveryFailureCode::ResponseTooLarge => "models_response_too_large",
-        ModelDiscoveryFailureCode::Transport => "models_transport",
-        ModelDiscoveryFailureCode::Unauthorized => "models_unauthorized",
-        ModelDiscoveryFailureCode::Upstream => "models_upstream",
-    }
+    error.code.management_code()
 }
 
 pub(in crate::local_pool::accounts) fn import_session_error(

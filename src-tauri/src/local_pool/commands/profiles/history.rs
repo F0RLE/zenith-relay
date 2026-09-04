@@ -1,6 +1,6 @@
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError},
-    profiles::repair,
+    profiles::{codex, repair},
     state::DesktopState,
 };
 
@@ -9,6 +9,28 @@ pub(crate) enum CodexHistoryProvider {
     ChatGpt,
     LocalGateway,
     ReadyApi,
+}
+
+/// A provider metadata rewrite is only needed when the profile crosses an
+/// adapter boundary. Switching two OAuth accounts or two Relay keys keeps the
+/// same history provider and must not rescan the whole Codex home.
+pub(crate) fn history_provider_changed(
+    state: &DesktopState,
+    profile_dir: &std::path::Path,
+    target: CodexHistoryProvider,
+) -> Result<bool, String> {
+    let current = codex::credential_kind(profile_dir, &state.profile_backup_root())
+        .map_err(|error| error.message)?;
+    let same = match target {
+        CodexHistoryProvider::ChatGpt => {
+            current == Some(codex::ProfileCredentialKind::OAuthAccount)
+        }
+        CodexHistoryProvider::LocalGateway => {
+            current == Some(codex::ProfileCredentialKind::LocalGateway)
+        }
+        CodexHistoryProvider::ReadyApi => current == Some(codex::ProfileCredentialKind::ApiKey),
+    };
+    Ok(!same)
 }
 
 pub(crate) fn synchronize_codex_history(

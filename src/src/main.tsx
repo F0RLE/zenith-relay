@@ -8,16 +8,24 @@ const STARTUP_REVEAL_FALLBACK_MS = 10_000;
 let startupFallbackTimer: number | undefined;
 
 function revealStartupShell() {
-  if (document.documentElement.dataset.startupReady === "true") return;
+  if (document.documentElement.dataset["startupReady"] === "true") return;
   if (startupFallbackTimer !== undefined) window.clearTimeout(startupFallbackTimer);
-  document.documentElement.dataset.startupReady = "true";
-  window.setTimeout(() => {
-    document.getElementById("splash-screen")?.remove();
-  }, 320);
+  const splash = document.getElementById("splash-screen");
+  if (splash && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    splash.remove();
+  } else if (splash) {
+    const removeAfterFade = (event: TransitionEvent) => {
+      if (event.target !== splash || event.propertyName !== "opacity") return;
+      splash.removeEventListener("transitionend", removeAfterFade);
+      splash.remove();
+    };
+    splash.addEventListener("transitionend", removeAfterFade);
+  }
+  document.documentElement.dataset["startupReady"] = "true";
 }
 
 window.addEventListener("zenith-startup-ready", revealStartupShell, { once: true });
-const initialTheme = document.documentElement.dataset.theme;
+const initialTheme = document.documentElement.dataset["theme"];
 const initialThemeIsDark = initialTheme === "dark" || (
   initialTheme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches
 );

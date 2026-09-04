@@ -7,11 +7,15 @@ export function projectRuntimeAccountLabels(
   accountDisplayName: AccountDisplayName,
 ): RuntimeSnapshot | null {
   if (!runtime) return null;
+  let accountsChanged = false;
+  const accounts = runtime.accounts.map((account): AccountSummary => {
+    const displayName = accountDisplayName(account.id, account.label) ?? account.label;
+    if (displayName === account.label && displayName === account.identityHint) return account;
+    accountsChanged = true;
+    return { ...account, label: displayName, identityHint: displayName };
+  });
   return {
     ...runtime,
-    accounts: runtime.accounts.map((account): AccountSummary => {
-      const displayName = accountDisplayName(account.id, account.label) ?? account.label;
-      return { ...account, label: displayName, identityHint: displayName };
-    }),
+    accounts: accountsChanged ? accounts : runtime.accounts,
   };
 }

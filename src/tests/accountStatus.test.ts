@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/relay/api/types";
 import {
+  accountQuotaRefreshState,
   accountErrorTranslationKey,
   currentAccountErrorCode,
   isCodexOauthAccountEligible,
@@ -52,6 +53,17 @@ describe("account status policy", () => {
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" }, lastErrorCode: "models_prepare" }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("provider_timeout");
+  });
+
+  test("does not let a stale quota result hide a required sign-in", () => {
+    expect(accountQuotaRefreshState(account({
+      quotaRefreshStatus: "updated",
+      authState: { state: "requires_reauth", reason: "expired_refresh_token" },
+    }))).toBe("requires_reauth");
+    expect(accountQuotaRefreshState(account({
+      quotaRefreshStatus: "updated",
+      authState: { state: "requires_reauth", reason: "reused_refresh_token" },
+    }))).toBe("updated");
   });
 
   test("maps safe error codes to stable translation keys", () => {

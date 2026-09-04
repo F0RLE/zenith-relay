@@ -141,6 +141,12 @@ pub(crate) fn retryable_failure(
     if !failure_category_requires_cooldown(category) {
         return false;
     }
+    if category == "upstream_candidate_rejected" {
+        // A new request may safely try another source. Responses continuations
+        // are bound to their creator, so retrying an unclassified rejection
+        // elsewhere can corrupt its upstream conversation state.
+        return !has_previous_response_id;
+    }
     retryable_status(status, has_previous_response_id)
         || matches!(
             category,
@@ -152,8 +158,10 @@ pub(crate) fn retryable_failure(
                 | "upstream_model_not_found"
                 | "upstream_model_unsupported"
                 | "upstream_model_capacity"
+                | "upstream_candidate_rejected"
                 | "upstream_websocket_connection_limit"
                 | "upstream_rate_limited"
+                | "upstream_refresh_token_reused"
                 | "upstream_request_timeout"
                 | "upstream_overloaded"
                 | "upstream_edge_challenge"
@@ -171,9 +179,6 @@ pub(crate) fn failure_category_requires_cooldown(category: &str) -> bool {
             | "response_affinity_miss"
             | "response_incomplete"
             | "upstream_cancelled"
-            | "upstream_stream"
-            | "stream_incomplete"
-            | "stream_idle_timeout"
             | "upstream_previous_response_not_found"
             | "upstream_tool_call_mismatch"
             | "upstream_context_too_large"

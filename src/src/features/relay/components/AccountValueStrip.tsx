@@ -1,7 +1,26 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary } from "../api/types";
-import { buildAccountValueProjection } from "../accountEconomics";
+import { buildAccountValueProjection, formatAccountPayback } from "../accountEconomics";
 import { formatAccountValueMicroUsd } from "../poolFormatting";
+import { useTooltip } from "./Ui";
+
+function AccountValueMetric({ title, state, children }: { title: string; state?: string; children: ReactNode }) {
+  const tooltip = useTooltip<HTMLDivElement>(title);
+  return <>
+    <div
+      ref={tooltip.anchorRef}
+      data-state={state}
+      aria-describedby={tooltip.describedBy}
+      onMouseEnter={tooltip.show}
+      onMouseLeave={tooltip.hideAfterHover}
+      onPointerDown={tooltip.pointerStart}
+    >
+      {children}
+    </div>
+    {tooltip.tooltip}
+  </>;
+}
 
 export function AccountValueStrip({ account }: { account: AccountSummary }) {
   const { t, i18n } = useTranslation();
@@ -20,17 +39,17 @@ export function AccountValueStrip({ account }: { account: AccountSummary }) {
     });
 
   return <dl className="account-value-strip" data-columns={remainingApiEquivalent ? 3 : 2}>
-    <div title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}>
+    <AccountValueMetric title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}>
       <dt>{t("accounts.accountValue.used")}</dt>
       <dd>{formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale, approximate)}</dd>
-    </div>
-    {remainingApiEquivalent ? <div title={t("accounts.accountValue.remainingHint")}>
+    </AccountValueMetric>
+    {remainingApiEquivalent ? <AccountValueMetric title={t("accounts.accountValue.remainingHint")}>
       <dt>{t("accounts.accountValue.remaining")}</dt>
       <dd>{formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate)}</dd>
-    </div> : null}
-    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}>
+    </AccountValueMetric> : null}
+    <AccountValueMetric title={paybackTitle} {...(payback != null && payback >= 1 ? { state: "paid" } : {})}>
       <dt>{t("accounts.accountValue.payback")}</dt>
-      <dd>{payback == null ? "—" : `${approximate ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd>
-    </div>
+      <dd>{formatAccountPayback(payback, locale, approximate)}</dd>
+    </AccountValueMetric>
   </dl>;
 }

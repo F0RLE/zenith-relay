@@ -65,4 +65,14 @@ describe("model rules model", () => {
     expect(supported).toEqual(["high", "low"]);
     expect(normalizeReasoningSelection(supported, ["low", "stale", "HIGH"])).toEqual(["high", "low"]);
   });
+
+  test("offers manual candidates only when the runtime explicitly permits unknown-model discovery", () => {
+    expect(supportedReasoningLevels(model("claude-fable-5-1", {
+      reasoningManualFallback: true,
+    }))).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(supportedReasoningLevels(model("known-non-reasoning", {
+      reasoningSupportedLevels: [],
+      reasoningLevels: [],
+    }))).toEqual([]);
+  });
 });

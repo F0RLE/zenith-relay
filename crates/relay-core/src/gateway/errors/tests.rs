@@ -328,6 +328,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
             ),
             (
                 StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"refresh_token_reused"}}"#.as_slice(),
+                "upstream_refresh_token_reused",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
                 br#"{"error":{"message":"An error occurred while processing your request"}}"#.as_slice(),
                 "upstream_server_error",
             ),
@@ -345,6 +350,16 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"invalid_request_error","message":"The 'gpt-next' model is not supported when using Codex with a ChatGPT account."}}"#.as_slice(),
                 "upstream_model_unsupported",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"model_disabled","message":"Requested model is disabled"}}"#.as_slice(),
+                "upstream_candidate_rejected",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"vendor_route_42","message":"this route cannot serve the request"}}"#.as_slice(),
+                "upstream_candidate_rejected",
             ),
             (
                 StatusCode::BAD_REQUEST,
@@ -477,6 +492,21 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
     ));
     assert!(retryable_failure(
         StatusCode::BAD_REQUEST,
+        "upstream_model_unsupported",
+        false
+    ));
+    assert!(retryable_failure(
+        StatusCode::BAD_REQUEST,
+        "upstream_candidate_rejected",
+        false
+    ));
+    assert!(!retryable_failure(
+        StatusCode::BAD_REQUEST,
+        "upstream_candidate_rejected",
+        true
+    ));
+    assert!(retryable_failure(
+        StatusCode::BAD_REQUEST,
         "upstream_overloaded",
         false
     ));
@@ -495,13 +525,15 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         "upstream_content_policy",
         false
     ));
+    assert!(!failure_category_requires_cooldown(
+        "upstream_invalid_request"
+    ));
     for category in [
         "upstream_stream",
         "stream_incomplete",
         "stream_idle_timeout",
-        "upstream_invalid_request",
     ] {
-        assert!(!failure_category_requires_cooldown(category));
+        assert!(failure_category_requires_cooldown(category));
     }
     assert_eq!(
         AttemptFailure::status_with_body(

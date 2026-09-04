@@ -42,7 +42,9 @@ export function shiftColumn<ColumnId extends string>(order: ColumnId[], column: 
   const to = Math.min(order.length - 1, Math.max(0, from + offset));
   if (from === to) return order;
   const next = [...order];
-  next.splice(to, 0, next.splice(from, 1)[0]);
+  const [moved] = next.splice(from, 1);
+  if (moved === undefined) return order;
+  next.splice(to, 0, moved);
   return next;
 }
 
@@ -81,7 +83,7 @@ export function useColumnDrag<ColumnId extends string>(moveColumn: (column: Colu
       const target = headers.find((header) => event.clientX <= header.getBoundingClientRect().right) ?? headers[headers.length - 1];
       if (!target) return;
       const bounds = target.getBoundingClientRect();
-      const targetId = target.dataset.column as ColumnId;
+      const targetId = target.dataset["column"] as ColumnId;
       const after = event.clientX > bounds.left + bounds.width / 2;
       if (current.target === targetId && current.after === after) return;
       const next = { ...current, target: targetId, after };

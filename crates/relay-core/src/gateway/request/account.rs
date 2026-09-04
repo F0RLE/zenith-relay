@@ -1,6 +1,6 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
-use super::super::execution::execute_account_endpoint;
+use super::super::execution::{execute_account_endpoint, AccountExecution};
 use super::normalization::{normalize_account_request, responses_lite_parallel_tool_calls_valid};
 use super::{
     CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES, MAX_CLIENT_REQUEST_BODY_BYTES,
@@ -72,18 +72,18 @@ pub(in crate::gateway) async fn responses_compact(
         runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
     normalize_account_request(&mut request, responses_lite.is_some());
     request.remove("stream");
-    execute_account_endpoint(
+    execute_account_endpoint(AccountExecution {
         runtime,
         key,
-        Value::Object(request),
+        request: Value::Object(request),
         requested_model,
         resolved_model,
-        headers,
-        AccountEndpoint::Compact,
+        client_headers: headers,
+        endpoint: AccountEndpoint::Compact,
         responses_lite,
         response_affinity_key,
-        true,
-    )
+        rewrite_model: true,
+    })
     .await
 }
 
@@ -149,18 +149,18 @@ pub(in crate::gateway) async fn alpha_search(
             headers.insert("session_id", session_id);
         }
     }
-    execute_account_endpoint(
+    execute_account_endpoint(AccountExecution {
         runtime,
         key,
-        Value::Object(request),
+        request: Value::Object(request),
         requested_model,
         resolved_model,
-        headers,
-        AccountEndpoint::AlphaSearch,
-        None,
-        None,
-        model_was_provided,
-    )
+        client_headers: headers,
+        endpoint: AccountEndpoint::AlphaSearch,
+        responses_lite: None,
+        response_affinity_key: None,
+        rewrite_model: model_was_provided,
+    })
     .await
 }
 

@@ -1,6 +1,7 @@
-use super::SourceSummary;
+use super::{AccountSummary, OperationalStatus, SourceSummary};
 use crate::{
-    CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier, ImageRequestPrice, RoutingStrategy,
+    ApiModelPriceOverride, CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier,
+    GatewayRuntime, ImageRequestPrice, RoutingStrategy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,8 +84,13 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
-    /// Whether a current upstream catalog explicitly permits Fast/priority for
-    /// this model. It is deliberately false until such evidence exists.
+    /// The upstream omitted reasoning metadata for an otherwise unknown pooled
+    /// model. The management client may offer manual levels for discovery, but
+    /// must not treat this as an advertised upstream capability.
+    #[serde(default)]
+    pub reasoning_manual_fallback: bool,
+    /// Compatibility flag for older management clients. Fast maps to an
+    /// OpenAI service tier and is unavailable for other model families.
     #[serde(default)]
     pub speed_supported: bool,
     #[serde(default)]
@@ -95,12 +101,75 @@ pub struct ModelSummary {
 
 pub fn apply_model_speed_summary(
     model: &mut ModelSummary,
-    fast_supported: bool,
     configured_tier: Option<DefaultServiceTier>,
 ) {
-    model.speed_supported = fast_supported;
-    model.speed_configurable = fast_supported;
-    model.speed_tier = configured_tier.unwrap_or(DefaultServiceTier::Standard);
+    let supported = crate::model_supports_fast_service_tier(&model.id);
+    model.speed_supported = supported;
+    model.speed_configurable = supported;
+    model.speed_tier = if supported {
+        configured_tier.unwrap_or(DefaultServiceTier::Standard)
+    } else {
+        DefaultServiceTier::Standard
+    };
+}
+
+/// Applies the same configured pool policy to every runtime snapshot. Local
+/// desktop and user-managed server snapshots share this projection, while
+/// their storage and runtime lifecycle remain separate.
+pub fn apply_pool_model_configuration(
+    models: &mut [ModelSummary],
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    model_price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    model_reasoning_allowed_levels: &BTreeMap<String, Vec<String>>,
+    model_service_tier_overrides: &BTreeMap<String, DefaultServiceTier>,
+    runtime: Option<&GatewayRuntime>,
+) {
+    for model in models {
+        let model_id = model.id.clone();
+        if let Some(price) = model_price_overrides.get(&model_id.trim().to_ascii_lowercase()) {
+            model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
+            model.cached_input_micro_usd_per_million = price.cached_input_micro_usd_per_million;
+            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
+            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
+            model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
+            model.custom_price = true;
+        }
+        let has_api_source_route = model_has_api_source_route(sources, &model_id);
+        let has_pool_route =
+            has_api_source_route || super::model_has_native_account_route(accounts, &model_id);
+        apply_model_reasoning_summary(
+            model,
+            runtime.and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
+            crate::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
+            has_pool_route,
+        );
+        apply_model_speed_summary(
+            model,
+            model_service_tier_overrides
+                .get(&model_id.to_ascii_lowercase())
+                .copied(),
+        );
+    }
+}
+
+/// Counts pooled source and account candidates that are currently eligible
+/// for rotation. This is a snapshot statistic, not scheduler admission.
+pub fn pool_candidate_count(sources: &[SourceSummary], accounts: &[AccountSummary]) -> usize {
+    sources
+        .iter()
+        .filter(|source| {
+            source.in_pool
+                && source.supports_any_wire_api()
+                && source.operational_status == OperationalStatus::Rotation
+        })
+        .count()
+        + accounts
+            .iter()
+            .filter(|account| {
+                account.in_pool && account.operational_status == OperationalStatus::Rotation
+            })
+            .count()
 }
 
 /// Applies the operator's explicit presentation order without dropping a
@@ -135,13 +204,16 @@ pub fn apply_model_reasoning_summary(
     model.reasoning_supported_levels.clear();
     model.reasoning_allowed_levels.clear();
     model.reasoning_configurable = false;
+    model.reasoning_manual_fallback = false;
 
     // Provider metadata is the current route contract. Known model defaults
     // are only a fallback for providers that omit the field entirely; using
     // them first hides newly introduced/provider-specific efforts.
+    let known_levels = crate::known_model_reasoning_levels(&model.id);
+    let reported_levels_missing = reported_levels.is_none();
     let mut declared_levels = match reported_levels {
         Some(levels) => levels,
-        None => crate::known_model_reasoning_levels(&model.id)
+        None => known_levels
             .map(|levels| levels.iter().copied().map(str::to_string).collect())
             .unwrap_or_default(),
     };
@@ -156,6 +228,8 @@ pub fn apply_model_reasoning_summary(
         declared_levels.push("ultra".to_string());
     }
     model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);
+    model.reasoning_manual_fallback =
+        has_pool_route && reported_levels_missing && known_levels.is_none();
     if has_pool_route {
         let effective_levels = saved_manual_levels.unwrap_or(&model.reasoning_supported_levels);
         model.reasoning_allowed_levels = crate::canonicalize_reasoning_levels(effective_levels);

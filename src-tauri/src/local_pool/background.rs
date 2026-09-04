@@ -2,8 +2,8 @@ use super::{
     accounts::{
         quota_refresh::{
             next_quota_refresh_at, prepare_account_credentials, record_model_refresh_error,
-            record_quota_refresh_error, refresh_account_quota_once, AccountQuotaOutcome,
-            AccountQuotaRefreshResponse,
+            record_quota_refresh_error, refresh_account_models_once, refresh_account_quota_once,
+            AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
         reset_credits::consume_local_reset_credit_for_account,
         wake::{completion_from_execution, CodexWakeClient},
@@ -11,15 +11,18 @@ use super::{
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
-    accounts::AccountAuthState,
     automations::{
         verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
         WakeVerificationOutcome,
     },
+    pricing::pricing_refresh_delay,
     providers::chatgpt::CodexQuotaClient,
     unix_time_ms as current_time_ms,
 };
@@ -59,8 +62,72 @@ pub(crate) fn start(app: AppHandle) {
     let _account_model_worker = tauri::async_runtime::spawn(async move {
         account_model_loop(account_model_app).await;
     });
+    let pricing_app = app.clone();
+    let _pricing_worker = tauri::async_runtime::spawn(async move {
+        pricing_loop(pricing_app).await;
+    });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_loop(app).await;
+    });
+}
+
+async fn pricing_loop(app: AppHandle) {
+    let instance_id = app
+        .state::<DesktopState>()
+        .root
+        .to_string_lossy()
+        .into_owned();
+    loop {
+        let state = app.state::<DesktopState>();
+        let loader = state.pricing_loader();
+        let now_ms = current_time_ms();
+        let deadline = loader.next_refresh_deadline(now_ms);
+        let delay = pricing_refresh_delay(&instance_id, deadline, now_ms);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = loader.wait_for_schedule_change() => continue,
+        }
+
+        let state = app.state::<DesktopState>();
+        let loader = state.pricing_loader();
+        if loader.refresh_due(current_time_ms()) {
+            let _ = loader.refresh(false).await;
+            // Refresh failures update the catalog status too. Notify the UI
+            // for every attempt so snapshot consumers can recalculate derived
+            // pricing data without waiting for another background event.
+            let _ = app.emit("zenith-state-changed", ());
+        }
+    }
+}
+
+/// Start a one-shot model discovery for accounts that have just become local
+/// pool members.
+///
+/// A membership change needs immediate model discovery, otherwise the UI can
+/// show a fresh quota together with an empty model list until the user
+/// manually refreshes it. Keep this one-shot work off the command path and
+/// reuse the per-account lock shared by the regular quota/model workers.
+pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: Vec<String>) {
+    let account_ids = account_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if account_ids.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<DesktopState>();
+        for account_id in account_ids {
+            let result = refresh_account_models_once(&state, &account_id).await;
+            if let Err(error) = result {
+                let _ = record_model_refresh_error(&state, &account_id, &error);
+            }
+            // The model list and any persisted discovery error are both part
+            // of the runtime snapshot, so notify the frontend after each
+            // account rather than waiting for a bulk operation to finish.
+            let _ = app.emit("zenith-state-changed", ());
+        }
     });
 }
 
@@ -88,7 +155,7 @@ async fn quota_loop(app: AppHandle) {
         if !state.background_session_active() {
             continue;
         }
-        if run_due_quota_refreshes(&app, false).await.is_err() {
+        if run_due_quota_refreshes(&app, true).await.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
     }
@@ -160,7 +227,9 @@ async fn source_model_loop(app: AppHandle) {
                     break;
                 }
                 let _ = super::commands::connections::refresh_local_source_models(
-                    &state, &source_id, false,
+                    &state,
+                    &source_id,
+                    super::commands::connections::SourceRefreshMode::Background,
                 )
                 .await;
                 let _ = app.emit("zenith-state-changed", ());
@@ -389,12 +458,10 @@ fn terminal_quota_refresh_error(
     if matches!(error.code, ErrorCode::NotFound) {
         return Ok(true);
     }
-    Ok(state.store()?.account(account_id).is_none_or(|account| {
-        matches!(
-            account.account.auth_state,
-            AccountAuthState::RequiresReauth(_)
-        )
-    }))
+    Ok(state
+        .store()?
+        .account(account_id)
+        .is_none_or(|account| account.account.auth_state.requires_fresh_login()))
 }
 
 fn evaluate_updated_transitions(
@@ -431,15 +498,13 @@ async fn evaluate_weekly_exhaustions(
     state: &DesktopState,
     response: &AccountQuotaRefreshResponse,
 ) -> Result<()> {
-    if response.exhaustion_transitions.is_empty()
-        || response.account.remote_location.is_some()
+    if response.account.remote_location.is_some()
         || response
             .account
             .account
             .quota
             .reset_credits_available
-            .unwrap_or(0)
-            == 0
+            .is_some_and(|available| available == 0)
     {
         return Ok(());
     }
@@ -452,7 +517,8 @@ async fn evaluate_weekly_exhaustions(
     if !has_weekly_task {
         return Ok(());
     }
-    for transition in &response.exhaustion_transitions {
+    let transitions = weekly_exhaustion_candidates(response);
+    for transition in &transitions {
         if transition.window_kind != zenith_relay_core::quota::QuotaWindowKind::Secondary
             || state
                 .weekly_reset_was_applied(&response.account.account.id, &transition.fingerprint)?
@@ -469,6 +535,27 @@ async fn evaluate_weekly_exhaustions(
         }
     }
     Ok(())
+}
+
+fn weekly_exhaustion_candidates(
+    response: &AccountQuotaRefreshResponse,
+) -> Vec<zenith_relay_core::quota::QuotaTransition> {
+    let mut transitions = response.exhaustion_transitions.clone();
+    if !transitions.iter().any(|transition| {
+        transition.window_kind == zenith_relay_core::quota::QuotaWindowKind::Secondary
+    }) {
+        if let Some(transition) = response
+            .account
+            .account
+            .quota
+            .secondary
+            .as_ref()
+            .and_then(zenith_relay_core::quota::QuotaWindow::exhaustion_transition)
+        {
+            transitions.push(transition);
+        }
+    }
+    transitions
 }
 
 async fn run_wake_permits(state: &DesktopState, permits: Vec<WakePermit>) -> Result<usize> {
@@ -808,6 +895,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            provider_family: Some("openai".into()),
             purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,
@@ -877,5 +965,64 @@ mod tests {
             },
             exhaustion_transitions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn weekly_exhaustion_candidates_recover_a_missed_secondary_transition() {
+        let mut account = account_record();
+        account.account.quota.reset_credits_available = None;
+        account.account.quota.secondary = Some(QuotaWindow {
+            kind: QuotaWindowKind::Secondary,
+            provider_cycle_id: Some("weekly-cycle".into()),
+            window_start_ms: Some(1_000),
+            available_basis_points: Some(0),
+            explicitly_full: Some(false),
+            reset_at_ms: Some(3_601_000),
+            window_minutes: Some(60),
+            observed_at_ms: 1_000,
+            full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: Some("weekly-fingerprint".into()),
+        });
+        let response = AccountQuotaRefreshResponse {
+            account,
+            quota: AccountQuotaOutcome::Updated {
+                transitions: Vec::new(),
+                exhaustion_transitions: Vec::new(),
+            },
+            exhaustion_transitions: Vec::new(),
+        };
+
+        let candidates = weekly_exhaustion_candidates(&response);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].window_kind, QuotaWindowKind::Secondary);
+        assert_eq!(candidates[0].fingerprint, "weekly-fingerprint");
+    }
+
+    #[test]
+    fn weekly_exhaustion_candidates_keep_provider_transition_identity() {
+        let mut response = quota_response(full_window(Some(10_000), 100));
+        response
+            .exhaustion_transitions
+            .push(zenith_relay_core::quota::QuotaTransition {
+                window_kind: QuotaWindowKind::Secondary,
+                fingerprint: "provider-fingerprint".into(),
+                transitioned_at_ms: 200,
+            });
+        response.account.account.quota.secondary = Some(QuotaWindow {
+            kind: QuotaWindowKind::Secondary,
+            provider_cycle_id: None,
+            window_start_ms: None,
+            available_basis_points: Some(0),
+            explicitly_full: Some(false),
+            reset_at_ms: None,
+            window_minutes: Some(60),
+            observed_at_ms: 300,
+            full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: Some("derived-fingerprint".into()),
+        });
+
+        let candidates = weekly_exhaustion_candidates(&response);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].fingerprint, "provider-fingerprint");
     }
 }

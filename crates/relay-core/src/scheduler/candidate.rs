@@ -42,10 +42,11 @@ pub fn account_candidate_health(
     subscription_status: SubscriptionStatus,
     last_error_code: Option<&str>,
 ) -> CandidateHealth {
-    match auth_state {
-        AccountAuthState::RequiresReauth(_) => return CandidateHealth::ReauthRequired,
-        AccountAuthState::Error => return CandidateHealth::Unhealthy,
-        _ => {}
+    if auth_state.requires_fresh_login() {
+        return CandidateHealth::ReauthRequired;
+    }
+    if matches!(auth_state, AccountAuthState::Error) {
+        return CandidateHealth::Unhealthy;
     }
     match last_error_code {
         Some("checkpoint" | "upstream_account_verification_required") => {
@@ -201,6 +202,15 @@ mod tests {
                 None,
             ),
             CandidateHealth::ReauthRequired
+        );
+        assert_eq!(
+            account_candidate_health(
+                AccountAuthState::RequiresReauth(ReauthReason::ReusedRefreshToken),
+                AccountHealthState::Healthy,
+                SubscriptionStatus::Active,
+                None,
+            ),
+            CandidateHealth::Healthy
         );
         assert_eq!(
             account_candidate_health(

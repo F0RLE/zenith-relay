@@ -1,4 +1,5 @@
 pub(crate) mod accounts;
+pub(crate) mod applications;
 pub(crate) mod background;
 pub mod commands;
 mod error;
@@ -18,10 +19,12 @@ use std::{fs, path::Path, time::Instant};
 pub use state::DesktopState;
 
 pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
+    applications::validate();
     let started = Instant::now();
     let root = crate::platform::relay_dir(app)
         .map_err(|message| error::LocalPoolError::new(error::ErrorCode::Io, message))?;
     create_storage_directory(&root)?;
+    state::migrate_recovery_layout(&root)?;
     let directory_ready = started.elapsed();
     let vault_started = Instant::now();
     store::secret_store::initialize(&root.join("data"))?;
@@ -29,10 +32,6 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     let secrets_ready = started.elapsed();
     let state = DesktopState::open(root)?;
     commands::pool::retire_user_gateway_keys(&state)?;
-    profiles::snapshots::ensure_original(
-        &crate::platform::default_codex_home(),
-        &state.profile_backup_root(),
-    )?;
     let state_ready = started.elapsed();
     state.set_app_handle(app.clone());
     let _ = state.record_performance("vault", vault_ms, Some("startup"));

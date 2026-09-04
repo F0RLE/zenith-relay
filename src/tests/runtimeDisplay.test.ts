@@ -71,4 +71,17 @@ describe("runtime account display projection", () => {
   test("preserves the null runtime state", () => {
     expect(projectRuntimeAccountLabels(null, () => "unused")).toBeNull();
   });
+
+  test("keeps account references stable when display labels do not change", () => {
+    const first = account({ id: "one", label: "Visible", identityHint: "Visible" });
+    const second = account({ id: "two", label: "Fallback", identityHint: "Fallback" });
+    const snapshot = runtime([first, second]);
+
+    const projected = projectRuntimeAccountLabels(snapshot, (_accountId, fallbackLabel) => fallbackLabel ?? null);
+
+    expect(projected).not.toBe(snapshot);
+    expect(projected?.accounts).toBe(snapshot.accounts);
+    expect(projected?.accounts[0]).toBe(first);
+    expect(projected?.accounts[1]).toBe(second);
+  });
 });

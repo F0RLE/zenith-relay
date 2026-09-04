@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { TitleBar } from "../components/TitleBar";
 import { AppContextMenu } from "../features/relay/components/ContextMenu";
 import { getPlatform, type Platform } from "../platform/desktop";
@@ -8,7 +8,7 @@ import { RelayApp } from "./RelayApp";
 export function App() {
   const [platform, setPlatform] = useState<Platform>("windows");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const preventChromeSelectAll = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "a" || (!event.ctrlKey && !event.metaKey)) return;
       const target = event.target;

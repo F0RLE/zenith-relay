@@ -626,10 +626,15 @@ async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
 }
 
 #[tokio::test]
-async fn bad_request_is_terminal_and_does_not_call_the_fallback_source() {
+async fn known_invalid_prompt_is_terminal_and_does_not_call_the_fallback_source() {
     let (source_a, state_a) = spawn_upstream(
         "source-a-key",
-        vec![status_reply(StatusCode::BAD_REQUEST, "bad", None)],
+        vec![Reply::Json {
+            status: StatusCode::BAD_REQUEST,
+            body: json!({"error": {"code": "invalid_prompt"}}),
+            cache_control: "invalid-prompt",
+            retry_after: None,
+        }],
     )
     .await;
     let (source_b, state_b) = spawn_upstream(
@@ -706,6 +711,61 @@ async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
     assert_eq!(
         events[0].error_category.as_deref(),
         Some("upstream_overloaded")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some(MODEL));
+}
+
+#[tokio::test]
+async fn generic_provider_rejection_falls_back_and_cools_only_the_model() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![Reply::Json {
+            status: StatusCode::BAD_REQUEST,
+            body: json!({
+                "error": {
+                    "code": "vendor_route_42",
+                    "message": "this route cannot serve the request"
+                }
+            }),
+            cache_control: "rejected",
+            retry_after: None,
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![
+            response_reply("fallback-response-1", "fallback"),
+            response_reply("fallback-response-2", "fallback"),
+        ],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway_with_options(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    for expected_id in ["fallback-response-1", "fallback-response-2"] {
+        let response = request(&gateway, false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap()["id"], expected_id);
+    }
+
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_candidate_rejected")
     );
     assert_eq!(events[0].cooldown_scope.as_deref(), Some(MODEL));
 }
@@ -1755,6 +1815,7 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
             response_affinity_store: None,
             provider_storm_breaker: false,
@@ -1859,6 +1920,7 @@ async fn spawn_gateway(
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
             response_affinity_store: None,
             provider_storm_breaker: false,

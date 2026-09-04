@@ -17,8 +17,6 @@ use zenith_relay_core::unix_time_ms as now_ms;
 const SNAPSHOT_VERSION: u32 = 1;
 const PAYLOAD_VERSION: u32 = 1;
 const SNAPSHOT_DIR: &str = "snapshots";
-const ORIGINAL_MARKER_FILE: &str = "original.snapshot.initialized";
-const ORIGINAL_SNAPSHOT_NAME: &str = "Initial profile";
 const MAX_NAME_CHARS: usize = 80;
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
 const MAX_PROFILE_FILE_BYTES: usize = 1024 * 1024;
@@ -126,13 +124,6 @@ pub fn create(codex_home: &Path, backup_root: &Path, name: &str) -> Result<Profi
     create_with(codex_home, backup_root, name, false, &OsSnapshotSecrets)
 }
 
-/// Create the one-time first-launch restore point. The marker deliberately
-/// survives deletion of the snapshot so a later startup cannot silently turn
-/// a user-created profile into a new "original" state.
-pub fn ensure_original(codex_home: &Path, backup_root: &Path) -> Result<()> {
-    ensure_original_with(codex_home, backup_root, &OsSnapshotSecrets)
-}
-
 pub fn restore_full(codex_home: &Path, backup_root: &Path, id: &str) -> Result<()> {
     restore_full_with(codex_home, backup_root, id, &OsSnapshotSecrets)
 }
@@ -184,35 +175,6 @@ fn create_with(
     Ok(summary(&record))
 }
 
-fn ensure_original_with(
-    codex_home: &Path,
-    backup_root: &Path,
-    secrets: &impl SnapshotSecrets,
-) -> Result<()> {
-    let root = snapshot_root(backup_root);
-    fs::create_dir_all(&root).map_err(io_error)?;
-    let marker = root.join(ORIGINAL_MARKER_FILE);
-    if marker.exists() {
-        return Ok(());
-    }
-
-    if !list_with(backup_root, secrets)?
-        .snapshots
-        .iter()
-        .any(|snapshot| snapshot.is_original)
-    {
-        create_with(
-            codex_home,
-            backup_root,
-            ORIGINAL_SNAPSHOT_NAME,
-            true,
-            secrets,
-        )?;
-    }
-    atomic_write(&marker, "v1\n").map_err(io_error_message)?;
-    Ok(())
-}
-
 fn restore_full_with(
     codex_home: &Path,
     backup_root: &Path,
@@ -222,6 +184,10 @@ fn restore_full_with(
     let path = metadata_path(backup_root, id)?;
     let record = read_record(&path)?;
     validate_record(&record, id)?;
+    // A profile directory may have been removed while the snapshot was kept.
+    // Recreate it before canonicalizing so a valid snapshot can repair the
+    // profile instead of failing with an I/O error on a missing path.
+    fs::create_dir_all(codex_home).map_err(io_error)?;
     let profile_dir = fs::canonicalize(codex_home).map_err(io_error)?;
     if codex::portable_path_value(&record.profile_dir) != codex::portable_path_string(&profile_dir)
     {
@@ -541,6 +507,36 @@ mod tests {
     }
 
     #[test]
+    fn full_restore_recreates_a_deleted_profile_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-profile-snapshot-deleted-{}",
+            Uuid::new_v4()
+        ));
+        let profile = root.join("profile");
+        let backups = root.join("backups");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("config.toml"), "model = \"original\"\n").unwrap();
+        fs::write(profile.join("auth.json"), "{\"token\":\"original\"}").unwrap();
+        let secrets = MemorySecrets::default();
+
+        let snapshot = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
+        fs::remove_dir_all(&profile).unwrap();
+
+        restore_full_with(&profile, &backups, &snapshot.id, &secrets).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(profile.join("config.toml")).unwrap(),
+            "model = \"original\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(profile.join("auth.json")).unwrap(),
+            "{\"token\":\"original\"}"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn snapshot_list_keeps_valid_entries_when_one_payload_is_missing() {
         let root = std::env::temp_dir().join(format!(
             "zenith-profile-snapshot-missing-{}",
@@ -560,35 +556,6 @@ mod tests {
         assert_eq!(list.invalid_count, 1);
         assert_eq!(list.snapshots.len(), 1);
         assert_eq!(list.snapshots[0].id, valid.id);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn original_snapshot_is_created_once_and_sorted_first() {
-        let root = std::env::temp_dir().join(format!("zenith-profile-original-{}", Uuid::new_v4()));
-        let profile = root.join("profile");
-        let backups = root.join("backups");
-        fs::create_dir_all(&profile).unwrap();
-        fs::write(profile.join("config.toml"), "model = \"initial\"\n").unwrap();
-        let secrets = MemorySecrets::default();
-
-        ensure_original_with(&profile, &backups, &secrets).unwrap();
-        let original = list_with(&backups, &secrets).unwrap().snapshots;
-        assert_eq!(original.len(), 1);
-        assert!(original[0].is_original);
-        create_with(&profile, &backups, "Later", false, &secrets).unwrap();
-        ensure_original_with(&profile, &backups, &secrets).unwrap();
-        let snapshots = list_with(&backups, &secrets).unwrap().snapshots;
-        assert_eq!(snapshots.len(), 2);
-        assert!(snapshots[0].is_original);
-        assert_eq!(
-            snapshots
-                .iter()
-                .filter(|snapshot| snapshot.is_original)
-                .count(),
-            1
-        );
-
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -17,9 +17,9 @@ use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, GatewayRuntime, GatewayRuntimeOptions,
-    LocalGatewayKey, MessagesReasoningMode, ProviderSource, RuntimeLocalKey, RuntimeSource,
-    SourceAdapter, SourceProtocolBinding, UsageEvent, WireApi,
+    discover_source_models_for_protocol_bindings, ErrorOrigin, GatewayRuntime,
+    GatewayRuntimeOptions, LocalGatewayKey, MessagesReasoningMode, ProviderSource, RuntimeLocalKey,
+    RuntimeSource, SourceAdapter, SourceProtocolBinding, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "local-test-key";
@@ -2473,9 +2473,14 @@ async fn malformed_messages_response_is_redacted_as_adapter_error() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["error"]["code"], "adapter_upstream_response_invalid");
+    assert_eq!(body["error"]["zenith_relay"]["origin"], "provider");
     assert!(!body.to_string().contains("provider-private-body"));
     assert_eq!(state.bodies.lock().unwrap().len(), 1);
     assert!(!events.lock().unwrap()[0].success);
+    assert_eq!(
+        events.lock().unwrap()[0].error_origin(),
+        Some(ErrorOrigin::Provider)
+    );
 }
 
 async fn spawn_gateway(

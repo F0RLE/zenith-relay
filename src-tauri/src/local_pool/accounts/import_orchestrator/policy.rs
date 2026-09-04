@@ -83,7 +83,8 @@ pub(in crate::local_pool::accounts) fn preserve_newer_account_state(
 pub(in crate::local_pool::accounts) fn account_model_state_is_valid(
     account: &LocalAccountRecord,
 ) -> bool {
-    !account.effective_models().is_empty()
+    account.discovered_models.is_some()
+        || !account.models.is_empty()
         || (account.account.last_error_code.is_some()
             && account.account.health != AccountHealthState::Healthy)
 }

@@ -56,8 +56,8 @@ headers, prompts, response bodies, or provider session material.
 - Update a profile through the existing inspect, snapshot, attach, verify, and
   restore flow. Never overwrite a newer user login.
 
-Read [AGENTS.md](AGENTS.md), [PLANNING.md](PLANNING.md), and
-[ROADMAP.md](ROADMAP.md) before changing a cross-cutting behavior.
+Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
+[ROADMAP.md](docs/project/ROADMAP.md) before changing a cross-cutting behavior.
 
 ## Documentation policy
 
@@ -66,13 +66,10 @@ The tracked human-facing documentation is deliberately small:
 ~~~text
 README.md
 CONTRIBUTING.md
-PLANNING.md
-ROADMAP.md
-CHANGELOG.md
+docs/project/PLANNING.md
+docs/project/ROADMAP.md
+docs/releases/CHANGELOG.md
 docs/help/<locale>/README.md
-docs/help/<locale>/this-computer.md
-docs/help/<locale>/choose-api.md
-docs/help/<locale>/my-server.md
 docs/screenshots/*.png
 ~~~
 
@@ -80,12 +77,13 @@ docs/screenshots/*.png
 metadata, and <code>relay-server/openapi.yaml</code> is the machine-readable
 server contract. Do not add parallel architecture, design, handoff, or
 historical planning documents. Fold current behavior into
-<code>PLANNING.md</code>, future work into <code>ROADMAP.md</code>, and user
-steps into localized Help files.
+<code>docs/project/PLANNING.md</code>, future work into
+<code>docs/project/ROADMAP.md</code>, and user steps into localized Help files.
 
 ### Changelog and release notes
 
-Record every user-visible change in [CHANGELOG.md](CHANGELOG.md) under
+Record every user-visible change in
+[CHANGELOG.md](docs/releases/CHANGELOG.md) under
 `Unreleased`, grouped by behavior rather than by branch. Include the relevant
 PR or commit in the entry when the change is ready for review. When publishing
 a tag, move the shipped entries into a dated version section and leave
@@ -96,17 +94,19 @@ described below.
 Keep the audience boundary explicit: changelog entries and updater notes are
 for users. Do not put test counts, CI job status, formatter or audit output,
 review history, or unfinished acceptance evidence in them. Keep contributor
-commands in this file, current implementation facts in `PLANNING.md`, and
-unfinished or live-provider acceptance gates in `ROADMAP.md`.
+commands in this file, current implementation facts in `docs/project/PLANNING.md`,
+and unfinished or live-provider acceptance gates in `docs/project/ROADMAP.md`.
 
-Stable release tags must have a matching dated section in `CHANGELOG.md`. The
+Stable release tags must have a matching dated section in
+`docs/releases/CHANGELOG.md`. The
 release workflow fails when that section is missing instead of publishing an
 automatically generated pull-request list as user-facing notes.
 
-To add a locale, add its overview and all three Help files, register its
-translation resources, and update the raw Markdown registry in
-<code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep Help documents
-accurate for the UI's current labels and mode order.
+To add a locale, add one sequential guide at
+<code>docs/help/&lt;locale&gt;/README.md</code>, register its translation
+resources, and update the raw Markdown registry in
+<code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep the guide
+accurate for the UI's current labels and section order.
 
 Screenshots are generated from the mocked desktop shell. Change the scenario
 when the UI changes, then regenerate rather than editing images by hand:
@@ -171,7 +171,8 @@ cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -
 cargo test --manifest-path relay-server/Cargo.toml --locked
 ~~~
 
-Use the real server acceptance gate in [ROADMAP.md](ROADMAP.md) before
+Use the real server acceptance gate in
+[ROADMAP.md](docs/project/ROADMAP.md) before
 claiming that the remote pool works in production. Unit and mocked browser
 tests cannot prove real account, proxy, streaming, or server persistence
 behavior.
@@ -186,11 +187,11 @@ behavior.
 4. Run the relevant checks and regenerate screenshots if their UI changed.
 5. Review the diff for secret leakage, stale Help wording, and generated-file
    noise.
-6. Update <code>CHANGELOG.md</code> for user-visible behavior, or state in the
+6. Update <code>docs/releases/CHANGELOG.md</code> for user-visible behavior, or state in the
    PR why no entry is needed.
 7. Merge reviewed work into <code>main</code>. Tag and publish a product release
    after the release checks pass; reserve a <code>production-ready</code> claim
-   for the live acceptance gates in <code>ROADMAP.md</code>.
+   for the live acceptance gates in <code>docs/project/ROADMAP.md</code>.
 
 ### Updater changelog for release admins
 

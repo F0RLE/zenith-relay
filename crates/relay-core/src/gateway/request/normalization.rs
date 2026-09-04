@@ -1,5 +1,69 @@
-use crate::runtime::DefaultServiceTier;
+use crate::{runtime::DefaultServiceTier, WireApi};
 use serde_json::{json, Map, Value};
+
+/// Owns the service-tier field for one routed request.
+///
+/// Managed Codex requests must use the pool's two-value policy. Generic API
+/// clients retain an explicit upstream tier such as `flex`. A request may be
+/// retried on several candidates, so the policy removes stale state before
+/// applying the selected candidate's pool setting each time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::gateway) struct ServiceTierPolicy {
+    owner: ServiceTierOwner,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceTierOwner {
+    Client,
+    Pool,
+}
+
+impl ServiceTierPolicy {
+    pub(in crate::gateway) const fn client_owned() -> Self {
+        Self {
+            owner: ServiceTierOwner::Client,
+        }
+    }
+
+    pub(in crate::gateway) const fn pool_owned() -> Self {
+        Self {
+            owner: ServiceTierOwner::Pool,
+        }
+    }
+
+    pub(in crate::gateway) fn prepare_for_candidate(
+        self,
+        request: &mut Value,
+        default: DefaultServiceTier,
+        wire_api: WireApi,
+    ) {
+        let object = request
+            .as_object_mut()
+            .expect("request object was validated before routing");
+        if self.owner == ServiceTierOwner::Pool {
+            object.remove("service_tier");
+            if wire_api != WireApi::Messages {
+                apply_default_service_tier_if_missing(request, default);
+            }
+        }
+    }
+
+    pub(in crate::gateway) fn effective_tier(
+        self,
+        request: &Value,
+        default: DefaultServiceTier,
+        wire_api: WireApi,
+    ) -> DefaultServiceTier {
+        if self.owner == ServiceTierOwner::Pool && wire_api == WireApi::Messages {
+            return default;
+        }
+        if wire_api != WireApi::Messages {
+            request_service_tier(request)
+        } else {
+            DefaultServiceTier::Standard
+        }
+    }
+}
 
 pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServiceTier {
     if request
@@ -15,7 +79,8 @@ pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServic
     }
 }
 
-/// Apply the pool's fast default only when the client did not choose a tier.
+/// Apply the pool's Fast setting after the request owner has removed any tier
+/// it does not control.
 ///
 /// `priority` is the upstream OpenAI spelling. Standard deliberately remains
 /// implicit, matching the Codex/Cockpit behavior and preserving arbitrary
@@ -43,10 +108,9 @@ pub(in crate::gateway) fn normalize_account_request(
     object: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
-    // Native account settings are opaque client selections. In particular,
-    // never translate or filter `service_tier`, `reasoning.effort`, or
-    // `reasoning.summary` according to Relay pool policy. Responses Lite is
-    // the sole exception: its upstream contract requires `context=all_turns`.
+    // This transport normalization preserves native account settings. The
+    // request execution layer applies Relay's two-speed pool policy later,
+    // while Responses Lite alone requires `context=all_turns` here.
     object.insert("store".to_string(), Value::Bool(false));
     object.insert("stream".to_string(), Value::Bool(true));
     object.remove("max_output_tokens");
@@ -190,4 +254,67 @@ fn is_encrypted_compaction(value: &Value) -> bool {
         .get("encrypted_content")
         .and_then(Value::as_str)
         .is_some_and(|content| !content.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pool_owned_service_tier_overrides_client_and_reapplies_for_each_candidate() {
+        let policy = ServiceTierPolicy::pool_owned();
+        let mut request = json!({"service_tier": "auto"});
+
+        policy.prepare_for_candidate(&mut request, DefaultServiceTier::Fast, WireApi::Responses);
+        assert_eq!(request["service_tier"], "priority");
+
+        policy.prepare_for_candidate(
+            &mut request,
+            DefaultServiceTier::Standard,
+            WireApi::Responses,
+        );
+        assert!(request.get("service_tier").is_none());
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Standard, WireApi::Responses),
+            DefaultServiceTier::Standard
+        );
+
+        policy.prepare_for_candidate(&mut request, DefaultServiceTier::Fast, WireApi::Responses);
+        assert_eq!(request["service_tier"], "priority");
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Fast, WireApi::Responses),
+            DefaultServiceTier::Fast
+        );
+    }
+
+    #[test]
+    fn client_owned_service_tier_preserves_explicit_value() {
+        let mut request = json!({"service_tier": "flex"});
+        let policy = ServiceTierPolicy::client_owned();
+
+        policy.prepare_for_candidate(&mut request, DefaultServiceTier::Fast, WireApi::Responses);
+        assert_eq!(request["service_tier"], "flex");
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Fast, WireApi::Responses),
+            DefaultServiceTier::Standard
+        );
+
+        let mut implicit = json!({});
+        policy.prepare_for_candidate(&mut implicit, DefaultServiceTier::Fast, WireApi::Responses);
+        assert!(implicit.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn pool_owned_service_tier_does_not_inject_into_messages() {
+        let mut request = json!({"service_tier": "priority"});
+        let policy = ServiceTierPolicy::pool_owned();
+
+        policy.prepare_for_candidate(&mut request, DefaultServiceTier::Fast, WireApi::Messages);
+        assert!(request.get("service_tier").is_none());
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Fast, WireApi::Messages),
+            DefaultServiceTier::Fast
+        );
+    }
 }

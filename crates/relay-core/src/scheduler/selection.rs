@@ -80,6 +80,8 @@ pub struct PoolScheduler {
     provider_storm_breaker_enabled: bool,
     cooldown_after_failures: u32,
     keep_last_candidate_available: bool,
+    /// Removed candidates remain as tombstones while leases are active.
+    retired_candidates: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -123,6 +125,7 @@ impl PoolScheduler {
             // immediately. GatewayRuntime installs the user-facing policy.
             cooldown_after_failures: 1,
             keep_last_candidate_available: false,
+            retired_candidates: BTreeSet::new(),
         }
     }
 
@@ -196,6 +199,7 @@ impl PoolScheduler {
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         let candidate_id = candidate.id.clone();
+        self.retired_candidates.remove(&candidate_id);
         self.cooldown_reasons.retain(|(id, model), _| {
             id != &candidate_id || candidate.cooldowns.contains_key(model)
         });
@@ -203,6 +207,25 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
+        let existing = self.candidates.get(candidate_id).cloned()?;
+        if self.active_request_count(candidate_id) > 0 {
+            // Do not tear down activity or executor ownership underneath an
+            // in-flight request. The candidate is immediately ineligible for
+            // new work and is finalized once its last lease is released.
+            self.response_affinity.invalidate_candidate(candidate_id);
+            self.prompt_affinity.invalidate_candidate(candidate_id);
+            if let Some(candidate) = self.candidates.get_mut(candidate_id) {
+                candidate.enabled = false;
+                candidate.draining = true;
+            }
+            self.retired_candidates.insert(candidate_id.to_string());
+            return Some(existing);
+        }
+        self.remove_now(candidate_id)
+    }
+
+    fn remove_now(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
+        self.retired_candidates.remove(candidate_id);
         self.response_affinity.invalidate_candidate(candidate_id);
         self.prompt_affinity.invalidate_candidate(candidate_id);
         self.activity.remove_candidate(candidate_id);
@@ -231,6 +254,14 @@ impl PoolScheduler {
             self.protected_candidate = None;
         }
         self.candidates.remove(candidate_id)
+    }
+
+    fn finalize_retired_if_idle(&mut self, candidate_id: &str) {
+        if self.retired_candidates.contains(candidate_id)
+            && self.active_request_count(candidate_id) == 0
+        {
+            let _ = self.remove_now(candidate_id);
+        }
     }
 
     pub fn candidate(&self, candidate_id: &str) -> Option<&RuntimeCandidate> {
@@ -776,7 +807,8 @@ impl PoolScheduler {
         scope: &CandidateScope,
         now_ms: u64,
     ) -> bool {
-        !self.execution_fences.contains_key(&candidate.id)
+        !self.retired_candidates.contains(&candidate.id)
+            && !self.execution_fences.contains_key(&candidate.id)
             && !self
                 .capability_blocks
                 .contains(&(candidate.id.clone(), model.to_ascii_lowercase()))
@@ -949,7 +981,11 @@ impl PoolScheduler {
             self.half_open
                 .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
         }
-        self.activity.release(candidate_id, model, lane)
+        let released = self.activity.release(candidate_id, model, lane);
+        if released {
+            self.finalize_retired_if_idle(candidate_id);
+        }
+        released
     }
 
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {

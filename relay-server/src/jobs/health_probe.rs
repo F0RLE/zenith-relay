@@ -31,13 +31,14 @@ async fn run(state: &Arc<AppState>) -> Result<(), String> {
         };
         match discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings).await
         {
-            Ok(discovery) if !discovery.models.is_empty() => {
+            Ok(discovery) => {
                 let resolved_base_url = discovery.resolved_base_url.clone();
                 if resolved_base_url
                     .as_deref()
                     .is_some_and(|base_url| record.base_url != base_url)
                     || record.models != discovery.models
                     || record.protocol_bindings != discovery.protocol_bindings
+                    || record.detected_model_prices != discovery.detected_model_prices
                     || record.last_error_code.is_some()
                 {
                     if let Some(base_url) = resolved_base_url {
@@ -45,12 +46,12 @@ async fn run(state: &Arc<AppState>) -> Result<(), String> {
                     }
                     record.models = discovery.models;
                     record.protocol_bindings = discovery.protocol_bindings;
+                    record.detected_model_prices = discovery.detected_model_prices;
                     record.last_error_code = None;
                     state.store.save_source(&record)?;
                     changed = true;
                 }
             }
-            Ok(_) => {}
             Err(_) => {
                 if record.last_error_code.as_deref() != Some("health_probe_failed") {
                     record.last_error_code = Some("health_probe_failed".to_string());

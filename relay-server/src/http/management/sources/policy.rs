@@ -1,30 +1,11 @@
 use crate::state::SourceRecord;
-use zenith_relay_core::{RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate};
+use zenith_relay_core::{changed_runtime_source_policy_updates, RuntimeSourcePolicyUpdate};
 
 pub(super) fn updates(
     previous: &[SourceRecord],
     next: &[SourceRecord],
 ) -> Vec<RuntimeSourcePolicyUpdate> {
-    next.iter()
-        .filter(|source| {
-            previous
-                .iter()
-                .find(|previous| previous.id == source.id)
-                .is_none_or(|previous| source_runtime_policy_changed(previous, source))
-        })
-        .map(|source| RuntimeSourcePolicyUpdate {
-            source_id: source.id.clone(),
-            policy: RuntimeCandidatePolicy {
-                enabled: source.enabled,
-                draining: source.draining,
-                priority: source.priority,
-                weight: source.weight,
-                allowed_models: source.allowed_models.clone(),
-                excluded_models: source.excluded_models.clone(),
-            },
-            recovery_delay_seconds: source.recovery_delay_seconds,
-        })
-        .collect()
+    changed_runtime_source_policy_updates(previous, next)
 }
 
 pub(super) fn source_runtime_policy_compatible(
@@ -45,16 +26,6 @@ pub(super) fn source_runtime_policy_compatible(
         })
 }
 
-fn source_runtime_policy_changed(previous: &SourceRecord, next: &SourceRecord) -> bool {
-    previous.enabled != next.enabled
-        || previous.draining != next.draining
-        || previous.priority != next.priority
-        || previous.weight != next.weight
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
-        || previous.recovery_delay_seconds != next.recovery_delay_seconds
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +41,8 @@ mod tests {
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:test".into(),
+            pricing_provider: None,
+            official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
@@ -101,7 +74,14 @@ mod tests {
             std::slice::from_ref(&previous),
             std::slice::from_ref(&policy)
         ));
-        assert!(source_runtime_policy_changed(&previous, &policy));
+        assert_eq!(
+            updates(
+                std::slice::from_ref(&previous),
+                std::slice::from_ref(&policy)
+            )
+            .len(),
+            1
+        );
 
         let mut membership_only = previous.clone();
         membership_only.in_pool = false;
@@ -110,7 +90,11 @@ mod tests {
             std::slice::from_ref(&membership_only)
         ));
         assert!(
-            !source_runtime_policy_changed(&previous, &membership_only),
+            updates(
+                std::slice::from_ref(&previous),
+                std::slice::from_ref(&membership_only)
+            )
+            .is_empty(),
             "pool membership refreshes key scope separately"
         );
 

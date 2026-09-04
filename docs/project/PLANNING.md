@@ -1,18 +1,19 @@
 # Zenith Relay Planning
 
-Last reviewed: 2026-08-23.
+Last reviewed: 2026-09-03.
 
 This document describes the implementation that exists today, its boundaries,
 and the design rules for compatible integrations. It is not a historical task
 log; completed detail belongs in code, tests, and Git.
 
-## Release baseline - v1.1.0
+## Current implementation
 
-The 1.1.0 implementation baseline is complete. Relay is a standalone
-local-first desktop product with the This computer, Choose API, and My server
-modes; a personal account/API pool; provider-neutral protocol adapters; quota,
+The current implementation is a standalone local-first desktop product with
+the This computer, Choose API, and My server modes; a personal account/API
+pool; provider-neutral protocol adapters; quota,
 model, reasoning, pricing, and usage contracts; reversible Codex profile
-attachment and recovery; and a user-managed server with an encrypted vault.
+attachment, OpenCode configuration integration, application recovery, and a
+user-managed server with an encrypted vault.
 
 Automated checks and live acceptance are maintainer evidence, not product
 behavior. Their commands and results belong to CI and the release process, not
@@ -112,8 +113,11 @@ placement, so Relay does not force live process pages to disk.
 ### Desktop storage boundary
 
 Relay desktop state is kept under `%LOCALAPPDATA%\\Zenith Relay`: `data` holds
-the SQLite runtime database and encrypted vault, `cache` holds WebView/import
-working data, and `recovery` holds profile and repair snapshots. The database
+the SQLite runtime database, pricing catalog, and encrypted vault, `cache` holds
+WebView/import/deployment working data, and `recovery` is organized by owner:
+`applications/chatgpt` contains ChatGPT profile and API-config backups,
+`applications/opencode` contains OpenCode config backups, and
+`operations/history-repair` contains short-lived history repair files. The database
 keeps bounded, redacted request diagnostics (retained for 30 days) and an
 incremental API-equivalent rollup so old logs can be removed without losing
 totals. Raw secret material is never written to these records. Relay does not
@@ -133,11 +137,12 @@ be shared; there is no one-proxy-per-account rule.
 
 Discovery refreshes provider-derived catalog data for that source without
 turning it into a global vendor assumption. Source pricing keeps provider,
-official-catalog, and manual provenance separate; runtime resolution is
-provider-discovered first, then the verified official catalog, then a manual
-value when no trusted upstream or official price exists. Changing an endpoint
-or protocol causes stale provider-derived prices to be rediscovered rather than
-carried to a different source contract.
+LiteLLM exact, LiteLLM canonical, and manual provenance separate. Runtime
+resolution is provider evidence first, then an exact LiteLLM provider/model
+record, then a canonical record from an explicitly declared official family,
+then a manual source value. Changing an endpoint or protocol causes stale
+provider-derived prices to be rediscovered rather than carried to a different
+source contract.
 
 Every candidate has a stable record, credential availability, health, model
 availability, and a user-facing operational state. A missing secret, revoked
@@ -331,19 +336,25 @@ response bodies in ordinary telemetry.
 
 API-equivalent is an informational estimate, never a routing input:
 
-- personal account usage uses the verified bundled OpenAI price catalog only;
+- ChatGPT and other subscription-account usage uses an exact LiteLLM record
+  within the account's declared official provider family, otherwise it is
+  unpriced;
 - an API source uses provider-discovered price evidence first;
-- if discovery has no price, the verified bundled OpenAI catalog is tried;
-- a manual source price is used only when neither provider nor official price exists;
+- if discovery has no price, an exact LiteLLM provider/model record is tried;
+- a canonical LiteLLM price is used only when the source explicitly declares
+  the matching official provider family;
+- a manual source price is used only when neither provider nor LiteLLM price
+  exists;
 - input, cached input, cache writes, and output retain separate price buckets;
 - unknown or incomplete token splits remain explicitly unpriced;
 - Fast and Standard request modes are recorded as observed service tiers, not
-  multiplied by a universal hard-coded factor.
+  multiplied by a universal factor.
 - Fast is Relay's user-facing name for the upstream `priority` service tier.
   It stays separate from scheduler/source priority. Fast is a request-speed
   mode, not a second user-facing quota; provider Fast/priority metadata remains
-  diagnostic and is not rendered as another account quota meter. A provider
-  may report that the requested Fast tier was served as Standard.
+  diagnostic and is not rendered as another account quota meter. The managed
+  pool control applies only to OpenAI-family models; other model families stay
+  on Standard. A provider may report that requested Fast was served as Standard.
 
 Provider quota remains a provider-reported operational signal. It is rendered
 as a percentage and reset boundary, never as money, an entitlement, a routing
@@ -355,23 +366,69 @@ unpriced or incomplete interval. The optional account purchase cost is
 user-entered presentation metadata used only to calculate payback against direct
 API-equivalent usage; it never decides whether a request may use an account.
 
-## Profiles and recovery
+### Pricing catalog lifecycle
 
-Profile operations follow one explicit full-replacement transaction:
+LiteLLM is the single reference catalog for token and request/image prices.
+Relay keeps the last validated catalog in its local state for both desktop and
+server deployments. A catalog refresh is an independent background operation:
+the first snapshot uses the cached catalog when available, and an asynchronous
+conditional validation is started once at process launch even when that cache is
+still fresh. Network failure does not block startup or requests, and an offline
+or expired catalog is marked stale. ETag and Last-Modified validators avoid
+downloading an unchanged file; 304 responses update only freshness metadata. A
+new payload is parsed and validated completely before an atomic replacement, so
+malformed or oversized data cannot discard the last good snapshot.
+
+After the startup check, normal validation is scheduled at the cache TTL
+(currently 24 hours) with a small deterministic per-instance spread. A failed
+attempt schedules exact bounded retries (5 minutes, 30 minutes, then 2 hours)
+and wakes the scheduler when a manual refresh changes that deadline. The retry
+state is in-memory because the last valid snapshot remains safe to use after a
+restart.
+
+Each usage calculation captures one immutable catalog snapshot and one policy
+revision for its entire pass. Replacing the snapshot invalidates derived
+API-equivalent totals without changing stored token facts. Provider evidence,
+manual source overrides, account-family selection, and catalog revision all
+participate in that invalidation. Prices never affect route selection, quota,
+or request admission. Image/request-only records remain a separate price type
+and are never converted into a zero-cost token quote. Missing prices are shown
+as unpriced rather than `$0`.
+
+## Applications and recovery
+
+ChatGPT profile operations follow a scoped managed-state transaction:
 
 ~~~text
-inspect -> create or reuse snapshot -> apply managed configuration -> verify
-restore full snapshot -> verify restored state
+inspect -> preserve Relay-managed state -> repair history when the provider changes
+apply or restore managed configuration -> verify -> discard or roll back history repair
 ~~~
 
-On the first local Relay startup, the current ChatGPT profile is captured once
-as a protected <code>isOriginal</code> snapshot and kept first in the recovery
-list. Users can create additional snapshots at any time. Recovery has one
-mode: after a Да/Нет confirmation it atomically replaces the complete
-<code>config.toml</code> and <code>auth.json</code>; it never creates a hidden
-pre-restore copy or offers a partial/managed variant. Snapshot deletion also
-requires a visible ten-second Да cooldown. Windows extended path prefixes are
-normalized in snapshot metadata and presentation.
+Before the first managed ChatGPT change, Relay records only the configuration,
+authentication, and catalog state that it will own. After confirmation, the
+managed restore returns those fields, including the prior
+<code>config.toml</code> state and managed authentication. It preserves
+unrelated client settings and refuses to overwrite a newer manual sign-in.
+
+Manual ChatGPT recovery points are a separate contract. Each named snapshot
+stores the current <code>config.toml</code> and authentication state in protected
+local storage. A confirmed restore replaces only those files, and invalid
+metadata or payloads remain visible as recovery errors instead of being
+partially applied.
+
+When a profile crosses the ChatGPT, Relay-local, or local API boundary, history
+repair rewrites only the affected provider metadata for the target. The same
+reversible repair runs in either direction; a failed profile operation restores
+the repair backup. Windows extended path prefixes are normalized in repair
+manifests and validation.
+
+OpenCode keeps one byte-for-byte original configuration as its recovery source.
+Relay resolves the user's `opencode.json`/JSONC path and copies it before the
+first managed write. A confirmed restore removes Relay's provider and
+semantically merges compatible settings changed by the user since that copy;
+the resulting JSON may therefore have different formatting. OpenCode recovery
+is separate from ChatGPT managed-state restore because the files, lifecycle,
+and client ownership differ.
 
 ## User-managed server
 
@@ -422,11 +479,12 @@ a second scheduler or a provider-specific UI routing rule.
 
 ### Other client applications
 
-Codex profile attachment is the current supported client integration. Future
-client adapters are selected by user need and only when their configuration can
-be inspected, changed reversibly, verified, and restored. An adapter owns
-client-specific file discovery and managed configuration; the pool endpoint,
-profile credential, usage, and scheduler remain shared.
+ChatGPT/Codex profile attachment and OpenCode configuration are the current
+shipped client integrations. Future client adapters are selected by user need
+and only when their configuration can be inspected, changed reversibly,
+verified, and restored. An adapter owns client-specific file discovery and
+managed configuration; the pool endpoint, profile credential, usage, and
+scheduler remain shared.
 
 ## Known limits
 
@@ -435,6 +493,10 @@ profile credential, usage, and scheduler remain shared.
   contract. A native Messages source model appears in that profile only when a
   Responses-to-Messages binding is explicitly configured. A native Messages
   client uses the original passthrough route.
+- OpenCode integration manages the user's resolved `opencode.json`/JSONC path
+  and writes one Relay provider entry from the prepared pool model snapshot.
+  Its original file is copied before the first Relay write; OpenCode does not
+  yet expose named multi-snapshot history or a native upstream WebSocket path.
 - The Responses-to-Messages and Responses-to-Gemini bridges support namespace
   tools through stable aliases, but neither claims hosted or dynamic-discovery
   tools, structured custom results, native encrypted reasoning, or Responses

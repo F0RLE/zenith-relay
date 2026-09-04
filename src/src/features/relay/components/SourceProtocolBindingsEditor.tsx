@@ -1,8 +1,9 @@
 import { Route, Sparkles } from "lucide-react";
 import { type CSSProperties, useId } from "react";
 import { useTranslation } from "react-i18next";
-import type { CacheWriteTtl, SourceAdapter, SourceProtocolBinding, SourceWireApi } from "../api/types";
+import type { CacheWriteTtl, SourceAdapter, SourceProtocolBinding, SourceSummary, SourceWireApi } from "../api/types";
 import {
+  effectiveSourceProtocolBindings,
   normalizedAdapter,
   normalizedBindings,
   sourceWireApis,
@@ -20,16 +21,7 @@ import {
   type SimpleRouteCard,
 } from "./sourceProtocolPresentation";
 
-export function SourceProtocolBindingsEditor({
-  models,
-  value,
-  onChange,
-  wireApis = sourceWireApis,
-  showSimplePicker = false,
-  autoAssignModels = true,
-  exclusiveSimplePicker = false,
-  routeGroup = "all",
-}: {
+export type SourceProtocolBindingsEditorProps = {
   models: string[];
   value: SourceProtocolBinding[];
   onChange: (value: SourceProtocolBinding[]) => void;
@@ -43,7 +35,34 @@ export function SourceProtocolBindingsEditor({
    * matrix to one of them when the dialog splits them into separate tabs.
    */
   routeGroup?: "all" | "native" | "adapters";
+};
+
+export function SourceProtocolBindingsSummary({
+  source,
+}: {
+  source: Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">;
 }) {
+  const { t } = useTranslation();
+  const hasRoute = effectiveSourceProtocolBindings(source).some(
+    (binding) => binding.modelIds.length > 0,
+  );
+  return (
+    <span className="source-protocol-summary">
+      {t(hasRoute ? "sources.routingSummary" : "sources.routingPending")}
+    </span>
+  );
+}
+
+export function SourceProtocolBindingsEditor({
+  models,
+  value,
+  onChange,
+  wireApis = sourceWireApis,
+  showSimplePicker = false,
+  autoAssignModels = true,
+  exclusiveSimplePicker = false,
+  routeGroup = "all",
+}: SourceProtocolBindingsEditorProps) {
   const { t } = useTranslation();
   const titleId = useId();
   const bindings = normalizedBindings(value, models)

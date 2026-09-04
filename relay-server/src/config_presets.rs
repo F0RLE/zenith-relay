@@ -3,19 +3,16 @@ use crate::{
     store::{configuration_revision, ConfigurationReplaceError},
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use zenith_relay_core::{
-    is_valid_model_id, normalize_image_base_model, normalize_model_ids,
-    normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
-    normalize_subscription_plan_order,
+    merge_configuration_preset_settings, normalize_configuration_preset,
     protocol::{
-        AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
-        ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
-        ConfigurationPresetPreview, ConfigurationPresetSettings, SourcePresetRule,
-        CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
+        ConfigurationPreset, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
+        ConfigurationPresetChange, ConfigurationPresetDocument, ConfigurationPresetPreview,
+        ConfigurationPresetSettings, CONFIGURATION_PRESET_FORMAT,
+        CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, ProxyConfig,
+    validate_resolved_configuration_preset_members, ProxyConfig,
 };
 
 #[derive(Debug)]
@@ -97,117 +94,6 @@ pub async fn apply(
     })
 }
 
-fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPreset, PresetError> {
-    if preset.format != CONFIGURATION_PRESET_FORMAT {
-        return Err(PresetError::Invalid(
-            "configuration preset format is unsupported".to_string(),
-        ));
-    }
-    if !(2..=CONFIGURATION_PRESET_SCHEMA_VERSION).contains(&preset.schema_version) {
-        return Err(PresetError::Invalid(format!(
-            "configuration preset schema {} is unsupported",
-            preset.schema_version
-        )));
-    }
-    normalize_source_rules(&mut preset.settings.sources)?;
-    normalize_account_rules(&mut preset.settings.accounts)?;
-    preset.settings.routing.subscription_plan_order =
-        normalize_subscription_plan_order(preset.settings.routing.subscription_plan_order)
-            .map_err(|message| PresetError::Invalid(message.to_string()))?;
-    preset.settings.routing.image_base_model =
-        normalize_image_base_model(preset.settings.routing.image_base_model)
-            .map_err(|error| PresetError::Invalid(error.to_string()))?;
-    if !(1..=8).contains(&preset.settings.routing.max_retry_candidates)
-        || !(1..=8).contains(&preset.settings.routing.cooldown_after_failures)
-        || !(10..=20).contains(&preset.settings.quota.request_timeout_seconds)
-    {
-        return Err(PresetError::Invalid(
-            "configuration preset policy is invalid".to_string(),
-        ));
-    }
-    preset.settings.hidden_models = normalize_models(preset.settings.hidden_models)?;
-    preset.settings.model_price_overrides =
-        normalize_prices(preset.settings.model_price_overrides)?;
-    preset.settings.model_reasoning_allowed_levels =
-        normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
-            .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))?;
-    preset.settings.model_service_tier_overrides =
-        normalize_model_service_tier_overrides(preset.settings.model_service_tier_overrides)
-            .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))?;
-    preset.settings.model_display_order = normalize_model_ids(preset.settings.model_display_order);
-    Ok(preset)
-}
-
-fn normalize_source_rules(rules: &mut [SourcePresetRule]) -> Result<(), PresetError> {
-    if rules.len() > 2_048 {
-        return Err(PresetError::Invalid(
-            "configuration preset contains too many sources".to_string(),
-        ));
-    }
-    let mut ids = BTreeSet::new();
-    for rule in rules.iter_mut() {
-        validate_id(&rule.id, "source")?;
-        rule.name = rule.name.trim().to_string();
-        rule.base_url = rule.base_url.trim().trim_end_matches('/').to_string();
-        if !ids.insert(rule.id.clone())
-            || rule.weight == 0
-            || rule.name.is_empty()
-            || rule.name.len() > 256
-            || rule.name.chars().any(char::is_control)
-            || url::Url::parse(&rule.base_url).is_err()
-        {
-            return Err(PresetError::Invalid(
-                "configuration preset source rule is invalid".to_string(),
-            ));
-        }
-        rule.allowed_models = normalize_models(std::mem::take(&mut rule.allowed_models))?;
-        rule.excluded_models = normalize_models(std::mem::take(&mut rule.excluded_models))?;
-        rule.model_price_overrides =
-            normalize_prices(std::mem::take(&mut rule.model_price_overrides))?;
-        if !rule.protocol_bindings.is_empty() {
-            rule.protocol_bindings = normalize_source_protocol_bindings(
-                std::mem::take(&mut rule.protocol_bindings),
-                rule.wire_api,
-                &[],
-            )
-            .map_err(|error| PresetError::Invalid(error.to_string()))?;
-        }
-    }
-    rules.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(())
-}
-
-fn normalize_account_rules(rules: &mut [AccountPresetRule]) -> Result<(), PresetError> {
-    if rules.len() > 2_048 {
-        return Err(PresetError::Invalid(
-            "configuration preset contains too many accounts".to_string(),
-        ));
-    }
-    let mut ids = BTreeSet::new();
-    for rule in rules.iter_mut() {
-        validate_id(&rule.id, "account")?;
-        if !ids.insert(rule.id.clone())
-            || rule.weight == 0
-            || invalid_reference(&rule.identity_hint)
-        {
-            return Err(PresetError::Invalid(
-                "configuration preset account rule is invalid".to_string(),
-            ));
-        }
-        if rule.proxy_id.as_deref().is_some_and(invalid_reference)
-            || rule.proxy_id.is_some() && rule.bypass_common_proxy
-        {
-            return Err(PresetError::Invalid(
-                "configuration preset proxy reference is invalid".to_string(),
-            ));
-        }
-        rule.allowed_models = normalize_models(std::mem::take(&mut rule.allowed_models))?;
-        rule.excluded_models = normalize_models(std::mem::take(&mut rule.excluded_models))?;
-    }
-    rules.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(())
-}
-
 fn resolve_references(
     state: &AppState,
     settings: &mut ConfigurationPresetSettings,
@@ -277,56 +163,12 @@ fn resolve_references(
     settings
         .accounts
         .sort_by(|left, right| left.id.cmp(&right.id));
+    validate_resolved_configuration_preset_members(settings).map_err(PresetError::Invalid)?;
     Ok(())
 }
 
-fn validate_id(value: &str, kind: &str) -> Result<(), PresetError> {
-    if invalid_reference(value) {
-        return Err(PresetError::Invalid(format!(
-            "configuration preset {kind} reference is invalid"
-        )));
-    }
-    Ok(())
-}
-
-fn invalid_reference(value: &str) -> bool {
-    value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-fn normalize_models(models: Vec<String>) -> Result<Vec<String>, PresetError> {
-    if models.len() > 4_096 {
-        return Err(PresetError::Invalid(
-            "configuration preset model list is too large".to_string(),
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if !is_valid_model_id(model) {
-            return Err(PresetError::Invalid(
-                "configuration preset model id is invalid".to_string(),
-            ));
-        }
-        if seen.insert(model.to_ascii_lowercase()) {
-            normalized.push(model.to_string());
-        }
-    }
-    Ok(normalized)
-}
-
-fn normalize_prices(
-    prices: BTreeMap<String, ApiModelPriceOverride>,
-) -> Result<BTreeMap<String, ApiModelPriceOverride>, PresetError> {
-    normalize_model_price_overrides(prices)
-        .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))
+fn normalize_preset(preset: ConfigurationPreset) -> Result<ConfigurationPreset, PresetError> {
+    normalize_configuration_preset(preset).map_err(PresetError::Invalid)
 }
 
 fn validate_references(
@@ -414,48 +256,7 @@ fn merge_settings(
     current: &ConfigurationPresetSettings,
     requested: &ConfigurationPresetSettings,
 ) -> Result<ConfigurationPresetSettings, PresetError> {
-    let mut merged = current.clone();
-    let source_indexes = merged
-        .sources
-        .iter()
-        .enumerate()
-        .map(|(index, rule)| (rule.id.clone(), index))
-        .collect::<HashMap<_, _>>();
-    for rule in &requested.sources {
-        let index = source_indexes.get(&rule.id).copied().ok_or_else(|| {
-            PresetError::Missing(format!("referenced source {} does not exist", rule.id))
-        })?;
-        merged.sources[index] = rule.clone();
-    }
-    let account_indexes = merged
-        .accounts
-        .iter()
-        .enumerate()
-        .map(|(index, rule)| (rule.id.clone(), index))
-        .collect::<HashMap<_, _>>();
-    for rule in &requested.accounts {
-        let index = account_indexes.get(&rule.id).copied().ok_or_else(|| {
-            PresetError::Missing(format!("referenced account {} does not exist", rule.id))
-        })?;
-        merged.accounts[index] = rule.clone();
-    }
-    merged.routing = requested.routing.clone();
-    merged.quota = requested.quota.clone();
-    merged.hidden_models = requested.hidden_models.clone();
-    merged.model_price_overrides = requested.model_price_overrides.clone();
-    if requested.model_reasoning_allowed_levels_present {
-        merged.model_reasoning_allowed_levels = requested.model_reasoning_allowed_levels.clone();
-    }
-    if requested.model_service_tier_overrides_present {
-        merged.model_service_tier_overrides = requested.model_service_tier_overrides.clone();
-    }
-    if requested.model_display_order_present {
-        merged.model_display_order = requested.model_display_order.clone();
-    }
-    merged.model_reasoning_allowed_levels_present = true;
-    merged.model_service_tier_overrides_present = true;
-    merged.model_display_order_present = true;
-    Ok(merged)
+    merge_configuration_preset_settings(current, requested).map_err(PresetError::Missing)
 }
 
 fn configuration_diff(

@@ -1,9 +1,6 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{TimeZone, Utc};
 use serde::Deserialize;
-
-const MAX_JWT_BYTES: usize = 64 * 1024;
-const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
+use zenith_relay_core::accounts::decode_unverified_jwt_payload;
 
 #[derive(Default, Deserialize)]
 pub(super) struct ImportedJwtClaims {
@@ -128,23 +125,7 @@ pub(super) fn normalize_epoch_timestamp_ms(value: u64) -> Option<u64> {
 }
 
 pub(super) fn decode_imported_jwt(token: &str) -> Option<ImportedJwtClaims> {
-    if token.is_empty() || token.len() > MAX_JWT_BYTES {
-        return None;
-    }
-    let mut parts = token.split('.');
-    let (Some(header), Some(payload), Some(signature), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return None;
-    };
-    if header.is_empty() || payload.is_empty() || signature.is_empty() {
-        return None;
-    }
-    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    if decoded.len() > MAX_JWT_PAYLOAD_BYTES {
-        return None;
-    }
-    serde_json::from_slice(&decoded).ok()
+    decode_unverified_jwt_payload(token)
 }
 
 pub(super) fn claim_email(claims: Option<&ImportedJwtClaims>) -> Option<String> {

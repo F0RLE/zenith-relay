@@ -101,43 +101,96 @@
   white-space: pre-line;
 }
 
+.update-dialog {
+  width: min(600px, 100%);
+}
+
+.update-dialog .relay-dialog-body {
+  padding: 0;
+}
+
 .update-release {
-  padding-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
   border-bottom: 1px solid var(--relay-border);
+  background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
+}
+
+.update-release-icon {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--relay-accent) 30%, var(--relay-border));
+  border-radius: 7px;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.update-release-icon svg {
+  width: 17px;
+  height: 17px;
 }
 
 .update-release > div {
+  min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: 3px;
 }
 
-.update-release span {
+.update-release strong {
+  font-size: 13px;
   font-weight: 650;
 }
 
 .update-release small {
   color: var(--relay-muted);
+  font-size: 11px;
 }
 
 .update-notes {
-  padding: 16px 0 4px;
+  padding: 16px 18px 20px;
 }
 
-.update-notes h3,
-.update-notes p {
+.update-notes > h3 {
   margin: 0;
-}
-
-.update-notes h3 {
   font-size: 13px;
 }
 
-.update-notes p {
-  margin-top: 8px;
+.update-notes > .markdown-description {
+  margin-top: 10px;
   color: var(--relay-secondary);
   font-size: 13px;
-  line-height: 1.55;
-  white-space: pre-wrap;
+  line-height: 20px;
+}
+
+.update-notes .markdown-description h1,
+.update-notes .markdown-description h2,
+.update-notes .markdown-description h3,
+.update-notes .markdown-description h4,
+.update-notes .markdown-description h5,
+.update-notes .markdown-description h6 {
+  margin: 18px 0 7px;
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.update-notes .markdown-description > :first-child {
+  margin-top: 0;
+}
+
+.update-notes .markdown-description ul,
+.update-notes .markdown-description ol {
+  display: grid;
+  gap: 5px;
+  padding-left: 19px;
+}
+
+.update-notes .markdown-description li::marker {
+  color: var(--relay-accent-hover);
 }
 
 .update-actions {
@@ -151,7 +204,7 @@
 .update-progress {
   display: grid;
   gap: 7px;
-  margin-top: 14px;
+  margin: 0 18px 18px;
 }
 
 .update-progress > div {

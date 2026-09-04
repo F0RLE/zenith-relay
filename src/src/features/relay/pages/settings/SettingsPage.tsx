@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Database, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { setI18nLanguage } from "../../../../i18n";
 import { APP_VERSION, restartApplication } from "../../../../platform/desktop";
 import { relayCommands } from "../../api/commands";
 import type { RelayStorageInfo } from "../../api/types";
@@ -34,7 +35,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
     <PageHeader title={t("nav.settings")} subtitle={t("settings.subtitle")} />
     <div className="settings-groups">
       <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
-        <div className="settings-control-row"><div><strong>{t("settings.language")}</strong></div><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void i18n.changeLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>
+        <div className="settings-control-row"><div><strong>{t("settings.language")}</strong></div><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void setI18nLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>
         <div className="settings-control-row"><div><strong>{t("settings.theme")}</strong></div><div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>{(["system", "light", "dark"] as const).map((value) => <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>{t(`settings.themes.${value}`)}</button>)}</div></div>
       </SettingsGroup>
 

@@ -11,7 +11,7 @@ import {
   compareSubscriptionPlanPriority,
   type ApiSourceRole,
 } from "./routingOrder";
-import { groupModels, modelProviderGroup, modelProviderGroupLabel } from "./modelGroups";
+import { groupModels, modelProviderGroupForDisplay, modelProviderGroupLabel } from "./modelGroups";
 
 export type PoolMember =
   | (AccountSummary & { kind: "account" })
@@ -178,7 +178,7 @@ export function groupModelSummariesForRules(
   );
   const groups = new Map<string, ModelSummary[]>();
   for (const model of models) {
-    const id = modelProviderGroup(model.id, nativeIds.has(model.id.toLowerCase()));
+    const id = modelProviderGroupForDisplay(model.id, nativeIds.has(model.id.toLowerCase()));
     const items = groups.get(id);
     if (items) items.push(model);
     else groups.set(id, [model]);

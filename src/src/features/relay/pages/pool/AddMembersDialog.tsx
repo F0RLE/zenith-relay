@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { CheckCheck, Plus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { relayCommands } from "../../api/commands";
 import { AccountPlanBadge, Button, Dialog, EmptyState } from "../../components/Ui";
 import { accountPlanOption, apiSourceRole, compareAccountPlans } from "../../routingOrder";
 import { compareStableText, toggle } from "../../poolHelpers";
+import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
@@ -42,9 +42,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
     ? accountIds.filter((id) => !accounts.some((account) => account.id === id))
     : [...new Set([...accountIds, ...accounts.map((account) => account.id)])]);
   const add = async () => {
-    const ok = await perform("pool-add-members", () => mode === "local"
-      ? relayCommands.setPoolMembership(accountIds, sourceIds, true)
-      : relayCommands.remoteAction({ type: "set_pool_membership" }, { accountIds, sourceIds, inPool: true }), "feedback.saved");
+    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds, sourceIds, inPool: true }), "feedback.saved");
     if (ok) onClose();
   };
   return <Dialog wide title={t("pool.addMembersTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "pool-add-members"} disabled={!selectedCount} onClick={add}>{t("pool.addSelected", { count: selectedCount })}</Button></>}>

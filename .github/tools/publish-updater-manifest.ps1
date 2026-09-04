@@ -20,7 +20,6 @@ $version = $TagName -replace "^v", ""
 if ($version -notmatch "^\d+\.\d+\.\d+$") {
   throw "The stable updater manifest accepts only stable SemVer tags (for example v1.1.0); prereleases require a separate update channel."
 }
-$bundleVersion = $version -replace "-.*$", ""
 $baseUrl = "https://github.com/$Repository/releases/download/$TagName"
 
 Remove-Item -Recurse -Force $OutputDir -ErrorAction SilentlyContinue
@@ -83,31 +82,29 @@ function Add-Platform {
   }
 }
 
-Add-Platform "darwin-aarch64" "zenith-relay-macos-arm64" "Zenith Relay.app.tar.gz" "Zenith.Relay_aarch64.app.tar.gz"
+Add-Platform "darwin-aarch64" "zenith-relay-macos-arm64" "zenith-relay-macos-arm64.app.tar.gz" "zenith-relay-macos-arm64.app.tar.gz"
 $platforms["darwin-aarch64-app"] = $platforms["darwin-aarch64"]
 
-Add-Platform "darwin-x86_64" "zenith-relay-macos-intel" "Zenith Relay.app.tar.gz" "Zenith.Relay_x64.app.tar.gz"
+Add-Platform "darwin-x86_64" "zenith-relay-macos-intel" "zenith-relay-macos-intel.app.tar.gz" "zenith-relay-macos-intel.app.tar.gz"
 $platforms["darwin-x86_64-app"] = $platforms["darwin-x86_64"]
 
-Add-Platform "linux-aarch64" "zenith-relay-linux-arm64" "Zenith Relay_${bundleVersion}_aarch64.AppImage" "Zenith.Relay_${version}_aarch64.AppImage"
+Add-Platform "linux-aarch64" "zenith-relay-linux-arm64" "zenith-relay-linux-arm64.AppImage" "zenith-relay-linux-arm64.AppImage"
 $platforms["linux-aarch64-appimage"] = $platforms["linux-aarch64"]
-Add-Platform "linux-aarch64-deb" "zenith-relay-linux-arm64" "Zenith Relay_${bundleVersion}_arm64.deb" "Zenith.Relay_${version}_arm64.deb"
-Add-Platform "linux-aarch64-rpm" "zenith-relay-linux-arm64" "Zenith Relay-${bundleVersion}-1.aarch64.rpm" "Zenith.Relay-${version}-1.aarch64.rpm"
+Add-Platform "linux-aarch64-deb" "zenith-relay-linux-arm64" "zenith-relay-linux-arm64.deb" "zenith-relay-linux-arm64.deb"
+Add-Platform "linux-aarch64-rpm" "zenith-relay-linux-arm64" "zenith-relay-linux-arm64.rpm" "zenith-relay-linux-arm64.rpm"
 
-Add-Platform "linux-x86_64" "zenith-relay-linux-x64" "Zenith Relay_${bundleVersion}_amd64.AppImage" "Zenith.Relay_${version}_amd64.AppImage"
+Add-Platform "linux-x86_64" "zenith-relay-linux-x64" "zenith-relay-linux-x64.AppImage" "zenith-relay-linux-x64.AppImage"
 $platforms["linux-x86_64-appimage"] = $platforms["linux-x86_64"]
-Add-Platform "linux-x86_64-deb" "zenith-relay-linux-x64" "Zenith Relay_${bundleVersion}_amd64.deb" "Zenith.Relay_${version}_amd64.deb"
-Add-Platform "linux-x86_64-rpm" "zenith-relay-linux-x64" "Zenith Relay-${bundleVersion}-1.x86_64.rpm" "Zenith.Relay-${version}-1.x86_64.rpm"
+Add-Platform "linux-x86_64-deb" "zenith-relay-linux-x64" "zenith-relay-linux-x64.deb" "zenith-relay-linux-x64.deb"
+Add-Platform "linux-x86_64-rpm" "zenith-relay-linux-x64" "zenith-relay-linux-x64.rpm" "zenith-relay-linux-x64.rpm"
 
-Add-Platform "windows-aarch64" "zenith-relay-windows-arm64" "Zenith Relay_${bundleVersion}_arm64_en-US.msi" "Zenith.Relay_${version}_arm64_en-US.msi"
-$platforms["windows-aarch64-msi"] = $platforms["windows-aarch64"]
-Add-Platform "windows-aarch64-nsis" "zenith-relay-windows-arm64" "Zenith Relay_${bundleVersion}_arm64-setup.exe" "Zenith.Relay_${version}_arm64-setup.exe"
-Add-Platform "windows-aarch64-portable" "zenith-relay-windows-arm64" "zenith-relay-windows-arm64.exe" "Zenith.Relay_${version}_arm64.exe"
+Add-Platform "windows-aarch64" "zenith-relay-windows-arm64" "zenith-relay-windows-arm64-setup.exe" "zenith-relay-windows-arm64-setup.exe"
+$platforms["windows-aarch64-nsis"] = $platforms["windows-aarch64"]
+Add-Platform "windows-aarch64-portable" "zenith-relay-windows-arm64" "zenith-relay-windows-arm64.exe" "zenith-relay-windows-arm64.exe"
 
-Add-Platform "windows-x86_64" "zenith-relay-windows-x64" "Zenith Relay_${bundleVersion}_x64_en-US.msi" "Zenith.Relay_${version}_x64_en-US.msi"
-$platforms["windows-x86_64-msi"] = $platforms["windows-x86_64"]
-Add-Platform "windows-x86_64-nsis" "zenith-relay-windows-x64" "Zenith Relay_${bundleVersion}_x64-setup.exe" "Zenith.Relay_${version}_x64-setup.exe"
-Add-Platform "windows-x86_64-portable" "zenith-relay-windows-x64" "zenith-relay-windows-x64.exe" "Zenith.Relay_${version}_x64.exe"
+Add-Platform "windows-x86_64" "zenith-relay-windows-x64" "zenith-relay-windows-x64-setup.exe" "zenith-relay-windows-x64-setup.exe"
+$platforms["windows-x86_64-nsis"] = $platforms["windows-x86_64"]
+Add-Platform "windows-x86_64-portable" "zenith-relay-windows-x64" "zenith-relay-windows-x64.exe" "zenith-relay-windows-x64.exe"
 
 $latest = [ordered]@{
   version = $version

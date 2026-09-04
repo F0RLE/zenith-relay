@@ -1,3 +1,4 @@
+use crate::runtime::DefaultServiceTier;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 
@@ -33,6 +34,7 @@ const FORWARDED_CODEX_HEADERS: &[&str] = &[
     "x-codex-beta-features",
     "x-codex-installation-id",
     "x-codex-parent-thread-id",
+    "x-codex-session-id",
     "x-codex-turn-metadata",
     "x-codex-turn-state",
     "x-codex-window-id",
@@ -44,6 +46,7 @@ const FORWARDED_CODEX_HEADERS: &[&str] = &[
 ];
 
 const CLIENT_CONTEXT_HEADERS: &[&str] = &[
+    "x-codex-session-id",
     "x-session-id",
     "session_id",
     "session-id",
@@ -72,6 +75,30 @@ pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap)
     Some(format!("client_{}", hex::encode(&digest.finalize()[..12])))
 }
 
+/// Identifies Relay-managed Codex or ChatGPT traffic without treating an
+/// ordinary OpenAI-compatible API call as a managed client request. The result
+/// controls only the local pool's two-speed policy; it is never forwarded
+/// upstream.
+pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
+    if headers
+        .keys()
+        .any(|name| name.as_str().starts_with("x-codex-"))
+        || headers.contains_key("x-openai-internal-codex-responses-lite")
+        || headers.contains_key("x-openai-subagent")
+    {
+        return true;
+    }
+    ["originator", "user-agent"].into_iter().any(|name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("codex") || value.contains("chatgpt")
+            })
+    })
+}
+
 pub(in crate::gateway) fn forwarded_codex_headers(
     client_headers: &HeaderMap,
     fallback_session_id: &str,
@@ -83,11 +110,17 @@ pub(in crate::gateway) fn forwarded_codex_headers(
         }
     }
     if !headers.contains_key(CLAUDE_CODE_SESSION_HEADER) {
-        let session_id = ["session_id", "x-session-id", "session-id", "thread-id"]
-            .iter()
-            .find_map(|name| client_headers.get(*name))
-            .cloned()
-            .or_else(|| HeaderValue::from_str(fallback_session_id).ok());
+        let session_id = [
+            "x-codex-session-id",
+            "session_id",
+            "x-session-id",
+            "session-id",
+            "thread-id",
+        ]
+        .iter()
+        .find_map(|name| client_headers.get(*name))
+        .cloned()
+        .or_else(|| HeaderValue::from_str(fallback_session_id).ok());
         if let Some(session_id) = session_id {
             headers.insert(
                 HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
@@ -96,6 +129,30 @@ pub(in crate::gateway) fn forwarded_codex_headers(
         }
     }
     headers
+}
+
+/// Rebuilds the Codex routing hint for the concrete OAuth route selected by
+/// the scheduler. The hint is deliberately not accepted from the client: a
+/// retry may select another model/route, so it must be regenerated per
+/// attempt alongside the effective service tier.
+pub(in crate::gateway) fn apply_codex_routing_hint(
+    headers: &mut HeaderMap,
+    model: &str,
+    service_tier: DefaultServiceTier,
+) {
+    let name = HeaderName::from_static("x-codex-routing-hint");
+    headers.remove(&name);
+    if service_tier != DefaultServiceTier::Fast {
+        return;
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return;
+    }
+    let Ok(value) = HeaderValue::from_str(&format!("model={model};tier=priority")) else {
+        return;
+    };
+    headers.insert(name, value);
 }
 
 /// A Responses-to-Messages bridge receives a Codex/Responses client request,
@@ -157,6 +214,10 @@ mod tests {
     #[test]
     fn forwarded_codex_headers_keep_session_identity_and_drop_secrets() {
         let mut client_headers = HeaderMap::new();
+        client_headers.insert(
+            "x-codex-session-id",
+            HeaderValue::from_static("codex-session-42"),
+        );
         client_headers.insert("x-session-id", HeaderValue::from_static("session-42"));
         client_headers.insert(
             AUTHORIZATION,
@@ -170,13 +231,49 @@ mod tests {
 
         let forwarded = forwarded_codex_headers(&client_headers, "relay-request");
         assert_eq!(forwarded["x-session-id"], "session-42");
-        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
+        assert_eq!(forwarded["x-codex-session-id"], "codex-session-42");
+        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "codex-session-42");
         assert!(!forwarded.contains_key(AUTHORIZATION));
         assert!(!forwarded.contains_key("cookie"));
         assert!(!forwarded.contains_key("chatgpt-account-id"));
 
         let synthesized = forwarded_codex_headers(&HeaderMap::new(), "relay-request");
         assert_eq!(synthesized[CLAUDE_CODE_SESSION_HEADER], "relay-request");
+    }
+
+    #[test]
+    fn managed_codex_client_detection_does_not_claim_generic_api_requests() {
+        let generic = HeaderMap::new();
+        assert!(!is_managed_codex_client(&generic));
+
+        let mut codex = HeaderMap::new();
+        codex.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        assert!(is_managed_codex_client(&codex));
+
+        let mut metadata_only = HeaderMap::new();
+        metadata_only.insert("x-codex-session-id", HeaderValue::from_static("session-1"));
+        assert!(is_managed_codex_client(&metadata_only));
+
+        let mut chatgpt = HeaderMap::new();
+        chatgpt.insert("user-agent", HeaderValue::from_static("ChatGPTDesktop/1.0"));
+        assert!(is_managed_codex_client(&chatgpt));
+    }
+
+    #[test]
+    fn codex_routing_hint_is_rebuilt_only_for_fast_tier() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-routing-hint",
+            HeaderValue::from_static("model=spoofed;tier=priority"),
+        );
+        apply_codex_routing_hint(&mut headers, "gpt-5.4", DefaultServiceTier::Fast);
+        assert_eq!(
+            headers["x-codex-routing-hint"],
+            "model=gpt-5.4;tier=priority"
+        );
+
+        apply_codex_routing_hint(&mut headers, "gpt-5.4", DefaultServiceTier::Standard);
+        assert!(!headers.contains_key("x-codex-routing-hint"));
     }
 
     #[test]
@@ -220,6 +317,34 @@ mod tests {
         assert!(!serde_json::to_string(&client_context_fingerprint(&first))
             .unwrap()
             .contains("thread-42"));
+    }
+
+    #[test]
+    fn native_codex_session_takes_precedence_for_client_affinity() {
+        let mut first = HeaderMap::new();
+        first.insert(
+            "x-codex-session-id",
+            HeaderValue::from_static("codex-session-42"),
+        );
+        first.insert("x-session-id", HeaderValue::from_static("legacy-session-a"));
+
+        let mut changed_legacy = first.clone();
+        changed_legacy.insert("x-session-id", HeaderValue::from_static("legacy-session-b"));
+
+        let mut changed_codex = first.clone();
+        changed_codex.insert(
+            "x-codex-session-id",
+            HeaderValue::from_static("codex-session-43"),
+        );
+
+        assert_eq!(
+            client_context_fingerprint(&first),
+            client_context_fingerprint(&changed_legacy)
+        );
+        assert_ne!(
+            client_context_fingerprint(&first),
+            client_context_fingerprint(&changed_codex)
+        );
     }
 
     #[test]

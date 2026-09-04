@@ -301,6 +301,42 @@ impl std::error::Error for AdapterError {}
 
 pub type AdapterResult<T> = std::result::Result<T, AdapterError>;
 
+/// Collects the complete client-side tool catalog for one Responses request.
+/// Codex can place tools loaded during a turn in `input.additional_tools`;
+/// bridges need to combine those with the root catalog before they translate
+/// their distinct upstream contracts.
+pub(super) fn request_tool_catalog(
+    object: &Map<String, Value>,
+) -> AdapterResult<Option<Vec<Value>>> {
+    let mut declared = false;
+    let mut tools = Vec::new();
+    if let Some(root) = object.get("tools") {
+        declared = true;
+        tools.extend(
+            root.as_array()
+                .ok_or_else(AdapterError::invalid_request)?
+                .iter()
+                .cloned(),
+        );
+    }
+    if let Some(input) = object.get("input").and_then(Value::as_array) {
+        for item in input {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            declared = true;
+            tools.extend(
+                item.get("tools")
+                    .and_then(Value::as_array)
+                    .ok_or_else(AdapterError::invalid_request)?
+                    .iter()
+                    .cloned(),
+            );
+        }
+    }
+    Ok(declared.then_some(tools))
+}
+
 /// The original Responses contract expected by the client for one tool name.
 ///
 /// Anthropic always represents a tool invocation as an object, so a direct

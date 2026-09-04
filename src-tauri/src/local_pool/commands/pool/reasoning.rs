@@ -58,7 +58,7 @@ async fn apply_local_model_reasoning(
             runtime.set_model_reasoning_allowed_levels(gateway.model_reasoning_allowed_levels)
         {
             state.store()?.replace_gateway(old_gateway)?;
-            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
+            return Err(LocalPoolError::invalid_state(error).into());
         }
     }
     let snapshot = state.snapshot().await?;

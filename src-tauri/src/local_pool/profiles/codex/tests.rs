@@ -899,6 +899,36 @@ fn legacy_catalog_without_the_relay_marker_is_not_adopted() {
 }
 
 #[test]
+fn missing_managed_catalog_is_migrated_for_safe_restore() {
+    let (root, home, backups) = profile_dirs("missing-managed-catalog-restore");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"vendor/model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    fs::remove_file(&catalog_path).unwrap();
+
+    let backup = local_backup(&home, &backups)
+        .unwrap()
+        .expect("profile backup");
+    assert!(backup.restore_pending);
+    assert!(valid_managed_model_catalog(&backup, &catalog_path, &None));
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert!(!backup_path(&backups).exists());
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(!restored.contains("zenith_relay_local"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
     let catalog = r#"{"models":[{"slug":"vendor/model"}]}"#;
     for changed in [false, true] {
@@ -927,42 +957,6 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
         assert_eq!(catalog_path.exists(), changed);
         fs::remove_dir_all(root).unwrap();
     }
-}
-
-#[test]
-fn user_snapshot_excludes_managed_projection_and_restore_detaches_it() {
-    let (root, home, backups) = profile_dirs("user-snapshot");
-    let original_config = "model_provider = \"custom\"\n";
-    let original_auth = "{\"tokens\":{\"access_token\":\"original\"}}";
-    fs::write(home.join(CONFIG_FILE), original_config).unwrap();
-    fs::write(home.join(AUTH_FILE), original_auth).unwrap();
-    let secrets = MemorySecrets::default();
-    attach_with(
-        &home,
-        &backups,
-        "http://127.0.0.1:14998/v1",
-        "zlr_key",
-        &secrets,
-    )
-    .unwrap();
-
-    let snapshot = snapshot_user_profile_with(&home, &backups, &secrets).unwrap();
-    assert_eq!(snapshot.config.as_deref(), Some(original_config));
-    assert_eq!(snapshot.auth.as_deref(), Some(original_auth));
-    assert!(!snapshot.config.as_deref().unwrap().contains(PROVIDER_ID));
-
-    restore_user_profile_snapshot_full_with(&home, &backups, &snapshot, &secrets).unwrap();
-    assert_eq!(
-        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
-        original_config
-    );
-    assert_eq!(
-        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
-        original_auth
-    );
-    assert_eq!(profile_backup_count(&backups), 0);
-    assert!(secrets.load(BACKUP_SECRET_REF).unwrap().is_none());
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

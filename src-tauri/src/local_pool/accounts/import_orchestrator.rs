@@ -274,7 +274,29 @@ pub async fn confirm_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
     let _mutation = state.setup_guard().await;
-    confirm_local_account_import_inner(input, &state, Some(&app)).await
+    let add_to_pool = input.add_to_pool;
+    let response = confirm_local_account_import_inner(input, &state, Some(&app)).await?;
+    let model_refresh_account_ids = if add_to_pool {
+        response
+            .results
+            .iter()
+            .filter_map(|result| {
+                result
+                    .account
+                    .as_ref()
+                    .filter(|account| account.account.in_pool)
+                    .map(|account| account.account.id.clone())
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    drop(_mutation);
+    crate::local_pool::background::refresh_account_models_in_background(
+        app,
+        model_refresh_account_ids,
+    );
+    Ok(response)
 }
 
 pub(super) fn default_true() -> bool {

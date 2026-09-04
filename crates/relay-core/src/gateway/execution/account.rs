@@ -10,10 +10,10 @@ use super::super::errors::{
 };
 use super::super::now_ms;
 use super::super::request::{
-    account_endpoint_url, apply_default_service_tier_if_missing, client_context_fingerprint,
-    forwarded_codex_headers, request_id, request_service_tier,
-    responses_lite_parallel_tool_calls_valid, tool_use_diagnostics, try_recover_encrypted_content,
-    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
+    account_endpoint_url, apply_codex_routing_hint, client_context_fingerprint,
+    forwarded_codex_headers, request_id, responses_lite_parallel_tool_calls_valid,
+    tool_use_diagnostics, try_recover_encrypted_content, with_forwarded_tool_diagnostics,
+    AccountEndpoint, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
@@ -34,22 +34,36 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[allow(clippy::too_many_arguments)]
+pub(in crate::gateway) struct AccountExecution {
+    pub(in crate::gateway) runtime: Arc<GatewayRuntime>,
+    pub(in crate::gateway) key: AuthenticatedKey,
+    pub(in crate::gateway) request: Value,
+    pub(in crate::gateway) requested_model: String,
+    pub(in crate::gateway) resolved_model: String,
+    pub(in crate::gateway) client_headers: HeaderMap,
+    pub(in crate::gateway) endpoint: AccountEndpoint,
+    pub(in crate::gateway) responses_lite: Option<HeaderValue>,
+    pub(in crate::gateway) response_affinity_key: Option<String>,
+    pub(in crate::gateway) rewrite_model: bool,
+}
+
 pub(in crate::gateway) async fn execute_account_endpoint(
-    runtime: Arc<GatewayRuntime>,
-    key: AuthenticatedKey,
-    mut request: Value,
-    requested_model: String,
-    resolved_model: String,
-    client_headers: HeaderMap,
-    endpoint: AccountEndpoint,
-    responses_lite: Option<HeaderValue>,
-    response_affinity_key: Option<String>,
-    rewrite_model: bool,
+    context: AccountExecution,
 ) -> Response<Body> {
-    let client_supplied_service_tier = request.get("service_tier").is_some();
+    let AccountExecution {
+        runtime,
+        key,
+        mut request,
+        requested_model,
+        resolved_model,
+        client_headers,
+        endpoint,
+        responses_lite,
+        response_affinity_key,
+        rewrite_model,
+    } = context;
+    let service_tier_policy = ServiceTierPolicy::pool_owned();
     let request_id = request_id();
-    let service_tier = request_service_tier(&request);
     let client_tool_use = tool_use_diagnostics(&request);
     let client_context_id = client_context_fingerprint(&client_headers);
     let prompt_affinity_key = runtime.prompt_affinity_key(
@@ -108,20 +122,17 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         if route.account_id.is_none() {
             continue;
         }
-        if !client_supplied_service_tier {
-            request
-                .as_object_mut()
-                .expect("request object was validated before routing")
-                .remove("service_tier");
-        }
-        apply_default_service_tier_if_missing(
+        let selected_service_tier = runtime.model_service_tier(&route.source_model);
+        service_tier_policy.prepare_for_candidate(
             &mut request,
-            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+            selected_service_tier,
+            WireApi::Responses,
         );
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_id.clone();
-        route.service_tier = service_tier;
+        route.service_tier =
+            service_tier_policy.effective_tier(&request, selected_service_tier, WireApi::Responses);
         let route_responses_lite = responses_lite.clone().or_else(|| {
             route
                 .account_id
@@ -183,6 +194,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
         let mut request_headers = forwarded_codex_headers(&client_headers, &request_id);
+        apply_codex_routing_hint(
+            &mut request_headers,
+            &route.source_model,
+            route.service_tier,
+        );
         guard_account_request(
             &runtime,
             &key.id,
@@ -348,6 +364,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
+                    if response_affinity_hit {
+                        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    }
                     let state = apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,

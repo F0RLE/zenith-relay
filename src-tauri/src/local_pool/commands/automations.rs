@@ -471,6 +471,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            provider_family: Some("openai".into()),
             purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,

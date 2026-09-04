@@ -146,6 +146,14 @@ pub(super) fn local_backup(codex_home: &Path, root: &Path) -> Result<Option<Prof
         &catalog_path,
         &catalog,
     )?;
+    migrate_missing_managed_catalog_for_restore(
+        codex_home,
+        &path,
+        &mut snapshot,
+        &mut backup,
+        &catalog_path,
+        &catalog,
+    )?;
     let oauth_metadata_valid = match (
         backup.bound_oauth_account_id.as_deref(),
         backup.managed_oauth_access_hash.as_deref(),
@@ -227,6 +235,47 @@ fn configured_catalog_matches_path(codex_home: &Path, configured: &str, expected
         codex_home.join(configured)
     };
     portable_path_string(&resolved) == portable_path_string(expected)
+}
+
+/// Older Relay builds could leave the dedicated catalog file behind while the
+/// managed profile still referenced it. The backup itself remains sufficient
+/// to restore the profile, so persist a restore-pending marker rather than
+/// trapping the user behind a metadata-only recovery error.
+fn migrate_missing_managed_catalog_for_restore(
+    codex_home: &Path,
+    backup_path: &Path,
+    backup_bytes: &mut Option<Vec<u8>>,
+    backup: &mut ProfileBackup,
+    catalog_path: &Path,
+    catalog: &Option<Vec<u8>>,
+) -> Result<()> {
+    if catalog.is_some()
+        || backup.restore_pending
+        || backup.attach_pending
+        || backup.managed_model_catalog_path.is_none()
+        || backup.managed_model_catalog_hash.is_none()
+    {
+        return Ok(());
+    }
+
+    let config_path = codex_home.join(CONFIG_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let configured_catalog = snapshot_text(&config, &config_path)?
+        .map(parse_config)
+        .transpose()?
+        .and_then(|document| root_model_catalog_json(&document));
+    if !configured_catalog
+        .as_deref()
+        .is_some_and(|path| configured_catalog_matches_path(codex_home, path, catalog_path))
+    {
+        return Ok(());
+    }
+
+    backup.restore_pending = true;
+    let updated = serialize_backup(backup)?;
+    replace_if_unchanged(backup_path, backup_bytes, &updated)?;
+    *backup_bytes = Some(updated.into_bytes());
+    Ok(())
 }
 
 fn is_relay_managed_model_catalog(content: &[u8]) -> bool {

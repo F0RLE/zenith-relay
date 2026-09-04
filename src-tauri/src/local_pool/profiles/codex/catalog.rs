@@ -299,7 +299,7 @@ fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
     normalize_codex_catalog_priorities(&mut models);
     serde_json::to_string_pretty(&json!({ "models": models }))
         .map(|content| format!("{content}\n"))
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))
+        .map_err(LocalPoolError::invalid_state)
 }
 
 pub(super) fn build_managed_model_catalog(

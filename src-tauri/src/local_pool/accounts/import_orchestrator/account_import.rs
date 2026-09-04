@@ -35,7 +35,7 @@ pub(crate) async fn stage_returned_remote_account(
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(state, &credentials)?;
     let mut parsed = parse_import(content, None, &existing.keys().cloned().collect::<Vec<_>>())
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+        .map_err(LocalPoolError::invalid_state)?;
     if parsed.items.len() != 1 || parsed.preview.rows.len() != 1 {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -208,12 +208,6 @@ pub(super) async fn import_account_item(
             )
             .await
             .map_err(model_item_error)?;
-        if models.is_empty() {
-            return Err(ImportItemError::new(
-                "models_empty",
-                "ChatGPT account did not expose any supported models",
-            ));
-        }
         Some(models)
     } else {
         None

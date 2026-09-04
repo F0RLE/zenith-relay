@@ -1,3 +1,3 @@
 pub mod codex;
 pub(crate) mod repair;
-pub mod snapshots;
+pub(crate) mod snapshots;

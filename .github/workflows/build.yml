@@ -16,14 +16,17 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-Dwarnings"
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
-          toolchain: 1.97.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-audit
@@ -47,6 +50,12 @@ jobs:
         working-directory: src
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Agent guardrails
+        shell: pwsh
+        run: ./scripts/check-agent-guardrails.ps1
+      - name: No new duplicate code
+        shell: pwsh
+        run: ./scripts/check-duplicate-code.ps1
       - run: cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked
@@ -73,6 +82,8 @@ jobs:
     permissions:
       contents: write
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: "-Dwarnings"
     strategy:
       fail-fast: false
       matrix:
@@ -95,9 +106,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: bun install --frozen-lockfile
         working-directory: src
@@ -130,8 +139,8 @@ jobs:
 
           | Architecture | Windows | Ubuntu | macOS |
           |---|---|---|---|
-          | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-intel.dmg) |
-          | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-arm64.dmg) |
+          | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64-setup.exe) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-intel.dmg) |
+          | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64-setup.exe) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-arm64.dmg) |
 
           Windows: use **Setup** for normal installation, or **EXE** for a portable launch with in-place updates.
 
@@ -140,10 +149,10 @@ jobs:
           $notes = ""
           if ($env:GITHUB_REF -like "refs/tags/*") {
             $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
-            $changelog = Get-Content -Raw -LiteralPath "CHANGELOG.md"
+            $changelog = Get-Content -Raw -LiteralPath "docs/releases/CHANGELOG.md"
             $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
             if (-not $releaseSection.Success) {
-              throw "CHANGELOG.md must contain a user-facing section for release $version"
+              throw "docs/releases/CHANGELOG.md must contain a user-facing section for release $version"
             }
             $notes = $releaseSection.Value.Trim()
           }
@@ -160,10 +169,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        with:
-          tagName: ""
-          releaseDraft: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          prerelease: ${{ startsWith(github.ref, 'refs/tags/') && contains(github.ref_name, '-') }}
+        # Release publishing is performed below after every platform has
+        # produced the normalized asset names. Supplying tagName here would
+        # make tauri-action upload the native bundle names as a second copy.
       - name: Collect and verify release files
         shell: pwsh
         run: |
@@ -175,7 +183,7 @@ jobs:
             }
             Copy-Item $file.FullName $Destination
           }
-          $patterns = @("*.msi", "*.exe", "*.dmg", "*.app.tar.gz", "*.deb", "*.rpm", "*.AppImage", "*.sig", "latest.json")
+          $patterns = @("*.exe", "*.dmg", "*.app.tar.gz", "*.deb", "*.rpm", "*.AppImage", "*.sig", "latest.json")
           Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
             Where-Object { $file = $_; $patterns | Where-Object { $file.Name -like $_ } } |
             Copy-Item -Destination artifacts
@@ -184,17 +192,21 @@ jobs:
               throw "Missing required Windows portable executable"
             }
             Copy-Item "src-tauri/target/release/zenith-relay.exe" "artifacts/zenith-relay-${{ matrix.name }}.exe"
-            Copy-Required "*.msi" "artifacts/zenith-relay-${{ matrix.name }}.msi"
             Copy-Required "*setup.exe" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe"
+            Copy-Required "*setup.exe.sig" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe.sig"
           }
           if ($env:RUNNER_OS -eq "macOS") {
             Copy-Required "*.dmg" "artifacts/zenith-relay-${{ matrix.name }}.dmg"
             Copy-Required "*.app.tar.gz" "artifacts/zenith-relay-${{ matrix.name }}.app.tar.gz"
+            Copy-Required "*.app.tar.gz.sig" "artifacts/zenith-relay-${{ matrix.name }}.app.tar.gz.sig"
           }
           if ($env:RUNNER_OS -eq "Linux") {
             Copy-Required "*.AppImage" "artifacts/zenith-relay-${{ matrix.name }}.AppImage"
+            Copy-Required "*.AppImage.sig" "artifacts/zenith-relay-${{ matrix.name }}.AppImage.sig"
             Copy-Required "*.deb" "artifacts/zenith-relay-${{ matrix.name }}.deb"
+            Copy-Required "*.deb.sig" "artifacts/zenith-relay-${{ matrix.name }}.deb.sig"
             Copy-Required "*.rpm" "artifacts/zenith-relay-${{ matrix.name }}.rpm"
+            Copy-Required "*.rpm.sig" "artifacts/zenith-relay-${{ matrix.name }}.rpm.sig"
           }
       - name: Sign portable executable
         if: runner.os == 'Windows'

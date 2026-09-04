@@ -1,9 +1,12 @@
 use super::{import_session::SecretBackend, oauth::OAuthTokenSet};
+use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 use zenith_relay_core::accounts::{access_token_is_usable, TokenRefresh, TokenSet};
-use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
+use zenith_relay_core::providers::chatgpt::{
+    bearer_authorization as shared_bearer_authorization, AgentIdentityCredential,
+};
 
 const CREDENTIAL_VERSION: u32 = 1;
 const MAX_SECRET_JSON_BYTES: usize = 256 * 1024;
@@ -39,15 +42,12 @@ impl CredentialError {
 }
 
 pub(super) fn bearer_authorization(access_token: &str) -> Result<HeaderValue, CredentialError> {
-    let mut authorization =
-        HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
-            CredentialError::new(
-                CredentialErrorCode::InvalidSecret,
-                "stored ChatGPT token is invalid",
-            )
-        })?;
-    authorization.set_sensitive(true);
-    Ok(authorization)
+    shared_bearer_authorization(access_token).map_err(|_| {
+        CredentialError::new(
+            CredentialErrorCode::InvalidSecret,
+            "stored ChatGPT token is invalid",
+        )
+    })
 }
 
 impl fmt::Display for CredentialError {
@@ -57,6 +57,23 @@ impl fmt::Display for CredentialError {
 }
 
 impl std::error::Error for CredentialError {}
+
+/// Preserves credential-store failures as user-actionable local errors.
+pub(in crate::local_pool) fn credential_local_error(error: CredentialError) -> LocalPoolError {
+    let code = match error.code {
+        CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
+        CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
+        _ => ErrorCode::InvalidState,
+    };
+    LocalPoolError::new(code, error.message)
+}
+
+/// Uses the neutral operation failure surface where credential details are not actionable.
+pub(in crate::local_pool) fn credential_invalid_state_error(
+    error: CredentialError,
+) -> LocalPoolError {
+    LocalPoolError::new(ErrorCode::InvalidState, error.message)
+}
 
 #[derive(Clone)]
 pub struct StoredCodexCredentials {
@@ -337,8 +354,7 @@ impl StoredCodexCredentials {
     }
 
     pub fn with_token_set(&self, tokens: &TokenSet) -> Result<Self, CredentialError> {
-        let mut updated = Self::new(
-            &self.local_account_id,
+        self.rebuild_with_token_material(
             tokens.access_token().to_string(),
             tokens
                 .refresh_token()
@@ -351,16 +367,7 @@ impl StoredCodexCredentials {
             tokens.expires_at_ms(),
             tokens.issued_at_ms(),
             tokens.generation(),
-            self.email.clone(),
-            self.provider_account_id.clone(),
-            self.provider_user_id.clone(),
-            self.organization_id.clone(),
-            self.plan_type.clone(),
-            self.account_is_fedramp,
-        )?
-        .with_proxy_route(self.proxy_url.clone(), self.bypass_common_proxy)?;
-        updated.agent_identity = self.agent_identity.clone();
-        Ok(updated)
+        )
     }
 
     pub fn apply_refresh(
@@ -368,14 +375,39 @@ impl StoredCodexCredentials {
         refresh: CredentialRefresh,
         issued_at_ms: u64,
     ) -> Result<Self, CredentialError> {
-        let mut updated = Self::new(
-            &self.local_account_id,
-            refresh.access_token,
-            refresh.refresh_token.or_else(|| self.refresh_token.clone()),
-            refresh.id_token.or_else(|| self.id_token.clone()),
-            refresh.expires_at_ms,
+        let CredentialRefresh {
+            access_token,
+            refresh_token,
+            id_token,
+            expires_at_ms,
+        } = refresh;
+        self.rebuild_with_token_material(
+            access_token,
+            refresh_token.or_else(|| self.refresh_token.clone()),
+            id_token.or_else(|| self.id_token.clone()),
+            expires_at_ms,
             issued_at_ms,
             self.generation.saturating_add(1),
+        )
+    }
+
+    fn rebuild_with_token_material(
+        &self,
+        access_token: String,
+        refresh_token: Option<String>,
+        id_token: Option<String>,
+        expires_at_ms: Option<u64>,
+        issued_at_ms: u64,
+        generation: u64,
+    ) -> Result<Self, CredentialError> {
+        let mut updated = Self::new(
+            &self.local_account_id,
+            access_token,
+            refresh_token,
+            id_token,
+            expires_at_ms,
+            issued_at_ms,
+            generation,
             self.email.clone(),
             self.provider_account_id.clone(),
             self.provider_user_id.clone(),
@@ -902,6 +934,22 @@ mod tests {
         assert_eq!(updated.id_token(), Some(ID_TOKEN));
         assert_eq!(updated.provider_account_id(), Some(PROVIDER_ACCOUNT));
         assert_eq!(updated.proxy_url(), Some(PROXY));
+        assert_eq!(updated.generation(), 8);
+    }
+
+    #[test]
+    fn credential_refresh_preserves_private_identity_metadata() {
+        let credentials = fixture();
+        let refresh = CredentialRefresh::new("new-access".into(), None, None, Some(9_000)).unwrap();
+
+        let updated = credentials.apply_refresh(refresh, 2_000).unwrap();
+
+        assert_eq!(updated.access_token(), "new-access");
+        assert_eq!(updated.refresh_token(), Some(REFRESH));
+        assert_eq!(updated.id_token(), Some(ID_TOKEN));
+        assert_eq!(updated.provider_account_id(), Some(PROVIDER_ACCOUNT));
+        assert_eq!(updated.proxy_url(), Some(PROXY));
+        assert_eq!(updated.issued_at_ms(), 2_000);
         assert_eq!(updated.generation(), 8);
     }
 

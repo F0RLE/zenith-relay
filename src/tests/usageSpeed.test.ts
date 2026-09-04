@@ -30,4 +30,13 @@ describe("usage token speed", () => {
   test("clamps malformed reasoning usage to reported output", () => {
     expect(tokenSpeed({ success: true, outputTokens: 4, reasoningTokens: 10, durationMs: 300 })).toBeNull();
   });
+
+  test("ignores buffered outliers above the reasonable throughput limit", () => {
+    expect(tokenSpeed({ success: true, outputTokens: 52, durationMs: 50 })).toBeNull();
+    expect(tokenSpeed({ success: true, outputTokens: 51, durationMs: 51 })).toBeCloseTo(980.3922, 4);
+    expect(averageTokenSpeed([
+      { success: true, outputTokens: 52, durationMs: 50 },
+      { success: true, outputTokens: 11, durationMs: 100 },
+    ])).toBe(100);
+  });
 });

@@ -139,12 +139,29 @@ pub(crate) fn apply_failure_cooldown_with_hint(
     half_open_probe: bool,
 ) -> FailureState {
     let status = canonical_upstream_status(status, category);
+    // Once bytes have started flowing, the response cannot be retried for the
+    // current client. Keep the next request away from this exact slot/model,
+    // rather than opening a candidate-wide circuit for every model it serves.
+    if matches!(
+        category,
+        "upstream_stream" | "stream_incomplete" | "stream_idle_timeout"
+    ) {
+        return apply_cooldown(
+            runtime,
+            candidate_id,
+            model,
+            TRANSIENT_COOLDOWN_MS,
+            context,
+            half_open_probe,
+        );
+    }
     if matches!(
         category,
         "upstream_model_not_found"
             | "upstream_model_unsupported"
             | "upstream_model_capacity"
             | "upstream_overloaded"
+            | "upstream_candidate_rejected"
     ) {
         let has_explicit_retry_after =
             retry_after_ms(headers, SystemTime::now()).is_some() || hint.retry_after_ms.is_some();

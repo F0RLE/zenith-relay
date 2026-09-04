@@ -103,6 +103,7 @@ pub enum RemoteServerAction {
     SetQuotaPolicy,
     SetRoutingPolicy,
     RefreshAllQuotas,
+    RefreshPricingCatalog,
     SetModelEnabled,
     SetModelPrice,
     SetModelReasoning,
@@ -265,6 +266,56 @@ pub async fn get_remote_server_usage(
         .await
         .map(Some)
         .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn reveal_remote_gateway_api_key(
+    state: State<'_, DesktopState>,
+) -> Result<String, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    Ok(client
+        .profile_credential()
+        .await
+        .map_err(remote_error)?
+        .secret)
+}
+
+#[tauri::command]
+pub async fn rotate_remote_gateway_api_key(
+    state: State<'_, DesktopState>,
+) -> Result<String, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    let rotation = client
+        .prepare_profile_key_rotation()
+        .await
+        .map_err(remote_error)?;
+    if let Err(error) = client
+        .commit_profile_key_rotation(&rotation.rotation_id)
+        .await
+    {
+        let committed = client.profile_credential().await.is_ok_and(|credential| {
+            credential.key_id == rotation.key_id
+                && credential.base_url == rotation.base_url
+                && credential.secret == rotation.secret
+        });
+        if !committed {
+            let _ = client
+                .abort_profile_key_rotation(&rotation.rotation_id)
+                .await;
+            return Err(remote_error(error));
+        }
+    }
+    Ok(rotation.secret)
 }
 
 #[tauri::command]
@@ -666,6 +717,9 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::RefreshAllQuotas => {
             (Method::POST, "/pool/quota/refresh".to_string(), false)
         }
+        RemoteServerAction::RefreshPricingCatalog => {
+            (Method::POST, "/pricing/refresh".to_string(), false)
+        }
         RemoteServerAction::SetModelEnabled => (Method::POST, "/models/rules".to_string(), true),
         RemoteServerAction::SetModelPrice => (Method::POST, "/models/prices".to_string(), true),
         RemoteServerAction::SetModelReasoning => {
@@ -755,5 +809,16 @@ mod tests {
             "server-two",
             "fingerprint-two",
         ));
+    }
+
+    #[test]
+    fn pricing_catalog_refresh_uses_its_dedicated_empty_post_request() {
+        let (method, path, requires_payload) =
+            action_request(&RemoteServerAction::RefreshPricingCatalog)
+                .expect("pricing catalog refresh request should be supported");
+
+        assert_eq!(method, Method::POST);
+        assert_eq!(path, "/pricing/refresh");
+        assert!(!requires_payload);
     }
 }

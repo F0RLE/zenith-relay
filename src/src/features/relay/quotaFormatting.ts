@@ -1,5 +1,6 @@
 import type { TFunction } from "i18next";
 import type { DefaultServiceTier, QuotaWindow } from "./api/types";
+import { formatNumber } from "./numberFormatting";
 
 export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
   const totalSeconds = Math.max(0, Math.floor((targetMs - nowMs) / 1_000));
@@ -18,12 +19,13 @@ export function formatDetailedRemainingTime(targetMs: number, nowMs: number, t: 
 export function formatWindowDuration(minutes: number | null, locale: string, fallback: string) {
   if (!minutes) return fallback;
   const units: Array<[number, Intl.NumberFormatOptions["unit"]]> = [[10_080, "week"], [1_440, "day"], [60, "hour"], [1, "minute"]];
-  const [size, unit] = units.find(([size]) => minutes % size === 0) ?? units[units.length - 1];
-  return new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 1 }).format(minutes / size);
+  const matching = units.find(([size]) => minutes % size === 0) ?? [1, "minute" as Intl.NumberFormatOptions["unit"]] as const;
+  const [size, unit] = matching;
+  return formatNumber(minutes / size, locale, { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 1 });
 }
 
 export function formatQuotaRemaining(basisPoints: number | null, locale: string) {
-  return basisPoints == null ? "—" : new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }).format(basisPoints / 10_000);
+  return basisPoints == null ? "—" : formatNumber(basisPoints / 10_000, locale, { style: "percent", maximumFractionDigits: 1 });
 }
 
 export function isFastSupplementalQuota(item: { label: string; serviceTier?: DefaultServiceTier | null }) {

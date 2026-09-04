@@ -23,8 +23,30 @@ export function isCodexOauthAccountEligible(account: AccountSummary) {
   return account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
 }
 
+export function requiresAccountReauthentication(account: Pick<AccountSummary, "authState" | "routingBlockReason">) {
+  return account.routingBlockReason === "reauth_required" || (
+    account.authState.state === "requires_reauth"
+    && account.authState.reason !== "reused_refresh_token"
+  );
+}
+
+/**
+ * A real sign-in requirement takes precedence over a stale quota refresh
+ * result, so every account surface exposes the same available action.
+ */
+export function accountQuotaRefreshState(account: Pick<AccountSummary, "authState" | "routingBlockReason" | "quota" | "quotaRefreshStatus">): AccountSummary["quotaRefreshStatus"] {
+  if (requiresAccountReauthentication(account)) return "requires_reauth";
+  return account.quotaRefreshStatus ?? (
+    account.quota.error
+      ? "failed"
+      : account.quota.updatedAtMs != null
+        ? "updated"
+        : "pending"
+  );
+}
+
 export function currentAccountErrorCode(account: AccountSummary) {
-  if (account.routingBlockReason === "reauth_required" || account.authState.state === "requires_reauth") {
+  if (requiresAccountReauthentication(account)) {
     return account.authState.reason ? `auth_${account.authState.reason}` : "auth_requires_reauth";
   }
   const modelError = account.lastErrorCode?.trim();

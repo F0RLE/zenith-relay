@@ -37,7 +37,7 @@
   transfer mode separate in UI, storage, and docs.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
-- Treat `PLANNING.md` as the canonical source for public boundaries, target
+- Treat `docs/project/PLANNING.md` as the canonical source for public boundaries, target
   paths, package ownership, and supported behavior. Do not invent parallel
   module trees.
 
@@ -53,6 +53,11 @@ bun run test:e2e
 
 For shared runtime or server changes, also run the strict Rust checks documented
 in `CONTRIBUTING.md`.
+
+The repository CI additionally runs `scripts/check-agent-guardrails.ps1` and
+`scripts/check-duplicate-code.ps1`. The duplicate check compares the working
+tree with the Git base and rejects only newly introduced Rust or TypeScript
+clones.
 
 For packaging/updater changes, also run or verify the Tauri build path:
 
@@ -84,7 +89,7 @@ bun run app:build
 - Model and balance displays come from the selected provider when available.
 - UI copy should describe Zenith Relay behavior.
 - Current product direction and supported behavior live in
-  `PLANNING.md`; incomplete work and acceptance gates live in
-  `ROADMAP.md`.
+  `docs/project/PLANNING.md`; incomplete work and acceptance gates live in
+  `docs/project/ROADMAP.md`.
 - Personal local-pool account data is local user data. It is not Zenith
   customer billing state and not production account-pool inventory.

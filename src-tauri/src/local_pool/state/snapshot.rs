@@ -42,6 +42,15 @@ pub(crate) struct LocalRuntimeInputs {
     pub account_credentials: HashMap<String, Option<StoredCodexCredentials>>,
 }
 
+struct SnapshotBase {
+    gateway: GatewaySettings,
+    sources: Vec<ProviderSourceRecord>,
+    accounts: Vec<LocalAccountRecord>,
+    automations: AutomationRecords,
+    warnings: Vec<String>,
+    running: bool,
+}
+
 impl DesktopState {
     pub async fn snapshot(&self) -> Result<LocalPoolSnapshot> {
         self.snapshot_with(&OsSecretLookup).await
@@ -51,29 +60,14 @@ impl DesktopState {
         &self,
         secrets: &impl SecretLookup,
     ) -> Result<LocalPoolSnapshot> {
-        let running = self.gateway.address().await.is_some();
-        let (gateway, sources, accounts, automations) = {
-            let store = self.store()?;
-            (
-                store.gateway().clone(),
-                store.sources().to_vec(),
-                store.accounts().to_vec(),
-                store.automations().clone(),
-            )
-        };
-        let mut warnings = Vec::new();
-        if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("usage_persistence_failed".to_string());
-        }
-        if self.failed_affinity_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("response_affinity_persistence_failed".to_string());
-        }
-        if gateway.enabled && !running {
-            warnings.push("gateway_configured_but_not_running".to_string());
-        }
-        if let Some(error) = self.catalog_refresh_warning() {
-            warnings.push(error);
-        }
+        let SnapshotBase {
+            gateway,
+            sources,
+            accounts,
+            automations,
+            mut warnings,
+            running,
+        } = self.snapshot_base().await?;
         for source in &sources {
             if secrets.load(&source.secret_ref)?.is_none() {
                 warnings.push(warning_code("source_secret_missing", &source.id));
@@ -102,16 +96,14 @@ impl DesktopState {
     }
 
     pub(crate) async fn runtime_inputs(&self) -> Result<LocalRuntimeInputs> {
-        let running = self.gateway.address().await.is_some();
-        let (gateway, sources, accounts, automations) = {
-            let store = self.store()?;
-            (
-                store.gateway().clone(),
-                store.sources().to_vec(),
-                store.accounts().to_vec(),
-                store.automations().clone(),
-            )
-        };
+        let SnapshotBase {
+            gateway,
+            sources,
+            accounts,
+            automations,
+            mut warnings,
+            running,
+        } = self.snapshot_base().await?;
         let source_api_keys = sources
             .iter()
             .map(|source| {
@@ -130,19 +122,6 @@ impl DesktopState {
                     })
             })
             .collect::<std::result::Result<HashMap<_, _>, _>>()?;
-        let mut warnings = Vec::new();
-        if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("usage_persistence_failed".to_string());
-        }
-        if self.failed_affinity_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("response_affinity_persistence_failed".to_string());
-        }
-        if gateway.enabled && !running {
-            warnings.push("gateway_configured_but_not_running".to_string());
-        }
-        if let Some(error) = self.catalog_refresh_warning() {
-            warnings.push(error);
-        }
         for source in &sources {
             if source_api_keys
                 .get(&source.id)
@@ -172,6 +151,40 @@ impl DesktopState {
             account_credentials,
         })
     }
+
+    async fn snapshot_base(&self) -> Result<SnapshotBase> {
+        let running = self.gateway.address().await.is_some();
+        let (gateway, sources, accounts, automations) = {
+            let store = self.store()?;
+            (
+                store.gateway().clone(),
+                store.sources().to_vec(),
+                store.accounts().to_vec(),
+                store.automations().clone(),
+            )
+        };
+        let mut warnings = Vec::new();
+        if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
+            warnings.push("usage_persistence_failed".to_string());
+        }
+        if self.failed_affinity_writes.load(Ordering::Relaxed) > 0 {
+            warnings.push("response_affinity_persistence_failed".to_string());
+        }
+        if gateway.enabled && !running {
+            warnings.push("gateway_configured_but_not_running".to_string());
+        }
+        if let Some(error) = self.catalog_refresh_warning() {
+            warnings.push(error);
+        }
+        Ok(SnapshotBase {
+            gateway,
+            sources,
+            accounts,
+            automations,
+            warnings,
+            running,
+        })
+    }
 }
 
 pub(super) fn account_secret_available(
@@ -180,7 +193,7 @@ pub(super) fn account_secret_available(
 ) -> Result<bool> {
     let secret_ref =
         crate::local_pool::accounts::credentials::credential_secret_ref(&account.account.id)
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+            .map_err(LocalPoolError::invalid_state)?;
     Ok(secrets.load(&secret_ref)?.is_some())
 }
 

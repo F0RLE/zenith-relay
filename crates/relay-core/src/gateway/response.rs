@@ -2,9 +2,12 @@ use super::errors::{upstream_failure_status, AttemptFailure, RateLimitBodyHint};
 use super::now_ms;
 use super::streaming::{parse_sse_event, TerminalOutcome};
 use crate::protocol::sse_event_end;
-use crate::runtime::{DefaultServiceTier, ExecutorRoute};
+use crate::runtime::ExecutorRoute;
 use crate::usage::ReasoningEffortDiagnostics;
-use crate::{CacheWriteTtl, Error, ErrorOrigin, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
+use crate::{
+    normalize_observed_service_tier, CacheWriteTtl, Error, ErrorOrigin, GatewayRuntime,
+    ObservedServiceTier, ToolUseDiagnostics, UsageEvent,
+};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -254,22 +257,21 @@ pub(super) fn populate_tokens(event: &mut UsageEvent, body: &[u8]) {
         return;
     };
     event.tool_use.set_terminal_response(&body);
+    event.applied_service_tier = response_service_tier(&body);
     let Some(usage) = find_usage(&body) else {
         return;
     };
     apply_usage(event, usage);
-    event.applied_service_tier = response_service_tier(&body);
 }
 
-pub(super) fn response_service_tier(value: &Value) -> Option<DefaultServiceTier> {
+pub(super) fn response_service_tier(value: &Value) -> Option<ObservedServiceTier> {
     std::iter::successors(Some(value), |value| value.get("response"))
         .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .find_map(|value| value.get("service_tier").and_then(Value::as_str))
-        .and_then(|tier| match tier.to_ascii_lowercase().as_str() {
-            "priority" | "fast" => Some(DefaultServiceTier::Fast),
-            "default" | "standard" => Some(DefaultServiceTier::Standard),
-            _ => None,
-        })
+        .and_then(normalize_observed_service_tier)
 }
 
 pub(super) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
@@ -508,7 +510,26 @@ mod tests {
         assert_eq!(event.reasoning_tokens, Some(5));
         assert_eq!(event.output_tokens, Some(5));
         assert_eq!(event.total_tokens, Some(21));
-        assert_eq!(event.applied_service_tier, Some(DefaultServiceTier::Fast));
+        assert_eq!(event.applied_service_tier, Some("priority".to_string()));
+    }
+
+    #[test]
+    fn response_service_tier_preserves_upstream_text_and_prefers_nested_response() {
+        assert_eq!(
+            response_service_tier(&serde_json::json!({"service_tier": "flex"})),
+            Some("flex".to_string())
+        );
+        assert_eq!(
+            response_service_tier(
+                &serde_json::json!({"service_tier": "default", "response": {"service_tier": "ultrafast"}})
+            ),
+            Some("ultrafast".to_string())
+        );
+        assert_eq!(response_service_tier(&serde_json::json!({})), None);
+        assert_eq!(
+            response_service_tier(&serde_json::json!({"service_tier": "not a tier"})),
+            None
+        );
     }
 
     #[test]

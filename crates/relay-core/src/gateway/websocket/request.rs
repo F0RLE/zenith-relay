@@ -2,9 +2,9 @@ use super::{
     now_ms, AuthenticatedKey, ExecutorRoute, GatewayFailure, RESPONSES_LITE_METADATA_KEY,
     WEBSOCKET_PROTOCOLS,
 };
-use crate::gateway::request::apply_default_service_tier_if_missing;
-use crate::gateway::request::client_context_fingerprint;
 use crate::gateway::request::codex_background_request_kind;
+use crate::gateway::request::ServiceTierPolicy;
+use crate::gateway::request::{client_context_fingerprint, is_managed_codex_client};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
@@ -18,7 +18,7 @@ pub(super) struct ClientRequest {
     pub(super) resolved_model: String,
     pub(super) stream_id: Option<String>,
     pub(super) responses_lite: bool,
-    client_supplied_service_tier: bool,
+    service_tier_policy: ServiceTierPolicy,
     responses_lite_candidates: Vec<String>,
     pub(super) response_affinity_key: Option<String>,
     pub(super) prompt_affinity_key: Option<String>,
@@ -78,7 +78,11 @@ impl ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
-        let client_supplied_service_tier = object.contains_key("service_tier");
+        let service_tier_policy = if is_managed_codex_client(headers) {
+            ServiceTierPolicy::pool_owned()
+        } else {
+            ServiceTierPolicy::client_owned()
+        };
         let background_kind = codex_background_request_kind(headers, &value);
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
@@ -108,7 +112,7 @@ impl ClientRequest {
             resolved_model,
             stream_id,
             responses_lite,
-            client_supplied_service_tier,
+            service_tier_policy,
             responses_lite_candidates,
             response_affinity_key,
             prompt_affinity_key,
@@ -121,20 +125,19 @@ impl ClientRequest {
         runtime: &GatewayRuntime,
         route: &ExecutorRoute,
     ) {
-        if !self.client_supplied_service_tier {
-            self.value
-                .as_object_mut()
-                .expect("request object was validated before routing")
-                .remove("service_tier");
-        }
-        apply_default_service_tier_if_missing(
+        self.service_tier_policy.prepare_for_candidate(
             &mut self.value,
-            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+            runtime.model_service_tier(&route.source_model),
+            WireApi::Responses,
         );
     }
 
     pub(super) fn service_tier(&self) -> DefaultServiceTier {
-        crate::gateway::request::request_service_tier(&self.value)
+        self.service_tier_policy.effective_tier(
+            &self.value,
+            DefaultServiceTier::Standard,
+            WireApi::Responses,
+        )
     }
 
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {

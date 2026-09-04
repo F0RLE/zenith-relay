@@ -1,5 +1,6 @@
 mod account_refresh;
 mod health_probe;
+mod pricing;
 pub(crate) mod quota_refresh;
 mod retention;
 mod wake_automation;
@@ -59,6 +60,7 @@ pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> Backgroun
     BackgroundJobs {
         handles: vec![
             health_probe::start(state.clone(), shutdown.clone()),
+            pricing::start(state.clone(), shutdown.clone()),
             quota_refresh::start(state.clone(), shutdown.clone()),
             retention::start(state.clone(), shutdown.clone()),
             wake_automation::start(state, shutdown),

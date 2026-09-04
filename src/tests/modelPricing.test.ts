@@ -133,7 +133,7 @@ describe("model pricing", () => {
     ]);
   });
 
-  test("keeps native ChatGPT account models in the first dedicated group", () => {
+  test("groups native and API OpenAI models together for display", () => {
     const models = [
       { id: "gpt-5.4-mini", nativeChatGpt: false },
       { id: "claude-opus-5", nativeChatGpt: false },
@@ -148,8 +148,7 @@ describe("model pricing", () => {
         (model) => model.nativeChatGpt,
       ).map((group) => [group.id, group.items.map((model) => model.id)]),
     ).toEqual([
-      ["chatgpt", ["gpt-5.6-sol", "gpt-5.4"]],
-      ["openai", ["gpt-5.4-mini"]],
+      ["openai", ["gpt-5.6-sol", "gpt-5.4", "gpt-5.4-mini"]],
       ["anthropic", ["claude-opus-5"]],
     ]);
   });

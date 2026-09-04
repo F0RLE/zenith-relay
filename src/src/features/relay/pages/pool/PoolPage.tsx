@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { ArrowRightLeft, Download, Loader2, Plus, Upload } from "lucide-react";
+import { Download, Loader2, Plug, Plus, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, ConfigurationPresetPreview } from "../../api/types";
 import { isCodexOauthAccountEligible } from "../../accountStatus";
 import { Button, Dialog, EmptyState, IconButton, PageHeader, Tabs } from "../../components/Ui";
+import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { OAuthDialog } from "../connections/OAuthDialogs";
@@ -21,6 +22,7 @@ export function PoolPage() {
   const [view, setView] = useState<View>("members");
   const [createSource, setCreateSource] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
+  const [connectDialog, setConnectDialog] = useState(false);
   const [routingPolicy, setRoutingPolicy] = useState(false);
   const [configurationPreview, setConfigurationPreview] = useState<ConfigurationPresetPreview | null>(null);
   const oauth = useOAuthSignIn(() => refresh());
@@ -37,11 +39,15 @@ export function PoolPage() {
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
     ? codexPoolOauthSelection
     : null;
-  const switchCodexToPool = () => activateCodexProfile(
+  const switchCodexToPool = (launchAfterConnect: boolean) => activateCodexProfile(
     "pool-switch",
     () => relayCommands.attachCodexGateway(selectedOauthAccountId, codexPoolOauthSelection === "none"),
-    true,
+    launchAfterConnect,
   );
+  const connectOpenCode = async (launchAfterConnect: boolean) => {
+    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved");
+    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched");
+  };
   const running = Boolean(runtime?.gateway.running);
   const exportConfiguration = () => perform("configuration-preset-export", mode === "local" ? relayCommands.exportLocalConfigurationPreset : relayCommands.exportRemoteConfigurationPreset);
   const previewConfiguration = () => perform("configuration-preset-preview", async () => {
@@ -56,10 +62,10 @@ export function PoolPage() {
       {supportsConfigurationPresets ? <IconButton className="pool-header-icon" label={t("pool.importConfiguration")} icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />} disabled={Boolean(busy)} title={t("pool.importConfiguration")} onClick={() => void previewConfiguration()} /> : null}
     </div> : null}
     {view === "members" ? <IconButton data-action="pool-add" className="pool-header-icon" label={t("pool.addMember")} icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : t("pool.addMember")} onClick={() => setAddMembers(true)} /> : null}
-    {mode === "local" ? <Button data-action="pool-switch" variant="primary" icon={<ArrowRightLeft aria-hidden />} aria-label={t("pool.switchChatGPT")} busy={busy === "pool-switch"} disabled={!running} title={!running ? t("pool.start") : t("pool.switchChatGPT")} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPTShort")}</Button> : null}
+    {mode === "local" ? <Button data-action="pool-connect" variant="primary" icon={<Plug aria-hidden />} aria-label={t("pool.connect")} busy={busy === "pool-switch"} disabled={!running} title={!running ? t("pool.start") : t("pool.connect")} onClick={() => setConnectDialog(true)}>{t("pool.connect")}</Button> : null}
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
-  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <PoolMembersView onAdd={() => setAddMembers(true)} onRoutingPolicy={() => setRoutingPolicy(true)} onReauthenticate={reauthenticateAccount} supportsRoutingSettings={supportsRoutingSettings} /> : null}{view === "models" ? <ModelRulesView /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{configurationPreview ? <ConfigurationPresetDialog preview={configurationPreview} mode={mode === "remote" ? "remote" : "local"} onClose={() => setConfigurationPreview(null)} /> : null}{oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
+  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <PoolMembersView onAdd={() => setAddMembers(true)} onRoutingPolicy={() => setRoutingPolicy(true)} onReauthenticate={reauthenticateAccount} supportsRoutingSettings={supportsRoutingSettings} /> : null}{view === "models" ? <ModelRulesView /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{connectDialog ? <ApplicationPickerDialog onClose={() => setConnectDialog(false)} onChatGPT={(launchAfterConnect) => void switchCodexToPool(launchAfterConnect)} onOpenCode={(launchAfterConnect) => void connectOpenCode(launchAfterConnect)} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{configurationPreview ? <ConfigurationPresetDialog preview={configurationPreview} mode={mode === "remote" ? "remote" : "local"} onClose={() => setConfigurationPreview(null)} /> : null}{oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
 }
 
 function ConfigurationPresetDialog({ preview, mode, onClose }: { preview: ConfigurationPresetPreview; mode: "local" | "remote"; onClose: () => void }) {

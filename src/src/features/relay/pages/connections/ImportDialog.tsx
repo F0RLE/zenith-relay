@@ -6,7 +6,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountImportProgress, ConfirmAccountImportResponse, ImportSession, RelayMode } from "../../api/types";
 import { AccountPlanBadge, Button, Dialog, StatusBadge, StatusIcon } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { MarkdownPreview } from "./MarkdownPreview";
+import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { useProxyPool } from "./ProxyDialogs";
 
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
@@ -193,8 +193,8 @@ function collectImportFailures(response: ConfirmAccountImportResponse | null, se
       return {
         itemId: item.itemId,
         code: item.error?.code ?? "unknown",
-        label: row?.label,
-        identity: row?.identity,
+        ...(row?.label ? { label: row.label } : {}),
+        ...(row?.identity ? { identity: row.identity } : {}),
       };
     });
 }
