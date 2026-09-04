@@ -19,6 +19,9 @@ release entries are kept concise and link to the corresponding tag.
   already exhausted before the refresh that detected it. Missing reset-credit
   metadata no longer prevents the authoritative reset-credit endpoint from
   checking availability.
+- Pool routing status now keeps the last account that actually handled a
+  request visible alongside the next eligible route, with a distinct card
+  highlight for the last-used member.
 
 ## [1.1.2] - 2026-09-03
 

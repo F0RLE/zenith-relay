@@ -126,27 +126,27 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const noAvailableModels = visibleModelIds.length === 0 || !hasRoutableModel;
   const hasAvailableRoute = nextMember != null;
   const firstActiveMember = activeMembers[0];
+  const recentRoute = !activeMembers.length && lastActivityMember && nextMember && lastActivityMember.id !== nextMember.id
+    ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember)} · ${t("pool.nextRoute")}: ${memberName(nextMember)}`
+    : null;
+  const idleRouteSummary = noAvailableModels
+    ? t("pool.noAvailableModels")
+    : recentRoute
+      ? recentRoute
+      : nextMember
+        ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
+        : (lastActivityMember ?? lastUsedMember)
+          ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
+          : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
   const routingSummary = firstActiveMember
     ? activeMembers.length === 1
       ? `${t("pool.currentRoute")}: ${memberName(firstActiveMember)}`
       : activeMembers.length > 1
         ? t("pool.activeRoutes", { count: activeMembers.length })
-        : noAvailableModels
-          ? t("pool.noAvailableModels")
-          : nextMember
-            ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
-            : (lastActivityMember ?? lastUsedMember)
-              ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
-              : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty")
+        : idleRouteSummary
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
-      : noAvailableModels
-        ? t("pool.noAvailableModels")
-        : nextMember
-          ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
-          : (lastActivityMember ?? lastUsedMember)
-            ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
-            : t(hasAvailableRoute ? "pool.awaitingRoute" : "pool.priorityEmpty");
+      : idleRouteSummary;
   const unavailableRouteErrors = members
     .map((member) => member.kind === "source" ? member.lastErrorCode?.trim() : currentAccountErrorCode(member))
     .filter((code): code is string => Boolean(code));
@@ -302,7 +302,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         const indicatorHint = member.kind === "source"
           ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
           : [runtimeHint, indicatorLabel].filter(Boolean).join(" · ");
-        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" title={[codexInterface ? t("pool.codexInterfaceHint") : null, member.kind === "source" ? sourceRuntimeTitle : null].filter(Boolean).join(" · ") || undefined} data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
+        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}${isLastUsed ? " last-used" : ""}`} role="listitem" title={[codexInterface ? t("pool.codexInterfaceHint") : null, member.kind === "source" ? sourceRuntimeTitle : null].filter(Boolean).join(" · ") || undefined} data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
           <header className="pool-member-card-header">
             {member.kind === "account" && displayedErrorCode
               ? <IconButton className="pool-member-kind-icon" data-status="error" label={indicatorLabel} icon={<UserRound aria-hidden />} onClick={() => setErrorDetails(member)} />
