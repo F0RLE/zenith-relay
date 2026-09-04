@@ -15,6 +15,10 @@ release entries are kept concise and link to the corresponding tag.
   unavailable for configuration.
 - Moved the update notification to the sidebar update row so it aligns with the
   application controls in both expanded and compact navigation.
+- Automatic weekly quota reset now recovers when the secondary window was
+  already exhausted before the refresh that detected it. Missing reset-credit
+  metadata no longer prevents the authoritative reset-credit endpoint from
+  checking availability.
 
 ## [1.1.2] - 2026-09-03
 

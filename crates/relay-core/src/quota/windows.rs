@@ -195,6 +195,29 @@ impl QuotaWindow {
             }
         })
     }
+
+    /// Returns the stable exhaustion identity for the current window. This is
+    /// used by recovery automations when the process starts after the provider
+    /// has already reported an exhausted window and no edge transition exists
+    /// in the current refresh response.
+    pub fn exhaustion_transition(&self) -> Option<QuotaTransition> {
+        self.is_exhausted().then(|| QuotaTransition {
+            window_kind: self.kind,
+            fingerprint: self
+                .exhaustion_transition_fingerprint
+                .clone()
+                .unwrap_or_else(|| {
+                    exhaustion_transition_fingerprint(
+                        self.kind,
+                        self.reset_at_ms,
+                        self.window_minutes,
+                        self.provider_cycle_id.as_deref(),
+                        self.observed_at_ms,
+                    )
+                }),
+            transitioned_at_ms: self.observed_at_ms,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -492,6 +515,9 @@ mod tests {
         assert!(repeated
             .exhaustion_transition_from(Some(&exhausted))
             .is_none());
+        let current = repeated.exhaustion_transition().unwrap();
+        assert_eq!(current.fingerprint, transition.fingerprint);
+        assert_eq!(current.transitioned_at_ms, repeated.observed_at_ms);
     }
 
     #[test]
