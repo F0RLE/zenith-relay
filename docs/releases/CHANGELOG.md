@@ -22,6 +22,8 @@ release entries are kept concise and link to the corresponding tag.
 - Pool routing status now keeps the last account that actually handled a
   request visible alongside the next eligible route, with a distinct card
   highlight for the last-used member.
+- Runtime activity overlays are reconciled with fresh snapshots so an old
+  release event cannot hide a newly active account or mislabel the next route.
 
 ## [1.1.2] - 2026-09-03
 

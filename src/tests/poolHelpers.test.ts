@@ -11,7 +11,7 @@ import {
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
-import { applyRuntimeActivity, applyRuntimeActivities, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivity, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -266,6 +266,16 @@ describe("pool helpers", () => {
     expect(next[0]).toMatchObject({ inFlight: 2, activeRequestCount: 2 });
     expect(next[1]).toMatchObject({ inFlight: 0, activeRequestCount: 0 });
     expect(order[0]).toMatchObject({ inFlight: 0, activeRequestCount: 0 });
+  });
+
+  test("drops a stale release tombstone when a fresh snapshot reports activity", () => {
+    const overlay = new Map([
+      ["account-a", { revision: 2, candidateId: "account-a", inFlight: 0, activeRequestCount: 0, activeModels: [] }],
+    ]);
+    reconcileRuntimeActivityOverlay([
+      { candidateId: "account-a", kind: "oauth_account", available: true, inFlight: 1, activeRequestCount: 1, activeModels: [{ model: "gpt-5.4", requestCount: 1 }], lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 1 },
+    ], overlay);
+    expect(overlay.size).toBe(0);
   });
 
   test("positions a multi-protocol source by its active binding", () => {
