@@ -595,6 +595,7 @@ mod tests {
             reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
+            reasoning_manual_fallback: false,
             speed_supported: false,
             speed_tier: Default::default(),
             speed_configurable: false,

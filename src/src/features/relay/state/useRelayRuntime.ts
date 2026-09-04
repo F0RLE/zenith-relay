@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities } from "../routingOrder";
+import { applyRuntimeActivities, reconcileRuntimeActivityOverlay } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
@@ -101,6 +101,7 @@ export function useRelayRuntime({
     if (requestedMode === "zenith") setReadyState(loaded.readyState);
     if (requestedMode === "local") {
       runtimeRoutingOrderBase.current = loaded.snapshot?.gateway.routingOrder ?? [];
+      reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
     }
     const snapshot = loaded.snapshot && requestedMode === "local"
       ? {
@@ -192,7 +193,10 @@ export function useRelayRuntime({
           ? await relayCommands.localRuntimeOrder()
           : await relayCommands.remoteRuntimeOrder();
         if (!active || routingOrder == null) return;
-        if (mode === "local") runtimeRoutingOrderBase.current = routingOrder;
+        if (mode === "local") {
+          runtimeRoutingOrderBase.current = routingOrder;
+          reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
+        }
         const visibleRoutingOrder = mode === "local"
           ? visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current)
           : routingOrder;

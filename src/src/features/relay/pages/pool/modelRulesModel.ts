@@ -26,6 +26,8 @@ export function modelSignature(models: ModelSummary[]) {
     model.reasoningLevels?.join(","),
     model.reasoningSupportedLevels?.join(","),
     model.reasoningAllowedLevels?.join(","),
+    model.reasoningConfigurable,
+    model.reasoningManualFallback,
   ].join(":" )).join("\u0000");
 }
 
@@ -66,10 +68,15 @@ export function formatModelDisplayName(value: string) {
 }
 
 /** Use the provider's advertised order and discard duplicate/blank levels. */
-export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels">) {
-  const levels = model.reasoningSupportedLevels?.length
+const MANUAL_REASONING_FALLBACK_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels" | "reasoningManualFallback">) {
+  const declaredLevels = model.reasoningSupportedLevels?.length
     ? model.reasoningSupportedLevels
     : model.reasoningLevels ?? [];
+  const levels = declaredLevels.length || !model.reasoningManualFallback
+    ? declaredLevels
+    : MANUAL_REASONING_FALLBACK_LEVELS;
   const seen = new Set<string>();
   return levels
     .map((level) => level.trim().toLowerCase())

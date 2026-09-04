@@ -777,6 +777,7 @@ fn model_summary(
         reasoning_supported_levels: Vec::new(),
         reasoning_allowed_levels: Vec::new(),
         reasoning_configurable: false,
+        reasoning_manual_fallback: false,
         speed_supported: false,
         speed_tier: DefaultServiceTier::Standard,
         speed_configurable: false,
@@ -1034,6 +1035,7 @@ mod tests {
             reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
+            reasoning_manual_fallback: false,
             speed_supported: false,
             speed_tier: DefaultServiceTier::Standard,
             speed_configurable: false,
@@ -1049,33 +1051,46 @@ mod tests {
         assert_eq!(model.reasoning_supported_levels, ["high"]);
         assert!(model.reasoning_allowed_levels.is_empty());
         assert!(!model.reasoning_configurable);
+        assert!(!model.reasoning_manual_fallback);
 
         apply_model_reasoning_summary(&mut model, None, None, false);
         assert!(model.reasoning_levels.is_empty());
         assert!(model.reasoning_supported_levels.is_empty());
         assert!(model.reasoning_allowed_levels.is_empty());
         assert!(!model.reasoning_configurable);
+        assert!(!model.reasoning_manual_fallback);
 
         apply_model_reasoning_summary(&mut model, Some(vec!["high".into()]), None, true);
         assert_eq!(model.reasoning_levels, ["high"]);
         assert_eq!(model.reasoning_supported_levels, ["high"]);
         assert_eq!(model.reasoning_allowed_levels, ["high"]);
         assert!(model.reasoning_configurable);
+        assert!(!model.reasoning_manual_fallback);
 
         apply_model_reasoning_summary(&mut model, Some(Vec::new()), Some(&["max".into()]), true);
         assert_eq!(model.reasoning_levels, ["max"]);
         assert!(model.reasoning_supported_levels.is_empty());
         assert_eq!(model.reasoning_allowed_levels, ["max"]);
         assert!(model.reasoning_configurable);
+        assert!(!model.reasoning_manual_fallback);
 
         model.id = "gpt-5.6-terra".into();
         apply_model_reasoning_summary(&mut model, Some(Vec::new()), None, true);
         assert!(model.reasoning_supported_levels.is_empty());
         assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(!model.reasoning_manual_fallback);
 
         apply_model_reasoning_summary(&mut model, Some(vec!["ultra".into()]), None, true);
         assert_eq!(model.reasoning_supported_levels, ["ultra"]);
         assert_eq!(model.reasoning_allowed_levels, ["ultra"]);
+        assert!(!model.reasoning_manual_fallback);
+
+        model.id = "claude-fable-5-1".into();
+        apply_model_reasoning_summary(&mut model, None, None, true);
+        assert!(model.reasoning_supported_levels.is_empty());
+        assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(model.reasoning_configurable);
+        assert!(model.reasoning_manual_fallback);
     }
 
     #[test]
@@ -1098,6 +1113,7 @@ mod tests {
             reasoning_supported_levels: Vec::new(),
             reasoning_allowed_levels: Vec::new(),
             reasoning_configurable: false,
+            reasoning_manual_fallback: false,
             speed_supported: false,
             speed_tier: DefaultServiceTier::Standard,
             speed_configurable: false,

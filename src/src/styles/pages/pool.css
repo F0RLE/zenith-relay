@@ -307,6 +307,10 @@
   box-shadow: var(--relay-shadow-soft);
 }
 
+.pool-member-card.last-used:not(.current) {
+  border-color: color-mix(in srgb, var(--relay-accent) 28%, var(--relay-border));
+}
+
 .pool-member-card.current::before {
   position: absolute;
   z-index: 2;

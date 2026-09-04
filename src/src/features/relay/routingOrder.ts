@@ -157,6 +157,27 @@ export function applyRuntimeActivities(
     .map(({ candidate }) => candidate);
 }
 
+/**
+ * Reconcile activity tombstones with a fresh runtime snapshot.
+ *
+ * A release event is kept as a tombstone so a stale lightweight poll cannot
+ * resurrect a completed request. Once a newer full snapshot reports that the
+ * same candidate is active again, that old tombstone must be discarded or it
+ * would hide the new request until another activity event arrives.
+ */
+export function reconcileRuntimeActivityOverlay(
+  order: readonly CandidateRuntimeSnapshot[],
+  overlay: Map<string, RuntimeActivitySnapshot>,
+) {
+  const candidates = new Map(order.map((candidate) => [candidate.candidateId, candidate]));
+  for (const [candidateId, activity] of overlay) {
+    const candidate = candidates.get(candidateId);
+    if (!candidate || (activeRequestCount(candidate) > 0 && activity.activeRequestCount === 0)) {
+      overlay.delete(candidateId);
+    }
+  }
+}
+
 export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {
   const counts = new Map<string, { model: string; requestCount: number }>();
   for (const candidate of candidates) {

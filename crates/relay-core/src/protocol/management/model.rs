@@ -84,6 +84,11 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
+    /// The upstream omitted reasoning metadata for an otherwise unknown pooled
+    /// model. The management client may offer manual levels for discovery, but
+    /// must not treat this as an advertised upstream capability.
+    #[serde(default)]
+    pub reasoning_manual_fallback: bool,
     /// Compatibility flag for older management clients. Fast maps to an
     /// OpenAI service tier and is unavailable for other model families.
     #[serde(default)]
@@ -199,13 +204,16 @@ pub fn apply_model_reasoning_summary(
     model.reasoning_supported_levels.clear();
     model.reasoning_allowed_levels.clear();
     model.reasoning_configurable = false;
+    model.reasoning_manual_fallback = false;
 
     // Provider metadata is the current route contract. Known model defaults
     // are only a fallback for providers that omit the field entirely; using
     // them first hides newly introduced/provider-specific efforts.
+    let known_levels = crate::known_model_reasoning_levels(&model.id);
+    let reported_levels_missing = reported_levels.is_none();
     let mut declared_levels = match reported_levels {
         Some(levels) => levels,
-        None => crate::known_model_reasoning_levels(&model.id)
+        None => known_levels
             .map(|levels| levels.iter().copied().map(str::to_string).collect())
             .unwrap_or_default(),
     };
@@ -220,6 +228,8 @@ pub fn apply_model_reasoning_summary(
         declared_levels.push("ultra".to_string());
     }
     model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);
+    model.reasoning_manual_fallback =
+        has_pool_route && reported_levels_missing && known_levels.is_none();
     if has_pool_route {
         let effective_levels = saved_manual_levels.unwrap_or(&model.reasoning_supported_levels);
         model.reasoning_allowed_levels = crate::canonicalize_reasoning_levels(effective_levels);

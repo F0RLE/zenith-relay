@@ -6,7 +6,24 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
-Changes for the next release will be listed here.
+### Fixed
+
+- Unknown pooled models whose provider does not advertise reasoning metadata can
+  now be configured manually with Low, Medium, High, Extra high, and Max.
+  Relay sends no reasoning setting until the user explicitly enables one.
+  Models whose provider explicitly reports no reasoning support remain
+  unavailable for configuration.
+- Moved the update notification to the sidebar update row so it aligns with the
+  application controls in both expanded and compact navigation.
+- Automatic weekly quota reset now recovers when the secondary window was
+  already exhausted before the refresh that detected it. Missing reset-credit
+  metadata no longer prevents the authoritative reset-credit endpoint from
+  checking availability.
+- Pool routing status now keeps the last account that actually handled a
+  request visible alongside the next eligible route, with a distinct card
+  highlight for the last-used member.
+- Runtime activity overlays are reconciled with fresh snapshots so an old
+  release event cannot hide a newly active account or mislabel the next route.
 
 ## [1.1.2] - 2026-09-03
 
@@ -73,6 +90,8 @@ integration, recovery, and the local-first desktop workflow.
 
 ### Desktop UI
 
+- The Overview application launcher now only starts an already connected
+  application; the connect-time launch preference is shown only during setup.
 - ChatGPT recovery provides named, protected snapshots of `config.toml` and
   sign-in state with confirmed restore and deletion. Managed profile switching
   still preserves unrelated settings, rejects a newer manual sign-in, and uses

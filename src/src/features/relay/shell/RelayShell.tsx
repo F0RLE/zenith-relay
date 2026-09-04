@@ -169,8 +169,8 @@ export function RelayShell() {
         </nav>
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
+          {availableUpdate ? <div className="sidebar-update-row"><button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} onClick={openUpdateDialog}><Download aria-hidden /><span>{t("updates.available")}</span></button></div> : null}
           <div className="sidebar-footer">
-            {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} onClick={openUpdateDialog}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
             <div className="sidebar-footer-row">
               <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
                 <CircleHelp aria-hidden />

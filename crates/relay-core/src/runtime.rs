@@ -1264,35 +1264,93 @@ impl GatewayRuntime {
         upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            let source = self.sources.get(&binding.source_id)?;
-            let source_binding = source.binding_for(binding.binding_key)?;
-            let source_model = source.canonical_model_for(binding.binding_key, model)?;
-            return Some(ExecutorRoute {
-                candidate_id: candidate_id.to_string(),
-                source_id: binding.source_id.clone(),
-                account_id: None,
-                client_context_id: None,
-                scope: scope.clone(),
-                allowed_protocols: allowed_protocols.to_vec(),
-                wire_api: binding.wire_api,
-                adapter: binding.adapter,
-                reasoning_mode: binding.reasoning_mode,
-                cache_write_ttl: binding.cache_write_ttl,
-                service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(
-                    binding.binding_key,
-                    &source_model,
-                    upstream_stream,
-                )?,
-                upstream_headers: source.protocol_headers_for_binding(source_binding),
-                source_model,
-                half_open_probe: false,
-                routing: None,
-            });
+            return self.source_executor_route(
+                candidate_id,
+                binding,
+                model,
+                scope,
+                allowed_protocols,
+                upstream_stream,
+            );
         }
         let account = self.chatgpt_accounts.get(candidate_id)?;
         let source_model = account.canonical_model(model)?;
+        Some(Self::account_executor_route(
+            account,
+            source_model,
+            scope,
+            allowed_protocols,
+        ))
+    }
+
+    pub(crate) fn image_executor_route(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> Option<ExecutorRoute> {
+        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+            if !binding.adapter.is_passthrough() {
+                return None;
+            }
+            return self.source_executor_route(
+                candidate_id,
+                binding,
+                model,
+                scope,
+                allowed_protocols,
+                false,
+            );
+        }
+        let account = self.chatgpt_accounts.get(candidate_id)?;
+        Some(Self::account_executor_route(
+            account,
+            account.image_main_model.clone()?,
+            scope,
+            allowed_protocols,
+        ))
+    }
+
+    fn source_executor_route(
+        &self,
+        candidate_id: &str,
+        binding: &SourceCandidateBinding,
+        model: &str,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+        upstream_stream: bool,
+    ) -> Option<ExecutorRoute> {
+        let source = self.sources.get(&binding.source_id)?;
+        let source_binding = source.binding_for(binding.binding_key)?;
+        let source_model = source.canonical_model_for(binding.binding_key, model)?;
         Some(ExecutorRoute {
+            candidate_id: candidate_id.to_string(),
+            source_id: binding.source_id.clone(),
+            account_id: None,
+            client_context_id: None,
+            scope: scope.clone(),
+            allowed_protocols: allowed_protocols.to_vec(),
+            wire_api: binding.wire_api,
+            adapter: binding.adapter,
+            reasoning_mode: binding.reasoning_mode,
+            cache_write_ttl: binding.cache_write_ttl,
+            service_tier: DefaultServiceTier::Standard,
+            upstream_url: source.endpoint(binding.binding_key, &source_model, upstream_stream)?,
+            upstream_headers: source.protocol_headers_for_binding(source_binding),
+            source_model,
+            half_open_probe: false,
+            routing: None,
+        })
+    }
+
+    fn account_executor_route(
+        account: &ChatGptAccountExecutor,
+        source_model: String,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> ExecutorRoute {
+        ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
@@ -1309,61 +1367,7 @@ impl GatewayRuntime {
             source_model,
             half_open_probe: false,
             routing: None,
-        })
-    }
-
-    pub(crate) fn image_executor_route(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        scope: &CandidateScope,
-        allowed_protocols: &[WireApi],
-    ) -> Option<ExecutorRoute> {
-        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            if !binding.adapter.is_passthrough() {
-                return None;
-            }
-            let source = self.sources.get(&binding.source_id)?;
-            let source_binding = source.binding_for(binding.binding_key)?;
-            let source_model = source.canonical_model_for(binding.binding_key, model)?;
-            return Some(ExecutorRoute {
-                candidate_id: candidate_id.to_string(),
-                source_id: binding.source_id.clone(),
-                account_id: None,
-                client_context_id: None,
-                scope: scope.clone(),
-                allowed_protocols: allowed_protocols.to_vec(),
-                wire_api: binding.wire_api,
-                adapter: binding.adapter,
-                reasoning_mode: binding.reasoning_mode,
-                cache_write_ttl: binding.cache_write_ttl,
-                service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(binding.binding_key, &source_model, false)?,
-                upstream_headers: source.protocol_headers_for_binding(source_binding),
-                source_model,
-                half_open_probe: false,
-                routing: None,
-            });
         }
-        let account = self.chatgpt_accounts.get(candidate_id)?;
-        Some(ExecutorRoute {
-            candidate_id: account.id.clone(),
-            source_id: account.source_id.clone(),
-            account_id: Some(account.id.clone()),
-            client_context_id: None,
-            scope: scope.clone(),
-            allowed_protocols: allowed_protocols.to_vec(),
-            wire_api: WireApi::Responses,
-            adapter: SourceAdapter::Native,
-            reasoning_mode: MessagesReasoningMode::Disabled,
-            cache_write_ttl: CacheWriteTtl::Provider,
-            service_tier: DefaultServiceTier::Standard,
-            upstream_url: account.responses_url.clone(),
-            upstream_headers: HeaderMap::new(),
-            source_model: account.image_main_model.clone()?,
-            half_open_probe: false,
-            routing: None,
-        })
     }
 
     pub(crate) fn request_client(
