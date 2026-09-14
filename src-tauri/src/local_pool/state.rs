@@ -480,9 +480,10 @@ mod tests {
         let root = temp_root("quota-single-flight");
         let state = DesktopState::open(root.clone()).unwrap();
         let leader = match state.reserve_quota_refresh("account-1").unwrap() {
-            QuotaRefreshReservation::Leader(leader) => leader,
-            QuotaRefreshReservation::Follower(_) => panic!("first refresh must lead"),
-        };
+            QuotaRefreshReservation::Leader(leader) => Some(leader),
+            QuotaRefreshReservation::Follower(_) => None,
+        }
+        .expect("first refresh must lead");
         let upstream_calls = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -500,9 +501,10 @@ mod tests {
         });
         started.notified().await;
         let follower = match state.reserve_quota_refresh("account-1").unwrap() {
-            QuotaRefreshReservation::Follower(follower) => follower,
-            QuotaRefreshReservation::Leader(_) => panic!("second refresh must join"),
-        };
+            QuotaRefreshReservation::Follower(follower) => Some(follower),
+            QuotaRefreshReservation::Leader(_) => None,
+        }
+        .expect("second refresh must join");
         let waiter = tokio::spawn(async move { follower.wait().await });
         assert_eq!(upstream_calls.load(Ordering::SeqCst), 1);
         release.notify_one();
@@ -515,9 +517,10 @@ mod tests {
         assert_eq!(joined.unwrap_err().message, "synthetic quota failure");
 
         let next = match state.reserve_quota_refresh("account-1").unwrap() {
-            QuotaRefreshReservation::Leader(next) => next,
-            QuotaRefreshReservation::Follower(_) => panic!("completed refresh must be removed"),
-        };
+            QuotaRefreshReservation::Leader(next) => Some(next),
+            QuotaRefreshReservation::Follower(_) => None,
+        }
+        .expect("completed refresh must be removed");
         let _ = next.finish(expected);
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -528,13 +531,15 @@ mod tests {
         let root = temp_root("quota-single-flight-interrupted");
         let state = DesktopState::open(root.clone()).unwrap();
         let leader = match state.reserve_quota_refresh("account-1").unwrap() {
-            QuotaRefreshReservation::Leader(leader) => leader,
-            QuotaRefreshReservation::Follower(_) => panic!("first refresh must lead"),
-        };
+            QuotaRefreshReservation::Leader(leader) => Some(leader),
+            QuotaRefreshReservation::Follower(_) => None,
+        }
+        .expect("first refresh must lead");
         let follower = match state.reserve_quota_refresh("account-1").unwrap() {
-            QuotaRefreshReservation::Follower(follower) => follower,
-            QuotaRefreshReservation::Leader(_) => panic!("second refresh must join"),
-        };
+            QuotaRefreshReservation::Follower(follower) => Some(follower),
+            QuotaRefreshReservation::Leader(_) => None,
+        }
+        .expect("second refresh must join");
         let waiter = tokio::spawn(async move { follower.wait().await });
         drop(leader);
 
@@ -549,9 +554,10 @@ mod tests {
         );
 
         let retry = match state.reserve_quota_refresh("account-1").unwrap() {
-            QuotaRefreshReservation::Leader(retry) => retry,
-            QuotaRefreshReservation::Follower(_) => panic!("interrupted refresh must be removed"),
-        };
+            QuotaRefreshReservation::Leader(retry) => Some(retry),
+            QuotaRefreshReservation::Follower(_) => None,
+        }
+        .expect("interrupted refresh must be removed");
         let _ = retry.finish(Err(LocalPoolError::new(
             ErrorCode::GatewayUnavailable,
             "synthetic retry failure",
