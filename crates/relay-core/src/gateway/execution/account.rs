@@ -3,7 +3,7 @@ use super::super::errors::{
     apply_failure_cooldown_with_body, apply_failure_state, is_deactivated_workspace,
     preserved_upstream_error, previous_response_not_found, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_call_id_is_missing, responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, retry_candidate_limit, retryable_failure,
     AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
@@ -11,10 +11,11 @@ use super::super::errors::{
 use super::super::now_ms;
 use super::super::request::{
     account_endpoint_url, apply_codex_routing_hint, client_context_fingerprint,
-    codex_client_version, drop_unpaired_responses_tool_calls, forwarded_codex_headers, request_id,
-    response_tool_call_ids, responses_lite_parallel_tool_calls_valid, tool_call_output_ids,
-    tool_use_diagnostics, try_recover_encrypted_content, with_forwarded_tool_diagnostics,
-    AccountEndpoint, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
+    codex_client_version, drop_unpaired_responses_tool_calls, forwarded_codex_headers,
+    repair_legacy_responses_call_ids, request_id, response_tool_call_ids,
+    responses_lite_parallel_tool_calls_valid, tool_call_output_ids, tool_use_diagnostics,
+    try_recover_encrypted_content, with_forwarded_tool_diagnostics, AccountEndpoint,
+    ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
@@ -85,7 +86,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         .is_some_and(|affinity_key| runtime.has_response_affinity_binding(affinity_key, now_ms()));
     let tool_output_ids = tool_call_output_ids(&request);
     let tool_call_ids = response_tool_call_ids(&request);
-    let has_unpaired_tool_output = tool_output_ids
+    let mut has_unpaired_tool_output = tool_output_ids
         .iter()
         .any(|output_id| !tool_call_ids.iter().any(|call_id| call_id == output_id));
     let tool_affinity_key = tool_output_ids.iter().find_map(|call_id| {
@@ -111,6 +112,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut function_item_id_repair_attempted = false;
     let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
+    let mut legacy_call_id_repair_attempted = false;
     let mut model_switch_reset_attempted = false;
     let mut stale_tool_history_recovered = false;
     let mut last_failure: Option<AttemptFailure> = None;
@@ -153,7 +155,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
                 + usize::from(encrypted_content_recovered)
                 + usize::from(model_switch_reset_attempted)
-                + usize::from(stale_tool_history_recovered);
+                + usize::from(stale_tool_history_recovered)
+                + usize::from(legacy_call_id_repair_attempted);
         if usize::from(attempt) >= attempt_limit {
             if should_wait_for_candidate_availability(
                 wait_for_candidate_availability,
@@ -441,6 +444,22 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             continue;
         };
         if !status.is_success() {
+            if !legacy_call_id_repair_attempted
+                && responses_call_id_is_missing(&bytes)
+                && repair_legacy_responses_call_ids(&mut request)
+            {
+                legacy_call_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                let output_ids = tool_call_output_ids(&request);
+                let call_ids = response_tool_call_ids(&request);
+                has_unpaired_tool_output = output_ids
+                    .iter()
+                    .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+                requires_affinity_owner =
+                    request_has_previous_response_id(&request) || has_unpaired_tool_output;
+                continue;
+            }
             if !function_item_id_repair_attempted
                 && responses_function_item_id_requires_fc_prefix(&bytes)
                 && repair_call_prefixed_function_item_ids(&mut request)

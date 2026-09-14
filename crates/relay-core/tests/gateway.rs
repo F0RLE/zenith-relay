@@ -1674,6 +1674,91 @@ async fn native_responses_repair_call_prefixed_function_item_ids_after_strict_re
 }
 
 #[tokio::test]
+async fn native_responses_repair_legacy_call_ids_after_explicit_strict_rejection() {
+    let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": [
+                {"type": "function_call_output", "output": "orphan"},
+                {"type": "function_call", "id": "fc_legacy", "name": "lookup", "namespace": "functions", "arguments": "{}"},
+                {"type": "function_call_output", "output": "lookup result"},
+                {"type": "function_call_output", "name": "heartbeat", "output": "standalone"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "resp_strict_call_id"
+    );
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"].as_array().unwrap().len(), 4);
+    let repaired = bodies[1]["input"].as_array().unwrap();
+    assert_eq!(repaired.len(), 3);
+    assert_eq!(repaired[0]["type"], "function_call");
+    assert_eq!(repaired[0]["id"], "fc_legacy");
+    assert_eq!(repaired[0]["namespace"], "functions");
+    assert_eq!(repaired[1]["call_id"], repaired[0]["call_id"]);
+    assert_eq!(repaired[2]["name"], "heartbeat");
+    assert!(repaired[2].get("call_id").is_none());
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
+async fn native_responses_stream_repairs_legacy_call_ids_after_terminal_error() {
+    let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "stream": true,
+            "input": [
+                {"type": "custom_tool_call", "name": "patch", "input": "{}"},
+                {"type": "custom_tool_call_output", "output": "done"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("History accepted"));
+    assert!(body.contains("response.completed"));
+    assert!(!body.contains("Missing required field"));
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[0]["input"][0].get("call_id").is_none());
+    assert_eq!(
+        bodies[1]["input"][0]["call_id"],
+        bodies[1]["input"][1]["call_id"]
+    );
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
 async fn native_responses_repair_custom_tool_item_ids_after_strict_rejection() {
     let (upstream, state) = spawn_strict_custom_tool_item_id_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
@@ -2861,6 +2946,17 @@ async fn spawn_strict_message_item_id_upstream() -> (TestServer, UpstreamState) 
     (spawn(app).await, state)
 }
 
+async fn spawn_strict_missing_call_id_upstream() -> (TestServer, UpstreamState) {
+    let state = UpstreamState::default();
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(strict_missing_call_id_upstream_responses),
+        )
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
 async fn spawn(app: Router) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -3341,6 +3437,89 @@ async fn strict_message_item_id_upstream_responses(
 
     Json(json!({
         "id": "resp_strict_message_id",
+        "object": "response",
+        "model": request["model"],
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "History accepted"}]
+        }]
+    }))
+    .into_response()
+}
+
+async fn strict_missing_call_id_upstream_responses(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    state.bodies.lock().unwrap().push(request.clone());
+    let input = request.get("input").and_then(Value::as_array);
+    let has_missing_call_id = input.is_some_and(|input| {
+        input.iter().any(|item| {
+            let item_type = item.get("type").and_then(Value::as_str);
+            let named_standalone_output = item_type == Some("function_call_output")
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.trim().is_empty());
+            !named_standalone_output
+                && matches!(
+                    item_type,
+                    Some(
+                        "function_call"
+                            | "function_call_output"
+                            | "custom_tool_call"
+                            | "custom_tool_call_output"
+                    )
+                )
+                && item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|call_id| call_id.trim().is_empty())
+        })
+    });
+    if has_missing_call_id {
+        if request.get("stream").and_then(Value::as_bool) == Some(true) {
+            let chunks = stream::iter([Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"},\"error\":{\"message\":\"Missing required field: call_id\"}}\n\n",
+            ))]);
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(chunks))
+                .unwrap();
+        }
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "Missing required field: call_id"}})),
+        )
+            .into_response();
+    }
+    if request.get("stream").and_then(Value::as_bool) == Some(true) {
+        let chunks = stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"History accepted\"}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_strict_call_id\",\"status\":\"completed\"}}\n\n",
+            )),
+        ]);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(chunks))
+            .unwrap();
+    }
+    Json(json!({
+        "id": "resp_strict_call_id",
         "object": "response",
         "model": request["model"],
         "output": [{

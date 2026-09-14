@@ -177,6 +177,35 @@ fn invalid_function_call_output_call_ids_are_detected_without_matching_generic_e
 }
 
 #[test]
+fn missing_responses_call_ids_are_detected_without_matching_invalid_ids() {
+    for payload in [
+        br#"{"error":{"message":"Missing field call_id"}}"#.as_slice(),
+        br#"{"error":{"message":"Missing required field: `call_id`"}}"#.as_slice(),
+        br#"{"error":{"message":"The call id is required"}}"#.as_slice(),
+        br#"{"error":{"code":"missing_call_id"}}"#.as_slice(),
+        b"Missing required parameter: call_id".as_slice(),
+    ] {
+        assert!(
+            responses_call_id_is_missing(payload),
+            "expected missing call_id detector to match {}",
+            String::from_utf8_lossy(payload)
+        );
+    }
+    for payload in [
+        br#"{"error":{"message":"Invalid call_id for function_call_output"}}"#.as_slice(),
+        br#"{"error":{"message":"Invalid call id"}}"#.as_slice(),
+        br#"{"error":{"message":"Missing field: model"}}"#.as_slice(),
+        br#"{"error":{"code":"invalid_request"}}"#.as_slice(),
+    ] {
+        assert!(
+            !responses_call_id_is_missing(payload),
+            "unexpected missing call_id match for {}",
+            String::from_utf8_lossy(payload)
+        );
+    }
+}
+
+#[test]
 fn zenith_gateway_invalid_request_is_detected_without_matching_generic_bad_requests() {
     assert!(zenith_gateway_invalid_request(
         br#"{"error":{"code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,

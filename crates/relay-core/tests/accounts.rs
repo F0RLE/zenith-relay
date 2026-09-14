@@ -574,6 +574,61 @@ async fn invalid_encrypted_compaction_is_dropped_once_before_semantic_output() {
 }
 
 #[tokio::test]
+async fn compact_account_repairs_legacy_call_ids_after_strict_rejection() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error": {"message": "Missing required field: call_id"}}),
+        ),
+        Reply::Json(
+            StatusCode::OK,
+            json!({"type": "compaction", "items": [], "usage": {"input_tokens": 2}}),
+        ),
+    ])
+    .await;
+    let authority = ready_authority("relay-legacy-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account(
+            "relay-legacy-account",
+            "provider-legacy-account",
+            &upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [
+                {"type": "function_call", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "output": "result"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].body["input"][0].get("call_id").is_none());
+    assert_eq!(
+        requests[1].body["input"][0]["call_id"],
+        requests[1].body["input"][1]["call_id"]
+    );
+    drop(requests);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn image_generation_uses_cheapest_account_model_and_translates_response() {
     let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data(
@@ -3341,6 +3396,112 @@ async fn account_websocket_retries_foreign_message_item_id_after_native_rejectio
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
+}
+
+#[tokio::test]
+async fn account_websocket_repairs_legacy_call_ids_on_a_later_request() {
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(VecDeque::from(vec![
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "first"}),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "ws-first-call-id",
+                        "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+                    }
+                }),
+            ],
+            vec![json!({
+                "type": "error",
+                "status": 400,
+                "error": {"message": "Missing required field: call_id"}
+            })],
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "repaired"}),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "ws-repaired-call-id",
+                        "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}
+                    }
+                }),
+            ],
+        ]))),
+    ))
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "start"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["response"]["id"],
+        "ws-first-call-id"
+    );
+
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "previous_response_id": "ws-first-call-id",
+                "input": [
+                    {"type": "function_call", "name": "lookup", "arguments": "{}"},
+                    {"type": "function_call_output", "output": "result"}
+                ]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["response"]["id"],
+        "ws-repaired-call-id"
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1]["input"][0].get("call_id").is_none());
+    assert_eq!(
+        requests[2]["input"][0]["call_id"],
+        requests[2]["input"][1]["call_id"]
+    );
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events.iter().filter(|event| event.success).count(), 2);
+    assert!(!events[1].success);
 }
 
 #[tokio::test]

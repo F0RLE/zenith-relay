@@ -1,9 +1,10 @@
 use super::errors::{
     api_error_type, apply_failure_cooldown_with_hint, apply_failure_state,
     canonical_upstream_status, failure_category_requires_cooldown, preserved_upstream_error_value,
-    rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
-    upstream_status_from_value, zenith_gateway_invalid_request_value, AttemptFailure,
-    CooldownContext, PreservedUpstreamError, RateLimitBodyHint,
+    rate_limit_body_hint_value, responses_call_id_is_missing_value,
+    upstream_event_failure_category, upstream_failure_status, upstream_status_from_value,
+    zenith_gateway_invalid_request_value, AttemptFailure, CooldownContext, PreservedUpstreamError,
+    RateLimitBodyHint,
 };
 use super::now_ms;
 use super::request::response_tool_call_ids;
@@ -55,6 +56,7 @@ pub(super) struct StreamBootstrapFailure {
     pub(super) failure: AttemptFailure,
     pub(super) preserved: Option<PreservedUpstreamError>,
     pub(super) zenith_gateway_invalid_request: bool,
+    pub(super) responses_call_id_is_missing: bool,
 }
 
 impl From<AttemptFailure> for StreamBootstrapFailure {
@@ -63,6 +65,7 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
             failure,
             preserved: None,
             zenith_gateway_invalid_request: false,
+            responses_call_id_is_missing: false,
         }
     }
 }
@@ -119,6 +122,10 @@ pub(super) async fn bootstrap_stream(
                                 .payload
                                 .as_ref()
                                 .is_some_and(zenith_gateway_invalid_request_value),
+                            responses_call_id_is_missing: event
+                                .payload
+                                .as_ref()
+                                .is_some_and(responses_call_id_is_missing_value),
                         });
                     }
                     if event.output_item.is_some() && !event.is_compaction {

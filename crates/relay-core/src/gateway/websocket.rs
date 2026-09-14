@@ -453,6 +453,7 @@ async fn connect_upstream(
     let mut function_item_id_repair_attempted = false;
     let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
+    let mut legacy_call_id_repair_attempted = false;
     let mut model_switch_reset_attempted = false;
     let mut stale_tool_history_recovered = false;
     let mut last_failure: Option<GatewayFailure> = None;
@@ -482,7 +483,8 @@ async fn connect_upstream(
             owner_recovery_confirmed,
         ) + usize::from(encrypted_content_recovered)
             + usize::from(model_switch_reset_attempted)
-            + usize::from(stale_tool_history_recovered);
+            + usize::from(stale_tool_history_recovered)
+            + usize::from(legacy_call_id_repair_attempted);
         if attempts_this_run >= attempt_limit {
             if websocket_http_fallback_origin.is_none()
                 && wait_for_candidate_availability
@@ -807,6 +809,18 @@ async fn connect_upstream(
             .and_then(Result::ok);
             let failure =
                 GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin);
+            if !legacy_call_id_repair_attempted
+                && body
+                    .as_deref()
+                    .is_some_and(super::errors::responses_call_id_is_missing)
+                && request.repair_legacy_call_ids()
+            {
+                legacy_call_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue 'candidates;
+            }
             if websocket_transport_fallback_status(status) {
                 runtime.mark_websocket_http_only(
                     &route.candidate_id,
@@ -1032,6 +1046,16 @@ async fn connect_upstream(
                     .status
                     .filter(|status| !status.is_success())
                     .unwrap_or_else(|| super::errors::upstream_failure_status(category));
+                if !legacy_call_id_repair_attempted
+                    && terminal_body.is_some_and(super::errors::responses_call_id_is_missing)
+                    && request.repair_legacy_call_ids()
+                {
+                    legacy_call_id_repair_attempted = true;
+                    attempt = attempt.saturating_sub(1);
+                    attempts_this_run = attempts_this_run.saturating_sub(1);
+                    tried.remove(&route.candidate_id);
+                    continue 'candidates;
+                }
                 if category == "upstream_encrypted_content_invalid"
                     && !encrypted_content_recovered
                     && request.recover_invalid_encrypted_content()
@@ -1625,6 +1649,7 @@ struct InFlight {
     prompt_affinity_key: Option<String>,
     retry_deadline: Option<TokioInstant>,
     client_visible_output: bool,
+    legacy_call_id_repair_attempted: bool,
 }
 
 struct BridgeState {
@@ -1687,6 +1712,7 @@ async fn bridge(
             prompt_affinity_key,
             retry_deadline: connected.retry_deadline,
             client_visible_output: false,
+            legacy_call_id_repair_attempted: false,
         }),
         stream_id: connected.request.stream_id.clone(),
         upstream_candidate_id,
@@ -1868,6 +1894,43 @@ async fn bridge(
                     }
                     break;
                 };
+                if let Some(request) = repairable_terminal_request(&mut state, &message) {
+                    let request_id = state.request_id().map(str::to_owned);
+                    let attempt_offset = state
+                        .in_flight
+                        .as_ref()
+                        .map(|in_flight| in_flight.event.attempt)
+                        .unwrap_or_default();
+                    let retry_deadline = state
+                        .in_flight
+                        .as_ref()
+                        .and_then(|in_flight| in_flight.retry_deadline);
+                    let terminal = match &message {
+                        UpstreamMessage::Text(text) => {
+                            inspect_upstream_event(text.as_bytes(), &mut state)
+                        }
+                        UpstreamMessage::Binary(bytes) => inspect_upstream_event(bytes, &mut state),
+                        _ => EventTerminal::default(),
+                    };
+                    finish_terminal(&runtime, &mut state, terminal);
+                    if retry_upstream_connection(
+                        &mut downstream,
+                        &mut upstream,
+                        &runtime,
+                        &key,
+                        &headers,
+                        &mut state,
+                        request,
+                        attempt_offset,
+                        retry_deadline,
+                        request_id.as_deref(),
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    break;
+                }
                 if let Some(request) = retryable_terminal_request(&runtime, &state, &message) {
                     let request_id = state.request_id().map(str::to_owned);
                     let attempt_offset = state
@@ -1978,6 +2041,34 @@ fn retryable_terminal_request(
         return None;
     }
     Some(in_flight.request.clone())
+}
+
+fn repairable_terminal_request(
+    state: &mut BridgeState,
+    message: &UpstreamMessage,
+) -> Option<ClientRequest> {
+    let terminal = first_message_terminal(message)?;
+    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
+        return None;
+    }
+    let body = match message {
+        UpstreamMessage::Text(text) => Some(text.as_bytes()),
+        UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
+        _ => None,
+    }?;
+    if !super::errors::responses_call_id_is_missing(body) {
+        return None;
+    }
+    let in_flight = state.in_flight.as_mut()?;
+    if in_flight.client_visible_output || in_flight.legacy_call_id_repair_attempted {
+        return None;
+    }
+    let mut request = in_flight.request.clone();
+    if !request.repair_legacy_call_ids() {
+        return None;
+    }
+    in_flight.legacy_call_id_repair_attempted = true;
+    Some(request)
 }
 
 async fn install_connected(
@@ -2202,6 +2293,7 @@ async fn start_next_request(
                 TokioInstant::now() + Duration::from_millis(runtime.chatgpt_retry_window_ms())
             }),
             client_visible_output: false,
+            legacy_call_id_repair_attempted: false,
         });
         return Ok(true);
     }
@@ -2299,6 +2391,7 @@ fn install_in_flight(state: &mut BridgeState, key: &AuthenticatedKey, install: I
         prompt_affinity_key: request.prompt_affinity_key,
         retry_deadline,
         client_visible_output: false,
+        legacy_call_id_repair_attempted: false,
     });
 }
 
@@ -3122,5 +3215,58 @@ mod tests {
             Some(&json!("item_reasoning"))
         );
         assert!(!request.repair_message_item_ids());
+    }
+
+    #[test]
+    fn websocket_request_repairs_legacy_call_ids_and_recomputes_affinity() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let request_result = ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": [
+                    {"type":"function_call_output","output":"orphan"},
+                    {"type":"function_call","name":"lookup","arguments":"{}"},
+                    {"type":"function_call_output","output":"result"}
+                ]
+            }"#,
+        );
+        assert!(request_result.is_ok(), "request should be accepted");
+        let Ok(mut request) = request_result else {
+            return;
+        };
+
+        assert!(!request.has_unpaired_tool_output());
+        assert!(request.repair_legacy_call_ids());
+        assert!(!request.has_unpaired_tool_output());
+        assert!(!request.requires_affinity_owner);
+
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .expect("test source should be routable");
+        let payload_result = request.payload_for(&route);
+        assert!(payload_result.is_ok(), "request should serialize");
+        let Ok(payload_bytes) = payload_result else {
+            return;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
+        let input = payload["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], input[1]["call_id"]);
+        assert!(!request.repair_legacy_call_ids());
     }
 }

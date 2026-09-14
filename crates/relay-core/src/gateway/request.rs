@@ -42,6 +42,13 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub(super) const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+// Legacy replay repair is deliberately fail-closed for unusually large or
+// adversarial histories. The normal request-body limit still applies, while
+// these bounds keep matching and temporary state predictable.
+const MAX_LEGACY_RESPONSES_REPAIR_ITEMS: usize = 4_096;
+const MAX_LEGACY_RESPONSES_PENDING_CALLS: usize = 256;
+const MAX_LEGACY_RESPONSES_NAME_CHARS: usize = 256;
+
 pub(super) const MAX_CLIENT_REQUEST_BODY_ERROR: &str = "request body exceeds 64 MiB";
 
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -317,6 +324,222 @@ pub(super) fn drop_unpaired_responses_tool_calls(request: &mut Value) -> bool {
             .is_none_or(|call_id| output_ids.iter().any(|output_id| output_id == call_id))
     });
     input.len() != original_len
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyResponsesCallFamily {
+    Function,
+    Custom,
+    Tool,
+    Mcp,
+    Computer,
+}
+
+impl LegacyResponsesCallFamily {
+    fn call_type(self) -> &'static str {
+        match self {
+            Self::Function => "function_call",
+            Self::Custom => "custom_tool_call",
+            Self::Tool => "tool_call",
+            Self::Mcp => "mcp_tool_call",
+            Self::Computer => "computer_call",
+        }
+    }
+
+    fn output_type(self) -> &'static str {
+        match self {
+            Self::Function => "function_call_output",
+            Self::Custom => "custom_tool_call_output",
+            Self::Tool => "tool_call_output",
+            Self::Mcp => "mcp_tool_call_output",
+            Self::Computer => "computer_call_output",
+        }
+    }
+}
+
+fn legacy_responses_call_family(item_type: &str) -> Option<LegacyResponsesCallFamily> {
+    match item_type {
+        "function_call" | "function_call_output" => Some(LegacyResponsesCallFamily::Function),
+        "custom_tool_call" | "custom_tool_call_output" => Some(LegacyResponsesCallFamily::Custom),
+        "tool_call" | "tool_call_output" => Some(LegacyResponsesCallFamily::Tool),
+        "mcp_tool_call" | "mcp_tool_call_output" => Some(LegacyResponsesCallFamily::Mcp),
+        "computer_call" | "computer_call_output" => Some(LegacyResponsesCallFamily::Computer),
+        _ => None,
+    }
+}
+
+fn legacy_responses_call_id(item: &Value) -> Option<&str> {
+    item.get("call_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+}
+
+fn next_legacy_responses_call_id(
+    index: usize,
+    used: &mut std::collections::HashSet<String>,
+) -> String {
+    let base = format!("call_missing_{index}");
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1..=MAX_LEGACY_RESPONSES_REPAIR_ITEMS {
+        let candidate = format!("{base}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    // The item bound makes this unreachable in practice. Keep a deterministic
+    // fallback so the helper cannot spin if its limits change later.
+    format!("call_missing_{index}_overflow")
+}
+
+#[derive(Clone, Debug)]
+struct PendingLegacyResponsesCall {
+    id: String,
+    name: Option<String>,
+    family: LegacyResponsesCallFamily,
+}
+
+fn legacy_responses_output_can_stand_alone(item_type: &str, name: Option<&str>) -> bool {
+    item_type == "function_call_output" && name.is_some()
+}
+
+/// Repairs historical Responses input items after a strict upstream has
+/// explicitly rejected a missing `call_id`.
+///
+/// Calls receive a collision-free bounded synthetic ID; a following output is
+/// matched by name and then FIFO order. Existing IDs, item IDs, namespaces,
+/// and named standalone `function_call_output` items are preserved. Anonymous
+/// orphan outputs are removed because assigning them a new ID would create a
+/// different, invalid tool turn. The operation is idempotent and does not
+/// touch non-tool input items.
+pub(super) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
+    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    if input.is_empty() || input.len() > MAX_LEGACY_RESPONSES_REPAIR_ITEMS {
+        return false;
+    }
+
+    let relevant_count = input
+        .iter()
+        .filter(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .and_then(legacy_responses_call_family)
+                .is_some()
+        })
+        .count();
+    if relevant_count > MAX_LEGACY_RESPONSES_PENDING_CALLS {
+        return false;
+    }
+
+    let mut used = std::collections::HashSet::with_capacity(relevant_count);
+    for item in input.iter() {
+        if let Some(call_id) = legacy_responses_call_id(item) {
+            used.insert(call_id.to_string());
+        }
+    }
+
+    let mut pending = Vec::<PendingLegacyResponsesCall>::with_capacity(relevant_count);
+    let mut drop_indices = Vec::new();
+    let mut changed = false;
+
+    for (index, item) in input.iter_mut().enumerate() {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(item_type) = object
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(family) = legacy_responses_call_family(&item_type) else {
+            continue;
+        };
+        let is_call = item_type == family.call_type();
+        let is_output = item_type == family.output_type();
+        if !is_call && !is_output {
+            continue;
+        }
+
+        let existing_id = object
+            .get("call_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .map(str::to_string);
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty() && value.chars().count() <= MAX_LEGACY_RESPONSES_NAME_CHARS
+            })
+            .map(str::to_string);
+
+        if is_call {
+            let call_id = if let Some(call_id) = existing_id {
+                call_id
+            } else {
+                changed = true;
+                let call_id = next_legacy_responses_call_id(index, &mut used);
+                object.insert("call_id".to_string(), Value::String(call_id.clone()));
+                call_id
+            };
+            pending.push(PendingLegacyResponsesCall {
+                id: call_id,
+                name,
+                family,
+            });
+            continue;
+        }
+
+        let Some(call_id) = existing_id else {
+            let matched = name.as_deref().and_then(|name| {
+                pending.iter().position(|pending_call| {
+                    pending_call.family == family && pending_call.name.as_deref() == Some(name)
+                })
+            });
+            let matched = matched.or_else(|| {
+                pending
+                    .iter()
+                    .position(|pending_call| pending_call.family == family)
+            });
+            let matched = matched.or_else(|| {
+                pending
+                    .iter()
+                    .position(|pending_call| pending_call.name.as_deref() == name.as_deref())
+            });
+            let matched = matched.or_else(|| (!pending.is_empty()).then_some(0));
+            if let Some(position) = matched {
+                let pending_call = pending.remove(position);
+                object.insert("call_id".to_string(), Value::String(pending_call.id));
+                changed = true;
+            } else if legacy_responses_output_can_stand_alone(&item_type, name.as_deref()) {
+                continue;
+            } else {
+                drop_indices.push(index);
+                changed = true;
+            }
+            continue;
+        };
+
+        if let Some(position) = pending
+            .iter()
+            .position(|pending_call| pending_call.id == call_id)
+        {
+            pending.remove(position);
+        }
+    }
+
+    for index in drop_indices.into_iter().rev() {
+        input.remove(index);
+    }
+    changed
 }
 
 fn response_tool_output_call_id(item: &Value) -> Option<&str> {
@@ -837,6 +1060,84 @@ mod tests {
         assert!(input.iter().any(|item| item["call_id"] == "call_completed"));
 
         assert!(!drop_unpaired_responses_tool_calls(&mut request));
+    }
+
+    #[test]
+    fn legacy_responses_call_id_repair_pairs_calls_and_drops_anonymous_orphans() {
+        let mut request = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "continue"},
+                {"type": "function_call_output", "output": "orphan"},
+                {"type": "function_call", "id": "fc_existing", "name": "lookup", "namespace": "functions", "arguments": "{}"},
+                {"type": "function_call_output", "name": "lookup", "output": "lookup result"},
+                {"type": "custom_tool_call", "name": "patch", "namespace": "tools", "input": "{}"},
+                {"type": "custom_tool_call_output", "name": "patch", "output": "patch result"},
+                {"type": "function_call_output", "name": "heartbeat", "output": "keep standalone"}
+            ]
+        });
+
+        assert!(repair_legacy_responses_call_ids(&mut request));
+        let input = request["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 6);
+        assert_eq!(input[1]["type"], "function_call");
+        assert!(input[1]["call_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("call_missing_")));
+        assert_eq!(input[1]["id"], "fc_existing");
+        assert_eq!(input[1]["namespace"], "functions");
+        assert_eq!(input[2]["call_id"], input[1]["call_id"]);
+        assert!(input[3]["call_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("call_missing_")));
+        assert_eq!(input[3]["namespace"], "tools");
+        assert_eq!(input[4]["call_id"], input[3]["call_id"]);
+        assert_eq!(input[5]["name"], "heartbeat");
+        assert!(input[5].get("call_id").is_none());
+    }
+
+    #[test]
+    fn legacy_responses_call_id_repair_is_idempotent_and_preserves_valid_history() {
+        let mut request = json!({
+            "input": [
+                {"type": "function_call", "call_id": "known", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "known", "output": "ok"},
+                {"type": "custom_tool_call", "call_id": "custom", "name": "patch", "input": "{}"},
+                {"type": "custom_tool_call_output", "call_id": "custom", "output": "done"}
+            ]
+        });
+        let original = request.clone();
+
+        assert!(!repair_legacy_responses_call_ids(&mut request));
+        assert_eq!(request, original);
+
+        let mut legacy = json!({
+            "input": [
+                {"type": "function_call", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "output": "ok"}
+            ]
+        });
+        assert!(repair_legacy_responses_call_ids(&mut legacy));
+        let repaired = legacy.clone();
+        assert!(!repair_legacy_responses_call_ids(&mut legacy));
+        assert_eq!(legacy, repaired);
+    }
+
+    #[test]
+    fn legacy_responses_call_id_repair_fails_closed_at_history_bounds() {
+        let mut too_many_items =
+            json!({"input": vec![json!({"role": "user"}); MAX_LEGACY_RESPONSES_REPAIR_ITEMS + 1]});
+        let original = too_many_items.clone();
+        assert!(!repair_legacy_responses_call_ids(&mut too_many_items));
+        assert_eq!(too_many_items, original);
+
+        let mut too_many_calls = json!({
+            "input": (0..=MAX_LEGACY_RESPONSES_PENDING_CALLS)
+                .map(|index| json!({"type": "function_call", "name": format!("tool-{index}")}))
+                .collect::<Vec<_>>()
+        });
+        let original = too_many_calls.clone();
+        assert!(!repair_legacy_responses_call_ids(&mut too_many_calls));
+        assert_eq!(too_many_calls, original);
     }
 
     #[test]

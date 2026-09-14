@@ -25,6 +25,7 @@ pub(super) use failure::{
     previous_response_not_found, previous_response_not_found_value,
     previous_response_requires_websocket, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
+    responses_call_id_is_missing, responses_call_id_is_missing_value,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,

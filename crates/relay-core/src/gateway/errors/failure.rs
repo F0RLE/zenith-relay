@@ -277,6 +277,95 @@ pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8])
     )
 }
 
+/// Detects the narrow Responses validation failure caused by a historical
+/// tool item that omitted `call_id`. This deliberately does not match generic
+/// invalid-call-id or arbitrary required-field errors: the request repair is
+/// allowed only when the upstream identifies the missing field itself.
+pub(crate) fn responses_call_id_is_missing(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return responses_call_id_is_missing_text(&normalized_error_text(payload));
+    };
+    responses_call_id_is_missing_value(&value)
+}
+
+pub(crate) fn responses_call_id_is_missing_value(value: &Value) -> bool {
+    let code = [
+        "/code",
+        "/error/code",
+        "/body/error/code",
+        "/response/error/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .any(|code| {
+        matches!(
+            code.to_ascii_lowercase().as_str(),
+            "missing_call_id" | "call_id_required" | "missing_required_call_id"
+        )
+    });
+    code || responses_call_id_is_missing_text(&upstream_error_text(value))
+}
+
+fn responses_call_id_is_missing_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    if (!text.contains("call_id") && !text.contains("call id"))
+        || text.contains("invalid call_id")
+        || text.contains("invalid call id")
+    {
+        return false;
+    }
+    let normalized = text
+        .chars()
+        .map(|character| match character {
+            '`' | '\'' | '"' | ':' | '.' | '-' | '/' => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    text_has_any(
+        &normalized,
+        &[
+            "missing field call_id",
+            "missing required field call_id",
+            "missing required parameter call_id",
+            "missing parameter call_id",
+            "required field call_id",
+            "required parameter call_id",
+            "field call_id is required",
+            "parameter call_id is required",
+            "call_id is required",
+            "call_id was required",
+            "call_id is missing",
+            "call_id was missing",
+            "missing call_id",
+            "call_id missing",
+            "call_id must be provided",
+            "call_id must be present",
+            "call_id was not provided",
+            "missing field call id",
+            "missing required field call id",
+            "missing required parameter call id",
+            "missing parameter call id",
+            "required field call id",
+            "required parameter call id",
+            "field call id is required",
+            "parameter call id is required",
+            "call id is required",
+            "call id was required",
+            "call id is missing",
+            "call id was missing",
+            "missing call id",
+            "call id missing",
+            "call id must be provided",
+            "call id must be present",
+            "call id was not provided",
+        ],
+    )
+}
+
 /// Detects the specific Responses rejection produced when imported history
 /// contains a tool call without its matching output. The caller must still
 /// prove that the request contains such an incomplete call before recovery.

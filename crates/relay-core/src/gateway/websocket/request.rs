@@ -4,7 +4,8 @@ use super::{
 };
 use crate::gateway::request::{
     client_context_fingerprint, codex_background_request_kind, is_managed_codex_client,
-    response_tool_call_ids, tool_call_output_ids, ServiceTierPolicy,
+    repair_legacy_responses_call_ids, response_tool_call_ids, tool_call_output_ids,
+    ServiceTierPolicy,
 };
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
@@ -372,6 +373,20 @@ impl ClientRequest {
 
     pub(super) fn repair_message_item_ids(&mut self) -> bool {
         crate::protocol::remove_item_prefixed_message_ids(&mut self.value)
+    }
+
+    pub(super) fn repair_legacy_call_ids(&mut self) -> bool {
+        if !repair_legacy_responses_call_ids(&mut self.value) {
+            return false;
+        }
+        let output_ids = tool_call_output_ids(&self.value);
+        let call_ids = response_tool_call_ids(&self.value);
+        self.has_unpaired_tool_output = output_ids
+            .iter()
+            .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+        self.requires_affinity_owner =
+            self.has_previous_response_id() || self.has_unpaired_tool_output;
+        true
     }
 }
 

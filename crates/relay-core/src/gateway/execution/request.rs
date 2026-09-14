@@ -5,7 +5,7 @@ use super::super::errors::{
     failure_category_requires_cooldown, preserved_upstream_error, previous_response_not_found,
     previous_response_requires_websocket, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_call_id_is_missing, responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
@@ -19,7 +19,8 @@ use super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
     drop_unpaired_responses_tool_calls, forwarded_bridge_gemini_headers,
     forwarded_bridge_messages_headers, normalize_account_request, normalize_responses_lite_request,
-    response_tool_call_ids, responses_lite_parallel_tool_calls_valid, tool_use_diagnostics,
+    repair_legacy_responses_call_ids, response_tool_call_ids,
+    responses_lite_parallel_tool_calls_valid, tool_call_output_ids, tool_use_diagnostics,
     try_recover_encrypted_content, with_forwarded_tool_diagnostics, ServiceTierPolicy,
     CODEX_RESPONSES_LITE_HEADER,
 };
@@ -121,6 +122,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     let mut function_item_id_repair_attempted = false;
     let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
+    let mut legacy_call_id_repair_attempted = false;
     let mut model_switch_reset_attempted = false;
     let mut stale_tool_history_recovered = false;
     let mut last_failure: Option<AttemptFailure> = None;
@@ -139,8 +141,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     // contract.
     let automatic_responses_lite = wire_api == WireApi::Responses
         && runtime.codex_model_responses_routes_all_support_lite(&key, &resolved_model);
-    let has_unpaired_tool_output = {
-        let outputs = super::super::request::tool_call_output_ids(&request);
+    let mut has_unpaired_tool_output = {
+        let outputs = tool_call_output_ids(&request);
         let calls = response_tool_call_ids(&request);
         outputs
             .iter()
@@ -182,7 +184,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 + usize::from(encrypted_content_recovered)
                 + usize::from(native_replay_attempted)
                 + usize::from(model_switch_reset_attempted)
-                + usize::from(stale_tool_history_recovered);
+                + usize::from(stale_tool_history_recovered)
+                + usize::from(legacy_call_id_repair_attempted);
         if attempts_this_run >= attempt_limit {
             if should_wait_for_candidate_availability(
                 wait_for_candidate_availability,
@@ -649,6 +652,26 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 }
                 Err(error) => return upstream_body_error_response(&runtime, event, started, error),
             };
+            if wire_api == WireApi::Responses
+                && adapter_is_passthrough
+                && !legacy_call_id_repair_attempted
+                && status.is_client_error()
+                && responses_call_id_is_missing(&bytes)
+                && repair_legacy_responses_call_ids(&mut request)
+            {
+                legacy_call_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                let output_ids = tool_call_output_ids(&request);
+                let call_ids = response_tool_call_ids(&request);
+                has_unpaired_tool_output = output_ids
+                    .iter()
+                    .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+                requires_affinity_owner = request_has_previous_response_id(wire_api, &request)
+                    || has_unpaired_tool_output;
+                continue;
+            }
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
                 && !function_item_id_repair_attempted
@@ -1174,6 +1197,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     bootstrap_failure.preserved.as_ref().is_some_and(|error| {
                         responses_tool_call_is_missing_output_message(&error.message)
                     });
+                let missing_call_id = bootstrap_failure.responses_call_id_is_missing;
                 let failure = bootstrap_failure.failure;
                 last_preserved_upstream_error = bootstrap_failure.preserved;
                 let mut event = usage_event(
@@ -1189,6 +1213,25 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     started.elapsed().as_millis() as u64,
                     tool_use.clone(),
                 );
+                if wire_api == WireApi::Responses
+                    && adapter_is_passthrough
+                    && !legacy_call_id_repair_attempted
+                    && missing_call_id
+                    && repair_legacy_responses_call_ids(&mut request)
+                {
+                    legacy_call_id_repair_attempted = true;
+                    attempt = attempt.saturating_sub(1);
+                    attempts_this_run = attempts_this_run.saturating_sub(1);
+                    tried.remove(&route.candidate_id);
+                    let output_ids = tool_call_output_ids(&request);
+                    let call_ids = response_tool_call_ids(&request);
+                    has_unpaired_tool_output = output_ids
+                        .iter()
+                        .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+                    requires_affinity_owner = request_has_previous_response_id(wire_api, &request)
+                        || has_unpaired_tool_output;
+                    continue;
+                }
                 if wire_api == WireApi::Responses
                     && adapter_is_passthrough
                     && has_previous_response_id
