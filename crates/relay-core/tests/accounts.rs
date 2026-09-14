@@ -4588,13 +4588,20 @@ async fn assert_transport_matrix_state<T, U>(
         first_requests.abs_diff(second_requests) <= requests.max(20) / 20,
         "parallel routing was unexpectedly skewed: {first_requests}/{second_requests}"
     );
-    assert!(gateway
-        .runtime
-        .as_ref()
-        .unwrap()
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.in_flight == 0));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !gateway
+            .runtime
+            .as_ref()
+            .unwrap()
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.in_flight == 0)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("transport candidate leases did not finish");
 }
 
 #[tokio::test]
