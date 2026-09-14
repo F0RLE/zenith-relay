@@ -6,6 +6,59 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- Account cards in Pool and Connections now share one subscription-date
+  display and reauthentication action. Missing subscription dates are hidden,
+  and provider credits have even vertical spacing on both pages. Long
+  API-equivalent source values are rounded to remain readable in compact cards.
+- Pool credit balances now use only the provider's explicit credit ledger.
+  Static spending-control limits can no longer be labelled or summed as
+  available credits.
+- Native Responses continuations now retain their complete bounded local
+  replay chain. If the owning account has a pre-output transport failure,
+  Relay can rebuild that chain for another eligible account instead of
+  forwarding an opaque response reference it does not own.
+- Responses WebSocket continuations now use the same bounded replay handoff
+  when the owner becomes quota-limited, so the next eligible candidate can be
+  either an OAuth account or an API source.
+- Switching a Codex chat to a model served by a different pool member no
+  longer leaves the request pinned to an incompatible old response owner.
+  Temporary quota, cooldown, and health conditions still preserve ownership.
+- Removing a provider from the active pool now releases its response affinity
+  for existing chats, so the same model can continue through another provider.
+  Complete tool-call histories can also move between API providers over HTTP
+  or WebSocket without stale tool affinity blocking the replacement route.
+- Standalone account compaction now uses its non-streaming request contract
+  instead of receiving regular Responses `store` and `stream` defaults; newer
+  compaction fields remain pass-through.
+- Responses WebSocket lifecycle events such as `response.created` no longer
+  disable safe pre-output recovery, while unknown or malformed frames remain
+  conservative.
+- Responses Lite requests now normalize `parallel_tool_calls` before route
+  selection and keep the same serial-tool contract across OAuth and API source
+  routes.
+- ChatGPT now uses a bare native model identity only when its owning account
+  supplied a compatible native catalog card. Other pool routes stay explicitly
+  Relay-routed and cannot inherit account-only capabilities or speed controls.
+- Model Rules now lists only models with a current usable pool route. Models
+  backed only by unavailable, quota-waiting, or cooling routes remain in
+  Connections diagnostics instead of appearing as editable pool rules.
+- Model Rules keeps the compact reasoning-then-speed controls and shows the
+  Fast toggle only when an active route explicitly reports that upstream tier.
+  Official catalog reasoning modes are retained when a generic route reports
+  an empty mode list; native ChatGPT modes remain available when
+  another route reports no modes for the same model.
+- Manual and automatic account refresh now apply provider-reported credits and
+  quota windows to the live pool together, including while Relay is running
+  only in the tray. The same Refresh action is available in Pool and
+  Connections when the active runtime supports it.
+- OAuth account-connected pages now use a compact close-window message and
+  follow the browser's English or Russian language preference.
+- Account import previews now offer a single select-all control. Existing and
+  invalid records stay unselected by default but can be explicitly selected
+  for the import flow.
+
 ## [1.1.3] - 2026-09-10
 
 <!-- relay-notes:en -->
@@ -285,11 +338,12 @@ integration, recovery, and the local-first desktop workflow.
 
 ### Desktop UI
 
-- Account cards now show an **AI credits** row beside provider quota details
-  when the connected provider explicitly reports a credit ledger. A fresh
-  positive or unlimited ledger keeps an otherwise exhausted account in the
-  pool; missing credit data stays hidden and does not affect billing or
-  Relay's API-equivalent calculation.
+- Account cards show a **Credits** row and the pool shows **Total credits**
+  when the connected provider explicitly reports a positive or unlimited
+  ledger. Values use at most one decimal place; zero or missing ledgers stay
+  hidden and do not affect billing or Relay's API-equivalent calculation. When
+  quota headroom is otherwise tied, the pool prefers the larger fresh ledger
+  before continuing its normal fair rotation.
 - The Overview application launcher now only starts an already connected
   application; the connect-time launch preference is shown only during setup.
 - ChatGPT recovery provides named, protected snapshots of `config.toml` and

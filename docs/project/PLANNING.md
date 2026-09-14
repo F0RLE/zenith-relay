@@ -97,7 +97,13 @@ Execution checks membership, enablement/draining, credentials/proxy, model,
 protocol/adapter support, health/cooldown, quota, and capacity. Response IDs and
 active connections preserve upstream ownership. Soft prompt/session affinity
 cannot force an unhealthy member. Retry and credential refresh are bounded;
-no transparent fallback occurs after response bytes reach the client.
+no transparent fallback occurs after response bytes reach the client. Native
+Responses continuations keep a bounded local materialized replay chain. Before
+any response bytes are visible, Relay can use that chain to move a
+continuation from a temporarily unavailable owner to another compatible
+candidate; the replacement receives the full input without the old opaque
+response reference. When no local replay exists, opaque ownership remains
+mandatory and the request waits or fails safely.
 
 Failures preserve `relay`, `account`, or `provider` origin plus safe category,
 status, and timings across protocols, storage, UI, and exports. Raw payloads
