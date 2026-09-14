@@ -19,7 +19,7 @@ use crate::local_pool::commands::{
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
 use crate::local_pool::profiles::codex;
-use crate::local_pool::state::DesktopState;
+use crate::local_pool::state::{DesktopState, QuotaRefreshReservation};
 use reqwest::header::HeaderValue;
 use reqwest::redirect::Policy;
 use serde::Serialize;
@@ -1277,6 +1277,27 @@ pub(super) async fn prepare_account_credentials_with_remote_policy(
 }
 
 pub(crate) async fn refresh_account_quota_once(
+    state: &DesktopState,
+    account_id: &str,
+    force_subscription_refresh: bool,
+    refresh_models: bool,
+) -> LocalResult<AccountQuotaRefreshResponse> {
+    match state.reserve_quota_refresh(account_id)? {
+        QuotaRefreshReservation::Leader(leader) => {
+            let result = refresh_account_quota_as_leader(
+                state,
+                account_id,
+                force_subscription_refresh,
+                refresh_models,
+            )
+            .await;
+            leader.finish(result)
+        }
+        QuotaRefreshReservation::Follower(follower) => follower.wait().await,
+    }
+}
+
+async fn refresh_account_quota_as_leader(
     state: &DesktopState,
     account_id: &str,
     force_subscription_refresh: bool,

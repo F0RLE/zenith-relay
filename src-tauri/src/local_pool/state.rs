@@ -13,7 +13,8 @@ use snapshot::{account_secret_available, SecretLookup};
 
 use super::{
     accounts::{
-        import_session::ImportSessionStore, oauth_flow::OAuthFlowManager, NativeSecretBackend,
+        import_session::ImportSessionStore, oauth_flow::OAuthFlowManager,
+        quota_refresh::AccountQuotaRefreshResponse, NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
     host::GatewayManager,
@@ -45,6 +46,108 @@ const MAX_QUOTA_REFRESH_ENTRIES: usize = crate::local_pool::models::MAX_LOCAL_AC
 const DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT: &str =
     "https://chatgpt.com/backend-api/wham/accounts/check";
 
+pub(crate) type QuotaRefreshResult = Result<AccountQuotaRefreshResponse>;
+
+pub(crate) struct SharedQuotaRefresh {
+    result: Mutex<Option<QuotaRefreshResult>>,
+    completed: Notify,
+}
+
+impl SharedQuotaRefresh {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            completed: Notify::new(),
+        }
+    }
+
+    fn result(&self) -> Option<QuotaRefreshResult> {
+        self.result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn complete(&self, result: QuotaRefreshResult) {
+        let mut stored = self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if stored.is_none() {
+            *stored = Some(result);
+        }
+        drop(stored);
+        self.completed.notify_waiters();
+    }
+
+    async fn wait(&self) -> QuotaRefreshResult {
+        loop {
+            let notified = self.completed.notified();
+            if let Some(result) = self.result() {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub(crate) enum QuotaRefreshReservation {
+    Leader(QuotaRefreshLeader),
+    Follower(QuotaRefreshFollower),
+}
+
+pub(crate) struct QuotaRefreshLeader {
+    account_id: String,
+    flights: Arc<Mutex<HashMap<String, Arc<SharedQuotaRefresh>>>>,
+    shared: Arc<SharedQuotaRefresh>,
+    finished: bool,
+}
+
+impl QuotaRefreshLeader {
+    pub(crate) fn finish(mut self, result: QuotaRefreshResult) -> QuotaRefreshResult {
+        self.shared.complete(result.clone());
+        self.remove_from_coordinator();
+        self.finished = true;
+        result
+    }
+
+    fn remove_from_coordinator(&self) {
+        let mut flights = self
+            .flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if flights
+            .get(&self.account_id)
+            .is_some_and(|shared| Arc::ptr_eq(shared, &self.shared))
+        {
+            flights.remove(&self.account_id);
+        }
+    }
+}
+
+impl Drop for QuotaRefreshLeader {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.shared.complete(Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "quota refresh operation was interrupted",
+        )));
+        self.remove_from_coordinator();
+    }
+}
+
+pub(crate) struct QuotaRefreshFollower {
+    shared: Arc<SharedQuotaRefresh>,
+}
+
+impl QuotaRefreshFollower {
+    pub(crate) async fn wait(self) -> QuotaRefreshResult {
+        self.shared.wait().await
+    }
+}
+
 pub struct DesktopState {
     pub(crate) root: PathBuf,
     pub(crate) gateway: GatewayManager,
@@ -64,6 +167,7 @@ pub struct DesktopState {
     catalog_refresh_error: Arc<Mutex<Option<String>>>,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    quota_refresh_flights: Arc<Mutex<HashMap<String, Arc<SharedQuotaRefresh>>>>,
     subscription_refresh_lock: AsyncMutex<()>,
     setup_lock: tokio::sync::Mutex<()>,
     account_check_url: Url,
@@ -145,6 +249,7 @@ impl DesktopState {
             catalog_refresh_error,
             background_session_active,
             quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
+            quota_refresh_flights: Arc::new(Mutex::new(HashMap::new())),
             subscription_refresh_lock: AsyncMutex::new(()),
             setup_lock: tokio::sync::Mutex::new(()),
             account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT)
@@ -230,6 +335,30 @@ impl DesktopState {
             .clone())
     }
 
+    pub(crate) fn reserve_quota_refresh(
+        &self,
+        account_id: &str,
+    ) -> Result<QuotaRefreshReservation> {
+        let mut flights = self
+            .quota_refresh_flights
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota refresh lock poisoned"))?;
+        if let Some(shared) = flights.get(account_id) {
+            return Ok(QuotaRefreshReservation::Follower(QuotaRefreshFollower {
+                shared: shared.clone(),
+            }));
+        }
+
+        let shared = Arc::new(SharedQuotaRefresh::new());
+        flights.insert(account_id.to_string(), shared.clone());
+        Ok(QuotaRefreshReservation::Leader(QuotaRefreshLeader {
+            account_id: account_id.to_string(),
+            flights: self.quota_refresh_flights.clone(),
+            shared,
+            finished: false,
+        }))
+    }
+
     pub(crate) fn weekly_reset_was_applied(
         &self,
         account_id: &str,
@@ -257,12 +386,17 @@ impl DesktopState {
     }
 
     pub(crate) fn remove_quota_account_lock(&self, account_id: &str) -> Result<bool> {
-        Ok(self
+        let removed = self
             .quota_account_locks
             .lock()
             .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota account lock poisoned"))?
             .remove(account_id)
-            .is_some())
+            .is_some();
+        self.quota_refresh_flights
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota refresh lock poisoned"))?
+            .remove(account_id);
+        Ok(removed)
     }
 
     pub(crate) async fn subscription_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -314,6 +448,7 @@ mod tests {
     };
     use crate::local_pool::usage_writer::apply_account_usage_state;
     use std::collections::{BTreeSet, HashMap};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use zenith_relay_core::{
         accounts::{
             AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
@@ -336,6 +471,91 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &other));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_quota_refreshes_share_one_result() {
+        let root = temp_root("quota-single-flight");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let leader = match state.reserve_quota_refresh("account-1").unwrap() {
+            QuotaRefreshReservation::Leader(leader) => leader,
+            QuotaRefreshReservation::Follower(_) => panic!("first refresh must lead"),
+        };
+        let upstream_calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let leader_calls = upstream_calls.clone();
+        let leader_started = started.clone();
+        let leader_release = release.clone();
+        let operation = tokio::spawn(async move {
+            leader_calls.fetch_add(1, Ordering::SeqCst);
+            leader_started.notify_one();
+            leader_release.notified().await;
+            leader.finish(Err(LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "synthetic quota failure",
+            )))
+        });
+        started.notified().await;
+        let follower = match state.reserve_quota_refresh("account-1").unwrap() {
+            QuotaRefreshReservation::Follower(follower) => follower,
+            QuotaRefreshReservation::Leader(_) => panic!("second refresh must join"),
+        };
+        let waiter = tokio::spawn(async move { follower.wait().await });
+        assert_eq!(upstream_calls.load(Ordering::SeqCst), 1);
+        release.notify_one();
+        let expected = operation.await.unwrap();
+        let joined = waiter.await.unwrap();
+        assert_eq!(
+            joined.as_ref().unwrap_err().code,
+            ErrorCode::GatewayUnavailable
+        );
+        assert_eq!(joined.unwrap_err().message, "synthetic quota failure");
+
+        let next = match state.reserve_quota_refresh("account-1").unwrap() {
+            QuotaRefreshReservation::Leader(next) => next,
+            QuotaRefreshReservation::Follower(_) => panic!("completed refresh must be removed"),
+        };
+        let _ = next.finish(expected);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_quota_refresh_unblocks_followers_and_releases_key() {
+        let root = temp_root("quota-single-flight-interrupted");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let leader = match state.reserve_quota_refresh("account-1").unwrap() {
+            QuotaRefreshReservation::Leader(leader) => leader,
+            QuotaRefreshReservation::Follower(_) => panic!("first refresh must lead"),
+        };
+        let follower = match state.reserve_quota_refresh("account-1").unwrap() {
+            QuotaRefreshReservation::Follower(follower) => follower,
+            QuotaRefreshReservation::Leader(_) => panic!("second refresh must join"),
+        };
+        let waiter = tokio::spawn(async move { follower.wait().await });
+        drop(leader);
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(joined.as_ref().unwrap_err().code, ErrorCode::InvalidState);
+        assert_eq!(
+            joined.unwrap_err().message,
+            "quota refresh operation was interrupted"
+        );
+
+        let retry = match state.reserve_quota_refresh("account-1").unwrap() {
+            QuotaRefreshReservation::Leader(retry) => retry,
+            QuotaRefreshReservation::Follower(_) => panic!("interrupted refresh must be removed"),
+        };
+        let _ = retry.finish(Err(LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            "synthetic retry failure",
+        )));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
