@@ -66,6 +66,11 @@ pub(in crate::gateway) struct TerminalEvent {
     pub(in crate::gateway) has_data: bool,
     pub(in crate::gateway) valid: bool,
     pub(in crate::gateway) has_output_delta: bool,
+    /// True only when this frame carries generated response content.  Context
+    /// compaction is intentionally excluded: it is opaque continuation state,
+    /// not a user-visible model output.
+    pub(in crate::gateway) semantic_output: bool,
+    pub(in crate::gateway) is_compaction: bool,
     pub(in crate::gateway) outcome: Option<TerminalOutcome>,
     pub(in crate::gateway) error_status: Option<StatusCode>,
     pub(in crate::gateway) error_category: Option<&'static str>,
@@ -77,6 +82,12 @@ pub(in crate::gateway) struct TerminalEvent {
     pub(in crate::gateway) response: Option<Value>,
     pub(in crate::gateway) output_item: Option<Value>,
     pub(in crate::gateway) payload: Option<Value>,
+    /// The SSE data payload for an opaque Responses compaction event.
+    ///
+    /// Compaction data is provider-owned and may be encrypted or otherwise
+    /// intentionally undecodable. Keep an owned copy so an HTTP-to-WebSocket
+    /// bridge can forward it without parsing, normalizing, or dropping it.
+    pub(in crate::gateway) raw_data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -111,6 +122,8 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             has_data: true,
             valid: true,
             has_output_delta: false,
+            semantic_output: false,
+            is_compaction: false,
             outcome: Some(TerminalOutcome::Success),
             error_status: None,
             error_category: None,
@@ -122,6 +135,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             response: None,
             output_item: None,
             payload: None,
+            raw_data: None,
         };
     }
     let Ok(value) = serde_json::from_slice::<Value>(&data) else {
@@ -134,6 +148,8 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             return TerminalEvent {
                 has_data: true,
                 valid: true,
+                is_compaction: true,
+                raw_data: Some(data),
                 ..TerminalEvent::default()
             };
         }
@@ -143,6 +159,8 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         };
     };
     let event_type = value.get("type").and_then(Value::as_str);
+    let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
+        || is_compaction_payload(&value, event_type);
     let outcome = match event_type {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
@@ -163,6 +181,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     let cooldown_hint = rate_limit_body_hint_value(&value, SystemTime::now());
     let preserved_error = preserved_stream_error(&value);
     let has_output_delta = has_output_delta(&value, event_type);
+    let semantic_output = has_semantic_output(&value, event_type);
     let usage = find_usage(&value).cloned();
     let applied_service_tier = response_service_tier(&value);
     let response_id = response_id(&value).map(str::to_string);
@@ -175,6 +194,8 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         has_data: true,
         valid: true,
         has_output_delta,
+        semantic_output,
+        is_compaction,
         outcome,
         error_status,
         error_category,
@@ -186,7 +207,54 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         response,
         output_item,
         payload: Some(value),
+        // Preserve the exact provider payload for all compaction forms. The
+        // output-item envelope is still useful to SSE clients, but an HTTP to
+        // WebSocket bridge must not reserialize the opaque encrypted item.
+        raw_data: is_compaction.then_some(data),
     }
+}
+
+/// Whether a decoded Responses event contains a compaction item. The item is
+/// opaque state that must be forwarded unchanged and does not commit a route
+/// before ordinary generation begins.
+pub(in crate::gateway) fn is_compaction_payload(value: &Value, event_type: Option<&str>) -> bool {
+    matches!(event_type, Some("compaction" | "compaction_summary"))
+        || event_type.is_some_and(is_opaque_compaction_event)
+        || matches!(
+            event_type,
+            Some("response.output_item.added" | "response.output_item.done")
+        ) && value
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(is_compaction_item_type)
+}
+
+/// Classifies protocol output without guessing about future event names.
+/// Callers that have already forwarded a frame should treat an unknown event
+/// conservatively; this function is deliberately limited to confirmed output.
+pub(in crate::gateway) fn has_semantic_output(value: &Value, event_type: Option<&str>) -> bool {
+    !is_compaction_payload(value, event_type)
+        && (has_output_delta(value, event_type) || event_type == Some("response.output_item.done"))
+}
+
+/// Known lifecycle and compaction frames are safe to buffer while selecting a
+/// route. Anything else is left to the caller's conservative fallback.
+pub(in crate::gateway) fn is_known_non_output_event(
+    value: &Value,
+    event_type: Option<&str>,
+) -> bool {
+    is_compaction_payload(value, event_type)
+        || matches!(
+            event_type,
+            Some(
+                "response.created"
+                    | "response.in_progress"
+                    | "response.queued"
+                    | "codex.rate_limits"
+                    | "codex.response.metadata"
+            )
+        )
 }
 
 pub(in crate::gateway) fn has_output_delta(value: &Value, event_type: Option<&str>) -> bool {
@@ -314,6 +382,10 @@ fn is_opaque_compaction_event(event_name: &str) -> bool {
     event_name.starts_with("response.compaction.")
 }
 
+fn is_compaction_item_type(item_type: &str) -> bool {
+    matches!(item_type, "compaction" | "compaction_summary")
+}
+
 fn gemini_candidate_has_output_delta(candidate: &Value) -> bool {
     candidate
         .pointer("/content/parts")
@@ -334,6 +406,7 @@ mod tests {
 
     #[test]
     fn raw_responses_compaction_delta_is_forwarded_without_stream_invalid() {
+        let raw = b"encrypted-compaction-fragment";
         let event = parse_sse_event(
             b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
         );
@@ -341,6 +414,53 @@ mod tests {
         assert!(event.has_data);
         assert!(event.valid);
         assert_eq!(event.outcome, None);
+        assert_eq!(event.raw_data.as_deref(), Some(raw.as_slice()));
+    }
+
+    #[test]
+    fn json_responses_compaction_data_keeps_the_original_bytes() {
+        let event = parse_sse_event(
+            b"event: response.compaction.delta\ndata: { \"type\": \"response.compaction.delta\", \"opaque\": true }\n\n",
+        );
+
+        assert!(event.valid);
+        assert_eq!(
+            event.raw_data.as_deref(),
+            Some(b"{ \"type\": \"response.compaction.delta\", \"opaque\": true }".as_slice())
+        );
+        assert_eq!(
+            event.payload.as_ref().and_then(|value| value.get("opaque")),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn compaction_output_items_are_opaque_non_output_events() {
+        for item_type in ["compaction", "compaction_summary"] {
+            let event = parse_sse_event(
+                format!(
+                    "event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"{item_type}\",\"encrypted_content\":\"opaque\"}}}}\n\n"
+                )
+                .as_bytes(),
+            );
+
+            assert!(event.valid);
+            assert!(event.is_compaction);
+            assert!(!event.semantic_output);
+            assert!(event.output_item.is_some());
+            assert!(event.raw_data.is_some());
+        }
+    }
+
+    #[test]
+    fn completed_non_compaction_output_item_commits_generation() {
+        let event = parse_sse_event(
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[]}}\n\n",
+        );
+
+        assert!(event.valid);
+        assert!(!event.is_compaction);
+        assert!(event.semantic_output);
     }
 
     #[test]

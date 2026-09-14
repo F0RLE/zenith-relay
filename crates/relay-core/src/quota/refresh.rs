@@ -53,7 +53,7 @@ pub struct QuotaRefreshData {
     pub limit_reached: bool,
     pub subscription: Option<SubscriptionInput>,
     pub reset_credits_available: Option<u32>,
-    /// Provider-reported AI credits, expressed in millionths of one credit.
+    /// Provider-reported credits, expressed in millionths of one credit.
     /// A fresh positive balance keeps an otherwise exhausted account eligible.
     pub available_credits_micro_units: Option<u64>,
     #[serde(default)]

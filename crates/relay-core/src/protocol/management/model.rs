@@ -131,8 +131,7 @@ pub struct ModelSummary {
     /// must not treat this as an advertised upstream capability.
     #[serde(default)]
     pub reasoning_manual_fallback: bool,
-    /// Compatibility flag for older management clients. Fast maps to an
-    /// OpenAI service tier and is unavailable for other model families.
+    /// Set only when a current pool route has confirmed an upstream Fast tier.
     #[serde(default)]
     pub speed_supported: bool,
     #[serde(default)]
@@ -141,8 +140,13 @@ pub struct ModelSummary {
     pub speed_configurable: bool,
 }
 
-pub fn apply_model_speed_summary(model: &mut ModelSummary, effective_tier: DefaultServiceTier) {
-    let supported = crate::model_supports_fast_service_tier(&model.id);
+pub fn apply_model_speed_summary(
+    model: &mut ModelSummary,
+    effective_tier: DefaultServiceTier,
+    runtime: Option<&GatewayRuntime>,
+) {
+    let supported =
+        runtime.is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model.id));
     model.speed_supported = supported;
     model.speed_configurable = supported;
     model.speed_tier = if supported {
@@ -186,11 +190,22 @@ pub fn apply_pool_model_configuration(
         let has_api_source_route = model_has_api_source_route(sources, &model_id);
         let has_pool_route =
             has_api_source_route || super::model_has_native_account_route(accounts, &model_id);
+        // A provider can return an explicit empty reasoning list when its
+        // generic `/models` endpoint has no capability metadata. Treat that
+        // as an absent declaration for the management projection so the
+        // official catalog can still describe a known model. A non-empty
+        // provider declaration remains authoritative and is not widened by
+        // the catalog fallback.
+        let reported_reasoning_levels = runtime
+            .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id))
+            .filter(|levels| !levels.is_empty())
+            .or_else(|| {
+                (!model.catalog_reasoning_effort_levels.is_empty())
+                    .then(|| model.catalog_reasoning_effort_levels.clone())
+            });
         apply_model_reasoning_summary(
             model,
-            runtime
-                .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id))
-                .or_else(|| Some(model.catalog_reasoning_effort_levels.clone())),
+            reported_reasoning_levels,
             crate::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
             has_pool_route,
         );
@@ -201,6 +216,7 @@ pub fn apply_pool_model_configuration(
                 .copied()
                 .or_else(|| runtime.map(GatewayRuntime::default_service_tier))
                 .unwrap_or(DefaultServiceTier::Standard),
+            runtime,
         );
     }
 }

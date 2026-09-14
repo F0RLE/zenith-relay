@@ -3,7 +3,9 @@ mod snapshot;
 
 use super::activity::{InFlightLane, SchedulerActivity};
 use super::affinity::AffinityCache;
-use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
+use super::candidate::{
+    CandidateHealth, CandidateKind, CandidateQuotaState, CandidateScope, RuntimeCandidate,
+};
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 use super::cooldown::{has_expired_cooldown, CooldownReason};
 use crate::WireApi;
@@ -199,6 +201,12 @@ impl PoolScheduler {
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         let candidate_id = candidate.id.clone();
+        // A newly reintroduced id must not inherit an opaque response owner
+        // from a previously deleted credential or source. Existing candidates
+        // are updated in place and keep their conversation affinity.
+        if !self.candidates.contains_key(&candidate_id) {
+            self.response_affinity.invalidate_candidate(&candidate_id);
+        }
         self.retired_candidates.remove(&candidate_id);
         self.cooldown_reasons.retain(|(id, model), _| {
             id != &candidate_id || candidate.cooldowns.contains_key(model)
@@ -212,7 +220,10 @@ impl PoolScheduler {
             // Do not tear down activity or executor ownership underneath an
             // in-flight request. The candidate is immediately ineligible for
             // new work and is finalized once its last lease is released.
-            self.response_affinity.invalidate_candidate(candidate_id);
+            // Keep response affinity until the request layer can consume a
+            // bounded native replay for a continuation arriving after this
+            // candidate is removed. The retired candidate remains ineligible
+            // for new routing.
             self.prompt_affinity.invalidate_candidate(candidate_id);
             if let Some(candidate) = self.candidates.get_mut(candidate_id) {
                 candidate.enabled = false;
@@ -226,7 +237,8 @@ impl PoolScheduler {
 
     fn remove_now(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
         self.retired_candidates.remove(candidate_id);
-        self.response_affinity.invalidate_candidate(candidate_id);
+        // Retain the short-lived response owner so a pending continuation can
+        // load its bounded native replay and hand off to another candidate.
         self.prompt_affinity.invalidate_candidate(candidate_id);
         self.activity.remove_candidate(candidate_id);
         self.half_open
@@ -391,22 +403,59 @@ impl PoolScheduler {
         true
     }
 
+    /// Updates the operational and quota state from one fresh account snapshot
+    /// while holding the scheduler lock. Keeping these fields together avoids
+    /// dispatching with a newly refreshed quota and stale provider credits.
+    pub fn update_candidate_availability_with_quota_at(
+        &mut self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota_state: CandidateQuotaState,
+    ) -> bool {
+        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        let quota_state_changed = candidate.quota != quota_state.quota
+            || candidate.quota_updated_at_ms != quota_state.updated_at_ms
+            || candidate.quota_reset_at_ms != quota_state.reset_at_ms
+            || candidate.provider_credits_micro_units != quota_state.provider_credits_micro_units
+            || candidate.provider_credits_unlimited != quota_state.provider_credits_unlimited;
+        candidate.enabled = enabled;
+        candidate.health = health;
+        candidate.quota = quota_state.quota;
+        candidate.quota_updated_at_ms = quota_state.updated_at_ms;
+        candidate.quota_reset_at_ms = quota_state.reset_at_ms;
+        candidate.provider_credits_micro_units = quota_state.provider_credits_micro_units;
+        candidate.provider_credits_unlimited = quota_state.provider_credits_unlimited;
+        if quota_state_changed {
+            self.activity.clear_dispatches();
+        }
+        true
+    }
+
     pub fn update_candidate_quota_at(
         &mut self,
         candidate_id: &str,
         quota: CandidateQuota,
         quota_updated_at_ms: Option<u64>,
         quota_reset_at_ms: Option<u64>,
+        provider_credits_micro_units: Option<u64>,
+        provider_credits_unlimited: bool,
     ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
         let changed = candidate.quota != quota
             || candidate.quota_updated_at_ms != quota_updated_at_ms
-            || candidate.quota_reset_at_ms != quota_reset_at_ms;
+            || candidate.quota_reset_at_ms != quota_reset_at_ms
+            || candidate.provider_credits_micro_units != provider_credits_micro_units
+            || candidate.provider_credits_unlimited != provider_credits_unlimited;
         candidate.quota = quota;
         candidate.quota_updated_at_ms = quota_updated_at_ms;
         candidate.quota_reset_at_ms = quota_reset_at_ms;
+        candidate.provider_credits_micro_units = provider_credits_micro_units;
+        candidate.provider_credits_unlimited = provider_credits_unlimited;
         if changed {
             self.activity.clear_dispatches();
         }
@@ -894,6 +943,54 @@ impl PoolScheduler {
 
     pub fn has_response_affinity(&mut self, key: &str, now_ms: u64) -> bool {
         self.response_affinity.contains(key, now_ms)
+    }
+
+    pub(crate) fn response_affinity_candidate(&mut self, key: &str, now_ms: u64) -> Option<String> {
+        self.response_affinity.get(key, now_ms).map(str::to_string)
+    }
+
+    /// Returns whether the current affinity owner can structurally serve this
+    /// route. Health, quota, capacity, and cooldown state are intentionally
+    /// excluded: they are temporary and must not discard an opaque response
+    /// continuation.
+    pub(crate) fn response_affinity_owner_supports_route(
+        &mut self,
+        key: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request_scope: &CandidateScope,
+        now_ms: u64,
+    ) -> Option<bool> {
+        let candidate_id = self.response_affinity.get(key, now_ms)?;
+        self.candidates.get(candidate_id).map(|candidate| {
+            // Pool membership and per-candidate policy are structural route
+            // constraints. If the affinity owner left the key scope, the
+            // opaque continuation cannot be sent there and the caller may
+            // safely reset it before selecting another provider. Temporary
+            // health, quota, capacity, and cooldown state remain excluded so
+            // those conditions continue to wait for the original owner.
+            candidate.is_configured(model, allowed_protocols, request_scope)
+        })
+    }
+
+    /// Returns whether the affinity owner still matches the model and wire
+    /// contract, without considering the caller's mutable pool scope. This
+    /// distinction lets the request layer reset a model switch immediately,
+    /// while giving an owner that merely left the pool a chance to replay its
+    /// bounded local continuation first.
+    pub(crate) fn response_affinity_owner_supports_model(
+        &mut self,
+        key: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        let candidate_id = self.response_affinity.get(key, now_ms)?;
+        self.candidates.get(candidate_id).map(|candidate| {
+            candidate.supports_model(model)
+                && candidate.model_rules.allows(model)
+                && allowed_protocols.contains(&candidate.protocol)
+        })
     }
 
     pub fn has_prompt_affinity(&mut self, key: &str, now_ms: u64) -> bool {

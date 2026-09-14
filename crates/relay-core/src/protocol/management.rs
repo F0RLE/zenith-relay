@@ -1809,7 +1809,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_snapshot_configuration_uses_one_shared_policy() {
+    fn pool_snapshot_configuration_hides_speed_without_runtime_evidence() {
         let source = SourceSummary {
             id: "source_1".into(),
             name: "Synthetic".into(),
@@ -1869,13 +1869,14 @@ mod tests {
         assert_eq!(model.cache_write_1h_micro_usd_per_million, None);
         assert_eq!(model.output_micro_usd_per_million, Some(34));
         assert!(model.reasoning_levels.is_empty());
-        assert_eq!(model.speed_tier, DefaultServiceTier::Fast);
-        assert!(model.speed_supported);
+        assert_eq!(model.speed_tier, DefaultServiceTier::Standard);
+        assert!(!model.speed_supported);
+        assert!(!model.speed_configurable);
         assert_eq!(pool_candidate_count(&[source], &[]), 1);
     }
 
     #[test]
-    fn pool_snapshot_uses_the_runtime_default_speed_without_a_model_override() {
+    fn pool_snapshot_does_not_infer_speed_from_a_runtime_default() {
         let source = SourceSummary {
             id: "source_1".into(),
             name: "Synthetic".into(),
@@ -1932,9 +1933,9 @@ mod tests {
             Some(&runtime),
         );
 
-        assert_eq!(models[0].speed_tier, DefaultServiceTier::Fast);
-        assert!(models[0].speed_supported);
-        assert!(models[0].speed_configurable);
+        assert_eq!(models[0].speed_tier, DefaultServiceTier::Standard);
+        assert!(!models[0].speed_supported);
+        assert!(!models[0].speed_configurable);
     }
 
     #[test]
@@ -1997,7 +1998,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-routed", "claude-native"]
         );
-        assert!(models[0].speed_supported);
+        assert!(!models[0].speed_supported);
         assert!(!models[1].speed_supported);
         assert_eq!(models[1].speed_tier, DefaultServiceTier::Standard);
     }

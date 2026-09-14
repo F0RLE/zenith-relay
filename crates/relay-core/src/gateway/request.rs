@@ -20,8 +20,8 @@ pub(super) use headers::{
 #[cfg(test)]
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
 pub(super) use normalization::{
-    normalize_account_request, responses_lite_parallel_tool_calls_valid,
-    try_recover_encrypted_content, ServiceTierPolicy,
+    normalize_account_request, normalize_compact_account_request, normalize_responses_lite_request,
+    responses_lite_parallel_tool_calls_valid, try_recover_encrypted_content, ServiceTierPolicy,
 };
 
 use super::execution::execute_client_request;

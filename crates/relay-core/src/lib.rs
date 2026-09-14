@@ -52,12 +52,12 @@ pub use catalog::{
     canonicalize_model_ids, canonicalize_reasoning_levels, codex_catalog_entry_is_compatible,
     codex_model_alias, codex_model_display_name, codex_model_is_picker_eligible,
     decode_codex_model_alias, deserialize_model_reasoning_allowed_levels, is_valid_model_id,
-    is_valid_model_token, merge_model_display_order, model_supports_fast_service_tier,
-    normalize_codex_catalog_priorities, normalize_model_ids,
-    normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, reasoning_policy_key, reasoning_policy_levels,
-    routed_codex_catalog_entry, source_model_declares_image_input, source_row_declares_reasoning,
-    ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
+    is_valid_model_token, merge_model_display_order, normalize_codex_catalog_priorities,
+    normalize_model_ids, normalize_model_reasoning_allowed_levels,
+    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
+    reasoning_policy_key, reasoning_policy_levels, routed_codex_catalog_entry,
+    source_model_declares_image_input, source_row_declares_reasoning, ModelRegistry, ModelRules,
+    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use pricing::{
@@ -89,10 +89,10 @@ pub use runtime::{
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
-    ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
-    RESPONSE_AFFINITY_TTL_MS,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateRuntimeSnapshot,
+    CandidateScope, ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy,
+    RuntimeCandidate, Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS,
+    QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,

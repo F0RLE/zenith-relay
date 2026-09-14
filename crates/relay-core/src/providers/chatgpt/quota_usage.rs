@@ -375,8 +375,6 @@ struct UsagePayload {
     #[serde(default)]
     credits: serde_json::Value,
     #[serde(default)]
-    spend_control: serde_json::Value,
-    #[serde(default)]
     rate_limit_reached_type: Option<serde_json::Value>,
 }
 
@@ -513,23 +511,10 @@ struct ProviderCredits {
 /// windows; an absent or malformed ledger makes no routing claim.
 fn provider_credits(payload: &UsagePayload) -> ProviderCredits {
     let mut result = ProviderCredits::default();
-    let spend_limit = payload
-        .spend_control
-        .as_object()
-        .and_then(|control| control.get("individual_limit"))
-        .and_then(serde_json::Value::as_object);
-    if let Some(limit) = spend_limit {
-        result.record_unlimited(json_bool(limit.get("unlimited")));
-        result.record_amount(json_number(limit.get("remaining")).or_else(|| {
-            json_number(limit.get("limit"))
-                .zip(json_number(limit.get("used")))
-                .map(|(limit, used)| (limit - used).max(0.0))
-        }));
-        if json_number(limit.get("remaining_percent")).is_some_and(|value| value > 0.0) {
-            result.available = true;
-        }
-    }
-
+    // `spend_control.individual_limit` is a separate spending-control
+    // configuration. It is not a credit ledger and may remain at a static
+    // ceiling while `credits.remaining` decreases. Do not display, aggregate,
+    // or use it as credit availability.
     match &payload.credits {
         serde_json::Value::Object(credits) => {
             result.record_unlimited(json_bool(credits.get("unlimited")));
@@ -574,10 +559,7 @@ impl ProviderCredits {
             return;
         };
         let micro_units = (amount * CREDIT_MICRO_UNITS).round() as u64;
-        self.micro_units = match self.micro_units {
-            Some(current) if current > micro_units => Some(current),
-            _ => Some(micro_units),
-        };
+        self.micro_units = Some(micro_units);
         self.available |= amount > 0.0;
     }
 }
@@ -832,8 +814,8 @@ mod tests {
             Some(DefaultServiceTier::Fast)
         );
         assert_eq!(quota.reset_credits_available, Some(2));
-        assert_eq!(quota.available_credits_micro_units, Some(222_750_000));
-        assert!(quota.provider_credits_available);
+        assert_eq!(quota.available_credits_micro_units, None);
+        assert!(!quota.provider_credits_available);
         assert!(!quota.provider_credits_unlimited);
         assert_eq!(subscription.unwrap().plan_type.as_deref(), Some("plus"));
     }
@@ -851,8 +833,8 @@ mod tests {
             ),
             (
                 r#"{"spend_control":{"individual_limit":{"limit":"400","used":"48.98"}}}"#,
-                Some(351_020_000),
-                true,
+                None,
+                false,
                 false,
             ),
             (r#"{"credits":{"unlimited":true}}"#, None, true, true),
@@ -875,6 +857,22 @@ mod tests {
             assert_eq!(quota.provider_credits_available, available);
             assert_eq!(quota.provider_credits_unlimited, unlimited);
         }
+    }
+
+    #[test]
+    fn provider_credits_do_not_mistake_a_static_spend_limit_for_the_ledger() {
+        let quota = parse_codex_usage(
+            br#"{
+                "spend_control":{"individual_limit":{"remaining":1000}},
+                "credits":{"remaining":927.8}
+            }"#,
+            1_000,
+        )
+        .unwrap()
+        .quota;
+
+        assert_eq!(quota.available_credits_micro_units, Some(927_800_000));
+        assert!(quota.provider_credits_available);
     }
 
     #[test]

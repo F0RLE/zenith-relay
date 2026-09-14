@@ -18,9 +18,10 @@ use super::super::request::requested_reasoning_effort;
 use super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
     drop_unpaired_responses_tool_calls, forwarded_bridge_gemini_headers,
-    forwarded_bridge_messages_headers, normalize_account_request, response_tool_call_ids,
-    responses_lite_parallel_tool_calls_valid, tool_use_diagnostics, try_recover_encrypted_content,
-    with_forwarded_tool_diagnostics, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
+    forwarded_bridge_messages_headers, normalize_account_request, normalize_responses_lite_request,
+    response_tool_call_ids, responses_lite_parallel_tool_calls_valid, tool_use_diagnostics,
+    try_recover_encrypted_content, with_forwarded_tool_diagnostics, ServiceTierPolicy,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_error_response,
@@ -234,6 +235,107 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             )
             .await;
         let Some((selected, lease)) = selected else {
+            if !requires_affinity_owner
+                && runtime.release_unroutable_response_affinity(
+                    &key,
+                    &mut response_affinity_key,
+                    &resolved_model,
+                    candidate_protocols(wire_api),
+                    now_ms(),
+                )
+            {
+                continue;
+            }
+            // Native replay deliberately refuses to materialize a response
+            // across model/protocol routes. When the bound owner itself no
+            // longer supports this route, retaining its opaque response id
+            // would therefore block all eligible new-model candidates before
+            // an upstream request is even attempted. Start a fresh safe turn
+            // instead, but never infer that from temporary availability.
+            if wire_api == WireApi::Responses
+                && allow_previous_response_reset
+                && has_previous_response_id
+                && requires_affinity_owner
+                && !has_unpaired_tool_output
+                && !model_switch_reset_attempted
+                && response_affinity_key.as_deref().and_then(|affinity_key| {
+                    runtime.response_affinity_owner_supports_model(
+                        affinity_key,
+                        &resolved_model,
+                        candidate_protocols(wire_api),
+                        now_ms(),
+                    )
+                }) == Some(false)
+                && request
+                    .as_object_mut()
+                    .is_some_and(|object| object.remove("previous_response_id").is_some())
+            {
+                model_switch_reset_attempted = true;
+                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                response_affinity_key = None;
+                requires_affinity_owner = false;
+                continue;
+            }
+            // Pool membership can change between two Codex turns.  An opaque
+            // previous_response_id remains pinned to its old owner, so normal
+            // selection correctly declines to send it to a new provider.  If
+            // Relay still has the bounded, owner-scoped native replay for
+            // that turn, materialize it before trying the replacement pool.
+            // This keeps the continuation safe while avoiding a permanent
+            // no-candidate failure after an operator rotates API sources.
+            if wire_api == WireApi::Responses
+                && has_previous_response_id
+                && requires_affinity_owner
+                && !native_replay_attempted
+            {
+                match replay_native_affinity_continuation(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    response_affinity_key.as_deref(),
+                    &resolved_model,
+                    stream,
+                    &mut native_replay_attempted,
+                ) {
+                    Ok(true) => {
+                        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                        response_affinity_key = None;
+                        requires_affinity_owner = false;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => return adapter_error_response(error),
+                }
+            }
+            // If the owner still matches the model but is no longer in this
+            // key's pool scope, there is no safe upstream route for the
+            // opaque response id. Reset it only after giving the bounded
+            // native replay above a chance to preserve the conversation.
+            if wire_api == WireApi::Responses
+                && allow_previous_response_reset
+                && has_previous_response_id
+                && requires_affinity_owner
+                && !has_unpaired_tool_output
+                && !model_switch_reset_attempted
+                && response_affinity_key.as_deref().and_then(|affinity_key| {
+                    runtime.response_affinity_owner_supports_route(
+                        &key,
+                        affinity_key,
+                        &resolved_model,
+                        candidate_protocols(wire_api),
+                        now_ms(),
+                    )
+                }) == Some(false)
+                && request
+                    .as_object_mut()
+                    .is_some_and(|object| object.remove("previous_response_id").is_some())
+            {
+                model_switch_reset_attempted = true;
+                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                response_affinity_key = None;
+                requires_affinity_owner = false;
+                continue;
+            }
             if should_wait_for_candidate_availability(
                 wait_for_candidate_availability,
                 &last_failure,
@@ -292,7 +394,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         ) else {
             continue;
         };
-        let selected_service_tier = runtime.model_service_tier(&route.source_model);
+        let selected_service_tier =
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model);
         service_tier_policy.prepare_for_candidate(&mut request, selected_service_tier, wire_api);
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
@@ -321,6 +424,25 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 })
             })
             .flatten();
+        if route_responses_lite.is_some() {
+            let Some(object) = request.as_object_mut() else {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "request body must be a JSON object",
+                    "invalid_request",
+                );
+            };
+            if !responses_lite_parallel_tool_calls_valid(object) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "responses Lite requires parallel_tool_calls to be a boolean",
+                    "invalid_request",
+                );
+            }
+            // Apply the shared Lite contract before adapter translation. This
+            // keeps native, bridged, OAuth, and API-source routes identical.
+            normalize_responses_lite_request(object);
+        }
         let previous = if route.adapter.uses_local_continuation_state() {
             match request
                 .get("previous_response_id")
@@ -360,21 +482,17 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             Err(error) => return adapter_error_response(error),
         };
-        if account_route {
-            let Some(upstream_body) = adapter_request.native_upstream_body_mut() else {
-                return adapter_error_response(AdapterError::unsupported_binding());
-            };
+        if let Some(upstream_body) = adapter_request.native_upstream_body_mut() {
             let Value::Object(object) = upstream_body else {
                 unreachable!("request object was validated before execution")
             };
-            if route_responses_lite.is_some() && !responses_lite_parallel_tool_calls_valid(object) {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "responses Lite requires parallel_tool_calls to be a boolean",
-                    "invalid_request",
-                );
+            // Lite was normalized before adapter preparation. Account
+            // normalization adds only the native ChatGPT fields here.
+            if account_route {
+                normalize_account_request(object, route_responses_lite.is_some());
             }
-            normalize_account_request(object, route_responses_lite.is_some());
+        } else if account_route {
+            return adapter_error_response(AdapterError::unsupported_binding());
         }
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
             &request,
@@ -966,21 +1084,14 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             if wire_api == WireApi::Responses && adapter_is_passthrough {
                 if let Ok(upstream) = serde_json::from_slice::<Value>(&bytes) {
-                    if let Some((response_id, replay)) =
-                        crate::NativeResponsesReplayState::from_response(
-                            &request,
-                            &source_model,
-                            &upstream,
-                        )
-                    {
-                        runtime.save_native_responses_replay(
-                            &key.id,
-                            &route.candidate_id,
-                            &response_id,
-                            replay,
-                            now_ms(),
-                        );
-                    }
+                    runtime.capture_native_responses_replay(
+                        &key.id,
+                        &route.candidate_id,
+                        &request,
+                        &source_model,
+                        &upstream,
+                        now_ms(),
+                    );
                 }
             }
             if wire_api == WireApi::Responses {
@@ -1313,6 +1424,41 @@ fn replay_native_tool_continuation(
         return Ok(false);
     };
     *request = replay.replay_request(request, &route.source_model, stream)?;
+    *attempted = true;
+    Ok(true)
+}
+
+fn replay_native_affinity_continuation(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    response_affinity_key: Option<&str>,
+    model: &str,
+    stream: bool,
+    attempted: &mut bool,
+) -> Result<bool, AdapterError> {
+    let Some(previous_response_id) = request
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    let Some(candidate_id) =
+        response_affinity_key.and_then(|key| runtime.response_affinity_candidate(key, now_ms()))
+    else {
+        return Ok(false);
+    };
+    let Some(replay) = runtime.load_native_responses_replay(
+        local_key_id,
+        previous_response_id,
+        &candidate_id,
+        now_ms(),
+    ) else {
+        return Ok(false);
+    };
+    *request = replay.replay_request(request, model, stream)?;
     *attempted = true;
     Ok(true)
 }

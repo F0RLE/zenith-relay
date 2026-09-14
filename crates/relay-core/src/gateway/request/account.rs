@@ -1,7 +1,9 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::execution::{execute_account_endpoint, AccountExecution};
-use super::normalization::{normalize_account_request, responses_lite_parallel_tool_calls_valid};
+use super::normalization::{
+    normalize_compact_account_request, responses_lite_parallel_tool_calls_valid,
+};
 use super::{
     CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES, MAX_CLIENT_REQUEST_BODY_BYTES,
     MAX_CLIENT_REQUEST_BODY_ERROR,
@@ -81,8 +83,7 @@ pub(in crate::gateway) async fn responses_compact(
     // The endpoint is ChatGPT-specific. Keep eligibility with the request and
     // read the mutable retry setting in the execution loop.
     let wait_for_candidate_availability = true;
-    normalize_account_request(&mut request, responses_lite.is_some());
-    request.remove("stream");
+    normalize_compact_account_request(&mut request, responses_lite.is_some());
     execute_account_endpoint(AccountExecution {
         runtime,
         key,

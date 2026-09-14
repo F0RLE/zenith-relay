@@ -292,7 +292,7 @@ fn build_codex_models_response_from_manifests(
         // These helpers accept the client-facing model spelling because they
         // resolve the key prefix internally. Passing the already-resolved
         // upstream id would make prefixed keys look like API-only routes.
-        let native_account_model = runtime.codex_model_has_chatgpt_account(key, &display_id);
+        let has_native_account_route = runtime.codex_model_has_chatgpt_account(key, &display_id);
         let native_account_ids = runtime.codex_model_chatgpt_account_ids(key, &display_id);
         let native_entry = upstream_by_model.get(&normalized).and_then(|entries| {
             entries.iter().find(|(candidate_id, _)| {
@@ -302,50 +302,26 @@ fn build_codex_models_response_from_manifests(
                         .any(|account_id| account_id == candidate_id)
             })
         });
-        let mut model = if native_account_model {
-            let native_model_id = native_entry
-                .and_then(|(_, entry)| entry.get("slug"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|slug| is_valid_model_id(slug))
-                .unwrap_or(&upstream_id);
-            native_entry
-                .and_then(|(_, entry)| {
+        // A bare model slug makes Codex choose its native client contract.
+        // The account's broad model inventory alone cannot prove that
+        // contract: it can contain models visible to an account without a
+        // compatible native card for the current plan or client version.
+        // Preserve native identity and capabilities only when the exact
+        // owning account supplied a valid card. Otherwise use Relay's alias
+        // and conservative API projection, even if the account can still be
+        // tried later by the scheduler.
+        let native_catalog_model = has_native_account_route
+            .then(|| {
+                native_entry.and_then(|(_, entry)| {
                     entry.as_object().and_then(|entry| {
-                        normalize_native_codex_catalog_entry(entry, native_model_id, priority, None)
+                        normalize_native_codex_catalog_entry(entry, &upstream_id, priority, None)
                     })
                 })
-                .unwrap_or_else(|| {
-                    // A missing/invalid account manifest must not borrow
-                    // another account's native capabilities or receive the
-                    // routed API context fallback. Keep the exact ID and let
-                    // Codex own context policy until a native row is known.
-                    normalize_native_codex_catalog_entry(
-                        &serde_json::Map::new(),
-                        native_model_id,
-                        priority,
-                        None,
-                    )
-                    .unwrap_or_else(|| {
-                        let mut fallback =
-                            routed_codex_catalog_entry(None, native_model_id, priority, None);
-                        for key in [
-                            "context_window",
-                            "max_context_window",
-                            "auto_compact_token_limit",
-                            "effective_context_window_percent",
-                        ] {
-                            fallback
-                                .as_object_mut()
-                                .expect("routed catalog entry is an object")
-                                .remove(key);
-                        }
-                        fallback
-                    })
-                })
-        } else {
-            routed_codex_catalog_entry(template, &display_id, priority, None)
-        };
+            })
+            .flatten();
+        let native_account_model = native_catalog_model.is_some();
+        let mut model = native_catalog_model
+            .unwrap_or_else(|| routed_codex_catalog_entry(template, &display_id, priority, None));
         for candidate_id in &native_account_ids {
             let uses_responses_lite = upstream_by_model
                 .get(&normalized)
@@ -845,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn native_account_catalog_fallback_uses_upstream_id_not_key_prefix() {
+    fn unverified_native_account_model_uses_a_routed_alias() {
         let runtime = native_catalog_test_runtime(Some("local"), None);
         let key = runtime
             .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
@@ -860,6 +836,13 @@ mod tests {
             build_codex_models_response(&runtime, &key, &visible, &Default::default(), None)
                 .expect("native catalog");
 
-        assert_eq!(response["models"][0]["slug"], "gpt-native");
+        assert_eq!(
+            response["models"][0]["slug"],
+            json!(crate::codex_model_alias("local/gpt-native"))
+        );
+        assert_eq!(
+            response["models"][0]["description"],
+            "Available through Zenith Relay."
+        );
     }
 }

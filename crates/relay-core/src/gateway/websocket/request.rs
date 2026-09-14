@@ -110,6 +110,20 @@ impl ClientRequest {
         let responses_lite = headers
             .contains_key(crate::gateway::request::CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY);
+        // Responses Lite is a transport contract, not an OAuth-only option.
+        // Normalize it before route selection so every selected provider sees
+        // the same serial-tool request shape.
+        if responses_lite {
+            let object = value
+                .as_object_mut()
+                .expect("request object was validated before normalization");
+            if !crate::gateway::request::responses_lite_parallel_tool_calls_valid(object) {
+                return Err(GatewayFailure::invalid_request(
+                    "responses Lite requires parallel_tool_calls to be a boolean",
+                ));
+            }
+            crate::gateway::request::normalize_responses_lite_request(object);
+        }
         // Keep automatic Lite consistent with HTTP: a pool that can fall back
         // to a non-Lite or non-official Responses route must stay on full
         // Responses for the whole request contract. An explicit client Lite
@@ -179,7 +193,7 @@ impl ClientRequest {
     ) {
         self.service_tier_policy.prepare_for_candidate(
             &mut self.value,
-            runtime.model_service_tier(&route.source_model),
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
             WireApi::Responses,
         );
     }
@@ -191,7 +205,7 @@ impl ClientRequest {
     ) -> DefaultServiceTier {
         self.service_tier_policy.effective_tier(
             &self.value,
-            runtime.model_service_tier(&route.source_model),
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
             WireApi::Responses,
         )
     }
@@ -199,6 +213,46 @@ impl ClientRequest {
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
         serde_json::to_string(&self.value_for(route))
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn native_replay_value(&self) -> Value {
+        self.value.clone()
+    }
+
+    /// Replace an owner-bound opaque continuation with materialized native
+    /// history before selecting a replacement candidate.
+    pub(super) fn replay_native_continuation(
+        &mut self,
+        runtime: &GatewayRuntime,
+        local_key_id: &str,
+        owner_candidate_id: &str,
+        owner_model: &str,
+    ) -> Result<bool, GatewayFailure> {
+        let Some(previous_response_id) = self.previous_response_id() else {
+            return Ok(false);
+        };
+        let Some(replay) = runtime.load_native_responses_replay(
+            local_key_id,
+            previous_response_id,
+            owner_candidate_id,
+            now_ms(),
+        ) else {
+            return Ok(false);
+        };
+        let replayed = match replay.replay_request(&self.value, owner_model, true) {
+            Ok(value) => value,
+            Err(error) if error.code() == "continuation_mismatch" => return Ok(false),
+            Err(_) => {
+                return Err(GatewayFailure::invalid_request(
+                    "native continuation state is invalid",
+                ))
+            }
+        };
+        self.value = replayed;
+        self.response_affinity_key = None;
+        self.requires_affinity_owner = false;
+        self.has_unpaired_tool_output = false;
+        Ok(true)
     }
 
     pub(super) fn http_payload(&self) -> Result<Vec<u8>, GatewayFailure> {
@@ -234,11 +288,12 @@ impl ClientRequest {
             "model".to_string(),
             Value::String(route.source_model.clone()),
         );
+        let responses_lite = self.responses_lite_for(route);
+        if responses_lite {
+            crate::gateway::request::normalize_responses_lite_request(object);
+        }
         if route.account_id.is_some() {
-            crate::gateway::request::normalize_account_request(
-                object,
-                self.responses_lite_for(route),
-            );
+            crate::gateway::request::normalize_account_request(object, responses_lite);
         }
         value
     }

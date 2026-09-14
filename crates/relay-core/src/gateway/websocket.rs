@@ -10,7 +10,10 @@ use super::request::{
     forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event};
-use super::streaming::{has_output_delta, is_empty_responses_incomplete, parse_sse_event};
+use super::streaming::{
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    is_known_non_output_event, parse_sse_event, MAX_SSE_EVENT_BYTES,
+};
 use super::turn_state::{
     guard_account_request, note_account_response_header, CODEX_TURN_STATE_HEADER,
 };
@@ -327,25 +330,20 @@ async fn serve_http_fallback_request(
     let mut pending = Vec::new();
     while let Some(chunk) = await_while_client_connected(downstream, body.next()).await? {
         let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
-        if pending.len().saturating_add(chunk.len()) > MAX_WEBSOCKET_ERROR_BYTES {
-            return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
-        }
         pending.extend_from_slice(&chunk);
         while let Some(end) = crate::protocol::sse_event_end(&pending) {
+            if end > MAX_SSE_EVENT_BYTES {
+                return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
+            }
             let event = pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
                 return Err(GatewayFailure::transport(stream_origin));
             }
-            if let Some(payload) = terminal.payload {
-                let payload = serde_json::to_string(&payload)
-                    .map_err(|_| GatewayFailure::transport(stream_origin))?;
-                if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                    return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
-                }
-                *client_visible_output = true;
+            if let Some(payload) = fallback_event_message(&terminal, stream_origin)? {
+                *client_visible_output |= payload.semantic_output;
                 downstream
-                    .send(Message::Text(payload.into()))
+                    .send(payload.message)
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
@@ -353,8 +351,53 @@ async fn serve_http_fallback_request(
                 return Ok(());
             }
         }
+        // Complete events have already been drained above. Only an incomplete
+        // tail counts against the per-event budget; one transport chunk may
+        // contain several complete events whose combined size is larger.
+        if pending.len() > MAX_SSE_EVENT_BYTES {
+            return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
+        }
     }
     Err(GatewayFailure::closed(stream_origin))
+}
+
+struct FallbackEventMessage {
+    message: Message,
+    semantic_output: bool,
+}
+
+fn fallback_event_message(
+    terminal: &super::streaming::TerminalEvent,
+    origin: ErrorOrigin,
+) -> Result<Option<FallbackEventMessage>, GatewayFailure> {
+    if let Some(raw_data) = terminal.raw_data.as_deref() {
+        if raw_data.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+            return Err(GatewayFailure::message_too_large(origin));
+        }
+        let semantic_output = !terminal.is_compaction && semantic_output_payload(raw_data);
+        let message = match String::from_utf8(raw_data.to_vec()) {
+            Ok(text) => Message::Text(text.into()),
+            Err(error) => Message::Binary(error.into_bytes().into()),
+        };
+        return Ok(Some(FallbackEventMessage {
+            message,
+            semantic_output,
+        }));
+    }
+
+    let Some(payload) = terminal.payload.as_ref() else {
+        return Ok(None);
+    };
+    let payload = serde_json::to_vec(payload).map_err(|_| GatewayFailure::transport(origin))?;
+    if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+        return Err(GatewayFailure::message_too_large(origin));
+    }
+    let semantic_output = semantic_output_payload(&payload);
+    let text = String::from_utf8(payload).map_err(|_| GatewayFailure::transport(origin))?;
+    Ok(Some(FallbackEventMessage {
+        message: Message::Text(text.into()),
+        semantic_output,
+    }))
 }
 
 const RELAY_ERROR_ORIGIN_HEADER: &str = "x-zenith-relay-error-origin";
@@ -502,6 +545,96 @@ async fn connect_upstream(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            if !request.requires_affinity_owner
+                && runtime.release_unroutable_response_affinity(
+                    key,
+                    &mut request.response_affinity_key,
+                    &request.resolved_model,
+                    WEBSOCKET_PROTOCOLS,
+                    now_ms(),
+                )
+            {
+                continue;
+            }
+            // A previous response is pinned to its original owner.  When a
+            // later WebSocket turn switches to a model that owner cannot
+            // structurally serve, affinity selection returns no candidate
+            // before an upstream request is attempted.  Clear the opaque
+            // continuation once so the new model can use a compatible owner;
+            // temporary health, quota, and cooldown misses remain retryable.
+            if allow_previous_response_reset
+                && request.has_previous_response_id()
+                && !request.has_unpaired_tool_output()
+                && !model_switch_reset_attempted
+                && (request
+                    .response_affinity_key
+                    .as_deref()
+                    .and_then(|affinity_key| {
+                        runtime.response_affinity_owner_supports_model(
+                            affinity_key,
+                            &request.resolved_model,
+                            WEBSOCKET_PROTOCOLS,
+                            now_ms(),
+                        )
+                    })
+                    == Some(false)
+                    || request
+                        .response_affinity_key
+                        .as_deref()
+                        .and_then(|affinity_key| {
+                            runtime.response_affinity_owner_supports_route(
+                                key,
+                                affinity_key,
+                                &request.resolved_model,
+                                WEBSOCKET_PROTOCOLS,
+                                now_ms(),
+                            )
+                        })
+                        == Some(false))
+            {
+                let response_affinity_key = request.response_affinity_key.clone();
+                if request.drop_previous_response_id() {
+                    model_switch_reset_attempted = true;
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    continue;
+                }
+            }
+            // The owner may be temporarily ineligible because its quota or
+            // cooldown changed after the previous turn. Use the bounded native
+            // replay before waiting, then let the next selection choose any
+            // compatible candidate (OAuth or API source).
+            if request.has_previous_response_id() && request.requires_affinity_owner {
+                if let Some(affinity_key) = request.response_affinity_key.clone() {
+                    if let Some(owner_candidate_id) =
+                        runtime.response_affinity_candidate(&affinity_key, now_ms())
+                    {
+                        let owner_model = runtime
+                            .executor_route(
+                                &owner_candidate_id,
+                                &request.resolved_model,
+                                &key.scope_snapshot(),
+                                WEBSOCKET_PROTOCOLS,
+                                false,
+                            )
+                            .map(|route| route.source_model)
+                            .unwrap_or_else(|| request.resolved_model.clone());
+                        match request.replay_native_continuation(
+                            runtime,
+                            &key.id,
+                            &owner_candidate_id,
+                            &owner_model,
+                        ) {
+                            Ok(true) => {
+                                runtime.invalidate_response_affinity(Some(&affinity_key));
+                                tried.clear();
+                                continue;
+                            }
+                            Ok(false) => {}
+                            Err(failure) => return Err(failure),
+                        }
+                    }
+                }
+            }
             if websocket_http_fallback_origin.is_none() && wait_for_candidate_availability {
                 tried.clear();
                 retry_wait_attempt = retry_wait_attempt.saturating_add(1);
@@ -588,7 +721,7 @@ async fn connect_upstream(
             let mut headers = upstream_headers(
                 client_headers,
                 &prepared,
-                request.responses_lite_for(&route),
+                route.account_id.is_some() && request.responses_lite_for(&route),
                 &request.request_id,
             );
             apply_codex_routing_hint(&mut headers, &route.source_model, route.service_tier);
@@ -1190,9 +1323,8 @@ async fn initial_application_messages(
         if buffered_bytes > MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2) {
             return Err(GatewayFailure::message_too_large(origin));
         }
-        let committed = initial_message_state(&message)
-            .map(|(has_output, terminal)| has_output || terminal.outcome.is_some())
-            .unwrap_or(true);
+        let (has_output, terminal) = initial_message_state(&message);
+        let committed = has_output || terminal.outcome.is_some();
         messages.push(message);
         if committed {
             return Ok(messages);
@@ -1242,18 +1374,27 @@ async fn first_application_message(
 }
 
 fn first_message_terminal(message: &UpstreamMessage) -> Option<EventTerminal> {
-    initial_message_state(message).map(|(_, terminal)| terminal)
+    Some(initial_message_state(message).1)
 }
 
-fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTerminal)> {
+fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTerminal) {
     let payload = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
-        _ => return None,
+        // This function is only called for application messages, but retain
+        // conservative behavior if that invariant changes.
+        _ => return (true, EventTerminal::default()),
     };
-    let value = serde_json::from_slice::<Value>(payload).ok()?;
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        // A malformed frame has already reached the bridge and must never be
+        // replayed to another account as if it were setup metadata.
+        return (true, EventTerminal::default());
+    };
     let event_type = value.get("type").and_then(Value::as_str);
-    Some((has_output_delta(&value, event_type), event_terminal(&value)))
+    (
+        has_semantic_output(&value, event_type),
+        event_terminal(&value),
+    )
 }
 
 fn initial_messages_are_empty_incomplete(messages: &[UpstreamMessage]) -> bool {
@@ -1277,11 +1418,13 @@ fn initial_payloads_are_empty_incomplete(payloads: &[Value]) -> bool {
     }
     let saw_output = payloads
         .iter()
-        .any(|payload| has_output_delta(payload, payload.get("type").and_then(Value::as_str)));
+        .any(|payload| has_semantic_output(payload, payload.get("type").and_then(Value::as_str)));
     let completed_output_items = payloads
         .iter()
         .filter(|payload| {
-            payload.get("type").and_then(Value::as_str) == Some("response.output_item.done")
+            let event_type = payload.get("type").and_then(Value::as_str);
+            event_type == Some("response.output_item.done")
+                && !is_compaction_payload(payload, event_type)
         })
         .count();
     is_empty_responses_incomplete(terminal, saw_output, completed_output_items)
@@ -1485,6 +1628,7 @@ struct InFlight {
 }
 
 struct BridgeState {
+    local_key_id: String,
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
     stream_id: Option<String>,
@@ -1532,6 +1676,7 @@ async fn bridge(
     let upstream_origin = route_error_origin(&connected.route);
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
     let mut state = BridgeState {
+        local_key_id: key.id.clone(),
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
             request: connected.request.clone(),
@@ -1958,10 +2103,27 @@ async fn start_next_request(
             state.stream_id = Some(stream_id.to_string());
         }
     }
-    if request
+    let same_response_id = request
         .previous_response_id()
-        .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
-    {
+        .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref());
+    let response_affinity_key = request.response_affinity_key.clone();
+    let model_switch_reset = same_response_id
+        && !request.has_unpaired_tool_output()
+        && response_affinity_key.as_deref().and_then(|affinity_key| {
+            runtime.response_affinity_owner_supports_route(
+                key,
+                affinity_key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                now_ms(),
+            )
+        }) == Some(false)
+        && request.drop_previous_response_id();
+    if model_switch_reset {
+        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+        state.last_response_id = None;
+    }
+    if same_response_id && !model_switch_reset {
         let tried = HashSet::new();
         let selected = runtime
             .select_and_reserve(
@@ -2163,9 +2325,7 @@ async fn handle_upstream_message(
                 return false;
             }
             let terminal = inspect_upstream_event(text.as_bytes(), state);
-            if let Some(in_flight) = state.in_flight.as_mut() {
-                in_flight.client_visible_output = true;
-            }
+            mark_client_visible_output(state, text.as_bytes());
             if downstream.send(Message::Text(text.into())).await.is_err() {
                 finish_incomplete(runtime, state, "client_cancelled");
                 return false;
@@ -2188,9 +2348,7 @@ async fn handle_upstream_message(
                 return false;
             }
             let terminal = inspect_upstream_event(&bytes, state);
-            if let Some(in_flight) = state.in_flight.as_mut() {
-                in_flight.client_visible_output = true;
-            }
+            mark_client_visible_output(state, bytes.as_ref());
             if downstream.send(Message::Binary(bytes)).await.is_err() {
                 finish_incomplete(runtime, state, "client_cancelled");
                 return false;
@@ -2221,6 +2379,32 @@ async fn handle_upstream_message(
             false
         }
     }
+}
+
+/// Mark a request as owned by the selected route only after the upstream has
+/// emitted semantic response output. Lifecycle/setup events such as
+/// `response.created` are still forwarded to the client, but they do not make
+/// a pre-output reconnect unsafe. Unknown or malformed frames remain
+/// conservative and count as visible output.
+fn mark_client_visible_output(state: &mut BridgeState, payload: &[u8]) {
+    if semantic_output_payload(payload) {
+        if let Some(in_flight) = state.in_flight.as_mut() {
+            in_flight.client_visible_output = true;
+        }
+    }
+}
+
+fn semantic_output_payload(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return true;
+    };
+    let event_type = value.get("type").and_then(Value::as_str);
+    if has_semantic_output(&value, event_type) {
+        return true;
+    }
+    // Compaction and known lifecycle notifications are setup/state. A future
+    // event is safer to classify as visible than to replay it to a client.
+    !is_known_non_output_event(&value, event_type)
 }
 
 fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTerminal {
@@ -2299,6 +2483,16 @@ fn finish_terminal(
         state.last_response_id = in_flight.response_id.clone();
     }
     if terminal_success {
+        if let Some(response) = terminal.response.as_ref() {
+            runtime.capture_native_responses_replay(
+                &state.local_key_id,
+                &in_flight.route.candidate_id,
+                &in_flight.request.native_replay_value(),
+                &in_flight.route.source_model,
+                response,
+                now_ms(),
+            );
+        }
         let recovered = runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
@@ -2398,9 +2592,10 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
 mod tests {
     use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
     use super::{
-        event_terminal, fallback_response_origin, incomplete_requires_cooldown,
-        initial_payloads_are_empty_incomplete, terminal_failure_status, ClientRequest,
-        EventTerminalOutcome, GatewayFailure, RELAY_ERROR_ORIGIN_HEADER,
+        event_terminal, fallback_event_message, fallback_response_origin,
+        incomplete_requires_cooldown, initial_payloads_are_empty_incomplete,
+        semantic_output_payload, terminal_failure_status, ClientRequest, EventTerminalOutcome,
+        GatewayFailure, MAX_SSE_EVENT_BYTES, MAX_WEBSOCKET_ERROR_BYTES, RELAY_ERROR_ORIGIN_HEADER,
         RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS,
     };
     use crate::{
@@ -2497,6 +2692,77 @@ mod tests {
             "response": {"output": [], "usage": {"output_tokens": 1}}
         })];
         assert!(!initial_payloads_are_empty_incomplete(&non_zero));
+    }
+
+    #[test]
+    fn websocket_setup_events_do_not_commit_route_ownership() {
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.created","response":{"id":"resp_1"}}"#
+        ));
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.in_progress","response":{"id":"resp_1"}}"#
+        ));
+        assert!(semantic_output_payload(
+            br#"{"type":"response.output_text.delta","delta":"hello"}"#
+        ));
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.compaction.delta","opaque":true}"#
+        ));
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"opaque"}}"#
+        ));
+    }
+
+    #[test]
+    fn websocket_unknown_or_malformed_frames_are_conservative() {
+        assert!(semantic_output_payload(
+            br#"{"type":"response.future_output_event"}"#
+        ));
+        assert!(semantic_output_payload(b"not-json"));
+    }
+
+    #[test]
+    fn http_fallback_preserves_opaque_compaction_data() {
+        let terminal = super::parse_sse_event(
+            b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
+        );
+        let message = fallback_event_message(&terminal, ErrorOrigin::Account)
+            .ok()
+            .flatten()
+            .expect("opaque compaction must produce a WebSocket message");
+
+        assert!(!message.semantic_output);
+        match message.message {
+            axum::extract::ws::Message::Text(text) => {
+                assert_eq!(text.to_string(), "encrypted-compaction-fragment")
+            }
+            other => assert!(
+                matches!(other, axum::extract::ws::Message::Text(_)),
+                "UTF-8 compaction data should remain a text message"
+            ),
+        }
+    }
+
+    #[test]
+    fn http_fallback_does_not_commit_response_setup_events() {
+        let terminal = super::parse_sse_event(
+            br#"data: {"type":"response.created","response":{"id":"resp_setup"}}
+
+"#,
+        );
+        let message = fallback_event_message(&terminal, ErrorOrigin::Account)
+            .ok()
+            .flatten()
+            .expect("setup event must still be forwarded");
+
+        assert!(!message.semantic_output);
+    }
+
+    #[test]
+    fn sse_fallback_limit_is_wider_than_the_error_body_limit() {
+        assert_eq!(MAX_WEBSOCKET_ERROR_BYTES, 1024 * 1024);
+        assert_eq!(MAX_SSE_EVENT_BYTES, 16 * 1024 * 1024);
+        const _: () = assert!(MAX_SSE_EVENT_BYTES > MAX_WEBSOCKET_ERROR_BYTES);
     }
 
     #[test]
@@ -2632,7 +2898,7 @@ mod tests {
             crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
             HeaderValue::from_static("true"),
         );
-        let request = ClientRequest::parse(
+        let request_result = ClientRequest::parse(
             &runtime,
             &key,
             &headers,
@@ -2642,8 +2908,11 @@ mod tests {
                 "previous_response_id": "resp_previous",
                 "prompt_cache_key": "cache-key"
             }"#,
-        )
-        .unwrap_or_else(|_| panic!("request should be accepted"));
+        );
+        assert!(request_result.is_ok(), "request should be accepted");
+        let Ok(request) = request_result else {
+            return;
+        };
         let route = runtime
             .executor_route(
                 "source",
@@ -2653,12 +2922,12 @@ mod tests {
                 false,
             )
             .unwrap();
-        let payload: serde_json::Value = serde_json::from_str(
-            &request
-                .payload_for(&route)
-                .unwrap_or_else(|_| panic!("request should be serializable")),
-        )
-        .unwrap();
+        let payload_result = request.payload_for(&route);
+        assert!(payload_result.is_ok(), "request should be serializable");
+        let Ok(payload_text) = payload_result else {
+            return;
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload_text).unwrap();
 
         assert_eq!(request.requested_model, "relay/upstream-model");
         assert_eq!(request.resolved_model, "upstream-model");
@@ -2668,6 +2937,91 @@ mod tests {
         assert_eq!(payload["type"], "response.create");
         assert_eq!(payload["model"], "upstream-model");
         assert_eq!(payload["input"], "hello");
+    }
+
+    #[test]
+    fn websocket_lite_contract_is_normalized_before_non_account_routing() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        let request_result = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": "hello",
+                "parallel_tool_calls": true
+            }"#,
+        );
+        assert!(request_result.is_ok(), "request should be accepted");
+        let Ok(request) = request_result else {
+            return;
+        };
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .expect("test source should be routable");
+        let payload_result = request.payload_for(&route);
+        assert!(payload_result.is_ok(), "request should serialize");
+        let Ok(payload_bytes) = payload_result else {
+            return;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
+
+        assert_eq!(payload["parallel_tool_calls"], false);
+        assert!(request.responses_lite_for(&route));
+    }
+
+    #[test]
+    fn websocket_lite_contract_rejects_non_boolean_parallel_tools() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        let parse_result = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": "hello",
+                "parallel_tool_calls": "yes"
+            }"#,
+        );
+        assert!(
+            parse_result.is_err(),
+            "non-boolean Lite tool setting must be rejected"
+        );
+        let error = match parse_result {
+            Err(error) => error,
+            Ok(_) => return,
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "responses Lite requires parallel_tool_calls to be a boolean"
+        );
     }
 
     #[test]

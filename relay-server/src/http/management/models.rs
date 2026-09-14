@@ -6,9 +6,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zenith_relay_core::{
-    is_valid_model_id, model_supports_fast_service_tier, normalize_model_reasoning_allowed_levels,
-    protocol::RuntimeStateSnapshot, reasoning_policy_key, ApiModelPriceOverride,
-    DefaultServiceTier,
+    is_valid_model_id, normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot,
+    reasoning_policy_key, ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -149,10 +148,14 @@ pub async fn set_model_service_tier(
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&snapshot, &input.model_id)?;
-    if !model_supports_fast_service_tier(&canonical) {
+    let runtime = state.runtime().map_err(runtime_error)?;
+    if !runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical))
+    {
         return Err(ManagementError::validation(
             "model_service_tier_unsupported",
-            "request speed is available only for OpenAI models",
+            "request speed requires a confirmed upstream service tier for this active model route",
         ));
     }
     let previous = state
@@ -169,7 +172,7 @@ pub async fn set_model_service_tier(
         .store
         .set_model_service_tier_overrides(next.clone())
         .map_err(store_error)?;
-    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+    if let Some(runtime) = runtime {
         if let Err(error) = runtime.set_model_service_tier_overrides(next) {
             state
                 .store

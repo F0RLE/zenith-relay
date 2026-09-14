@@ -342,7 +342,7 @@ pub struct QuotaSnapshot {
     #[serde(default)]
     pub limit_reached: bool,
     pub reset_credits_available: Option<u32>,
-    /// Provider-reported AI credits, expressed in millionths of one credit.
+    /// Provider-reported credits, expressed in millionths of one credit.
     /// A fresh positive balance keeps an otherwise exhausted account eligible.
     pub available_credits_micro_units: Option<u64>,
     /// A fresh provider ledger explicitly confirmed that credits can still be

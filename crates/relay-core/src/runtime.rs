@@ -40,6 +40,7 @@ mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
+mod source_speed;
 
 use control::RuntimeControl;
 use session_state::CodexTurnStateStore;
@@ -301,8 +302,9 @@ pub enum DefaultServiceTier {
     Fast,
 }
 
-/// Normalizes the explicit per-model policy. Older configurations may omit a
-/// model, in which case the legacy pool default remains the fallback.
+/// Normalizes the explicit per-model policy. Capability is resolved only from
+/// a live route's confirmed upstream manifest, so persistence must retain a
+/// valid model ID without inferring support from its spelling.
 pub fn normalize_model_service_tier_overrides(
     overrides: BTreeMap<String, DefaultServiceTier>,
 ) -> std::result::Result<BTreeMap<String, DefaultServiceTier>, &'static str> {
@@ -312,9 +314,7 @@ pub fn normalize_model_service_tier_overrides(
         if !is_valid_model_id(model) {
             return Err("model service tier override has an invalid model id");
         }
-        if crate::model_supports_fast_service_tier(model) {
-            normalized.insert(model.to_ascii_lowercase(), tier);
-        }
+        normalized.insert(model.to_ascii_lowercase(), tier);
     }
     Ok(normalized)
 }
@@ -1530,8 +1530,12 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    pub(crate) fn model_service_tier(&self, model: &str) -> DefaultServiceTier {
-        if !crate::model_supports_fast_service_tier(model) {
+    pub(crate) fn model_service_tier_for_candidate(
+        &self,
+        candidate_id: &str,
+        model: &str,
+    ) -> DefaultServiceTier {
+        if !self.candidate_supports_fast_service_tier(candidate_id, model) {
             return DefaultServiceTier::Standard;
         }
         self.model_service_tier_overrides

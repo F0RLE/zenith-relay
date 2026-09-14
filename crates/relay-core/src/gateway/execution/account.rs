@@ -194,6 +194,45 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             )
             .await
         else {
+            if !requires_affinity_owner
+                && runtime.release_unroutable_response_affinity(
+                    &key,
+                    &mut response_affinity_key,
+                    &resolved_model,
+                    &[WireApi::Responses],
+                    now_ms(),
+                )
+            {
+                continue;
+            }
+            // Account-only continuations are pinned to their creating account
+            // while it remains in the key scope. If pool membership removes
+            // that owner, drop the opaque response id once so another account
+            // can continue the chat instead of waiting forever on an
+            // impossible affinity selection. Temporary health, quota, and
+            // cooldown misses remain retryable on the original owner.
+            if has_previous_response_id
+                && !has_unpaired_tool_output
+                && !model_switch_reset_attempted
+                && response_affinity_key.as_deref().and_then(|affinity_key| {
+                    runtime.response_affinity_owner_supports_route(
+                        &key,
+                        affinity_key,
+                        &resolved_model,
+                        &[WireApi::Responses],
+                        now_ms(),
+                    )
+                }) == Some(false)
+                && request
+                    .as_object_mut()
+                    .is_some_and(|object| object.remove("previous_response_id").is_some())
+            {
+                model_switch_reset_attempted = true;
+                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                response_affinity_key = None;
+                requires_affinity_owner = false;
+                continue;
+            }
             if should_wait_for_candidate_availability(
                 wait_for_candidate_availability,
                 &last_failure,
@@ -232,7 +271,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         if route.account_id.is_none() {
             continue;
         }
-        let selected_service_tier = runtime.model_service_tier(&route.source_model);
+        let selected_service_tier =
+            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model);
         service_tier_policy.prepare_for_candidate(
             &mut request,
             selected_service_tier,
@@ -278,13 +318,10 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                         "invalid_request",
                     );
                 }
-                crate::gateway::request::normalize_account_request(object, true);
-                // Responses Lite is also used by the compact endpoint, but
-                // compact remains a non-streaming contract. The shared
-                // account normalizer sets the native streaming defaults, so
-                // remove that field again for this endpoint only.
                 if endpoint == AccountEndpoint::Compact {
-                    object.remove("stream");
+                    crate::gateway::request::normalize_compact_account_request(object, true);
+                } else {
+                    crate::gateway::request::normalize_account_request(object, true);
                 }
             }
         }

@@ -725,26 +725,38 @@ impl GatewayRuntime {
 
     pub fn source_declared_reasoning_levels(&self, model: &str) -> Option<Vec<String>> {
         let model = model.trim().to_ascii_lowercase();
-        {
+        let (source_levels, has_explicit_empty_source_declaration) = {
             let declared = self
                 .model_metadata
                 .declared_reasoning
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(levels) = declared.levels.get(&model) {
-                return Some(levels.clone());
-            }
-            if declared
-                .empty_routes
-                .get(&model)
-                .is_some_and(|routes| !routes.is_empty())
-            {
-                return Some(Vec::new());
-            }
+            (
+                declared.levels.get(&model).cloned(),
+                declared
+                    .empty_routes
+                    .get(&model)
+                    .is_some_and(|routes| !routes.is_empty()),
+            )
+        };
+
+        // A generic API route may explicitly declare no reasoning modes for
+        // itself while an account route for the same model exposes native
+        // ChatGPT modes. Route-local emptiness suppresses only the catalog
+        // fallback; it must not erase positive native metadata.
+        let native_levels = self.native_chatgpt_reasoning_levels(&model);
+        let mut levels = source_levels.unwrap_or_default();
+        levels.extend(native_levels.iter().cloned());
+        let levels = crate::canonicalize_reasoning_levels(levels);
+        if !levels.is_empty() {
+            return Some(levels);
+        }
+        if has_explicit_empty_source_declaration {
+            return Some(Vec::new());
         }
 
         let mut levels = self.model_capabilities(&model).reasoning_effort_levels;
-        levels.extend(self.native_chatgpt_reasoning_levels(&model));
+        levels.extend(native_levels);
         let levels = crate::canonicalize_reasoning_levels(levels);
         (!levels.is_empty()).then_some(levels)
     }

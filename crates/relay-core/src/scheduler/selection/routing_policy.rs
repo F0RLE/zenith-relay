@@ -59,6 +59,10 @@ impl PoolScheduler {
             RoutingStrategy::QuotaHighest => common
                 .then_with(|| self.compare_quota_and_reset(left, right))
                 .then_with(load)
+                // A quota tie must not pin every sequential request to the
+                // same account. Keep the highest-quota preference, then use
+                // dispatch history as a fair tie-breaker.
+                .then_with(fair_rotation)
                 .then_with(|| right.id.cmp(&left.id)),
             RoutingStrategy::SubscriptionExpiry => common
                 .then_with(|| self.compare_subscription_expiry(left, right))
@@ -106,13 +110,12 @@ impl PoolScheduler {
             && selected_in_flight != runner_up_in_flight
         {
             SelectionReason::ParallelLoad
-        } else if self.routing_strategy != RoutingStrategy::QuotaHighest
-            && self.compare_equal_quota_rotation(
-                selected,
-                runner_up,
-                selected_dispatches,
-                runner_up_dispatches,
-            ) != Ordering::Equal
+        } else if self.compare_equal_quota_rotation(
+            selected,
+            runner_up,
+            selected_dispatches,
+            runner_up_dispatches,
+        ) != Ordering::Equal
         {
             SelectionReason::FairRotation
         } else {
@@ -142,6 +145,34 @@ impl PoolScheduler {
                 }
             }
             (left_quota, right_quota) => left_quota.compare_preference(right_quota),
+        }
+        .then_with(|| self.compare_provider_credits(left, right))
+    }
+
+    fn compare_provider_credits(
+        &self,
+        left: &RuntimeCandidate,
+        right: &RuntimeCandidate,
+    ) -> Ordering {
+        if left.kind != CandidateKind::OAuthAccount || right.kind != CandidateKind::OAuthAccount {
+            return Ordering::Equal;
+        }
+        match (
+            left.provider_credits_unlimited,
+            right.provider_credits_unlimited,
+        ) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => match (
+                left.provider_credits_micro_units,
+                right.provider_credits_micro_units,
+            ) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            },
         }
     }
 

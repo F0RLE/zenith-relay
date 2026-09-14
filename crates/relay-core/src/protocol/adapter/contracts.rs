@@ -557,11 +557,20 @@ impl NativeResponsesReplayState {
         if !request.contains_key("input") {
             return None;
         }
-        let output = response
-            .get("output")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // The stored request must already be self-contained. If a predecessor
+        // was unavailable, retaining this opaque id would create a replay that
+        // appears valid while silently losing the earlier conversation.
+        if request
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return None;
+        }
+        // A native replay is safe only when the completed response contains
+        // its output items. Never store a request-only snapshot: replaying it
+        // after a quota handoff would silently drop tool/context output.
+        let output = response.get("output").and_then(Value::as_array)?.clone();
         Some((
             response_id,
             Self {

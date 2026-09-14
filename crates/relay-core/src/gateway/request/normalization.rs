@@ -127,6 +127,27 @@ pub(in crate::gateway) fn normalize_account_request(
     // while Responses Lite alone requires `context=all_turns` here.
     object.insert("store".to_string(), Value::Bool(false));
     object.insert("stream".to_string(), Value::Bool(true));
+    normalize_account_request_common(object, responses_lite);
+}
+
+/// Normalize the legacy non-streaming account compaction contract.
+///
+/// Unlike a regular Responses request, `/responses/compact` does not accept
+/// the streaming transport controls that Relay adds for the normal account
+/// path. Remove them even when a client supplied them explicitly; otherwise a
+/// request can pass local validation and still be rejected by the account
+/// endpoint. All other request fields remain client-owned so newly introduced
+/// Codex options are not silently discarded.
+pub(in crate::gateway) fn normalize_compact_account_request(
+    object: &mut Map<String, Value>,
+    responses_lite: bool,
+) {
+    object.remove("store");
+    object.remove("stream");
+    normalize_account_request_common(object, responses_lite);
+}
+
+fn normalize_account_request_common(object: &mut Map<String, Value>, responses_lite: bool) {
     object.remove("max_output_tokens");
     normalize_codex_tool_schemas(object);
     sanitize_unstored_reasoning_items(object);
@@ -155,9 +176,7 @@ pub(in crate::gateway) fn normalize_account_request(
         // untouched, but pin this transport-level switch to false.  This is
         // deliberately done for both OAuth and compact Lite routes so HTTP
         // and WebSocket requests cannot diverge.
-        if !matches!(object.get("parallel_tool_calls"), Some(Value::Bool(false))) {
-            object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
-        }
+        normalize_responses_lite_request(object);
     }
     match object.get("input") {
         Some(Value::String(text)) if text.trim().is_empty() => {
@@ -176,6 +195,18 @@ pub(in crate::gateway) fn normalize_account_request(
             );
         }
         _ => {}
+    }
+}
+
+/// Apply the transport-level Responses Lite tool contract.
+///
+/// The Lite marker can arrive on a WebSocket before Relay has selected a
+/// concrete route. Normalize it at request parse time as a defensive guard so
+/// a route that does not use the account normalizer cannot forward
+/// `parallel_tool_calls: true` alongside the Lite contract.
+pub(in crate::gateway) fn normalize_responses_lite_request(object: &mut Map<String, Value>) {
+    if !matches!(object.get("parallel_tool_calls"), Some(Value::Bool(false))) {
+        object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
     }
 }
 
@@ -542,6 +573,28 @@ mod tests {
         assert!(request["tools"][0]["parameters"]["properties"]["kind"]
             .get("oneOf")
             .is_none());
+    }
+
+    #[test]
+    fn compact_normalization_removes_transport_fields_and_preserves_new_fields() {
+        let mut request = json!({
+            "store": false,
+            "stream": false,
+            "max_output_tokens": 4,
+            "model": "gpt-test",
+            "input": "compact this",
+            "reasoning": {"effort": "high"},
+            "future_compaction_option": {"enabled": true}
+        });
+
+        normalize_compact_account_request(request.as_object_mut().unwrap(), false);
+
+        assert!(request.get("store").is_none());
+        assert!(request.get("stream").is_none());
+        assert!(request.get("max_output_tokens").is_none());
+        assert_eq!(request["reasoning"]["effort"], "high");
+        assert_eq!(request["future_compaction_option"]["enabled"], true);
+        assert_eq!(request["input"][0]["content"][0]["text"], "compact this");
     }
 
     #[test]

@@ -1548,6 +1548,17 @@ fn native_responses_replay_store_is_route_scoped_bounded_and_expiring() {
 }
 
 #[test]
+fn native_replay_does_not_store_an_unresolved_previous_response_reference() {
+    let request = json!({
+        "model": "alias",
+        "input": "continue",
+        "previous_response_id": "resp_missing"
+    });
+    let upstream = json!({"id": "resp_next", "output": []});
+    assert!(NativeResponsesReplayState::from_response(&request, "gpt-test", &upstream).is_none());
+}
+
+#[test]
 fn continuation_stores_bound_entry_and_total_retained_bytes() {
     let mut oversized_state =
         MessagesBridgeState::new("claude-test", MessagesReasoningMode::Disabled);

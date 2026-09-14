@@ -17,7 +17,7 @@ use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
     AdapterStreamBridge, GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge,
-    NativeResponsesReplayState, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
+    PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
 };
 use axum::body::{Body, Bytes};
 use axum::http::{Response, StatusCode};
@@ -31,7 +31,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
-const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
 const SSE_FIRST_OUTPUT_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
 
@@ -46,8 +46,9 @@ type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> +
 mod events;
 
 pub(super) use events::{
-    has_output_delta, is_empty_responses_incomplete, parse_sse_event, preserved_stream_error,
-    rewrite_bridge_failure, TerminalOutcome,
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    is_known_non_output_event, parse_sse_event, preserved_stream_error, rewrite_bridge_failure,
+    TerminalEvent, TerminalOutcome,
 };
 
 pub(super) struct StreamBootstrapFailure {
@@ -120,10 +121,10 @@ pub(super) async fn bootstrap_stream(
                                 .is_some_and(zenith_gateway_invalid_request_value),
                         });
                     }
-                    if event.output_item.is_some() {
+                    if event.output_item.is_some() && !event.is_compaction {
                         completed_output_items = completed_output_items.saturating_add(1);
                     }
-                    saw_output |= event.has_output_delta || event.output_item.is_some();
+                    saw_output |= event.semantic_output;
                     // A zero-token incomplete response has not committed any
                     // client-visible output. Treat it as a pre-output source
                     // failure, allowing the request executor to retry another
@@ -134,9 +135,7 @@ pub(super) async fn bootstrap_stream(
                     }) {
                         return Err(AttemptFailure::stream("stream_incomplete").into());
                     }
-                    ready_to_forward |= event.outcome.is_some()
-                        || event.has_output_delta
-                        || event.output_item.is_some();
+                    ready_to_forward |= event.outcome.is_some() || event.semantic_output;
                     inspected = absolute_end;
                 }
                 if ready_to_forward {
@@ -268,21 +267,14 @@ impl StreamExecution {
                                 now_ms(),
                             );
                         }
-                        if let Some((response_id, replay)) =
-                            NativeResponsesReplayState::from_response(
-                                &completion_native_template,
-                                &completion_model,
-                                &response,
-                            )
-                        {
-                            completion_runtime.save_native_responses_replay(
-                                &completion_local_key,
-                                &completion_source,
-                                &response_id,
-                                replay,
-                                now_ms(),
-                            );
-                        }
+                        completion_runtime.capture_native_responses_replay(
+                            &completion_local_key,
+                            &completion_source,
+                            &completion_native_template,
+                            &completion_model,
+                            &response,
+                            now_ms(),
+                        );
                     }
                 }
             } else if let Some(category) = event
@@ -995,6 +987,24 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
             .await
             .err()
             .expect("empty incomplete stream must not commit client output");
+        server.await.unwrap();
+
+        assert_eq!(failure.failure.category, "stream_incomplete");
+        assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_does_not_commit_an_opaque_compaction_before_disconnect() {
+        let event = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}}\n\n"
+        );
+        let (upstream, server) = response_from_sse_event(event.into()).await;
+        let failure = bootstrap_stream(upstream)
+            .await
+            .err()
+            .expect("compaction alone must remain retryable");
         server.await.unwrap();
 
         assert_eq!(failure.failure.category, "stream_incomplete");

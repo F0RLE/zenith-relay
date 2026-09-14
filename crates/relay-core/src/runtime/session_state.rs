@@ -1,5 +1,6 @@
 use super::*;
 use crate::{NativeResponsesReplayState, PROMPT_AFFINITY_TTL_MS, RESPONSE_AFFINITY_TTL_MS};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CODEX_TURN_STATE_TTL_MS: u64 = 60 * 60 * 1_000;
@@ -157,18 +158,50 @@ impl GatewayRuntime {
             .get(local_key_id, response_id, candidate_id, now_ms)
     }
 
-    pub(crate) fn save_native_responses_replay(
+    /// Captures a completed native Responses turn as a bounded, materialized
+    /// conversation. When the completed turn continues a previous response,
+    /// fold the predecessor's replay state into it first. That keeps the
+    /// next recovery independent of an opaque upstream response id, rather
+    /// than retaining only the most recent user message.
+    pub(crate) fn capture_native_responses_replay(
         &self,
         local_key_id: &str,
         candidate_id: &str,
-        response_id: &str,
-        state: NativeResponsesReplayState,
+        request: &Value,
+        model: &str,
+        upstream: &Value,
         now_ms: u64,
     ) {
+        let materialized_request = request
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|response_id| !response_id.is_empty())
+            .and_then(|response_id| {
+                self.load_native_responses_replay(local_key_id, response_id, candidate_id, now_ms)
+            })
+            .and_then(|previous| {
+                previous
+                    .replay_request(
+                        request,
+                        model,
+                        request
+                            .get("stream")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    )
+                    .ok()
+            })
+            .unwrap_or_else(|| request.clone());
+        let Some((response_id, state)) =
+            NativeResponsesReplayState::from_response(&materialized_request, model, upstream)
+        else {
+            return;
+        };
         self.native_responses_replay_store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(local_key_id, response_id, candidate_id, state, now_ms);
+            .insert(local_key_id, &response_id, candidate_id, state, now_ms);
     }
 
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
@@ -207,6 +240,71 @@ impl GatewayRuntime {
             .as_ref()
             .and_then(|store| store.find(key, now_ms).ok().flatten())
             .is_some()
+    }
+
+    /// Returns the in-memory owner of a response continuation. This is used
+    /// only to read the owner-scoped native replay state when that owner has
+    /// left the active pool or was removed before the next turn arrives.
+    pub(crate) fn response_affinity_candidate(&self, key: &str, now_ms: u64) -> Option<String> {
+        self.lock_scheduler()
+            .response_affinity_candidate(key, now_ms)
+    }
+
+    pub(crate) fn response_affinity_owner_supports_route(
+        &self,
+        key: &AuthenticatedKey,
+        affinity_key: &str,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        let scope = key.scope_snapshot();
+        self.lock_scheduler()
+            .response_affinity_owner_supports_route(
+                affinity_key,
+                model,
+                allowed_protocols,
+                &scope,
+                now_ms,
+            )
+    }
+
+    pub(crate) fn response_affinity_owner_supports_model(
+        &self,
+        affinity_key: &str,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        self.lock_scheduler()
+            .response_affinity_owner_supports_model(affinity_key, model, allowed_protocols, now_ms)
+    }
+
+    /// Release an optional tool binding after its owner leaves the request's
+    /// configured routes. Callers must first establish that the input contains
+    /// the full tool history and does not depend on an opaque response id.
+    pub(crate) fn release_unroutable_response_affinity(
+        &self,
+        key: &AuthenticatedKey,
+        affinity_key: &mut Option<String>,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> bool {
+        let supports_route = affinity_key.as_deref().and_then(|affinity_key| {
+            self.response_affinity_owner_supports_route(
+                key,
+                affinity_key,
+                model,
+                allowed_protocols,
+                now_ms,
+            )
+        });
+        if supports_route != Some(false) {
+            return false;
+        }
+        self.invalidate_response_affinity(affinity_key.take().as_deref());
+        true
     }
 
     pub(crate) fn prompt_affinity_key(
