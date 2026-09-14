@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use tokio::task::JoinHandle;
 use zenith_relay_core::accounts::{
     AccountAuthState, ReauthReason, TokenAuthority, TokenPersistenceAdapter,
@@ -67,6 +67,7 @@ struct UpstreamState {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     delay: Duration,
+    request_barrier: Option<Arc<Barrier>>,
     model_catalog: Value,
 }
 
@@ -4428,10 +4429,21 @@ async fn sse_transport_concurrency_matrix_balances_and_releases_all_leases() {
 }
 
 async fn assert_sse_concurrency(requests: usize) {
-    let (first_upstream, first_state) =
-        spawn_upstream(vec![successful_sse_reply(); requests]).await;
-    let (second_upstream, second_state) =
-        spawn_upstream(vec![successful_sse_reply(); requests]).await;
+    // Keep every lease live until every request has selected a route. Without
+    // this gate, a fast local SSE response can finish while later client tasks
+    // are still opening their connections, so the assertion measures arrival
+    // timing instead of concurrent routing.
+    let request_barrier = Arc::new(Barrier::new(requests + 1));
+    let (first_upstream, first_state) = spawn_gated_upstream(
+        vec![successful_sse_reply(); requests],
+        request_barrier.clone(),
+    )
+    .await;
+    let (second_upstream, second_state) = spawn_gated_upstream(
+        vec![successful_sse_reply(); requests],
+        request_barrier.clone(),
+    )
+    .await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "first-account", "first-access").await;
     register_ready(&authority, "second-account", "second-access").await;
@@ -4450,34 +4462,36 @@ async fn assert_sse_concurrency(requests: usize) {
 
     let client = reqwest::Client::new();
     let url = format!("{}/v1/responses", gateway.base_url);
-    let completed = tokio::time::timeout(
-        Duration::from_secs(20),
-        join_all((0..requests).map(|index| {
-            let client = client.clone();
-            let url = url.clone();
-            async move {
-                let response = client
-                    .post(url)
-                    .bearer_auth(LOCAL_KEY)
-                    .json(&json!({
-                        "model": MODEL,
-                        "input": format!("parallel SSE chat {index}"),
-                        "stream": true
-                    }))
-                    .send()
-                    .await
-                    .unwrap();
-                response.status() == StatusCode::OK
-                    && response
-                        .text()
+    let (completed, _) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            join_all((0..requests).map(|index| {
+                let client = client.clone();
+                let url = url.clone();
+                async move {
+                    let response = client
+                        .post(url)
+                        .bearer_auth(LOCAL_KEY)
+                        .json(&json!({
+                            "model": MODEL,
+                            "input": format!("parallel SSE chat {index}"),
+                            "stream": true
+                        }))
+                        .send()
                         .await
-                        .unwrap()
-                        .contains("response.completed")
-            }
-        })),
-    )
+                        .unwrap();
+                    response.status() == StatusCode::OK
+                        && response
+                            .text()
+                            .await
+                            .unwrap()
+                            .contains("response.completed")
+                }
+            })),
+            request_barrier.wait(),
+        )
+    })
     .await
-    .expect("parallel SSE requests timed out");
+    .expect("parallel SSE requests did not reach the upstream barrier");
 
     assert!(completed.into_iter().all(|completed| completed));
     assert_transport_matrix_state(
@@ -6753,6 +6767,19 @@ async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
     spawn_delayed_upstream_with_replies(replies, Duration::ZERO).await
 }
 
+async fn spawn_gated_upstream(
+    replies: Vec<Reply>,
+    request_barrier: Arc<Barrier>,
+) -> (TestServer, UpstreamState) {
+    spawn_upstream_with_catalog_and_delay_and_barrier(
+        replies,
+        default_upstream_model_catalog(),
+        Duration::ZERO,
+        Some(request_barrier),
+    )
+    .await
+}
+
 async fn spawn_upstream_with_catalog(
     replies: Vec<Reply>,
     model_catalog: Value,
@@ -6772,10 +6799,20 @@ async fn spawn_upstream_with_catalog_and_delay(
     model_catalog: Value,
     delay: Duration,
 ) -> (TestServer, UpstreamState) {
+    spawn_upstream_with_catalog_and_delay_and_barrier(replies, model_catalog, delay, None).await
+}
+
+async fn spawn_upstream_with_catalog_and_delay_and_barrier(
+    replies: Vec<Reply>,
+    model_catalog: Value,
+    delay: Duration,
+    request_barrier: Option<Arc<Barrier>>,
+) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         replies: Arc::new(Mutex::new(replies.into())),
         requests: Arc::new(Mutex::new(Vec::new())),
         delay,
+        request_barrier,
         model_catalog,
     };
     let app = Router::new()
@@ -6887,6 +6924,9 @@ async fn upstream(
         session_id: header(&headers, "x-session-id"),
         body: body_value.clone(),
     });
+    if let Some(request_barrier) = &state.request_barrier {
+        request_barrier.wait().await;
+    }
     tokio::time::sleep(state.delay).await;
     match state
         .replies
