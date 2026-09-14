@@ -180,6 +180,8 @@
 }
 
 .usage-request-table th {
+  height: auto;
+  min-height: 50px;
   padding-right: 12px;
   padding-left: 4px;
   line-height: 15px;
@@ -228,6 +230,15 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.usage-request-table .usage-column-heading > span {
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .usage-column-heading:hover,

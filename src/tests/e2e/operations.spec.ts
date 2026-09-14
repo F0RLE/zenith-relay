@@ -1797,7 +1797,9 @@ test("connections and pool show model cooldown without disabling the account", a
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const member = page.locator('[data-member-label="Personal Plus"]');
-  await expect(member.locator(".pool-member-runtime-hint")).toContainText("gpt-5.4: retry after");
+  const poolRuntime = member.locator(".account-runtime-line");
+  await expect(poolRuntime).toContainText("gpt-5.4: retry after");
+  await expect(poolRuntime).toHaveAttribute("data-warning", "true");
   await expect(member.locator(".pool-member-kind-icon")).not.toHaveAttribute("data-status", "error");
 });
 
@@ -1808,7 +1810,7 @@ test("pool source errors use one status indicator without duplicate card text", 
 
   const source = page.locator('.pool-member-card[data-member-kind="source"]');
   await expect(source.locator('.pool-member-kind-icon[data-status="error"]')).toBeVisible();
-  await expect(source.locator(".pool-member-runtime-hint")).toHaveCount(0);
+  await expect(source.locator(".account-runtime-line")).toHaveCount(0);
   await expect(source).not.toHaveAttribute("title", /upstream model discovery failed/);
   await expect(source.locator('.pool-member-kind-icon[data-status="error"]')).toHaveAttribute("aria-label", "Error: upstream model discovery failed");
   await source.locator(".pool-member-kind-icon").hover();
@@ -2580,8 +2582,9 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const personalPlus = page.locator('[data-member-label="Personal Plus"]');
-  await expect(personalPlus.locator(".pool-member-subscription-date")).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
-  await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
+  const subscription = personalPlus.locator(".account-subscription-line");
+  await expect(subscription.locator("span").first()).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
+  await expect(subscription.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
   await expect(personalPlus.locator(".quota-meter-heading small").first()).toHaveText(/^\d+ h \d+ min$/);
   await expect(personalPlus.locator(".quota-meter-heading small").nth(1)).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
@@ -2617,8 +2620,8 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(retryCandidates).toHaveValue("1");
   await expect(cooldownAfterFailures).toHaveValue("1");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(personalPlus.locator(".pool-member-subscription-date")).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
-  await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
+  await expect(subscription.locator("span").first()).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
+  await expect(subscription.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 1, cooldownAfterFailures: 1, keepLastCandidateAvailable: true, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });

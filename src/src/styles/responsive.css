@@ -57,11 +57,6 @@
   .usage-request-table .usage-column-heading {
     padding-inline: 4px;
   }
-  .usage-request-table .usage-column-heading > span {
-    display: block;
-    overflow-wrap: normal;
-    word-break: normal;
-  }
   .usage-request-table th[data-column="request"] .usage-column-heading > span {
     overflow: visible;
     text-overflow: clip;
