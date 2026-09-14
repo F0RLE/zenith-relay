@@ -1,7 +1,9 @@
 import type {
   AccountSummary,
+  CandidateRuntimeSnapshot,
   ModelSummary,
   RuntimeSnapshot,
+  SourceProtocolBinding,
   SourceSummary,
 } from "./api/types";
 import {
@@ -12,6 +14,10 @@ import {
   type ApiSourceRole,
 } from "./routingOrder";
 import { groupModels } from "./modelGroups";
+import {
+  effectiveSourceProtocolBindings,
+  normalizedAdapter,
+} from "./sourceProtocolBindings";
 
 export type PoolMember =
   | (AccountSummary & { kind: "account" })
@@ -112,27 +118,65 @@ export function mergeSubscriptionPlanOrder(
 }
 
 export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
-  if (runtime.gateway.models?.length) {
-    return runtime.gateway.models.map((model) => ({
-      ...model,
-      codexVisible: model.codexVisible ?? false,
-      codexDisplayName: model.codexDisplayName || model.id,
-      reasoningLevels: model.reasoningLevels ?? [],
-      reasoningSupportedLevels: model.reasoningSupportedLevels ?? [],
-      reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
-      reasoningConfigurable: model.reasoningConfigurable ?? false,
-      speedSupported: model.speedSupported ?? false,
-      speedTier: model.speedTier ?? "standard",
-      speedConfigurable: model.speedConfigurable ?? false,
-    }));
+  // `gateway.models` is a derived projection and can lag a source/account
+  // refresh. Merge it with the catalogs carried by the current members even
+  // when the derived array is non-empty. Keep the gateway order (it already
+  // contains the saved presentation order), then append newly observed IDs.
+  const summaries = new Map<string, ModelSummary>();
+  const order: string[] = [];
+  const add = (id: string, summary?: ModelSummary) => {
+    const normalized = id.trim().toLowerCase();
+    if (!normalized || summaries.has(normalized)) return;
+    order.push(normalized);
+    summaries.set(normalized, summary ? normalizeModelSummary(summary) : fallbackModelSummary(id.trim()));
+  };
+
+  for (const model of runtime.gateway.models ?? []) add(model.id, model);
+  for (const id of runtime.gateway.visibleModelIds) add(id);
+  for (const source of runtime.sources) {
+    for (const id of source.models) add(id);
+    // A partially migrated source can have the model only on its binding.
+    for (const binding of source.protocolBindings ?? []) {
+      for (const id of binding.modelIds) add(id);
+    }
+  }
+  for (const account of runtime.accounts) {
+    for (const id of account.models) add(id);
   }
 
-  return runtime.gateway.visibleModelIds.map((id) => ({
+  const memberCount = new Map<string, number>();
+  for (const member of [...runtime.sources, ...runtime.accounts]) {
+    const ids = new Set(member.models.map((id) => id.trim().toLowerCase()).filter(Boolean));
+    for (const id of ids) memberCount.set(id, (memberCount.get(id) ?? 0) + 1);
+  }
+
+  return order.map((id) => {
+    const model = summaries.get(id)!;
+    const count = memberCount.get(id);
+    return count == null ? model : { ...model, memberCount: count };
+  });
+}
+
+function normalizeModelSummary(model: ModelSummary): ModelSummary {
+  return {
+    ...model,
+    codexVisible: model.codexVisible ?? false,
+    codexDisplayName: model.codexDisplayName || model.id,
+    reasoningLevels: model.reasoningLevels ?? [],
+    reasoningSupportedLevels: model.reasoningSupportedLevels ?? [],
+    reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
+    reasoningConfigurable: model.reasoningConfigurable ?? false,
+    speedSupported: model.speedSupported ?? false,
+    speedTier: model.speedTier ?? "standard",
+    speedConfigurable: model.speedConfigurable ?? false,
+  };
+}
+
+function fallbackModelSummary(id: string): ModelSummary {
+  return {
     id,
     enabled: true,
-    memberCount: [...runtime.sources, ...runtime.accounts].filter((member) =>
-      member.models.some((model) => model.toLowerCase() === id.toLowerCase()),
-    ).length,
+    memberCount: 0,
     codexVisible: false,
     codexDisplayName: id,
     catalogProvider: null,
@@ -168,7 +212,162 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
     speedSupported: false,
     speedTier: "standard",
     speedConfigurable: false,
-  }));
+  };
+}
+
+/**
+ * Model Rules is an operational surface: it must not offer a rule for a
+ * model whose only pool routes are unavailable. Inventory remains intact in
+ * Connections, where unavailable accounts and sources can still be repaired.
+ */
+export function operationalModelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
+  return modelSummaries(runtime).filter((model) =>
+    hasOperationalModelRoute(runtime, model.id),
+  );
+}
+
+function hasOperationalModelRoute(runtime: RuntimeSnapshot, modelId: string) {
+  const nowMs = Date.now();
+  return runtime.sources.some((source) =>
+    sourceHasOperationalModelRoute(source, runtime.gateway.routingOrder, modelId, nowMs),
+  ) || runtime.accounts.some((account) =>
+    accountHasOperationalModelRoute(account, runtime.gateway.routingOrder, modelId, nowMs),
+  );
+}
+
+function sourceHasOperationalModelRoute(
+  source: SourceSummary,
+  routingOrder: readonly CandidateRuntimeSnapshot[] | undefined,
+  modelId: string,
+  nowMs: number,
+) {
+  if (!memberCanServeModel(source, modelId)) return false;
+
+  // Keep this projection in lockstep with the runtime normalizer. In
+  // particular, a sole native binding with an empty model list is the legacy
+  // source-wide form and means all models in `source.models`.
+  const bindings = effectiveSourceProtocolBindings(source);
+  const matchingBindings = bindings.filter((binding) =>
+    sourceBindingModels(source, bindings, binding).some((model) => sameModel(model, modelId)),
+  );
+  if (!matchingBindings.length) return false;
+  return hasLiveRoute(
+    routingOrder,
+    "api_source",
+    matchingBindings.map((binding) => sourceCandidateId(source.id, binding, bindings.length)),
+    modelId,
+    nowMs,
+  );
+}
+
+function sourceBindingModels(
+  source: Pick<SourceSummary, "models">,
+  bindings: readonly SourceProtocolBinding[],
+  binding: SourceProtocolBinding,
+): readonly string[] {
+  return binding.modelIds.length
+    || bindings.length !== 1
+    || normalizedAdapter(binding) !== "native"
+    ? binding.modelIds
+    : source.models;
+}
+
+function accountHasOperationalModelRoute(
+  account: AccountSummary,
+  routingOrder: readonly CandidateRuntimeSnapshot[] | undefined,
+  modelId: string,
+  nowMs: number,
+) {
+  return account.proxyAvailable !== false
+    && memberCanServeModel(account, modelId)
+    && account.models.some((model) => sameModel(model, modelId))
+    && hasLiveRoute(routingOrder, "oauth_account", [account.id], modelId, nowMs);
+}
+
+function memberCanServeModel(
+  member: Pick<AccountSummary, "enabled" | "inPool" | "draining" | "secretAvailable" | "operationalStatus" | "allowedModels" | "excludedModels">,
+  modelId: string,
+) {
+  return member.enabled
+    && member.inPool
+    && !member.draining
+    && member.secretAvailable
+    && member.operationalStatus === "rotation"
+    && modelAllowedByMember(member, modelId);
+}
+
+function modelAllowedByMember(
+  member: Pick<AccountSummary, "allowedModels" | "excludedModels">,
+  modelId: string,
+) {
+  return !member.excludedModels.some((rule) => matchesModelRule(rule, modelId))
+    && (!member.allowedModels.length
+      || member.allowedModels.some((rule) => matchesModelRule(rule, modelId)));
+}
+
+function hasLiveRoute(
+  routingOrder: readonly CandidateRuntimeSnapshot[] | undefined,
+  kind: CandidateRuntimeSnapshot["kind"],
+  candidateIds: readonly string[],
+  modelId: string,
+  nowMs: number,
+) {
+  // Older remote snapshots, and snapshots taken while the gateway is
+  // stopped, do not include route-level state. Their member operationalStatus
+  // remains the compatible source of truth; current snapshots additionally
+  // remove a model while its exact route is cooling. An empty order therefore
+  // means "not reported", rather than "no routes".
+  if (routingOrder == null || routingOrder.length === 0) return true;
+  const matchingCandidates = routingOrder.filter((candidate) =>
+    candidate.kind === kind
+      && candidateIds.includes(candidate.candidateId)
+  );
+  // A partial/older snapshot can contain other candidates but omit this one.
+  // Do not turn that missing telemetry into a false availability failure; the
+  // member's operational status above is the source of truth in that case.
+  if (!matchingCandidates.length) return true;
+  return matchingCandidates.some((candidate) =>
+    !candidate.modelRetries?.some((retry) =>
+      retry.retryAtMs > nowMs && matchesModelRule(retry.model, modelId),
+    )
+      // `available` is a volatile scheduler fact. A member already reported
+      // as `rotation` is still a valid source of model rules when an older or
+      // transient route snapshot says unavailable. A future whole-candidate
+      // retry remains authoritative and hides every model on that route.
+      && (candidate.available
+        || candidate.nextRetryAtMs == null
+        || candidate.nextRetryAtMs <= nowMs),
+  );
+}
+
+function sourceCandidateId(
+  sourceId: string,
+  binding: SourceProtocolBinding,
+  bindingCount: number,
+) {
+  if (bindingCount === 1) return sourceId;
+  const adapter = binding.adapter ?? "native";
+  const suffix = adapter === "responses_to_messages" && binding.wireApi === "responses"
+    ? "responses_to_messages"
+    : adapter === "responses_to_gemini" && binding.wireApi === "responses"
+      ? "responses_to_gemini"
+      : adapter === "native"
+        ? binding.wireApi
+        : "bridge";
+  return `${sourceId}::${suffix}`;
+}
+
+function matchesModelRule(rule: string, modelId: string) {
+  const normalizedRule = rule.trim().toLowerCase();
+  const normalizedModel = modelId.trim().toLowerCase();
+  if (normalizedRule === "*") return true;
+  return normalizedRule.endsWith("*")
+    ? normalizedModel.startsWith(normalizedRule.slice(0, -1))
+    : normalizedRule === normalizedModel;
+}
+
+function sameModel(left: string, right: string) {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
 }
 
 export function groupModelSummaries(

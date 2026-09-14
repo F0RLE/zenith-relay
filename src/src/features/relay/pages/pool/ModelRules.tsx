@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical, Loader2, Power, Zap } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, GripVertical, Loader2, Power, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ModelSummary } from "../../api/types";
 import { Button, Dialog, EmptyState, IconButton } from "../../components/Ui";
-import { groupModelSummaries, modelSummaries } from "../../poolHelpers";
+import { groupModelSummaries, operationalModelSummaries } from "../../poolHelpers";
 import { formatReasoningEffort } from "../../poolFormatting";
 import {
   initialReasoningLevels,
@@ -18,7 +18,6 @@ import {
   supportedReasoningLevels,
 } from "./modelRulesModel";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { requiresAccountReauthentication } from "../../accountStatus";
 import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
 
 type ModelDragState = {
@@ -33,7 +32,7 @@ export function ModelRulesView() {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
-  const models = runtime ? modelSummaries(runtime) : [];
+  const models = runtime ? operationalModelSummaries(runtime) : [];
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [dragModelId, setDragModelId] = useState<string | null>(null);
   const [dragGroupId, setDragGroupId] = useState<string | null>(null);
@@ -46,33 +45,6 @@ export function ModelRulesView() {
     setOrderedModels(models);
   }, [runtime?.configurationRevision, catalogSignature]);
   const modelGroups = groupModelSummaries(orderedModels, runtime?.accounts ?? []);
-  // A provider/API source can be temporarily unreachable while the local
-  // OAuth pool still has a valid catalog. Keep that source error visible on
-  // Connections, but do not present it as a global model outage.
-  const hasAccountModelFallback = runtime?.accounts.some((account) =>
-    account.enabled
-      && account.inPool
-      && account.secretAvailable
-      && account.models.length > 0
-      && !requiresAccountReauthentication(account)
-  ) ?? false;
-  const discoveryErrors = runtime
-    ? [...new Set([
-      ...runtime.accounts
-        .filter((account) => account.lastErrorCode?.trim().startsWith("models_"))
-        .map((account) => `${account.label}: ${account.lastErrorCode!.trim()}`),
-      ...(hasAccountModelFallback ? [] : runtime.sources
-        .filter((source) => Boolean(source.lastErrorCode?.trim()))
-        .map((source) => `${source.name}: ${source.lastErrorCode!.trim()}`)),
-      ...(hasAccountModelFallback ? [] : runtime.warnings
-        .filter((warning) => warning.startsWith("model_catalog_refresh_failed:"))
-        .map((warning) => warning.replace("model_catalog_refresh_failed:", "model catalog: "))),
-    ])]
-    : [];
-  const catalogRefreshDeferred = !hasAccountModelFallback && (runtime?.warnings.includes("model_catalog_refresh_deferred:codex_running") ?? false);
-  const discoveryAlert = discoveryErrors.length || catalogRefreshDeferred
-    ? <div className={`model-discovery-alert${catalogRefreshDeferred && !discoveryErrors.length ? " deferred" : ""}`} role={discoveryErrors.length ? "alert" : "status"}><CircleAlert aria-hidden /><span><strong>{discoveryErrors.length ? t("models.discoveryError") : t("models.discoveryDeferred")}</strong><small>{discoveryErrors.length ? t("models.discoveryErrorDetail", { errors: discoveryErrors.join(" · ") }) : t("models.discoveryDeferredDetail")}</small></span></div>
-    : null;
   const toggleModel = (model: ModelSummary) => perform(
     `model-toggle-${model.id}`,
     () => mode === "local"
@@ -173,8 +145,8 @@ export function ModelRulesView() {
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
   };
-  if (!models.length) return <div className="model-rules-empty">{discoveryAlert}<EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
-  return <>{discoveryAlert}<section className="model-rules relay-compact-content" aria-label={t("models.visible")}>
+  if (!models.length) return <div className="model-rules-empty"><EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
+  return <><section className="model-rules relay-compact-content" aria-label={t("models.visible")}>
       <div className="relay-table-wrap"><table className="relay-table model-rules-table">
       <colgroup><col data-column="model" /><col data-column="actions" /></colgroup>
       <thead><tr><th>{t("common.model")}</th><th>{t("common.actions")}</th></tr></thead>
@@ -192,11 +164,9 @@ export function ModelRulesView() {
       const speedTier = model.speedTier ?? "standard";
       const canEditSpeed = model.speedSupported === true
         && model.speedConfigurable === true;
-      const speedLabel = t("pool.serviceTier");
-      const speedStateLabel = t(`pool.serviceTiers.${speedTier}`);
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"} data-drop-target={dropModelId === model.id ? "true" : undefined} className={dragModelId === model.id ? "model-dragging" : undefined} draggable onPointerDown={(event) => startPointerDrag(event, "model", model.id)} onDragStart={(event) => startModelDrag(event, model.id)} onDragEnd={() => { setDragModelId(null); setDropModelId(null); }} onDragOver={(event) => { event.preventDefault(); setDropModelId(dragModelId && dragModelId !== model.id ? model.id : null); }} onDrop={() => { if (dragModelId) reorderModels(dragModelId, model.id); setDragModelId(null); setDropModelId(null); }}>
         <td data-column="model"><button className="model-rule-drag-handle" type="button" aria-label={t("models.dragModel", { model: displayName })} data-relay-tooltip={t("models.dragModel", { model: displayName })} onPointerDown={(event) => startPointerDrag(event, "model", model.id)}><GripVertical aria-hidden /></button><div className="model-rule-identity"><strong data-relay-tooltip={displayName}>{displayName}</strong>{displayName !== model.id ? <code data-relay-tooltip={model.id}>{model.id}</code> : null}</div></td>
-                <td data-column="actions"><div className="model-rule-actions"><span className="model-rule-secondary-actions"><IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} disabled={!hasReasoningModes} onClick={() => setReasoningModel(model)} /><IconButton className="model-speed-toggle" label={`${speedLabel}: ${speedStateLabel}`} icon={<Zap aria-hidden />} aria-pressed={speedTier === "fast"} data-speed-tier={speedTier} disabled={!canEditSpeed || busy === `model-speed-${model.id}`} onClick={() => { const nextTier = speedTier === "fast" ? "standard" : "fast"; void perform(`model-speed-${model.id}`, () => mode === "local" ? relayCommands.setModelServiceTier(model.id, nextTier) : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved"); }} /></span><IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
+                <td data-column="actions"><div className="model-rule-actions"><span className="model-rule-secondary-actions"><IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} disabled={!hasReasoningModes} onClick={() => setReasoningModel(model)} />{canEditSpeed ? <IconButton className="model-speed-toggle" label={`${t("pool.serviceTier")}: ${t(`pool.serviceTiers.${speedTier}`)}`} icon={<Zap aria-hidden />} aria-pressed={speedTier === "fast"} data-speed-tier={speedTier} data-model-speed-select={model.id} disabled={busy === `model-speed-${model.id}`} onClick={() => { const nextTier = speedTier === "fast" ? "standard" : "fast"; void perform(`model-speed-${model.id}`, () => mode === "local" ? relayCommands.setModelServiceTier(model.id, nextTier) : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved"); }} /> : null}</span><IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
       </tr>;
       })}</tbody>;
       })}

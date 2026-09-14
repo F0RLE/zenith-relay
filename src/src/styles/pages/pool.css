@@ -276,6 +276,11 @@
   transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
 
+.pool-member-card[data-member-kind="account"] {
+  display: flex;
+  flex-direction: column;
+}
+
 @media (max-width: 900px) {
   .pool-member-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));

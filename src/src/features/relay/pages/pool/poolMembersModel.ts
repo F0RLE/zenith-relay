@@ -1,5 +1,6 @@
 import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
 import { currentAccountErrorCode } from "../../accountStatus";
+import { providerCreditsSummary, type ProviderCreditsSummary } from "../../providerCredits";
 import {
   activeModelCounts,
   activeRequestCount,
@@ -15,6 +16,8 @@ export type PoolMemberStatusCounts = {
   errors: number;
   disabled: number;
 };
+
+export type PoolProviderCreditsSummary = ProviderCreditsSummary;
 
 export type PoolActivityState = {
   activeMembers: PoolMember[];
@@ -237,4 +240,18 @@ export function poolMemberStatusCounts(members: readonly PoolMember[]): PoolMemb
       : member.operationalStatus === "unavailable" || Boolean(member.lastErrorCode?.trim())).length,
     disabled: statuses.filter((status) => status === "disabled").length,
   };
+}
+
+/**
+ * Sums only provider-reported credits from accounts currently in the pool.
+ * Reset credits, API-equivalent estimates, and source balances are separate
+ * ledgers and must not appear in this total.
+ */
+export function poolProviderCreditsSummary(
+  members: readonly PoolMember[],
+): PoolProviderCreditsSummary | null {
+  return providerCreditsSummary(
+    members
+      .filter((member): member is Extract<PoolMember, { kind: "account" }> => member.kind === "account" && member.inPool),
+  );
 }

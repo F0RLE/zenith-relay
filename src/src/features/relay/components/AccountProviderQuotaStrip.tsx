@@ -10,7 +10,7 @@ function availableCredits(value: number | null | undefined) {
 }
 
 /**
- * Renders an upstream AI-credit ledger only when a provider explicitly
+ * Renders an upstream credit ledger only when a provider explicitly
  * reported it. It is distinct from reset credits, API-equivalent estimates,
  * and any API-money balance.
  */
@@ -18,10 +18,10 @@ export function AccountProviderQuotaStrip({ account }: { account: AccountSummary
   const { t, i18n } = useTranslation();
   const credits = availableCredits(account.quota.availableCreditsMicroUnits);
   const unlimited = account.quota.providerCreditsUnlimited === true;
-  if (!unlimited && credits == null) return null;
+  if (!unlimited && (credits == null || credits <= 0)) return null;
 
   return <dl className="account-provider-quota-strip" data-relay-tooltip={t("accounts.providerCredits.hint")}>
     <dt>{t("accounts.providerCredits.label")}</dt>
-    <dd>{unlimited ? "∞" : formatNumber(credits!, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 6 })}</dd>
+    <dd>{unlimited ? "∞" : formatNumber(credits!, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 1 })}</dd>
   </dl>;
 }

@@ -7,6 +7,35 @@ const locales = ["en", "ru"] as const;
 const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as const;
 const TITLE_BAR_HEIGHT = 36;
 
+for (const viewport of viewports) {
+  for (const theme of themes) {
+    test(`provider credit rows stay balanced across account cards ${theme} ${viewport.width}`, async ({ page }) => {
+      await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true, accountCount: 6, quotaAvailable: true, providerCredits: 498.2, freeAccountHealthy: true });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      const heights: number[] = [];
+      for (const [tab, selector] of [["Подключения", ".account-card"], ["Пул", ".pool-member-card"]] as const) {
+        await page.getByRole("button", { name: tab, exact: true }).click();
+        const card = page.locator(selector).filter({ hasText: "Free reserve" });
+        await expect(card.locator(".account-subscription-line")).toHaveCount(0);
+        const credits = card.locator(".account-provider-quota-strip");
+        await expect(credits.locator("dd")).toHaveText("498,2");
+        await card.scrollIntoViewIfNeeded();
+        const bounds = await credits.evaluate((row) => {
+          const rect = row.getBoundingClientRect();
+          const value = row.querySelector("dd")!.getBoundingClientRect();
+          return { height: rect.height, top: value.top - rect.top, bottom: rect.bottom - value.bottom, fits: row.scrollWidth <= row.clientWidth };
+        });
+        expect(Math.abs(bounds.top - bounds.bottom)).toBeLessThanOrEqual(1);
+        expect(bounds.fits).toBe(true);
+        heights.push(bounds.height);
+        await card.screenshot({ path: `output/playwright/credit-card-${selector.slice(1)}-${theme}-${viewport.width}.png` });
+      }
+      expect(heights[0]).toBe(heights[1]);
+    });
+  }
+}
+
 async function expectTopLevelEmptyCentered(page: Page) {
   const tabs = page.locator(".relay-page > .relay-tabs");
   const [pageBox, headerBox, tabCount, emptyBox, paddingBottom] = await Promise.all([
@@ -78,12 +107,12 @@ test("pool account actions match connection cards", async ({ page }) => {
   await expect(actions).toHaveCount(3);
   expect(await actions.evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual([
     "Убрать из пула: Personal Plus",
-    "Обновить квоту",
+    "Обновить",
     "Правила участника пула: Personal Plus",
   ]);
   const widths = await actions.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().width));
   expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(2);
-  const [cardBox, dateBox] = await Promise.all([card.boundingBox(), card.locator(".pool-member-context").boundingBox()]);
+  const [cardBox, dateBox] = await Promise.all([card.boundingBox(), card.locator(".account-subscription-line").boundingBox()]);
   expect(cardBox).not.toBeNull();
   expect(dateBox).not.toBeNull();
   expect(cardBox!.width).toBeLessThanOrEqual(360);
@@ -126,6 +155,7 @@ for (const locale of locales) {
       await page.screenshot({ path: `output/playwright/account-import-loading-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await expect(dialog.getByLabel("Выбрать Imported account для импорта")).toBeChecked();
       await expect(dialog.getByLabel("Выбрать Second imported account для импорта")).toBeChecked();
+      await expect(dialog.getByLabel("Выбрать все записи")).toHaveJSProperty("indeterminate", true);
       await expect(dialog.getByText("Описание пакета", { exact: true })).toBeVisible();
       await expect(dialog.getByRole("heading", { name: "Состав пакета" })).toBeVisible();
       await expect(dialog.locator('.account-plan-badge[data-plan="k12"]')).toHaveCount(3);
@@ -182,7 +212,7 @@ for (const theme of ["light", "dark"] as const) {
 }
 
 test("disabled model state stays readable in the compact dark window", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true, modelSpeed: { "gpt-5.4-mini": "fast" } });
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true, quotaAvailable: true, modelSpeed: { "gpt-5.4-mini": "fast" } });
   await page.setViewportSize({ width: 840, height: 560 });
   await page.goto("/");
   await page.getByRole("button", { name: "Пул", exact: true }).click();
@@ -486,8 +516,12 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
     const speed = page.getByRole("switch", { name: "Скорость запроса" });
+    await expect(page.locator(".pool-speed-control")).toContainText("Скорость запроса");
+    await expect(page.locator(".pool-speed-control .relay-option-trigger")).toHaveCount(0);
+    await expect(page.locator(".pool-speed-track")).toBeVisible();
     await speed.check();
     await expect(speed).toBeChecked();
+    await page.screenshot({ path: `output/playwright/pool-speed-switch-ru-dark-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Распределение" });
     await expect(distribution).not.toContainText("Скорость запроса");
@@ -518,7 +552,7 @@ for (const viewport of viewports) {
     await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Параллельность");
     await expect(apiCard.locator(".pool-member-active-runtime")).toHaveCount(0);
     expect(await apiCard.locator(".pool-member-runtime-meta > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
-    await expect(members.getByRole("button", { name: "Обновить квоту" })).toHaveCount(5);
+    await expect(members.getByRole("button", { name: "Обновить", exact: true })).toHaveCount(5);
     expect(await members.locator(".pool-member-context").evaluateAll((items) => items.every((item) => getComputedStyle(item).justifyContent === "center" && getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members).not.toContainText("Доля");
     expect(await page.getByRole("button", { name: "Настройки распределения", exact: true }).evaluate((control) => control.scrollWidth <= control.clientWidth)).toBe(true);
@@ -661,11 +695,11 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Refresh all quotas" })).toBeVisible();
+    await expect(page.locator(".account-command-actions").getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
     await page.locator(".account-bulk-menu summary").click();
     const menu = page.locator(".account-bulk-menu [role=menu]");
     await expect(menu.getByRole("menuitem")).toHaveCount(2);
-    await expect(menu.getByRole("menuitem", { name: "Refresh all quotas" })).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", { name: "Refresh", exact: true })).toHaveCount(0);
     await expect(menu.getByRole("menuitem", { name: "Refresh and delete non-working accounts" })).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/account-bulk-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
@@ -684,7 +718,7 @@ for (const viewport of viewports) {
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Подключения", exact: true }).click();
-      await page.getByRole("button", { name: "Обновить все квоты" }).hover();
+      await page.locator(".account-command-actions").getByRole("button", { name: "Обновить", exact: true }).hover();
       const tooltip = page.getByRole("tooltip");
       await expect(tooltip).toBeVisible();
       await page.screenshot({ path: `output/playwright/icon-tooltip-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -756,7 +790,7 @@ for (const viewport of viewports) {
     await expect(backup).not.toContainText("quota_transport");
     await expect(business.locator(".account-subscription-line")).toContainText(/\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}/);
     await expect(business.locator(".account-subscription-countdown")).toHaveText(/^\d+ дн\. \d+ ч \d+ мин$/);
-    await expect(backup.locator(".account-subscription-line")).toHaveText("Дата окончания подписки не указана");
+    await expect(backup.locator(".account-subscription-line")).toHaveCount(0);
     expect(await cards.evaluateAll((items) => items.every((item) => !item.textContent?.includes("Модели")))).toBe(true);
     await page.screenshot({ path: `output/playwright/multiple-accounts-ru-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".account-list").evaluate((list, narrow) => getComputedStyle(list).gridTemplateColumns.split(" ").length === (narrow ? 2 : 3), viewport.width <= 900)).toBe(true);

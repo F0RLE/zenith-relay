@@ -13,6 +13,7 @@ export type MockOptions = {
   accountCount?: number;
   accountHealth?: string;
   staleAccountError?: boolean;
+  accountModelErrorCode?: string;
   accountCooldown?: boolean;
   accountModelCooldown?: boolean;
   usageAccountIndex?: number;
@@ -52,6 +53,7 @@ export type MockOptions = {
   proxyCount?: number;
   importResult?: "success" | "item_failure" | "not_found";
   importFailureCode?: string;
+  importPreviewError?: boolean;
   importPreviewDelayMs?: number;
   importConfirmDelayMs?: number;
   sourceUpdateDelayMs?: number;
@@ -211,7 +213,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       remoteLocation: null as { serverId: string; remoteAccountId: string } | null,
       proxyMode: "common",
       proxyAvailable: true,
-      lastErrorCode: input.staleAccountError ? "quota_transport" : input.accountAuthReason ? "quota_token_prepare" : null as string | null,
+      lastErrorCode: input.accountModelErrorCode
+        ?? (input.staleAccountError ? "quota_transport" : input.accountAuthReason ? "quota_token_prepare" : null as string | null),
     };
     const accountCount = Math.max(1, Math.min(input.accountCount ?? 1, 6));
     const accountVariants = [
@@ -1006,6 +1009,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         { itemId: "import_0123456789abcdef", label: "Imported account", identity: "im••••ed", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "k12", defaultSelected: true, selectable: true, existing: false, warnings: [] },
         { itemId: "import_1111222233334444", label: "Second imported account", identity: "se••••nd", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "k12", defaultSelected: true, selectable: true, existing: false, warnings: [] },
         { itemId: "import_fedcba9876543210", label: "Existing account", identity: "ex••••ng", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "existing", plan: "k12", defaultSelected: false, selectable: true, existing: true, warnings: [] },
+        ...(input.importPreviewError ? [{ itemId: "import_invalid_refresh_exchange", label: "Invalid imported account", identity: "in••••id", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "skipped", status: "invalid", plan: null, defaultSelected: false, selectable: false, existing: false, warnings: [], error: { code: "refresh_exchange_failed", message: "synthetic import validation failure" } }] : []),
       ], warnings: [] } };
     }
 
@@ -1127,9 +1131,17 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       runtime.gateway.visibleModelIds = runtime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
     }
 
-    function sourceServesResponsesModel(source: { models: string[]; wireApi: string; protocolBindings: Array<{ wireApi: string; modelIds: string[] }> }, modelId: string) {
+    function sourceServesResponsesModel(source: { models: string[]; wireApi: string; protocolBindings: Array<{ wireApi: string; adapter?: string; modelIds: string[] }> }, modelId: string) {
       const normalized = modelId.toLowerCase();
       if (source.protocolBindings.length) {
+        // Match the runtime's legacy single native binding: an empty model
+        // list means the whole discovered source catalog.
+        if (source.protocolBindings.length === 1
+          && source.protocolBindings[0].wireApi === "responses"
+          && (source.protocolBindings[0].adapter ?? "native") === "native"
+          && source.protocolBindings[0].modelIds.length === 0) {
+          return source.models.some((model) => model.toLowerCase() === normalized);
+        }
         return source.protocolBindings.some((binding) => binding.wireApi === "responses" && binding.modelIds.some((model) => model.toLowerCase() === normalized));
       }
       return source.wireApi === "responses" && source.models.some((model) => model.toLowerCase() === normalized);

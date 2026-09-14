@@ -565,6 +565,24 @@
 .import-preview .relay-table th:nth-child(4) { width: 22%; }
 .import-preview .relay-table th:nth-child(5) { width: 90px; }
 
+.import-preview .relay-table .import-select-cell {
+  padding-inline: 8px;
+  text-align: center;
+}
+
+.import-preview .relay-table .import-select-cell input {
+  margin-inline: auto;
+}
+
+.import-preview .relay-table tbody tr.selected td {
+  background: var(--relay-accent-soft);
+}
+
+.import-preview .relay-table tbody tr.selected:hover td,
+.import-preview .relay-table tbody tr.selected:focus-within td {
+  background: color-mix(in srgb, var(--relay-accent-soft) 78%, var(--relay-subtle));
+}
+
 .import-preview .relay-table td {
   min-width: 0;
   overflow: hidden;

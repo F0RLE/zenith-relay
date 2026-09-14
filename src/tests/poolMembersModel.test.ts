@@ -8,6 +8,7 @@ import {
   poolMembersFromRuntime,
   poolMemberSourceIds,
   poolMemberStatusCounts,
+  poolProviderCreditsSummary,
 } from "../src/features/relay/pages/pool/poolMembersModel";
 
 const member = (kind: "account" | "source", id: string, overrides: Record<string, unknown> = {}) => ({
@@ -176,5 +177,30 @@ describe("pool members model", () => {
       member("account", "quota", { operationalStatus: "quotaWait" }),
     ];
     expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, errors: 2, disabled: 1 });
+  });
+
+  test("sums provider credits only for accounts currently in the pool", () => {
+    const members = [
+      member("account", "account-one", { quota: { availableCreditsMicroUnits: 1_250_000 } }),
+      member("account", "account-two", { quota: { availableCreditsMicroUnits: 2_750_000 } }),
+      member("account", "account-outside", { inPool: false, quota: { availableCreditsMicroUnits: 99_000_000 } }),
+      member("source", "source-without-account-credits"),
+    ];
+
+    expect(poolProviderCreditsSummary(members)).toEqual({ kind: "finite", availableCredits: 4 });
+  });
+
+  test("shows unlimited provider credits and omits the summary without a ledger", () => {
+    expect(poolProviderCreditsSummary([
+      member("account", "unlimited", { quota: { providerCreditsUnlimited: true } }),
+      member("account", "finite", { quota: { availableCreditsMicroUnits: 2_000_000 } }),
+    ])).toEqual({ kind: "unlimited" });
+    expect(poolProviderCreditsSummary([member("account", "missing"), member("source", "source-only")])).toBeNull();
+  });
+
+  test("omits a zero credit balance from the summary", () => {
+    expect(poolProviderCreditsSummary([
+      member("account", "empty", { quota: { availableCreditsMicroUnits: 0 } }),
+    ])).toBeNull();
   });
 });

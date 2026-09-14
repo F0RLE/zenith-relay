@@ -251,6 +251,18 @@ test("reset credits are visible and require explicit account confirmation", asyn
   expect(calls.filter((call) => call.command === "consume_local_reset_credit").at(-1)?.args.accountId).toBe("account_synthetic");
 });
 
+test("pool summary shows the total provider credits across pooled accounts", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, providerCredits: 2.5 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const summary = page.locator(".pool-summary");
+  const credits = summary.locator('[data-summary="provider-credits"]');
+  await expect(summary).toHaveAttribute("data-has-provider-credits", "true");
+  await expect(credits).toContainText("Total credits");
+  await expect(credits.locator("strong")).toHaveText("5");
+});
+
 test("reset action is absent when no reset credit is available", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, resetCreditsAvailable: 0 });
   await page.goto("/");
@@ -1603,7 +1615,7 @@ test("frequent account actions use full-width zones and secondary actions stay i
   const actions = page.locator(".account-card").first().locator(".account-card-actions");
   expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual([
     "Remove from pool",
-    "Refresh quota",
+    "Refresh",
     "Launch in ChatGPT",
   ]);
   await page.locator(".account-card .account-row-menu summary").click();
@@ -1820,12 +1832,13 @@ test("quota refresh is visible without a destructive bulk cleanup action", async
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
-  await expect(page.getByRole("button", { name: "Refresh all quotas" })).toBeVisible();
-  await page.getByRole("button", { name: "Refresh all quotas" }).click();
+  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Refresh", exact: true });
+  await expect(refreshAll).toBeVisible();
+  await refreshAll.click();
   await expect(page.getByText("Updated: 1 · Errors: 0", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh and delete non-working accounts" })).toHaveCount(0);
   await page.locator(".account-bulk-menu summary").click();
-  await expect(page.getByRole("menuitem", { name: "Refresh all quotas" })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Refresh", exact: true })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Refresh and delete non-working accounts" })).toHaveCount(0);
 });
 
@@ -1837,7 +1850,7 @@ test("accounts without quota show the automatic refresh state", async ({ page })
   await expect(pending.locator(".account-quota-refresh-state")).toContainText("Waiting for check");
 });
 
-test("account cards show the subscription end date or an explicit unavailable state", async ({ page }) => {
+test("account cards show subscription dates only when available", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -1851,7 +1864,14 @@ test("account cards show the subscription end date or an explicit unavailable st
   await expect(personal.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
   await expect(business.locator(".account-subscription-line")).toContainText(/\d{2}\/\d{2}\/\d{4}/);
   await expect(business.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
-  await expect(cards.filter({ hasText: "Backup account" }).locator(".account-subscription-line")).toHaveText("Subscription end date unavailable");
+  await expect(cards.filter({ hasText: "Backup account" }).locator(".account-subscription-line")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const poolPersonal = page.locator('.pool-member-card[data-member-label="Personal Plus"]');
+  const poolBackup = page.locator('.pool-member-card[data-member-label="Backup account"]');
+  await expect(poolPersonal.locator(".account-subscription-line")).toContainText(/\d{2}\/\d{2}\/\d{4}/);
+  await expect(poolPersonal.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
+  await expect(poolBackup.locator(".account-subscription-line")).toHaveCount(0);
 });
 
 test("subscription countdown uses live short units in the final minute", async ({ page }) => {
@@ -2006,10 +2026,10 @@ test("icon actions explain themselves and scrollbars follow the active theme", a
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
 
-  const refreshAll = page.getByRole("button", { name: "Обновить все квоты" });
+  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Обновить", exact: true });
   await refreshAll.hover();
   const tooltip = page.getByRole("tooltip");
-  await expect(tooltip).toHaveText("Обновить все квоты");
+  await expect(tooltip).toHaveText("Обновить");
   const box = await tooltip.boundingBox();
   expect(box).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(8);
@@ -2133,6 +2153,21 @@ test("pool sign-in status starts reauthentication for that account", async ({ pa
 
   const member = page.locator('[data-member-label="Personal Plus"]');
   const signIn = member.getByRole("button", { name: "Sign-in required", exact: true });
+  await expect(signIn).toBeVisible();
+  await signIn.click();
+  await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
+  const oauthStart = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth"));
+  expect(oauthStart?.args).toEqual({ openBrowser: false, accountId: "account_synthetic" });
+});
+
+test("connections show the same sign-in action instead of stale quota data", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountAuthReason: "invalid_grant" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const account = page.locator(".account-card").filter({ hasText: "Personal Plus" });
+  const signIn = account.getByRole("button", { name: "Sign-in required", exact: true });
+  await expect(account.locator(".quota-meter")).toHaveCount(0);
   await expect(signIn).toBeVisible();
   await signIn.click();
   await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
@@ -2531,7 +2566,7 @@ test("local pool refreshes all account quotas without an interval setting", asyn
   const freeMember = page.locator('[data-member-label="Backup account"]');
   await expect(freeMember.locator('.relay-status-icon[aria-label^="In rotation"]')).toBeVisible();
 
-  await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
+  await page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText("Updated: 3 · Errors: 0", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
   await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
@@ -2715,12 +2750,25 @@ test("remote pool refreshes quotas without exposing an interval setting", async 
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
+  await page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
 
   const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
   expect(actions).toContainEqual({ action: { type: "refresh_all_quotas" }, payload: null });
   expect(actions.some((input) => input?.action?.type === "set_quota_policy")).toBe(false);
+});
+
+test("remote connections expose the same account refresh action as the pool", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Refresh", exact: true });
+  await expect(refreshAll).toBeVisible();
+  await refreshAll.click();
+
+  const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
+  expect(actions).toContainEqual({ action: { type: "refresh_all_quotas" }, payload: null });
 });
 
 test("connections route Free accounts like other pool members", async ({ page }) => {
@@ -3213,8 +3261,6 @@ test("remote model rules preserve the server group and model order", async ({ pa
     "gemini-3.6-flash-high",
     "gemini-3.6-flash-medium",
     "gemini-3.6-flash-low",
-    "gpt-5.4",
-    "gpt-5.4-mini",
   ]);
 });
 
@@ -3226,6 +3272,7 @@ for (const mode of ["local", "remote"] as const) {
       populated: true,
       mixedModels: true,
       modelSpeed: { "gpt-5.4": "standard" },
+      modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
     });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -3233,13 +3280,20 @@ for (const mode of ["local", "remote"] as const) {
 
     const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
     const speed = model.locator(".model-speed-toggle");
+    await expect(model.locator(".relay-option-trigger")).toHaveCount(0);
+    await expect(speed).toBeVisible();
     await expect(model.locator(".model-rule-secondary-actions")).toHaveCSS("opacity", "1");
+    expect(await model.locator(".model-rule-secondary-actions > *").evaluateAll((controls) => controls.map((control) => {
+      if (control.matches(".model-speed-toggle")) return "speed";
+      return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
+    }))).toEqual(["reasoning", "speed"]);
     await expect(speed).toHaveAttribute("aria-pressed", "false");
+    await expect(speed).toHaveAttribute("data-speed-tier", "standard");
     await speed.click();
     await expect(speed).toHaveAttribute("aria-pressed", "true");
+    await expect(speed).toHaveAttribute("data-speed-tier", "fast");
     const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
-    await expect(claude.locator(".model-speed-toggle")).toBeDisabled();
-    await expect(claude.locator(".model-speed-toggle")).toHaveAttribute("data-speed-tier", "standard");
+    await expect(claude.locator(".model-speed-toggle")).toHaveCount(0);
 
     const groups = page.locator(".model-rules .model-group-row");
     await groups.first().dragTo(groups.last());
@@ -3320,6 +3374,7 @@ test("every native pool model exposes backend reasoning settings", async ({ page
     locale: "en",
     populated: true,
     serverModelOrder: [],
+    quotaAvailable: true,
     modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
   });
   await page.goto("/");
@@ -3744,21 +3799,27 @@ test("direct account value remains controlled by the dollar toggle", async ({ pa
   await expect(poolValue.first()).toBeVisible();
 });
 
-test("provider-reported AI credits keep an exhausted account in the pool", async ({ page }) => {
+test("provider-reported credits keep an exhausted account in the pool", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, providerCredits: 222.75 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
+  const summary = page.locator(".connections-account-summary");
+  const totalCredits = summary.locator('[data-summary="provider-credits"]');
+  await expect(summary).toHaveAttribute("data-has-provider-credits", "true");
+  await expect(totalCredits).toContainText("Total credits");
+  await expect(totalCredits.locator("strong")).toHaveText("222.8");
+
   const connectionCredits = page.locator(".account-card").first().locator(".account-provider-quota-strip");
-  await expect(connectionCredits.locator("dt")).toHaveText("Available AI credits");
-  await expect(connectionCredits.locator("dd")).toHaveText("222.75");
+  await expect(connectionCredits.locator("dt")).toHaveText("Credits");
+  await expect(connectionCredits.locator("dd")).toHaveText("222.8");
   await page.getByRole("button", { name: "Hide account calculation" }).click();
   await expect(connectionCredits).toBeVisible();
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const poolCredits = page.locator('.pool-member-card[data-member-kind="account"]').first().locator(".account-provider-quota-strip");
-  await expect(poolCredits.locator("dt")).toHaveText("Available AI credits");
-  await expect(poolCredits.locator("dd")).toHaveText("222.75");
+  await expect(poolCredits.locator("dt")).toHaveText("Credits");
+  await expect(poolCredits.locator("dd")).toHaveText("222.8");
 });
 
 test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
@@ -4366,6 +4427,69 @@ test("remote bulk import previews multiple files and confirms selected rows", as
       },
     },
   ]);
+});
+
+test("account import preview selects all rows and exposes partial selection", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: "Choose account files" }).click();
+
+  const selectAll = dialog.getByLabel("Select all records");
+  const imported = dialog.getByLabel("Select Imported account for import");
+  const secondImported = dialog.getByLabel("Select Second imported account for import");
+  const existing = dialog.getByLabel("Select Existing account for import");
+
+  await expect(selectAll).not.toBeChecked();
+  await selectAll.check();
+  await expect(imported).toBeChecked();
+  await expect(secondImported).toBeChecked();
+  await expect(existing).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "Import 3 account(s)" })).toBeVisible();
+
+  await secondImported.uncheck();
+  await expect(selectAll).not.toBeChecked();
+  await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
+  await expect(selectAll).toHaveJSProperty("indeterminate", true);
+  await expect(dialog.getByRole("button", { name: "Import 2 account(s)" })).toBeVisible();
+
+  await selectAll.check();
+  await expect(selectAll).toBeChecked();
+  await selectAll.uncheck();
+  await expect(imported).not.toBeChecked();
+  await expect(secondImported).not.toBeChecked();
+  await expect(existing).not.toBeChecked();
+});
+
+test("account import preview keeps existing and invalid rows selectable", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importPreviewError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: "Choose account files" }).click();
+
+  const selectAll = dialog.getByLabel("Select all records");
+  const imported = dialog.getByLabel("Select Imported account for import");
+  const secondImported = dialog.getByLabel("Select Second imported account for import");
+  const existing = dialog.getByLabel("Select Existing account for import");
+  const invalid = dialog.getByLabel("Select Invalid imported account for import");
+
+  await expect(existing).toBeEnabled();
+  await expect(invalid).toBeEnabled();
+  await invalid.check();
+  await expect(invalid).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "Import 3 account(s)" })).toBeVisible();
+
+  await selectAll.check();
+  await expect(imported).toBeChecked();
+  await expect(secondImported).toBeChecked();
+  await expect(existing).toBeChecked();
+  await expect(invalid).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "Import 4 account(s)" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
 });
 
 test("remote server-side usage filters and clear logs use managed commands", async ({ page }) => {

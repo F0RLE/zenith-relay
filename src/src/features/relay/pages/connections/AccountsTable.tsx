@@ -1,6 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
-  CalendarDays,
   Check,
   CircleAlert,
   Clock3,
@@ -34,7 +33,7 @@ import {
   refreshOneAccountQuota,
   type AccountQuotaRefreshReport,
 } from "../../accountQuotaRefresh";
-import { subscriptionExpiryFormatter, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
+import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import {
   AccountPlanBadge,
   ActionMenu,
@@ -44,7 +43,6 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  QuotaStack,
   StatusIcon,
   accountErrorLabel,
   accountPlanOption,
@@ -53,8 +51,12 @@ import {
 } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
+import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
+import { AccountSubscriptionLine } from "../../components/AccountSubscriptionLine";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
+import { formatDetailedRemainingTime } from "../../quotaFormatting";
+import { formatNumber } from "../../numberFormatting";
+import { providerCreditsSummary } from "../../providerCredits";
 import { routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -96,10 +98,15 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
       : []),
   ]), [allAccounts, runtimeOrder]);
   const nowMs = useRelativeTimeClock(accountTimestamps);
-  const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
   const unknownPlanLabel = t("common.unknown");
   const plans = useMemo(() => accountPlanOptions(allAccounts, unknownPlanLabel), [allAccounts, unknownPlanLabel]);
   const { errorCount, inPoolCount, disabledCount } = useMemo(() => accountCounts(allAccounts), [allAccounts]);
+  const providerCredits = useMemo(() => providerCreditsSummary(allAccounts), [allAccounts]);
+  const providerCreditsValue = providerCredits == null
+    ? null
+    : providerCredits.kind === "unlimited"
+      ? "∞"
+      : formatNumber(providerCredits.availableCredits, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 1 });
   const runtimePosition = useMemo(() => routingOrderPositions(runtimeOrder), [runtimeOrder]);
   const runtimeByAccount = useMemo(() => new Map(allAccounts.map((account) => [
     account.id,
@@ -297,7 +304,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         </> : <>
           <IconButton className="account-calculation-toggle" label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<DollarSign aria-hidden />} aria-pressed={accountValueVisible} onClick={() => setAccountValueVisible(!accountValueVisible)} />
           {canRevealAccountIdentities && allAccounts.some((account) => account.secretAvailable) ? <IconButton label={t(accountIdentitiesVisible ? "accounts.hideAllIdentities" : "accounts.revealAllIdentities")} icon={accountIdentitiesBusy ? <Loader2 className="spin" aria-hidden /> : accountIdentitiesVisible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={accountIdentitiesBusy} onClick={() => setAccountIdentitiesVisible(!accountIdentitiesVisible)} /> : null}
-          {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
+          {canRefreshQuota ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
             <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport} onClick={() => onExport(exportIds)}>{t("accounts.exportAll")}</ActionMenuItem>
             <ActionMenuItem icon={<Network aria-hidden />} disabled={!canManageProxies} onClick={() => onBulkProxies(accounts.map((account) => account.id))}>{t("proxies.assignBulk")}</ActionMenuItem>
@@ -305,11 +312,11 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         </>}
       </div>
     </div>
-    <div className="connections-account-summary" aria-label={t("accounts.summary.label")}>
+    <div className="connections-account-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"} aria-label={t("accounts.summary.label")}>
       <div><span>{t("accounts.summary.total")}</span><i aria-hidden="true">—</i><strong>{allAccounts.length}</strong></div>
       <div><span>{t("accounts.summary.inPool")}</span><i aria-hidden="true">—</i><strong>{inPoolCount}</strong></div>
       <div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{errorCount}</strong></div>
-      <div><span>{t("accounts.summary.disabled")}</span><i aria-hidden="true">—</i><strong>{disabledCount}</strong></div>
+      <div><span>{t("accounts.summary.disabled")}</span><i aria-hidden="true">—</i><strong>{disabledCount}</strong></div>{providerCreditsValue != null ? <div className="connections-summary-provider-credits" data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><span>{t("pool.totalProviderCredits")}</span><i aria-hidden="true">—</i><strong>{providerCreditsValue}</strong></div> : null}
     </div>
     </div>
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><Check aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
@@ -329,10 +336,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         const previousAccount = index ? accounts[index - 1] : undefined;
         const previousPlan = previousAccount ? accountPlanOption(previousAccount.subscription.planType, t("common.unknown")).id : null;
         const participates = accountParticipates(account);
-        const subscriptionEnded = account.subscription.activeUntilMs != null && account.subscription.activeUntilMs <= Date.now();
-        const subscriptionEnd = account.subscription.activeUntilMs == null
-          ? { date: t("accounts.subscriptionEndUnknown"), relative: null }
-          : { date: subscriptionExpiryFormat.format(account.subscription.activeUntilMs), relative: formatDetailedRemainingTime(account.subscription.activeUntilMs, nowMs, t) };
         const onServer = mode === "local" && Boolean(account.remoteLocation);
         const errorCode = onServer
           ? account.lastErrorCode === "remote_missing" ? "remote_missing" : null
@@ -403,11 +406,11 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
             </div>
           </div>
           <div className="account-card-quota compact-quota-layout">
-            {accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}
-            <AccountProviderQuotaStrip account={account} />
+            <AccountQuotaPanel account={account} nowMs={nowMs} onReauthenticate={onReauthenticate} />
             {mode === "local" ? <ResetCreditsControl account={account} onCompleted={() => refresh()} /> : null}
           </div>
-          <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
+          <AccountProviderQuotaStrip account={account} />
+          <AccountSubscriptionLine activeUntilMs={account.subscription.activeUntilMs} nowMs={nowMs} />
           {runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}
           {accountValueVisible ? <AccountValueStrip account={account} /> : null}
           <footer className="account-card-footer"><div className="account-card-actions">
@@ -424,25 +427,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     {errorDetails ? <AccountErrorDialog account={errorDetails} onClose={() => setErrorDetails(null)} /> : null}
     </>
   );
-}
-
-function AccountQuotaRefreshState({ account }: { account: AccountSummary }) {
-  const { t } = useTranslation();
-  const status = accountQuotaRefreshState(account);
-  const icon = status === "refreshing"
-    ? <Loader2 className="spin" aria-hidden />
-    : status === "updated"
-      ? <Check aria-hidden />
-      : status === "requires_reauth"
-        ? <LogIn aria-hidden />
-        : status === "failed"
-          ? <RefreshCw aria-hidden />
-          : <Clock3 aria-hidden />;
-  return <div className={`account-quota-refresh-state ${status}`} role="status">{icon}<span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></div>;
-}
-
-function accountHasQuotaWindows(account: AccountSummary) {
-  return Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
 }
 
 export function AccountErrorDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {

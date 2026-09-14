@@ -28,7 +28,7 @@ export type QuotaSnapshot = {
   supplemental?: SupplementalQuotaWindow[];
   limitReached: boolean;
   resetCreditsAvailable: number | null;
-  /** Provider-reported AI credits in millionths of one credit; informational only. */
+  /** Provider-reported credits in millionths of one credit; informational only. */
   availableCreditsMicroUnits?: number | null;
   /** Fresh positive or unlimited provider credits keep an exhausted account eligible. */
   providerCreditsAvailable?: boolean;

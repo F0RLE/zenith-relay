@@ -3,7 +3,7 @@
   .relay-page { padding: 0 16px 24px; }
   .relay-page-header { min-height: 64px; }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pool-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .pool-summary[data-has-provider-credits="true"] { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .pool-member-state {
     display: flex;
     align-items: center;
@@ -669,6 +669,12 @@
   .pool-summary,
   .connections-account-summary,
   .runtime-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pool-summary[data-has-provider-credits="true"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .connections-account-summary[data-has-provider-credits="true"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .overview-analytics-header {

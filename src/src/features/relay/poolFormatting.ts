@@ -4,7 +4,7 @@ import { formatNumber } from "./numberFormatting";
 export function formatApiEquivalent(microUsd: number, locale: string) {
   return `≈${formatMicroUsd(microUsd, locale, {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 6,
+    maximumFractionDigits: 2,
   })}`;
 }
 
