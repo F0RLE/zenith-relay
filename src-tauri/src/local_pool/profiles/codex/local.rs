@@ -15,9 +15,14 @@ pub(super) fn prepare_existing_local_binding_locked(
     let profile_dir = canonical_profile_dir(codex_home)?;
     let config_path = profile_dir.join(CONFIG_FILE);
     let config = read_optional_bytes(&config_path)?;
-    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    let mut document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
     if external_provider_took_over(&document, &backup) {
         return Ok(());
+    }
+    if managed_config_matches(&document, &backup)
+        && normalize_managed_provider_name(&mut document, &backup)
+    {
+        replace_if_unchanged(&config_path, &config, &document.to_string())?;
     }
     if backup.previous_model_catalog_json.is_none()
         && backup.managed_model_catalog_path.is_none()
@@ -265,7 +270,7 @@ pub(super) fn attach_local_locked(
         let mut provider = providers
             .remove(PROVIDER_ID)
             .expect("attach creates provider");
-        provider["name"] = value("Zenith");
+        provider["name"] = value(READY_API_PROVIDER_NAME);
         providers.insert(options.provider_id, provider);
         document["model_provider"] = value(options.provider_id);
     }
@@ -471,7 +476,7 @@ pub(super) fn restore_local_locked(
     }
     let config_path = codex_home.join(CONFIG_FILE);
     let auth_path = codex_home.join(AUTH_FILE);
-    let original_config_bytes = read_stable_optional_bytes(&config_path)?;
+    let mut original_config_bytes = read_stable_optional_bytes(&config_path)?;
     let original_auth_bytes = read_stable_optional_bytes(&auth_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
@@ -480,6 +485,11 @@ pub(super) fn restore_local_locked(
     let config_matches_previous = previous_config_matches(&document, &backup);
     if !config_matches_managed && !config_matches_previous {
         return Err(profile_restore_blocked());
+    }
+    if config_matches_managed && normalize_managed_provider_name(&mut document, &backup) {
+        let normalized = document.to_string();
+        replace_if_unchanged(&config_path, &original_config_bytes, &normalized)?;
+        original_config_bytes = Some(normalized.into_bytes());
     }
     let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
         Some(secret_ref) => secrets.load(secret_ref)?,

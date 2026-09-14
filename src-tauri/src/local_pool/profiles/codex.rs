@@ -48,6 +48,8 @@ use transaction::{
 
 const PROVIDER_ID: &str = "zenith_relay_local";
 const READY_API_PROVIDER_ID: &str = "codex_local_access";
+const READY_API_PROVIDER_NAME: &str = "OpenAI";
+const LEGACY_READY_API_PROVIDER_NAME: &str = "Zenith";
 
 fn default_managed_provider() -> String {
     PROVIDER_ID.to_owned()

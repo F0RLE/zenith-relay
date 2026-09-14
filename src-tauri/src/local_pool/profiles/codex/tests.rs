@@ -468,6 +468,10 @@ fn ready_api_websocket_setting_and_restore_use_its_managed_provider_id() {
     set_local_gateway_websockets_with_backend(&home, &backups, false, &secrets).unwrap();
     let managed = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert_eq!(
+        managed["model_providers"][READY_API_PROVIDER_ID]["name"].as_str(),
+        Some("OpenAI")
+    );
+    assert_eq!(
         managed["model_providers"][READY_API_PROVIDER_ID]["supports_websockets"].as_bool(),
         Some(false)
     );
@@ -481,6 +485,57 @@ fn ready_api_websocket_setting_and_restore_use_its_managed_provider_id() {
     assert_eq!(
         restored["model_providers"]["custom"]["name"].as_str(),
         Some("Custom")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ready_api_legacy_provider_name_is_migrated_to_openai() {
+    let (root, home, backups) = profile_dirs("ready-api-provider-name-migration");
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\n",
+    )
+    .unwrap();
+    let secrets = MemorySecrets::default();
+    let options = LocalAttachOptions {
+        provider_id: READY_API_PROVIDER_ID,
+        ..LocalAttachOptions::default()
+    };
+    switch_to_local_with(
+        &home,
+        &backups,
+        "ready-api",
+        "https://api.zenithmarket.dev/v1",
+        "fixture-api-key",
+        options,
+        &secrets,
+    )
+    .unwrap();
+
+    let legacy = fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .replace("name = \"OpenAI\"", "name = \"Zenith\"");
+    fs::write(home.join(CONFIG_FILE), legacy).unwrap();
+
+    switch_to_local_with(
+        &home,
+        &backups,
+        "ready-api",
+        "https://api.zenithmarket.dev/v1",
+        "fixture-api-key",
+        LocalAttachOptions {
+            provider_id: READY_API_PROVIDER_ID,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+
+    let migrated = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        migrated["model_providers"][READY_API_PROVIDER_ID]["name"].as_str(),
+        Some("OpenAI")
     );
     fs::remove_dir_all(root).unwrap();
 }

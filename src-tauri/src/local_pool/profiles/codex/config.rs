@@ -410,11 +410,7 @@ pub(super) fn managed_provider_matches(document: &DocumentMut, backup: &ProfileB
                 .get("name")
                 .and_then(Item::as_str)
                 .is_some_and(|name| {
-                    name == if backup.managed_provider_id == READY_API_PROVIDER_ID {
-                        "Zenith"
-                    } else {
-                        "Zenith Relay Local"
-                    }
+                    managed_provider_name_matches(name, &backup.managed_provider_id)
                 })
                 && provider
                     .get("base_url")
@@ -436,6 +432,36 @@ pub(super) fn managed_provider_matches(document: &DocumentMut, backup: &ProfileB
                     provider.get("supports_websockets").and_then(Item::as_bool) == Some(expected)
                 })
         })
+}
+
+fn managed_provider_name_matches(name: &str, provider_id: &str) -> bool {
+    if provider_id == READY_API_PROVIDER_ID {
+        name == READY_API_PROVIDER_NAME || name == LEGACY_READY_API_PROVIDER_NAME
+    } else {
+        name == "Zenith Relay Local"
+    }
+}
+
+pub(super) fn normalize_managed_provider_name(
+    document: &mut DocumentMut,
+    backup: &ProfileBackup,
+) -> bool {
+    if backup.managed_provider_id != READY_API_PROVIDER_ID {
+        return false;
+    }
+    let Some(provider) = document
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(&backup.managed_provider_id))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    if provider.get("name").and_then(Item::as_str) != Some(LEGACY_READY_API_PROVIDER_NAME) {
+        return false;
+    }
+    provider.insert("name", value(READY_API_PROVIDER_NAME));
+    true
 }
 
 pub(super) fn auth_content(local_key: &str) -> String {
