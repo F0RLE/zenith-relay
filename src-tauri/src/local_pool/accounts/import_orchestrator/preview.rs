@@ -3,7 +3,7 @@ use super::{
     find_existing_account, find_existing_source, hinted_import_proxy, import_item_command_error,
     import_session_error, masked_account_identity, normalize_import_input,
     parse_subscription_timestamp_ms, parsed_item_value, parsed_item_value_from_material,
-    timestamp_from_ms, ImportSessionResponse, StartAccountImportInput,
+    provider_identity_key, timestamp_from_ms, ImportSessionResponse, StartAccountImportInput,
 };
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::import_session::{ImportSession, ImportSessionStore};
@@ -15,6 +15,7 @@ use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
 use crate::local_pool::state::DesktopState;
+use std::collections::HashSet;
 use std::time::Duration;
 use zenith_relay_core::accounts::{
     ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview, ImportPreviewStatus,
@@ -88,7 +89,9 @@ pub(super) async fn prepare_import_preview(
         .into());
     }
     let mut preview = session.preview;
-    let mut prepared_values = Vec::with_capacity(session.items.len());
+    let item_count = session.items.len();
+    let mut prepared_values = Vec::with_capacity(item_count);
+    let mut prepared_identity_keys = HashSet::with_capacity(item_count);
     let mut credentials_changed = false;
     let now_ms = current_time_ms();
     let settings = state.store()?.gateway().clone();
@@ -166,6 +169,29 @@ pub(super) async fn prepare_import_preview(
             });
             continue;
         };
+        // Some account exports contain the same credentials more than once,
+        // while their cached account_id/email fields differ. The initial
+        // parser quite reasonably treats those rows as distinct, but the
+        // authenticated lookup gives them the same canonical identity. If we
+        // serialize both rows, the session re-parser collapses the duplicate
+        // and rejects the prepared snapshot with a misleading count mismatch.
+        // Keep the first canonical identity and mark later rows explicitly so
+        // the preview and prepared credential set stay in lockstep.
+        let provider_identity = provider_identity_key(
+            provider_account_id,
+            material.provider_user_id.as_deref(),
+            material.email.as_deref(),
+        );
+        if !prepared_identity_keys.insert(provider_identity) {
+            row.status = ImportPreviewStatus::Invalid;
+            row.selectable = false;
+            row.default_selected = false;
+            row.error = Some(ImportIssue {
+                code: ImportIssueCode::DuplicateItem,
+                message: "duplicate authenticated account identity".into(),
+            });
+            continue;
+        }
         row.identity = masked_account_identity(provider_account_id);
         row.plan = material.plan_type.clone().or_else(|| row.plan.clone());
         row.expires_at = material.expires_at_ms.and_then(timestamp_from_ms);
@@ -246,7 +272,11 @@ pub(super) async fn prepare_import_preview(
         }
         prepared_values.push(parsed_item_value_from_material(original, &material));
     }
-    let content = credentials_changed
+    // Preparation can reject an otherwise parseable item after contacting the
+    // provider. In that case the prepared snapshot must retain only the
+    // credentials that still have a selectable row; reusing the original
+    // document would make the snapshot's item count disagree with the preview.
+    let content = (credentials_changed || prepared_values.len() != item_count)
         .then(|| serde_json::to_string(&prepared_values))
         .transpose()
         .map_err(|_| {
@@ -268,4 +298,179 @@ fn mark_preview_quota_failed(
         code: ImportIssueCode::QuotaProbeFailed,
         message: message.into(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header::AUTHORIZATION, HeaderMap};
+    use axum::{routing::get, Json, Router};
+    use std::fs;
+    use tokio::net::TcpListener;
+    use url::Url;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn preparation_persists_only_credentials_for_selectable_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-preview-{}",
+            Uuid::new_v4().simple()
+        ));
+        let mut state = DesktopState::open(root.clone()).unwrap();
+        let (endpoint, server) = spawn_account_check_server().await;
+        state.set_account_check_url_for_test(endpoint);
+
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+        let session = sessions
+            .start(
+                r#"[
+                    {"auth_mode":"oauth","account_id":"synthetic-provider-ok","access_token":"synthetic-access-ok","refresh_token":"synthetic-refresh-ok"},
+                    {"auth_mode":"oauth","account_id":"synthetic-provider-rejected","access_token":"synthetic-access-rejected","refresh_token":"synthetic-refresh-rejected"}
+                ]"#,
+                None,
+                &[],
+            )
+            .unwrap();
+        let session_id = session.session_id.clone();
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+
+        let (prepared_content, preview) =
+            prepare_import_preview(&state, &credentials, session, false)
+                .await
+                .unwrap();
+        let prepared_content = prepared_content.expect("filtered credentials must be persisted");
+        let prepared_values =
+            zenith_relay_core::accounts::parse_import(&prepared_content, None, &[]).unwrap();
+
+        assert_eq!(prepared_values.items.len(), 1);
+        assert_eq!(preview.rows.len(), 2);
+        assert_eq!(preview.rows.iter().filter(|row| row.selectable).count(), 1);
+        assert!(preview.rows[0].selectable);
+        assert!(!preview.rows[1].selectable);
+
+        let prepared = sessions
+            .prepare(&session_id, Some(&prepared_content), preview.clone(), &[])
+            .unwrap();
+        assert_eq!(prepared.items.len(), 1);
+        assert_eq!(prepared.preview, preview);
+
+        sessions.cancel(&session_id).unwrap();
+        server.abort();
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_filters_duplicates_found_by_authenticated_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-duplicate-preview-{}",
+            Uuid::new_v4().simple()
+        ));
+        let mut state = DesktopState::open(root.clone()).unwrap();
+        let (endpoint, server) = spawn_duplicate_account_check_server().await;
+        state.set_account_check_url_for_test(endpoint);
+
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+        let session = sessions
+            .start(
+                r#"[
+                    {"auth_mode":"oauth","access_token":"synthetic-access-one"},
+                    {"auth_mode":"oauth","access_token":"synthetic-access-two"}
+                ]"#,
+                None,
+                &[],
+            )
+            .unwrap();
+        let session_id = session.session_id.clone();
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+
+        let (prepared_content, preview) =
+            prepare_import_preview(&state, &credentials, session, false)
+                .await
+                .unwrap();
+        let prepared_content = prepared_content.expect("duplicate credentials must be filtered");
+        let prepared_values =
+            zenith_relay_core::accounts::parse_import(&prepared_content, None, &[]).unwrap();
+
+        assert_eq!(prepared_values.items.len(), 1);
+        assert_eq!(preview.rows.len(), 2);
+        assert_eq!(preview.rows.iter().filter(|row| row.selectable).count(), 1);
+        assert_eq!(
+            preview.rows[1].error.as_ref().map(|error| error.code),
+            Some(ImportIssueCode::DuplicateItem)
+        );
+
+        let prepared = sessions
+            .prepare(&session_id, Some(&prepared_content), preview, &[])
+            .unwrap();
+        assert_eq!(prepared.items.len(), 1);
+
+        sessions.cancel(&session_id).unwrap();
+        server.abort();
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn spawn_account_check_server() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/accounts/check",
+            get(|headers: HeaderMap| async move {
+                let valid = headers
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value == "Bearer synthetic-access-ok");
+                let payload = if valid {
+                    serde_json::json!({
+                        "accounts": [{"account": {"id": "synthetic-provider-ok"}}]
+                    })
+                } else {
+                    serde_json::json!({"accounts": []})
+                };
+                Json(payload)
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            Url::parse(&format!("http://{address}/accounts/check")).unwrap(),
+            server,
+        )
+    }
+
+    async fn spawn_duplicate_account_check_server() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/accounts/check",
+            get(|headers: HeaderMap| async move {
+                let valid = headers
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        matches!(
+                            value,
+                            "Bearer synthetic-access-one" | "Bearer synthetic-access-two"
+                        )
+                    });
+                let payload = if valid {
+                    serde_json::json!({
+                        "accounts": [{"account": {"id": "synthetic-shared-account"}}]
+                    })
+                } else {
+                    serde_json::json!({"accounts": []})
+                };
+                Json(payload)
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            Url::parse(&format!("http://{address}/accounts/check")).unwrap(),
+            server,
+        )
+    }
 }

@@ -113,7 +113,9 @@ impl DesktopState {
         let failed_affinity_writes = Arc::new(AtomicU64::new(0));
         let catalog_refresh_error =
             Arc::new(Mutex::new(store.gateway().catalog_refresh_error.clone()));
-        let (background_session_active, _) = watch::channel(false);
+        // The native process owns automatic account work. A tray-only startup
+        // or a closed WebView must not pause quota, credit, or catalog refresh.
+        let (background_session_active, _) = watch::channel(true);
         let token_authority = Arc::new(
             TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
                 .map_err(LocalPoolError::invalid_state)?,
@@ -365,25 +367,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_workers_follow_the_desktop_session_lifecycle() {
+    async fn background_workers_stay_active_for_the_desktop_process_lifetime() {
         let root = temp_root("background-session");
         let state = DesktopState::open(root.clone()).unwrap();
 
-        assert!(!state.background_session_active());
+        assert!(state.background_session_active());
+        state.wait_for_background_session_active().await;
         assert!(tokio::time::timeout(
             std::time::Duration::from_millis(10),
-            state.wait_for_background_session_active()
+            state.wait_for_background_session_inactive()
         )
         .await
         .is_err());
-
-        state.set_background_session_active(true);
-        state.wait_for_background_session_active().await;
-        assert!(state.background_session_active());
-
-        state.set_background_session_active(false);
-        state.wait_for_background_session_inactive().await;
-        assert!(!state.background_session_active());
 
         drop(state);
         std::fs::remove_dir_all(root).unwrap();

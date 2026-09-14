@@ -19,7 +19,23 @@ use uuid::Uuid;
 const SNAPSHOT_VERSION: u32 = 1;
 const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_PATH: &str = "/auth/callback";
-const CALLBACK_SUCCESS_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}button{margin-top:20px;padding:10px 18px;border:1px solid ButtonBorder;border-radius:8px;background:ButtonFace;color:ButtonText;font:inherit;cursor:pointer}button:disabled{cursor:default;opacity:.65}</style><body><main><h1>Account connected</h1><p id="message">You can return to Zenith Relay. This tab will close when the browser allows it.</p><button id="close" type="button">Close tab</button></main><script>(function(){"use strict";var button=document.getElementById("close"),message=document.getElementById("message");function closeTab(){var closed=false;try{window.close();closed=window.closed;}catch(_){ }if(!closed){try{window.open("","_self");window.close();closed=window.closed;}catch(_){ }}if(!closed){message.textContent="Return to Zenith Relay. Your browser prevents this tab from being closed automatically; close it with Ctrl+W (or the tab’s close button).";button.disabled=true;}}button.addEventListener("click",closeTab);window.setTimeout(closeTab,250);})();</script></body></html>"#;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CallbackLanguage {
+    English,
+    Russian,
+}
+
+const CALLBACK_SUCCESS_HTML_EN: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}button{margin-top:20px;padding:10px 18px;border:1px solid ButtonBorder;border-radius:8px;background:ButtonFace;color:ButtonText;font:inherit;cursor:pointer}button:disabled{cursor:default;opacity:.65}</style><body><main><h1>Account connected</h1><p id="message">You can close this window now.</p><button id="close" type="button">Close window</button></main><script>(function(){"use strict";var button=document.getElementById("close"),message=document.getElementById("message");function closeTab(){var closed=false;try{window.close();closed=window.closed;}catch(_){}if(!closed){try{window.open("","_self");window.close();closed=window.closed;}catch(_){} }if(!closed){message.textContent="You can close this window now.";}}button.addEventListener("click",closeTab);window.setTimeout(closeTab,250);})();</script></body></html>"#;
+
+const CALLBACK_SUCCESS_HTML_RU: &str = r#"<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}button{margin-top:20px;padding:10px 18px;border:1px solid ButtonBorder;border-radius:8px;background:ButtonFace;color:ButtonText;font:inherit;cursor:pointer}button:disabled{cursor:default;opacity:.65}</style><body><main><h1>Аккаунт подключён</h1><p id="message">Теперь это окно можно закрыть.</p><button id="close" type="button">Закрыть окно</button></main><script>(function(){"use strict";var button=document.getElementById("close"),message=document.getElementById("message");function closeTab(){var closed=false;try{window.close();closed=window.closed;}catch(_){}if(!closed){try{window.open("","_self");window.close();closed=window.closed;}catch(_){} }if(!closed){message.textContent="Теперь это окно можно закрыть.";}}button.addEventListener("click",closeTab);window.setTimeout(closeTab,250);})();</script></body></html>"#;
+
+fn callback_success_html(language: CallbackLanguage) -> &'static str {
+    match language {
+        CallbackLanguage::English => CALLBACK_SUCCESS_HTML_EN,
+        CallbackLanguage::Russian => CALLBACK_SUCCESS_HTML_RU,
+    }
+}
+
 const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024;
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
@@ -603,8 +619,8 @@ where
     B: SecretBackend,
     E: OAuthFlowEventSink,
 {
-    let target = match read_request_target(&mut stream).await {
-        Ok(target) => target,
+    let request = match read_request(&mut stream).await {
+        Ok(request) => request,
         Err(RequestReadError::TooLarge) => {
             let _ = write_response(&mut stream, 413, "OAuth callback request is too large.").await;
             return RequestOutcome::Rejected;
@@ -615,13 +631,13 @@ where
         }
         Err(RequestReadError::Io) => return RequestOutcome::Rejected,
     };
-    let Ok(callback_url) = callback_url(&snapshot.pending, &target) else {
+    let Ok(callback_url) = callback_url(&snapshot.pending, &request.target) else {
         let _ = write_response(&mut stream, 400, "Invalid OAuth callback request.").await;
         return RequestOutcome::Rejected;
     };
     match inner.accept_callback(&snapshot.login_id, &callback_url) {
         Ok(()) => {
-            let _ = write_callback_success(&mut stream).await;
+            let _ = write_callback_success(&mut stream, request.language).await;
             RequestOutcome::Accepted
         }
         Err(error) if error.code == OAuthFlowErrorCode::CallbackInvalid => {
@@ -642,7 +658,12 @@ enum RequestReadError {
     TooLarge,
 }
 
-async fn read_request_target(stream: &mut TcpStream) -> Result<String, RequestReadError> {
+struct CallbackRequest {
+    target: String,
+    language: CallbackLanguage,
+}
+
+async fn read_request(stream: &mut TcpStream) -> Result<CallbackRequest, RequestReadError> {
     let read = async {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
@@ -679,11 +700,44 @@ async fn read_request_target(stream: &mut TcpStream) -> Result<String, RequestRe
         if !target.starts_with('/') || target.bytes().any(|byte| byte.is_ascii_control()) {
             return Err(RequestReadError::Invalid);
         }
-        Ok(target.to_string())
+        Ok(CallbackRequest {
+            target: target.to_string(),
+            language: callback_language(header),
+        })
     };
     tokio::time::timeout(REQUEST_READ_TIMEOUT, read)
         .await
         .map_err(|_| RequestReadError::Io)?
+}
+
+fn callback_language(headers: &str) -> CallbackLanguage {
+    let Some(value) = headers.lines().find_map(|line| {
+        line.split_once(':')
+            .filter(|(name, _)| name.eq_ignore_ascii_case("accept-language"))
+            .map(|(_, value)| value)
+    }) else {
+        return CallbackLanguage::English;
+    };
+
+    for preference in value.split(',') {
+        match preference
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            language if language == "ru" || language.starts_with("ru-") => {
+                return CallbackLanguage::Russian;
+            }
+            language if language == "en" || language.starts_with("en-") => {
+                return CallbackLanguage::English;
+            }
+            _ => {}
+        }
+    }
+    CallbackLanguage::English
 }
 
 fn callback_url(pending: &OAuthPendingSession, target: &str) -> Result<String, OAuthFlowError> {
@@ -713,12 +767,15 @@ async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> io::
     write_http_response(stream, status, "text/plain; charset=utf-8", body).await
 }
 
-async fn write_callback_success(stream: &mut TcpStream) -> io::Result<()> {
+async fn write_callback_success(
+    stream: &mut TcpStream,
+    language: CallbackLanguage,
+) -> io::Result<()> {
     write_http_response(
         stream,
         200,
         "text/html; charset=utf-8",
-        CALLBACK_SUCCESS_HTML,
+        callback_success_html(language),
     )
     .await
 }
@@ -1069,9 +1126,9 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"));
         assert!(response.contains("Content-Type: text/html; charset=utf-8"));
         assert!(response.contains("text-align:center"));
-        assert!(response.contains("This tab will close when the browser allows it."));
+        assert!(response.contains("You can close this window now."));
+        assert!(response.contains(">Close window<"));
         assert!(response.contains("window.open(\"\",\"_self\")"));
-        assert!(response.contains("browser prevents this tab from being closed automatically"));
         assert!(!response.contains("authorization-code"));
         wait_until(|| events.has(&start.login_id, OAuthFlowStatus::CallbackReceived)).await;
         assert!(secrets.contains(&callback_secret_ref(&start.login_id)));
@@ -1086,6 +1143,22 @@ mod tests {
         assert!(!format!("{manager:?} {start:?}").contains("authorization-code"));
         manager.complete(&start.login_id).await.unwrap();
         remove_root(&root);
+    }
+
+    #[test]
+    fn callback_success_page_uses_supported_browser_language() {
+        assert_eq!(
+            callback_language("GET / HTTP/1.1\r\nAccept-Language: ru-RU,ru;q=0.9,en;q=0.8"),
+            CallbackLanguage::Russian
+        );
+        assert_eq!(
+            callback_language("GET / HTTP/1.1\r\nAccept-Language: de-DE,de;q=0.9,en;q=0.8"),
+            CallbackLanguage::English
+        );
+        assert!(callback_success_html(CallbackLanguage::Russian)
+            .contains("Теперь это окно можно закрыть."));
+        assert!(callback_success_html(CallbackLanguage::English)
+            .contains("You can close this window now."));
     }
 
     #[tokio::test]

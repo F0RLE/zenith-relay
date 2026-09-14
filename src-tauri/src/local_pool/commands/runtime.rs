@@ -425,25 +425,26 @@ pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
-    let (enabled, health, quota, quota_updated_at_ms) = {
+    let (enabled, health, quota_snapshot, observed_at_ms) = {
         let store = state.store()?;
         let account = store
             .account(&account_id)
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-        let operational = runtime_account_operational_state(&account.account, current_time_ms());
+        let observed_at_ms = current_time_ms();
+        let operational = runtime_account_operational_state(&account.account, observed_at_ms);
         (
             account_candidate_enabled(account.account.enabled, operational.routing_block_reason),
             operational.health,
-            operational.quota,
-            account.account.quota.updated_at_ms,
+            account.account.quota.clone(),
+            observed_at_ms,
         )
     };
-    if runtime.update_candidate_availability_at(
+    if runtime.sync_account_availability_with_quota(
         &account_id,
         enabled,
         health,
-        quota,
-        quota_updated_at_ms,
+        &quota_snapshot,
+        observed_at_ms,
     ) {
         return Ok(());
     }

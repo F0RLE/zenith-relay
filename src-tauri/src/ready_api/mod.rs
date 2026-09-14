@@ -227,8 +227,6 @@ pub fn run() {
                         started.elapsed().as_millis()
                     );
                 }
-            } else {
-                relay_state.set_background_session_active(false);
             }
             local_pool::background::start(handle.clone());
             let state = app.state::<AppState>();

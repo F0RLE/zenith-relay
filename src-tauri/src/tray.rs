@@ -232,9 +232,6 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
 /// Releases the WebView renderer while preserving the native process, tray,
 /// managed state, and local gateway. Opening Relay from the tray recreates it.
 pub fn close_main_window(app: &AppHandle) {
-    if let Some(state) = app.try_state::<DesktopState>() {
-        state.set_background_session_active(false);
-    }
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.destroy();
     }

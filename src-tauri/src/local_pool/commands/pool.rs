@@ -26,8 +26,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use zenith_relay_core::WireApi;
 use zenith_relay_core::{
-    merge_configuration_preset_settings, model_supports_fast_service_tier,
-    normalize_configuration_preset,
+    merge_configuration_preset_settings, normalize_configuration_preset,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
         ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetPreview,
@@ -924,10 +923,14 @@ pub async fn set_local_model_service_tier(
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
-    if !model_supports_fast_service_tier(&canonical) {
+    let runtime = state.gateway.runtime().await;
+    if !runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical))
+    {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "request speed is available only for OpenAI models",
+            "request speed requires a confirmed upstream service tier for this active model route",
         )
         .into());
     }
@@ -942,7 +945,7 @@ pub async fn set_local_model_service_tier(
         return Ok(snapshot);
     }
     state.store()?.replace_gateway(gateway.clone())?;
-    if let Some(runtime) = state.gateway.runtime().await {
+    if let Some(runtime) = runtime {
         if let Err(error) =
             runtime.set_model_service_tier_overrides(gateway.model_service_tier_overrides)
         {
