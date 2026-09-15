@@ -1770,6 +1770,135 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
 }
 
 #[tokio::test]
+async fn account_wake_is_pinned_to_its_account_and_reuses_runtime_execution() {
+    let (upstream, state) = spawn_upstream(vec![success_reply("wake-response")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    authority
+        .register(
+            "relay-refresh-account",
+            TokenSet::new(
+                "old-access",
+                Some("refresh-secret".into()),
+                None,
+                Some(current_time_ms().saturating_sub(1)),
+                current_time_ms().saturating_sub(2),
+                1,
+            )
+            .unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    register_ready(&authority, "other-account", "other-access").await;
+    let refresh = Arc::new(RefreshAdapter {
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+        access_token: "new-access",
+    });
+    let (gateway, events, refresh, _) = spawn_mixed_gateway(
+        // A permitted API source and a second OAuth account make this a
+        // regression for accidental pool fallback. The wake may use only its
+        // requested OAuth account.
+        vec![source("fallback-source", &upstream, "source-key", -10)],
+        vec![
+            account(
+                "relay-refresh-account",
+                "provider-wake-account",
+                &upstream,
+                10,
+            ),
+            account("other-account", "provider-other-account", &upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh,
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+
+    let response = gateway::execute_account_wake(
+        runtime,
+        gateway::AccountWakeRequest {
+            local_key_id: "system-gateway-key".into(),
+            account_id: "relay-refresh-account".into(),
+            model_id: MODEL.into(),
+            output_token_cap: 8,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["id"],
+        "wake-response"
+    );
+
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert_eq!(
+        requests[0].chatgpt_account_id.as_deref(),
+        Some("provider-wake-account")
+    );
+    assert_eq!(requests[0].originator.as_deref(), Some(CODEX_ORIGINATOR));
+    assert!(requests[0].responses_lite.is_none());
+    assert_eq!(requests[0].body["model"], MODEL);
+    assert_eq!(requests[0].body["stream"], false);
+    assert_eq!(requests[0].body["store"], false);
+    assert_eq!(requests[0].body["max_output_tokens"], 8);
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+    assert_eq!(
+        events[0].account_id.as_deref(),
+        Some("relay-refresh-account")
+    );
+    assert_eq!(events[0].local_key_id, "system-gateway-key");
+    assert_eq!(events[0].error_category.as_deref(), Some("codex_wake"));
+}
+
+#[tokio::test]
+async fn account_wake_for_an_unknown_account_does_not_fallback_to_the_pool() {
+    let (upstream, state) = spawn_upstream(vec![success_reply("must-not-run")]).await;
+    let authority = ready_authority("available-account", "available-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        vec![source("fallback-source", &upstream, "source-key", -10)],
+        vec![account(
+            "available-account",
+            "provider-available-account",
+            &upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+
+    let response = gateway::execute_account_wake(
+        runtime,
+        gateway::AccountWakeRequest {
+            local_key_id: "system-gateway-key".into(),
+            account_id: "missing-account".into(),
+            model_id: MODEL.into(),
+            output_token_cap: 8,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(state.requests.lock().unwrap().is_empty());
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn codex_compatibility_aliases_reach_the_canonical_account_endpoints() {
     let (upstream, state) = spawn_upstream(vec![
         success_reply("alias-response"),

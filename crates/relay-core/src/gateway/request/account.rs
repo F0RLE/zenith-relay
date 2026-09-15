@@ -96,6 +96,8 @@ pub(in crate::gateway) async fn responses_compact(
         response_affinity_key,
         rewrite_model: true,
         wait_for_candidate_availability,
+        allow_automatic_responses_lite: true,
+        request_origin: None,
     })
     .await
 }
@@ -185,6 +187,8 @@ pub(in crate::gateway) async fn alpha_search(
         response_affinity_key: None,
         rewrite_model: model_was_provided,
         wait_for_candidate_availability,
+        allow_automatic_responses_lite: true,
+        request_origin: None,
     })
     .await
 }
@@ -193,12 +197,16 @@ pub(in crate::gateway) async fn alpha_search(
 pub(in crate::gateway) enum AccountEndpoint {
     Compact,
     AlphaSearch,
+    /// Native Responses endpoint used by scheduler-owned account wake probes.
+    /// The account route already points at `/backend-api/codex/responses`, so
+    /// this variant intentionally leaves the URL unchanged.
+    Wake,
 }
 
 impl AccountEndpoint {
     pub(in crate::gateway) fn response_limit(self) -> usize {
         match self {
-            Self::Compact => crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+            Self::Compact | Self::Wake => crate::runtime::MAX_NON_STREAM_BODY_BYTES,
             Self::AlphaSearch => MAX_ALPHA_SEARCH_RESPONSE_BYTES,
         }
     }
@@ -228,6 +236,9 @@ pub(in crate::gateway) fn account_endpoint_url(
     mut responses_url: url::Url,
     endpoint: AccountEndpoint,
 ) -> Option<url::Url> {
+    if endpoint == AccountEndpoint::Wake {
+        return Some(responses_url);
+    }
     let mut segments = responses_url.path_segments_mut().ok()?;
     segments.pop_if_empty().pop();
     match endpoint {
@@ -237,6 +248,7 @@ pub(in crate::gateway) fn account_endpoint_url(
         AccountEndpoint::AlphaSearch => {
             segments.push("alpha").push("search");
         }
+        AccountEndpoint::Wake => unreachable!("wake endpoint returned before path mutation"),
     }
     drop(segments);
     Some(responses_url)

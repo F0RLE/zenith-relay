@@ -45,7 +45,7 @@ use reasoning::SetModelReasoningInput;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
-const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+pub(in crate::local_pool) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
 
 struct PreparedLocalPreset {
     current: ConfigurationPreset,

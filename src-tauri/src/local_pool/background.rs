@@ -6,7 +6,7 @@ use super::{
             AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
         reset_credits::consume_local_reset_credit_for_account,
-        wake::{completion_from_execution, CodexWakeClient},
+        wake::{completion_from_execution, execute_with_runtime, CodexWakeClient},
     },
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,
@@ -841,48 +841,77 @@ async fn execute_wake_permit(
     if !state.is_wake_permit_active(permit)? {
         return Ok(None);
     }
-    let prepared = match prepare_account_credentials(state, &permit.account_id).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            crate::diagnostics::record_error(
-                "background-wake",
-                Some(credential_error_code(&error)),
-                &error.message,
-                &[(
-                    "account",
-                    crate::diagnostics::hash_identifier(&permit.account_id),
-                )],
-            );
-            return Ok(Some(failed_wake_completion(credential_error_code(&error))));
-        }
+    let execution = if let Some(runtime) = state.gateway.runtime().await {
+        // Keep scheduler-owned wake traffic on the same live runtime as user
+        // requests.  The runtime receives an account-only scope, refreshes the
+        // token through its authority, and records the attempt in the shared
+        // usage/diagnostics pipeline.
+        crate::diagnostics::breadcrumb(
+            "background-wake",
+            "runtime_execution_started",
+            &[(
+                "account",
+                crate::diagnostics::hash_identifier(&permit.account_id),
+            )],
+        );
+        execute_with_runtime(
+            runtime,
+            super::commands::pool::SYSTEM_GATEWAY_KEY_ID,
+            &permit.request,
+        )
+        .await
+    } else {
+        // Startup can schedule the worker before the optional local listener
+        // has been created.  Preserve the existing direct probe only for that
+        // narrow window; once a runtime exists all wakes use the shared path.
+        crate::diagnostics::breadcrumb(
+            "background-wake",
+            "runtime_unavailable_direct_fallback",
+            &[(
+                "account",
+                crate::diagnostics::hash_identifier(&permit.account_id),
+            )],
+        );
+        let prepared = match prepare_account_credentials(state, &permit.account_id).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                crate::diagnostics::record_error(
+                    "background-wake",
+                    Some(credential_error_code(&error)),
+                    &error.message,
+                    &[(
+                        "account",
+                        crate::diagnostics::hash_identifier(&permit.account_id),
+                    )],
+                );
+                return Ok(Some(failed_wake_completion(credential_error_code(&error))));
+            }
+        };
+        let client = match CodexWakeClient::new_with_proxy(
+            prepared.tokens().access_token(),
+            prepared.provider_account_id(),
+            prepared.proxy(),
+        ) {
+            Ok(client) => client,
+            Err(failure) => {
+                crate::diagnostics::record_error(
+                    "background-wake",
+                    Some("client_create_failed"),
+                    &failure.to_string(),
+                    &[(
+                        "account",
+                        crate::diagnostics::hash_identifier(&permit.account_id),
+                    )],
+                );
+                return Ok(Some(completion_from_execution(
+                    &Err(failure),
+                    WakeVerificationOutcome::Unconfirmed,
+                    current_time_ms(),
+                )));
+            }
+        };
+        client.execute(&permit.request).await
     };
-    let client = match CodexWakeClient::new_with_proxy(
-        prepared.tokens().access_token(),
-        prepared.provider_account_id(),
-        prepared.proxy(),
-    ) {
-        Ok(client) => client,
-        Err(failure) => {
-            crate::diagnostics::record_error(
-                "background-wake",
-                Some("client_create_failed"),
-                &failure.to_string(),
-                &[(
-                    "account",
-                    crate::diagnostics::hash_identifier(&permit.account_id),
-                )],
-            );
-            return Ok(Some(completion_from_execution(
-                &Err(failure),
-                WakeVerificationOutcome::Unconfirmed,
-                current_time_ms(),
-            )));
-        }
-    };
-    if !state.is_wake_permit_active(permit)? {
-        return Ok(None);
-    }
-    let execution = client.execute(&permit.request).await;
     if !state.is_wake_permit_active(permit)? {
         return Ok(None);
     }

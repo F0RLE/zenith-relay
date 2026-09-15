@@ -1102,6 +1102,38 @@ impl GatewayRuntime {
             .map(|key| self.authenticated_key(key))
     }
 
+    /// Creates an ephemeral key scope for scheduler-owned work on exactly one
+    /// OAuth account.  Background probes must use the same scheduler,
+    /// cooldowns, token authority, and usage callback as normal gateway
+    /// requests, but they must never inherit the user's broad pool scope or
+    /// fall back to a different account.
+    pub(crate) fn internal_account_key(
+        &self,
+        local_key_id: &str,
+        account_id: &str,
+    ) -> Option<AuthenticatedKey> {
+        let local_key_id = local_key_id.trim();
+        let account_id = account_id.trim();
+        if local_key_id.is_empty() || account_id.is_empty() {
+            return None;
+        }
+        self.chatgpt_accounts.get(account_id)?;
+        Some(AuthenticatedKey {
+            id: local_key_id.to_string(),
+            scope: Arc::new(RwLock::new(CandidateScope {
+                // An explicit empty source set prevents a synthetic internal
+                // key from selecting an API source while the account set below
+                // pins selection to the requested OAuth candidate.
+                source_ids: Some(BTreeSet::new()),
+                account_ids: Some(BTreeSet::from([account_id.to_string()])),
+                model_rules: ModelRules::default(),
+            })),
+            model_rules: ModelRules::default(),
+            model_prefix: None,
+            client_wire_apis: Some(vec![ClientWireApi::Responses]),
+        })
+    }
+
     fn authenticated_key(&self, key: &RuntimeKey) -> AuthenticatedKey {
         AuthenticatedKey {
             id: key.id.clone(),

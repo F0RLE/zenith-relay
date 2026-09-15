@@ -2,6 +2,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 use zenith_relay_core::automations::{
@@ -10,6 +11,8 @@ use zenith_relay_core::automations::{
 use zenith_relay_core::{is_loopback_url, providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
 
 use super::{collect_limited, LimitedBodyError};
+use zenith_relay_core::gateway::{execute_account_wake, AccountWakeRequest};
+use zenith_relay_core::GatewayRuntime;
 
 pub const DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT: &str = super::records::CODEX_RESPONSES_URL;
 
@@ -186,6 +189,110 @@ impl CodexWakeClient {
             total_tokens: envelope.usage.and_then(|usage| usage.total_tokens),
         })
     }
+}
+
+/// Executes a wake through the already-running shared GatewayRuntime.  The
+/// runtime owns account selection, token refresh, scheduler leases, cooldowns,
+/// and usage emission; this adapter only converts its sanitized HTTP response
+/// into the desktop wake metrics contract.
+pub async fn execute_with_runtime(
+    runtime: Arc<GatewayRuntime>,
+    local_key_id: &str,
+    request: &WakeExecutionRequest,
+) -> Result<WakeExecutionMetrics, WakeExecutionFailure> {
+    let started = Instant::now();
+    let response = execute_account_wake(
+        runtime,
+        AccountWakeRequest {
+            local_key_id: local_key_id.to_string(),
+            account_id: request.account_id.clone(),
+            model_id: request.model_id.clone(),
+            output_token_cap: request.output_token_cap,
+        },
+    )
+    .await;
+    let status = response.status();
+    let category = response
+        .headers()
+        .get("x-zenith-relay-error-category")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let response_body = axum::body::to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| {
+            WakeExecutionFailure::runtime(
+                WakeExecutionErrorCode::ResponseTooLarge,
+                false,
+                Some(status.as_u16()),
+                elapsed_ms(started),
+            )
+        })?;
+    if !status.is_success() {
+        return Err(runtime_status_failure(
+            status,
+            category.as_deref(),
+            elapsed_ms(started),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&response_body).map_err(|_| {
+        WakeExecutionFailure::runtime(
+            WakeExecutionErrorCode::InvalidResponse,
+            false,
+            Some(status.as_u16()),
+            elapsed_ms(started),
+        )
+    })?;
+    let usage = wake_usage(&value);
+    Ok(WakeExecutionMetrics {
+        http_status: status.as_u16(),
+        latency_ms: elapsed_ms(started),
+        input_tokens: usage
+            .and_then(|usage| usage_token(usage, &["input_tokens", "prompt_tokens"])),
+        output_tokens: usage
+            .and_then(|usage| usage_token(usage, &["output_tokens", "completion_tokens"])),
+        total_tokens: usage.and_then(|usage| usage_token(usage, &["total_tokens"])),
+    })
+}
+
+fn runtime_status_failure(
+    status: reqwest::StatusCode,
+    category: Option<&str>,
+    latency_ms: u64,
+) -> WakeExecutionFailure {
+    let (code, retryable) = match category {
+        Some(
+            "all_sources_cooling_down"
+            | "all_sources_temporarily_unavailable"
+            | "no_eligible_source",
+        ) => (WakeExecutionErrorCode::Upstream, true),
+        Some("model_not_found" | "invalid_request") => {
+            (WakeExecutionErrorCode::InvalidRequest, false)
+        }
+        Some("upstream_body_too_large") => (WakeExecutionErrorCode::ResponseTooLarge, false),
+        _ => match status {
+            reqwest::StatusCode::UNAUTHORIZED => (WakeExecutionErrorCode::Unauthorized, false),
+            reqwest::StatusCode::FORBIDDEN => (WakeExecutionErrorCode::Forbidden, false),
+            reqwest::StatusCode::TOO_MANY_REQUESTS => (WakeExecutionErrorCode::RateLimited, true),
+            status if status.is_server_error() => (WakeExecutionErrorCode::Upstream, true),
+            reqwest::StatusCode::BAD_REQUEST => (WakeExecutionErrorCode::InvalidRequest, false),
+            _ => (WakeExecutionErrorCode::HttpStatus, false),
+        },
+    };
+    WakeExecutionFailure::runtime(code, retryable, Some(status.as_u16()), latency_ms)
+}
+
+fn wake_usage(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    value
+        .get("usage")
+        .or_else(|| value.pointer("/response/usage"))
+        .or_else(|| value.pointer("/response/response/usage"))
+        .or_else(|| value.get("usageMetadata"))
+}
+
+fn usage_token(usage: &serde_json::Value, names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| usage.get(*name).and_then(serde_json::Value::as_u64))
 }
 
 impl fmt::Debug for CodexWakeClient {

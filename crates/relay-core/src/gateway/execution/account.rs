@@ -52,6 +52,15 @@ pub(in crate::gateway) struct AccountExecution {
     pub(in crate::gateway) response_affinity_key: Option<String>,
     pub(in crate::gateway) rewrite_model: bool,
     pub(in crate::gateway) wait_for_candidate_availability: bool,
+    /// Account-only callers such as the background wake path deliberately
+    /// disable the automatic Responses Lite contract.  Lite is a whole
+    /// request contract and must never be inferred for a synthetic internal
+    /// request merely because the account's catalog happened to confirm it.
+    pub(in crate::gateway) allow_automatic_responses_lite: bool,
+    /// Optional internal origin attached to the request's usage record.  This
+    /// keeps scheduler-owned work distinguishable from customer traffic while
+    /// preserving the same account execution and retry pipeline.
+    pub(in crate::gateway) request_origin: Option<&'static str>,
 }
 
 pub(in crate::gateway) async fn execute_account_endpoint(
@@ -69,9 +78,14 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         response_affinity_key,
         rewrite_model,
         wait_for_candidate_availability,
+        allow_automatic_responses_lite,
+        request_origin,
     } = context;
     let service_tier_policy = ServiceTierPolicy::pool_owned(&request);
     let request_id = request_id();
+    if let Some(origin) = request_origin {
+        runtime.mark_request_origin(&request_id, origin);
+    }
     let client_tool_use = tool_use_diagnostics(&request);
     let client_context_id = client_context_fingerprint(&client_headers);
     let prompt_affinity_key = runtime.prompt_affinity_key(
@@ -132,8 +146,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     // Compact and search endpoints only select OAuth accounts, but their
     // retries can still move between account slots. Keep automatic Lite off
     // unless every such configured slot confirmed the same contract.
-    let automatic_responses_lite =
-        runtime.codex_model_account_responses_routes_all_support_lite(&key, &resolved_model);
+    let automatic_responses_lite = allow_automatic_responses_lite
+        && runtime.codex_model_account_responses_routes_all_support_lite(&key, &resolved_model);
 
     loop {
         // A model-switch or stale-tool recovery can remove the opaque
