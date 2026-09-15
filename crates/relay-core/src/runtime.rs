@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -300,6 +300,8 @@ pub enum DefaultServiceTier {
     #[default]
     Standard,
     Fast,
+    /// OpenAI's access-controlled lowest-latency tier.
+    Ultrafast,
 }
 
 /// Normalizes the explicit per-model policy. Capability is resolved only from
@@ -324,16 +326,33 @@ impl DefaultServiceTier {
         match self {
             Self::Standard => "standard",
             Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
         }
     }
 
     /// Parses the durable service-tier spelling, including the legacy Codex
     /// `priority` alias for Relay's fast tier.
     pub fn from_storage_value(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
-            Self::Fast
-        } else {
-            Self::Standard
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ultrafast" => Self::Ultrafast,
+            "fast" | "priority" => Self::Fast,
+            _ => Self::Standard,
+        }
+    }
+
+    pub(crate) const fn atomic_value(self) -> u8 {
+        match self {
+            Self::Standard => 0,
+            Self::Fast => 1,
+            Self::Ultrafast => 2,
+        }
+    }
+
+    pub(crate) const fn from_atomic_value(value: u8) -> Self {
+        match value {
+            1 => Self::Fast,
+            2 => Self::Ultrafast,
+            _ => Self::Standard,
         }
     }
 }
@@ -468,7 +487,7 @@ pub struct GatewayRuntime {
     control: RuntimeControl,
     max_retry_candidates: usize,
     quota_stale_after_ms: u64,
-    default_service_tier_fast: AtomicBool,
+    default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
     activity_revision: Arc<AtomicU64>,
@@ -950,9 +969,7 @@ impl GatewayRuntime {
             control: RuntimeControl::default(),
             max_retry_candidates: options.max_retry_candidates,
             quota_stale_after_ms: options.quota_stale_after_ms,
-            default_service_tier_fast: AtomicBool::new(
-                options.default_service_tier == DefaultServiceTier::Fast,
-            ),
+            default_service_tier_value: AtomicU8::new(options.default_service_tier.atomic_value()),
             response_affinity_store: affinity_store,
             activity_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
             activity_revision: Arc::new(AtomicU64::new(0)),
@@ -1503,20 +1520,18 @@ impl GatewayRuntime {
     }
 
     pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
-        self.default_service_tier_fast
-            .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
+        self.default_service_tier_value
+            .store(tier.atomic_value(), Ordering::Relaxed);
     }
 
     pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
-        if self.default_service_tier_fast.load(Ordering::Relaxed) {
-            DefaultServiceTier::Fast
-        } else {
-            DefaultServiceTier::Standard
-        }
+        DefaultServiceTier::from_atomic_value(
+            self.default_service_tier_value.load(Ordering::Relaxed),
+        )
     }
 
-    /// Applies the operator-selected two-speed policy. Client-owned API
-    /// requests retain an explicit tier at the gateway boundary.
+    /// Applies the operator-selected speed policy. Client-owned API requests
+    /// retain an explicit tier at the gateway boundary.
     pub fn set_model_service_tier_overrides(
         &self,
         overrides: BTreeMap<String, DefaultServiceTier>,
@@ -1535,15 +1550,25 @@ impl GatewayRuntime {
         candidate_id: &str,
         model: &str,
     ) -> DefaultServiceTier {
-        if !self.candidate_supports_fast_service_tier(candidate_id, model) {
-            return DefaultServiceTier::Standard;
-        }
-        self.model_service_tier_overrides
+        let requested = self
+            .model_service_tier_overrides
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&model.trim().to_ascii_lowercase())
             .copied()
-            .unwrap_or_else(|| self.default_service_tier())
+            .unwrap_or_else(|| self.default_service_tier());
+        self.effective_service_tier_for_candidate(candidate_id, model, requested)
+    }
+
+    pub(crate) fn model_effective_service_tier(&self, model: &str) -> DefaultServiceTier {
+        let requested = self
+            .model_service_tier_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model.trim().to_ascii_lowercase())
+            .copied()
+            .unwrap_or_else(|| self.default_service_tier());
+        self.project_service_tier_for_model(model, requested)
     }
 
     pub fn set_model_display_order(&self, models: Vec<String>) {

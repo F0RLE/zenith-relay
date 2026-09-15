@@ -2230,6 +2230,21 @@ async fn start_next_request(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            // The owner can become temporarily ineligible while this client
+            // WebSocket stays open because another chat consumed its quota.
+            // Reuse would fail before reaching the owner, so reconnect through
+            // the normal bounded replay path. That path materializes the local
+            // Responses history and removes the opaque owner reference before
+            // choosing a compatible account or API source.
+            if request.has_previous_response_id() && request.requires_affinity_owner {
+                let connected = connect_upstream_while_client_connected(
+                    downstream, runtime, key, headers, request, false, 0, None,
+                )
+                .await?;
+                return Ok(
+                    install_connected(downstream, upstream, runtime, key, state, connected).await,
+                );
+            }
             if let Some(retry_at_ms) = runtime.earliest_retry_at(
                 key,
                 &request.resolved_model,

@@ -65,6 +65,22 @@ impl StoragePaths {
         self.root.join("exports")
     }
 
+    pub(crate) fn logs_root(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
+    pub(crate) fn error_logs_root(&self) -> PathBuf {
+        self.logs_root().join("errors")
+    }
+
+    pub(crate) fn crash_logs_root(&self) -> PathBuf {
+        self.logs_root().join("crashes")
+    }
+
+    pub(crate) fn operation_logs_root(&self) -> PathBuf {
+        self.logs_root().join("operations")
+    }
+
     pub(crate) fn recovery_root(&self) -> PathBuf {
         self.root.join("recovery")
     }
@@ -109,6 +125,10 @@ mod tests {
         );
         assert_eq!(paths.webview_root(), root.join("cache/webview"));
         assert_eq!(paths.exports_root(), root.join("exports"));
+        assert_eq!(paths.logs_root(), root.join("logs"));
+        assert_eq!(paths.error_logs_root(), root.join("logs/errors"));
+        assert_eq!(paths.crash_logs_root(), root.join("logs/crashes"));
+        assert_eq!(paths.operation_logs_root(), root.join("logs/operations"));
         assert_eq!(
             paths.history_repair_backup_root(),
             root.join("recovery/operations/history-repair")

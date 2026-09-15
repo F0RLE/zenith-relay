@@ -47,11 +47,30 @@ const SOURCE_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 const ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 
 pub(crate) fn start(app: AppHandle) {
+    crate::diagnostics::record_operation("background", "workers_started", &[]);
     let recovery_app = app.clone();
     let _ownership_recovery = tauri::async_runtime::spawn(async move {
         let state = recovery_app.state::<DesktopState>();
-        let _ = super::commands::remote_server::recover_pending_remote_ownership(&state).await;
-        let _ = super::commands::remote_server::reconcile_saved_remote_ownership(&state).await;
+        if let Err(error) =
+            super::commands::remote_server::recover_pending_remote_ownership(&state).await
+        {
+            crate::diagnostics::record_error(
+                "background-remote-recovery",
+                Some("recover_pending_failed"),
+                &error.message,
+                &[],
+            );
+        }
+        if let Err(error) =
+            super::commands::remote_server::reconcile_saved_remote_ownership(&state).await
+        {
+            crate::diagnostics::record_error(
+                "background-remote-recovery",
+                Some("reconcile_failed"),
+                &error.message,
+                &[],
+            );
+        }
     });
     let quota_app = app.clone();
     let _quota_worker = tauri::async_runtime::spawn(async move {
@@ -87,8 +106,23 @@ pub(crate) fn start(app: AppHandle) {
 /// paused or empty pool must still pick up a newer identity for its next use.
 async fn codex_release_loop(_app: AppHandle) {
     loop {
-        if let Ok(release) = refresh_codex_client_release().await {
-            let _ = configure_codex_client_version(release.version());
+        match refresh_codex_client_release().await {
+            Ok(release) => {
+                if !configure_codex_client_version(release.version()) {
+                    crate::diagnostics::record_error(
+                        "background-codex-release",
+                        Some("configure_failed"),
+                        "published Codex release could not be applied",
+                        &[],
+                    );
+                }
+            }
+            Err(error) => crate::diagnostics::record_error(
+                "background-codex-release",
+                Some("refresh_failed"),
+                &error.to_string(),
+                &[],
+            ),
         }
         tokio::time::sleep(CODEX_RELEASE_REFRESH_INTERVAL).await;
     }
@@ -111,7 +145,14 @@ async fn model_metadata_loop(app: AppHandle) {
         }
         let loader = app.state::<DesktopState>().model_metadata_loader();
         if loader.refresh_due(current_time_ms()) {
-            let _ = loader.refresh(false).await;
+            if let Err(error) = loader.refresh(false).await {
+                crate::diagnostics::record_error(
+                    "background-model-metadata",
+                    Some("refresh_failed"),
+                    &error.to_string(),
+                    &[],
+                );
+            }
             let _ = app.emit("zenith-state-changed", ());
         }
     }
@@ -137,7 +178,14 @@ async fn pricing_loop(app: AppHandle) {
         let state = app.state::<DesktopState>();
         let loader = state.pricing_loader();
         if loader.refresh_due(current_time_ms()) {
-            let _ = loader.refresh(false).await;
+            if let Err(error) = loader.refresh(false).await {
+                crate::diagnostics::record_error(
+                    "background-pricing",
+                    Some("refresh_failed"),
+                    &error.to_string(),
+                    &[],
+                );
+            }
             // Refresh failures update the catalog status too. Notify the UI
             // for every attempt so snapshot consumers can recalculate derived
             // pricing data without waiting for another background event.
@@ -167,7 +215,20 @@ pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: 
         for account_id in account_ids {
             let result = refresh_account_models_once(&state, &account_id).await;
             if let Err(error) = result {
-                let _ = record_model_refresh_error(&state, &account_id, &error);
+                if let Err(record_error) = record_model_refresh_error(&state, &account_id, &error) {
+                    crate::diagnostics::record_error(
+                        "background-account-models",
+                        Some("persist_refresh_error_failed"),
+                        &record_error.message,
+                        &[("account", crate::diagnostics::hash_identifier(&account_id))],
+                    );
+                }
+                crate::diagnostics::record_error(
+                    "background-account-models",
+                    Some("refresh_failed"),
+                    &error.message,
+                    &[("account", crate::diagnostics::hash_identifier(&account_id))],
+                );
             }
             // The model list and any persisted discovery error are both part
             // of the runtime snapshot, so notify the frontend after each
@@ -181,8 +242,20 @@ pub(crate) async fn run_due_confirmation_wakes(
     state: &DesktopState,
     max_claims: usize,
 ) -> Result<usize> {
-    let permits =
-        state.claim_due_confirmation_wakes(current_time_ms(), max_claims.min(WAKE_BATCH_SIZE))?;
+    let permits = match state
+        .claim_due_confirmation_wakes(current_time_ms(), max_claims.min(WAKE_BATCH_SIZE))
+    {
+        Ok(permits) => permits,
+        Err(error) => {
+            crate::diagnostics::record_error(
+                "background-wake",
+                Some("claim_confirmation_failed"),
+                &error.message,
+                &[],
+            );
+            return Err(error);
+        }
+    };
     run_wake_permits(state, permits).await
 }
 
@@ -194,14 +267,26 @@ async fn quota_loop(app: AppHandle) {
             _ = state.wait_for_background_session_inactive() => continue,
             result = wait_for_quota_due(&state) => result,
         };
-        if wait_result.is_err() {
+        if let Err(error) = wait_result {
+            crate::diagnostics::record_error(
+                "background-quota",
+                Some("schedule_failed"),
+                &error.message,
+                &[],
+            );
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
             continue;
         }
         if !state.background_session_active() {
             continue;
         }
-        if run_due_quota_refreshes(&app, true).await.is_err() {
+        if let Err(error) = run_due_quota_refreshes(&app, true).await {
+            crate::diagnostics::record_error(
+                "background-quota",
+                Some("refresh_batch_failed"),
+                &error.message,
+                &[],
+            );
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
     }
@@ -226,21 +311,44 @@ async fn account_model_loop(app: AppHandle) {
                 .map(|account| account.account.id.clone())
                 .collect::<Vec<_>>()
         });
-        if let Ok(account_ids) = account_ids {
-            for account_id in account_ids {
-                if !state.background_session_active() {
-                    break;
+        match account_ids {
+            Ok(account_ids) => {
+                for account_id in account_ids {
+                    if !state.background_session_active() {
+                        break;
+                    }
+                    let result = super::accounts::quota_refresh::refresh_account_models_once(
+                        &state,
+                        &account_id,
+                    )
+                    .await;
+                    if let Err(error) = result {
+                        if let Err(record_error) =
+                            record_model_refresh_error(&state, &account_id, &error)
+                        {
+                            crate::diagnostics::record_error(
+                                "background-account-models",
+                                Some("persist_refresh_error_failed"),
+                                &record_error.message,
+                                &[("account", crate::diagnostics::hash_identifier(&account_id))],
+                            );
+                        }
+                        crate::diagnostics::record_error(
+                            "background-account-models",
+                            Some("refresh_failed"),
+                            &error.message,
+                            &[("account", crate::diagnostics::hash_identifier(&account_id))],
+                        );
+                    }
+                    let _ = app.emit("zenith-state-changed", ());
                 }
-                let result = super::accounts::quota_refresh::refresh_account_models_once(
-                    &state,
-                    &account_id,
-                )
-                .await;
-                if let Err(error) = result {
-                    let _ = record_model_refresh_error(&state, &account_id, &error);
-                }
-                let _ = app.emit("zenith-state-changed", ());
             }
+            Err(error) => crate::diagnostics::record_error(
+                "background-account-models",
+                Some("load_accounts_failed"),
+                &error.message,
+                &[],
+            ),
         }
         tokio::select! {
             _ = state.wait_for_background_session_inactive() => {},
@@ -267,28 +375,64 @@ async fn source_model_loop(app: AppHandle) {
                     .collect::<Vec<_>>()
             })
         };
-        if let Ok(source_ids) = source_ids {
-            for source_id in source_ids {
-                if !state.background_session_active() {
-                    break;
+        match source_ids {
+            Ok(source_ids) => {
+                for source_id in source_ids {
+                    if !state.background_session_active() {
+                        break;
+                    }
+                    let refresh_result = super::commands::connections::refresh_local_source_models(
+                        &state,
+                        &source_id,
+                        super::commands::connections::SourceRefreshMode::Background,
+                    )
+                    .await;
+                    match refresh_result {
+                        Ok(source) if source.last_test_status.as_deref() == Some("error") => {
+                            crate::diagnostics::record_error(
+                                "background-source-models",
+                                Some("discovery_failed"),
+                                source
+                                    .last_error
+                                    .as_deref()
+                                    .unwrap_or("source model discovery failed"),
+                                &[("source", crate::diagnostics::hash_identifier(&source_id))],
+                            );
+                        }
+                        Err(error) => crate::diagnostics::record_error(
+                            "background-source-models",
+                            Some("refresh_failed"),
+                            &error.message,
+                            &[("source", crate::diagnostics::hash_identifier(&source_id))],
+                        ),
+                        Ok(_) => {}
+                    }
+                    let _ = app.emit("zenith-state-changed", ());
                 }
-                let _ = super::commands::connections::refresh_local_source_models(
-                    &state,
-                    &source_id,
-                    super::commands::connections::SourceRefreshMode::Background,
-                )
-                .await;
-                let _ = app.emit("zenith-state-changed", ());
+                if !state.background_session_active() {
+                    continue;
+                }
+                if let Some(runtime) = state.gateway.runtime().await {
+                    runtime.prefetch_source_model_metadata();
+                }
+                let _mutation = state.setup_guard().await;
+                let result = super::commands::profiles::refresh_active_codex_catalog(&state).await;
+                if let Err(error) = &result {
+                    crate::diagnostics::record_error(
+                        "background-catalog",
+                        Some("refresh_failed"),
+                        &error.message,
+                        &[],
+                    );
+                }
+                super::commands::record_catalog_refresh_result(&state, &result);
             }
-            if !state.background_session_active() {
-                continue;
-            }
-            if let Some(runtime) = state.gateway.runtime().await {
-                runtime.prefetch_source_model_metadata();
-            }
-            let _mutation = state.setup_guard().await;
-            let result = super::commands::profiles::refresh_active_codex_catalog(&state).await;
-            super::commands::record_catalog_refresh_result(&state, &result);
+            Err(error) => crate::diagnostics::record_error(
+                "background-source-models",
+                Some("load_sources_failed"),
+                &error.message,
+                &[],
+            ),
         }
         tokio::select! {
             _ = state.wait_for_background_session_inactive() => {},
@@ -305,23 +449,44 @@ async fn wake_loop(app: AppHandle) {
             _ = state.wait_for_background_session_inactive() => continue,
             result = wait_for_automatic_wake(&state) => result,
         };
-        if wait_result.is_err() {
+        if let Err(error) = wait_result {
+            crate::diagnostics::record_error(
+                "background-wake",
+                Some("schedule_failed"),
+                &error.message,
+                &[],
+            );
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
             continue;
         }
         if !state.background_session_active() {
             continue;
         }
-        let Ok(permits) = app
+        let permits = match app
             .state::<DesktopState>()
             .claim_due_automatic_wakes(current_time_ms(), WAKE_BATCH_SIZE)
-        else {
-            tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
-            continue;
+        {
+            Ok(permits) => permits,
+            Err(error) => {
+                crate::diagnostics::record_error(
+                    "background-wake",
+                    Some("claim_failed"),
+                    &error.message,
+                    &[],
+                );
+                tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
+                continue;
+            }
         };
         let state = app.state::<DesktopState>();
         let result = run_wake_permits(&state, permits).await;
-        if result.is_err() {
+        if let Err(error) = result {
+            crate::diagnostics::record_error(
+                "background-wake",
+                Some("execution_failed"),
+                &error.message,
+                &[],
+            );
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
     }
@@ -373,6 +538,12 @@ async fn run_due_quota_refreshes(app: &AppHandle, refresh_models: bool) -> Resul
     while let Some(joined) = workers.join_next_with_id().await {
         let worker_id = quota_worker_id(&joined);
         let Some(permit) = active_permits.remove(&worker_id) else {
+            crate::diagnostics::record_error(
+                "background-quota",
+                Some("worker_permit_lost"),
+                "quota refresh worker permit was lost",
+                &[],
+            );
             first_error.get_or_insert_with(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
@@ -384,20 +555,40 @@ async fn run_due_quota_refreshes(app: &AppHandle, refresh_models: bool) -> Resul
         match joined {
             Ok((_, response)) => {
                 let state = app.state::<DesktopState>();
+                let account_hash = crate::diagnostics::hash_identifier(&permit.account_id);
                 if let Err(error) = settle_quota_refresh(&state, permit, response).await {
+                    crate::diagnostics::record_error(
+                        "background-quota",
+                        Some("settle_failed"),
+                        &error.message,
+                        &[("account", account_hash)],
+                    );
                     first_error.get_or_insert(error);
                 }
             }
             Err(_) => {
                 let state = app.state::<DesktopState>();
+                let account_hash = crate::diagnostics::hash_identifier(&permit.account_id);
                 if let Err(error) = reschedule_failed_quota_worker(
                     &state,
                     permit,
                     current_time_ms().saturating_add(WORKER_ERROR_RETRY_MS),
                 ) {
+                    crate::diagnostics::record_error(
+                        "background-quota",
+                        Some("reschedule_failed"),
+                        &error.message,
+                        &[("account", account_hash.clone())],
+                    );
                     first_error.get_or_insert(error);
                     continue;
                 }
+                crate::diagnostics::record_error(
+                    "background-quota",
+                    Some("worker_panicked"),
+                    "quota refresh worker terminated unexpectedly",
+                    &[("account", account_hash)],
+                );
                 first_error.get_or_insert_with(|| {
                     LocalPoolError::new(ErrorCode::InvalidState, "quota refresh worker failed")
                 });
@@ -417,6 +608,12 @@ async fn run_due_quota_refreshes(app: &AppHandle, refresh_models: bool) -> Resul
         ) {
             Ok(new_claims) => claimed = claimed.saturating_add(new_claims),
             Err(error) => {
+                crate::diagnostics::record_error(
+                    "background-quota",
+                    Some("claim_failed"),
+                    &error.message,
+                    &[],
+                );
                 first_error.get_or_insert(error);
             }
         }
@@ -482,7 +679,22 @@ async fn settle_quota_refresh(
         }
         Err(error) => {
             let account_id = permit.account_id.clone();
-            let _ = record_quota_refresh_error(state, &account_id, &error, current_time_ms());
+            crate::diagnostics::record_error(
+                "background-quota",
+                Some("account_refresh_failed"),
+                &error.message,
+                &[("account", crate::diagnostics::hash_identifier(&account_id))],
+            );
+            if let Err(record_error) =
+                record_quota_refresh_error(state, &account_id, &error, current_time_ms())
+            {
+                crate::diagnostics::record_error(
+                    "background-quota",
+                    Some("persist_refresh_error_failed"),
+                    &record_error.message,
+                    &[("account", crate::diagnostics::hash_identifier(&account_id))],
+                );
+            }
             if terminal_quota_refresh_error(state, &account_id, &error)? {
                 state.complete_quota_refresh(permit)?;
             } else {
@@ -608,14 +820,27 @@ async fn run_wake_permits(state: &DesktopState, permits: Vec<WakePermit>) -> Res
     let claimed = permits.len();
     let mut first_error = None;
     for permit in permits {
+        let account_hash = crate::diagnostics::hash_identifier(&permit.account_id);
         match execute_wake_permit(state, &permit).await {
             Ok(Some(completion)) => {
                 if let Err(error) = state.complete_wake(permit, completion) {
+                    crate::diagnostics::record_error(
+                        "background-wake",
+                        Some("complete_failed"),
+                        &error.message,
+                        &[("account", account_hash.clone())],
+                    );
                     first_error.get_or_insert(error);
                 }
             }
             Ok(None) => {}
             Err(error) => {
+                crate::diagnostics::record_error(
+                    "background-wake",
+                    Some("permit_failed"),
+                    &error.message,
+                    &[("account", account_hash)],
+                );
                 first_error.get_or_insert(error);
             }
         }
@@ -632,7 +857,18 @@ async fn execute_wake_permit(
     }
     let prepared = match prepare_account_credentials(state, &permit.account_id).await {
         Ok(prepared) => prepared,
-        Err(error) => return Ok(Some(failed_wake_completion(credential_error_code(&error)))),
+        Err(error) => {
+            crate::diagnostics::record_error(
+                "background-wake",
+                Some(credential_error_code(&error)),
+                &error.message,
+                &[(
+                    "account",
+                    crate::diagnostics::hash_identifier(&permit.account_id),
+                )],
+            );
+            return Ok(Some(failed_wake_completion(credential_error_code(&error))));
+        }
     };
     let client = match CodexWakeClient::new_with_proxy(
         prepared.tokens().access_token(),
@@ -641,11 +877,20 @@ async fn execute_wake_permit(
     ) {
         Ok(client) => client,
         Err(failure) => {
+            crate::diagnostics::record_error(
+                "background-wake",
+                Some("client_create_failed"),
+                &failure.to_string(),
+                &[(
+                    "account",
+                    crate::diagnostics::hash_identifier(&permit.account_id),
+                )],
+            );
             return Ok(Some(completion_from_execution(
                 &Err(failure),
                 WakeVerificationOutcome::Unconfirmed,
                 current_time_ms(),
-            )))
+            )));
         }
     };
     if !state.is_wake_permit_active(permit)? {
@@ -662,12 +907,48 @@ async fn execute_wake_permit(
         }
         match refresh_account_quota_once(state, &permit.account_id, false, false).await {
             Ok(response) => {
-                let _ = settle_verification_quota(state, &permit.account_id, &response);
-                let _ = evaluate_updated_transitions(state, &response);
-                let _ = evaluate_weekly_exhaustions(state, &response).await;
+                if let Err(error) = settle_verification_quota(state, &permit.account_id, &response)
+                {
+                    crate::diagnostics::record_error(
+                        "background-wake",
+                        Some("settle_verification_failed"),
+                        &error.message,
+                        &[(
+                            "account",
+                            crate::diagnostics::hash_identifier(&permit.account_id),
+                        )],
+                    );
+                }
+                if let Err(error) = evaluate_updated_transitions(state, &response) {
+                    crate::diagnostics::record_error(
+                        "background-wake",
+                        Some("evaluate_transition_failed"),
+                        &error.message,
+                        &[],
+                    );
+                }
+                if let Err(error) = evaluate_weekly_exhaustions(state, &response).await {
+                    crate::diagnostics::record_error(
+                        "background-wake",
+                        Some("evaluate_weekly_failed"),
+                        &error.message,
+                        &[],
+                    );
+                }
                 verification_from_refresh(permit, &response)
             }
-            Err(_) => WakeVerificationOutcome::Unconfirmed,
+            Err(error) => {
+                crate::diagnostics::record_error(
+                    "background-wake",
+                    Some("verification_refresh_failed"),
+                    &error.message,
+                    &[(
+                        "account",
+                        crate::diagnostics::hash_identifier(&permit.account_id),
+                    )],
+                );
+                WakeVerificationOutcome::Unconfirmed
+            }
         }
     } else {
         WakeVerificationOutcome::Unconfirmed

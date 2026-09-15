@@ -269,6 +269,24 @@ impl GatewayRuntime {
             )
     }
 
+    pub(crate) fn response_affinity_owner_is_eligible(
+        &self,
+        key: &AuthenticatedKey,
+        affinity_key: &str,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        let scope = key.scope_snapshot();
+        self.lock_scheduler().response_affinity_owner_is_eligible(
+            affinity_key,
+            model,
+            allowed_protocols,
+            &scope,
+            now_ms,
+        )
+    }
+
     pub(crate) fn response_affinity_owner_supports_model(
         &self,
         affinity_key: &str,
@@ -280,9 +298,10 @@ impl GatewayRuntime {
             .response_affinity_owner_supports_model(affinity_key, model, allowed_protocols, now_ms)
     }
 
-    /// Release an optional tool binding after its owner leaves the request's
-    /// configured routes. Callers must first establish that the input contains
-    /// the full tool history and does not depend on an opaque response id.
+    /// Release an optional tool binding after its owner is no longer eligible
+    /// or leaves the request's configured routes. Callers must first establish
+    /// that the input contains the full tool history and does not depend on an
+    /// opaque response id.
     pub(crate) fn release_unroutable_response_affinity(
         &self,
         key: &AuthenticatedKey,
@@ -291,6 +310,15 @@ impl GatewayRuntime {
         allowed_protocols: &[crate::WireApi],
         now_ms: u64,
     ) -> bool {
+        let owner_is_eligible = affinity_key.as_deref().and_then(|affinity_key| {
+            self.response_affinity_owner_is_eligible(
+                key,
+                affinity_key,
+                model,
+                allowed_protocols,
+                now_ms,
+            )
+        });
         let supports_route = affinity_key.as_deref().and_then(|affinity_key| {
             self.response_affinity_owner_supports_route(
                 key,
@@ -300,7 +328,7 @@ impl GatewayRuntime {
                 now_ms,
             )
         });
-        if supports_route != Some(false) {
+        if owner_is_eligible != Some(false) && supports_route != Some(false) {
             return false;
         }
         self.invalidate_response_affinity(affinity_key.take().as_deref());

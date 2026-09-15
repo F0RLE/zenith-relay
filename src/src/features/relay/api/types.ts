@@ -1,6 +1,6 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
-export type DefaultServiceTier = "standard" | "fast";
+export type DefaultServiceTier = "standard" | "fast" | "ultrafast";
 export type ObservedServiceTier = string;
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
@@ -226,6 +226,8 @@ export type ModelSummary = {
   reasoningConfigurable?: boolean;
   reasoningManualFallback?: boolean;
   speedSupported?: boolean;
+  /** Exact speed tiers confirmed by current routes, including standard. */
+  speedTiers?: DefaultServiceTier[];
   speedTier?: DefaultServiceTier;
   speedConfigurable?: boolean;
 };
@@ -802,4 +804,8 @@ export type SupportBundlePreview = {
 
 export type RelayStorageInfo = {
   dataPath: string;
+  logsPath: string;
+  errorLogsPath: string;
+  crashLogsPath: string;
+  operationLogsPath: string;
 };

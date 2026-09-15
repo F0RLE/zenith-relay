@@ -167,6 +167,7 @@ function normalizeModelSummary(model: ModelSummary): ModelSummary {
     reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
     reasoningConfigurable: model.reasoningConfigurable ?? false,
     speedSupported: model.speedSupported ?? false,
+    speedTiers: model.speedTiers ?? [],
     speedTier: model.speedTier ?? "standard",
     speedConfigurable: model.speedConfigurable ?? false,
   };
@@ -209,6 +210,7 @@ function fallbackModelSummary(id: string): ModelSummary {
     reasoningSupportedLevels: [],
     reasoningAllowedLevels: [],
     reasoningConfigurable: false,
+    speedTiers: [],
     speedSupported: false,
     speedTier: "standard",
     speedConfigurable: false,

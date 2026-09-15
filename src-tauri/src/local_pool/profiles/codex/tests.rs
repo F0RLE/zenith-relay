@@ -2801,6 +2801,10 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         config["desktop"][DESKTOP_DEFAULT_SERVICE_TIER_KEY].as_str(),
         Some("priority")
     );
+    assert_eq!(
+        config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(),
+        Some("priority")
+    );
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
     let state: Value =
         serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
@@ -2815,6 +2819,26 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         true
     );
 
+    sync_default_service_tier(&home, DefaultServiceTier::Ultrafast).unwrap();
+    let config = fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    assert_eq!(
+        config["desktop"][DESKTOP_DEFAULT_SERVICE_TIER_KEY].as_str(),
+        Some("ultrafast")
+    );
+    assert_eq!(
+        config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(),
+        Some("ultrafast")
+    );
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY],
+        "ultrafast"
+    );
+
     sync_default_service_tier(&home, DefaultServiceTier::Standard).unwrap();
     let config = fs::read_to_string(home.join(CONFIG_FILE))
         .unwrap()
@@ -2825,6 +2849,7 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         .unwrap()
         .get(DESKTOP_DEFAULT_SERVICE_TIER_KEY)
         .is_none());
+    assert_eq!(config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(), Some("default"));
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
     let state: Value =
         serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();

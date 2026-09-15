@@ -905,9 +905,8 @@
 @media (prefers-reduced-motion: reduce) {
   .subscription-plan-order-row,
   .pool-speed-control,
-  .pool-speed-control > svg,
-  .pool-speed-track,
-  .pool-speed-track > span {
+  .pool-speed-control .relay-option-trigger,
+  .pool-speed-control .relay-option-trigger > svg {
     transition: none;
   }
 

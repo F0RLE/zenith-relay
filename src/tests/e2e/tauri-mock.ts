@@ -75,7 +75,7 @@ export type MockOptions = {
   distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
-  modelSpeed?: Record<string, "standard" | "fast">;
+  modelSpeed?: Record<string, "standard" | "fast" | "ultrafast">;
   sourceDetectedModelPrices?: Record<string, {
     inputMicroUsdPerMillion: number;
     cachedInputMicroUsdPerMillion?: number;
@@ -125,7 +125,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const quotaNowMs = Date.now();
     const primaryResetAtMs = quotaNowMs + 90 * 60_000;
     const secondaryResetAtMs = quotaNowMs + 3 * 24 * 60 * 60_000;
-    const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; serviceTier?: "standard" | "fast" | null; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; availableCreditsMicroUnits: number | null; providerCreditsAvailable: boolean; providerCreditsUnlimited: boolean; updatedAtMs: number; error: null } = {
+    const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; serviceTier?: "standard" | "fast" | "ultrafast" | null; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; availableCreditsMicroUnits: number | null; providerCreditsAvailable: boolean; providerCreditsUnlimited: boolean; updatedAtMs: number; error: null } = {
       primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: primaryResetAtMs, windowStartMs: primaryResetAtMs - 300 * 60_000, windowMinutes: 300, observedAtMs: quotaNowMs },
       secondary: { kind: "secondary", availableBasisPoints: exhaustedQuotaWindow === "secondary" ? 0 : 6400, explicitlyFull: false, resetAtMs: secondaryResetAtMs, windowStartMs: secondaryResetAtMs - 10_080 * 60_000, windowMinutes: 10_080, observedAtMs: quotaNowMs },
       supplemental: input.supplementalQuota ? [
@@ -271,7 +271,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     });
       const systemCredentialId = "key_system";
       const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogProvider?: string | null; catalogFamily?: string | null; catalogName?: string | null; catalogReleaseDate?: string | null; catalogLastUpdated?: string | null; catalogStatus?: string | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningManualFallback?: boolean; speedSupported?: boolean; speedTier?: "standard" | "fast"; speedConfigurable?: boolean };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogProvider?: string | null; catalogFamily?: string | null; catalogName?: string | null; catalogReleaseDate?: string | null; catalogLastUpdated?: string | null; catalogStatus?: string | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningManualFallback?: boolean; speedTiers?: Array<"standard" | "fast" | "ultrafast">; speedSupported?: boolean; speedTier?: "standard" | "fast" | "ultrafast"; speedConfigurable?: boolean };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "cacheWrite5mMicroUsdPerMillion" | "cacheWrite1hMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -307,7 +307,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
       capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
       sources: populated ? sources : [],
@@ -671,7 +671,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "set_local_model_service_tier": {
-            const request = args.input as { modelId: string; serviceTier: "standard" | "fast" };
+            const request = args.input as { modelId: string; serviceTier: "standard" | "fast" | "ultrafast" };
             const target = localRuntime.gateway.models.find((model) => model.id === request.modelId);
             if (target) target.speedTier = request.serviceTier;
             return structuredClone(localRuntime);
@@ -702,7 +702,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "set_codex_profile_websockets": return null;
           case "update_local_routing": {
-            const request = args.input as { maxRetryCandidates: number; cooldownAfterFailures: number; keepLastCandidateAvailable: boolean; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" };
+            const request = args.input as { maxRetryCandidates: number; cooldownAfterFailures: number; keepLastCandidateAvailable: boolean; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" | "ultrafast" };
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
             localRuntime.gateway.cooldownAfterFailures = request.cooldownAfterFailures;
             localRuntime.gateway.keepLastCandidateAvailable = request.keepLastCandidateAvailable;
@@ -960,7 +960,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null, active: true } };
           case "launch_codex_source": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.sourceId), boundOauthAccountId: null, active: true } };
           case "attach_codex_to_remote_gateway": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: "key_system", boundOauthAccountId: null, active: true } };
-          case "get_relay_storage_info": return { dataPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data" };
+          case "get_relay_storage_info": return {
+            dataPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data",
+            logsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs",
+            errorLogsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\errors",
+            crashLogsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\crashes",
+            operationLogsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations",
+          };
           case "open_relay_folder": return null;
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.automations = []; localUsage = []; return null;
           case "clear_local_usage": localUsage = []; return null;
@@ -1122,6 +1128,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           reasoningManualFallback: current?.reasoningManualFallback
             ?? input.manualReasoningFallbackModels?.some((model) => model.toLowerCase() === id.toLowerCase())
             ?? false,
+          speedTiers: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase())
+            ? ["standard", "fast"]
+            : ["standard"],
           speedSupported: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase()),
           speedTier: input.modelSpeed?.[id.toLowerCase()] ?? "standard",
           speedConfigurable: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase()),
@@ -1275,7 +1284,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (type === "set_model_service_tier") {
         const modelId = String(input.payload?.modelId ?? "");
         const target = remoteRuntime.gateway.models.find((model) => model.id === modelId);
-        if (target) target.speedTier = input.payload?.serviceTier as "standard" | "fast";
+        if (target) target.speedTier = input.payload?.serviceTier as "standard" | "fast" | "ultrafast";
         return structuredClone(remoteRuntime);
       }
       if (type === "set_model_order") {
@@ -1293,7 +1302,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         remoteRuntime.gateway.keepLastCandidateAvailable = Boolean(input.payload?.keepLastCandidateAvailable);
         if (input.payload?.routingStrategy) remoteRuntime.gateway.routingStrategy = input.payload.routingStrategy as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
         if (input.payload?.subscriptionPlanOrder) remoteRuntime.gateway.subscriptionPlanOrder = [...input.payload.subscriptionPlanOrder as string[]];
-        if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast";
+        if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast" | "ultrafast";
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_all_quotas") return { refreshed: remoteRuntime.accounts.length, failed: 0, snapshot: structuredClone(remoteRuntime) };

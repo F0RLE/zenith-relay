@@ -49,6 +49,7 @@ pub(in crate::local_pool) fn record_catalog_refresh_result(
 pub(in crate::local_pool) async fn runtime_from_store(
     state: &DesktopState,
 ) -> Result<Arc<GatewayRuntime>> {
+    crate::diagnostics::breadcrumb("gateway-runtime", "build_started", &[]);
     let system_key = pool::ensure_system_gateway_key(state)?;
     let codex_home = crate::platform::default_codex_home();
     let protected_account_id =
@@ -231,7 +232,16 @@ pub(in crate::local_pool) async fn runtime_from_store(
         options,
         usage_callback,
     )
-    .map_err(core_error)?;
+    .map_err(|error| {
+        let local = core_error(error);
+        crate::diagnostics::record_error(
+            "gateway-runtime",
+            Some("runtime_build_failed"),
+            &local.message,
+            &[],
+        );
+        local
+    })?;
     runtime.set_activity_callback(state.runtime_activity_callback());
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
@@ -412,6 +422,22 @@ pub(in crate::local_pool) async fn sync_account_or_rollback(
     .await
 }
 
+/// Reconciles account policy and quota snapshots that may have changed while
+/// the startup runtime was being constructed. Automatic quota refreshes run
+/// independently of Gateway startup, so a refresh can finish before the
+/// listener exists and otherwise have no live scheduler to update.
+pub(in crate::local_pool) async fn sync_running_account_states(state: &DesktopState) -> Result<()> {
+    let Some(runtime) = state.gateway.runtime().await else {
+        return Ok(());
+    };
+    let accounts = state.store()?.accounts().to_vec();
+    let observed_at_ms = current_time_ms();
+    for account in accounts {
+        sync_runtime_account_state(&runtime, &account, observed_at_ms);
+    }
+    Ok(())
+}
+
 pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
     state: &DesktopState,
     previous_account: LocalAccountRecord,
@@ -425,30 +451,30 @@ pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
-    let (enabled, health, quota_snapshot, observed_at_ms) = {
-        let store = state.store()?;
-        let account = store
-            .account(&account_id)
-            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-        let observed_at_ms = current_time_ms();
-        let operational = runtime_account_operational_state(&account.account, observed_at_ms);
-        (
-            account_candidate_enabled(account.account.enabled, operational.routing_block_reason),
-            operational.health,
-            account.account.quota.clone(),
-            observed_at_ms,
-        )
-    };
-    if runtime.sync_account_availability_with_quota(
-        &account_id,
-        enabled,
-        health,
-        &quota_snapshot,
-        observed_at_ms,
-    ) {
+    let account = state
+        .store()?
+        .account(&account_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    if sync_runtime_account_state(&runtime, &account, current_time_ms()) {
         return Ok(());
     }
     sync_account_or_rollback(state, previous_account, attempted_account).await
+}
+
+fn sync_runtime_account_state(
+    runtime: &GatewayRuntime,
+    account: &LocalAccountRecord,
+    observed_at_ms: u64,
+) -> bool {
+    let operational = runtime_account_operational_state(&account.account, observed_at_ms);
+    runtime.sync_account_availability_with_quota(
+        &account.account.id,
+        account_candidate_enabled(account.account.enabled, operational.routing_block_reason),
+        operational.health,
+        &account.account.quota,
+        observed_at_ms,
+    )
 }
 
 pub(in crate::local_pool) async fn sync_gateway_or_rollback(
@@ -470,7 +496,9 @@ pub(in crate::local_pool) async fn restart_or_rollback(
     state: &DesktopState,
     rollback: impl FnOnce() -> Result<()> + Send,
 ) -> Result<()> {
+    crate::diagnostics::breadcrumb("gateway-runtime", "restart_started", &[]);
     let Some(address) = state.gateway.address().await else {
+        crate::diagnostics::breadcrumb("gateway-runtime", "restart_skipped", &[]);
         return Ok(());
     };
     let next_port = state.store()?.gateway().port;
@@ -478,7 +506,20 @@ pub(in crate::local_pool) async fn restart_or_rollback(
     let runtime = match runtime_from_store(state).await {
         Ok(runtime) => runtime,
         Err(error) => {
-            apply_rollback(state, rollback.take().unwrap()).await?;
+            crate::diagnostics::record_error(
+                "gateway-runtime",
+                Some("runtime_rebuild_failed"),
+                &error.message,
+                &[],
+            );
+            let Some(rollback) = rollback.take() else {
+                return Err(fail_closed(
+                    state,
+                    format!("{error}; gateway rollback callback was consumed unexpectedly"),
+                )
+                .await);
+            };
+            apply_rollback(state, rollback).await?;
             return Err(error);
         }
     };
@@ -486,8 +527,21 @@ pub(in crate::local_pool) async fn restart_or_rollback(
     state.gateway.stop().await;
     let restart_error = state.gateway.start(runtime, next_port).await.err();
     if let Some(error) = restart_error {
+        crate::diagnostics::record_error(
+            "gateway-runtime",
+            Some("gateway_restart_failed"),
+            &error.to_string(),
+            &[],
+        );
         state.gateway.stop().await;
-        apply_rollback(state, rollback.take().unwrap()).await?;
+        let Some(rollback) = rollback.take() else {
+            return Err(fail_closed(
+                state,
+                format!("{error}; gateway rollback callback was consumed unexpectedly"),
+            )
+            .await);
+        };
+        apply_rollback(state, rollback).await?;
         let old_runtime = match runtime_from_store(state).await {
             Ok(runtime) => runtime,
             Err(restore) => {
@@ -512,6 +566,7 @@ pub(in crate::local_pool) async fn restart_or_rollback(
     }
     let result = profiles::refresh_active_codex_catalog(state).await;
     record_catalog_refresh_result(state, &result);
+    crate::diagnostics::record_operation("gateway-runtime", "restart_completed", &[]);
     Ok(())
 }
 
@@ -534,6 +589,7 @@ pub(in crate::local_pool) async fn fail_closed(
     state: &DesktopState,
     message: String,
 ) -> LocalPoolError {
+    crate::diagnostics::record_error("gateway-runtime", Some("fail_closed"), &message, &[]);
     state.gateway.stop().await;
     match disable_gateway(state) {
         Ok(()) => LocalPoolError::new(ErrorCode::RecoveryRequired, message),
@@ -569,6 +625,7 @@ pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> Loca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
     use std::{
         fs,
         sync::atomic::{AtomicUsize, Ordering},
@@ -689,6 +746,106 @@ mod tests {
         state.gateway.stop().await;
         secret_store::delete(&source_secret_ref).unwrap();
         secret_store::delete(&key.secret_ref).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_quota_persisted_before_listener_creation() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-startup-quota-{id}"));
+        let account_id = format!("account_startup_{id}");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let now_ms = current_time_ms();
+        let credentials = StoredCodexCredentials::new(
+            &account_id,
+            "access-startup".into(),
+            Some("refresh-startup".into()),
+            Some("id-startup".into()),
+            Some(now_ms.saturating_add(60_000)),
+            now_ms,
+            1,
+            None,
+            Some(format!("provider-{id}")),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+        let credentials_store = CredentialStore::from_backend(NativeSecretBackend);
+        credentials_store.save(&credentials).unwrap();
+        let mut account = records::new_account_record(
+            &credentials,
+            zenith_relay_core::accounts::AccountAuthMode::OAuth,
+            vec!["gpt-test".into()],
+            0,
+            now_ms,
+        )
+        .unwrap();
+        account.account.in_pool = true;
+        account.account.quota = zenith_relay_core::quota::QuotaSnapshot {
+            limit_reached: true,
+            updated_at_ms: Some(now_ms),
+            ..Default::default()
+        };
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account.clone())
+            .unwrap();
+
+        // Build the same stale runtime that can be captured while a startup
+        // quota refresh is still writing its result to the store.
+        let stale_runtime = runtime_from_store(&state).await.unwrap();
+        assert!(
+            !stale_runtime
+                .candidate_runtime_order()
+                .into_iter()
+                .find(|candidate| candidate.candidate_id == account_id)
+                .expect("startup account candidate")
+                .available
+        );
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        state.gateway.start(stale_runtime, port).await.unwrap();
+
+        account.account.quota = zenith_relay_core::quota::QuotaSnapshot {
+            limit_reached: true,
+            available_credits_micro_units: Some(123),
+            provider_credits_available: true,
+            updated_at_ms: Some(now_ms.saturating_add(1)),
+            ..Default::default()
+        };
+        state.store().unwrap().upsert_account(account).unwrap();
+        sync_running_account_states(&state).await.unwrap();
+
+        assert!(
+            state
+                .gateway
+                .runtime()
+                .await
+                .unwrap()
+                .candidate_runtime_order()
+                .into_iter()
+                .find(|candidate| candidate.candidate_id == account_id)
+                .expect("reconciled account candidate")
+                .available
+        );
+
+        let key_secret_ref = state
+            .store()
+            .unwrap()
+            .keys()
+            .iter()
+            .find(|key| key.system)
+            .map(|key| key.secret_ref.clone());
+        state.gateway.stop().await;
+        credentials_store.delete(&account_id).unwrap();
+        if let Some(secret_ref) = key_secret_ref {
+            secret_store::delete(&secret_ref).unwrap();
+        }
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

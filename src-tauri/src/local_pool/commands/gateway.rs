@@ -456,6 +456,10 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
             .gateway
             .start(runtime_from_store(state).await?, port)
             .await?;
+        // Quota workers can finish between runtime construction and listener
+        // creation. Reconcile the persisted account snapshots now that a live
+        // scheduler exists so startup cannot strand fresh provider credits.
+        super::sync_running_account_states(state).await?;
         if state.background_session_active() {
             if let Some(runtime) = state.gateway.runtime().await {
                 runtime.prefetch_source_model_metadata();

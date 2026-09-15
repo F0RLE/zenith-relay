@@ -211,3 +211,6 @@ client does not receive two different answers in one stream.
 
 When asking for help, copy the sanitized status, HTTP code, model, and **Error
 source**. Never include API keys, cookies, tokens, prompts, or provider bodies.
+If a failure repeats, open **Settings → Diagnostics**: `logs/errors` contains
+errors, `logs/crashes` contains crash reports, and `logs/operations` contains
+short import and startup stages. Files are size-bounded and redacted.

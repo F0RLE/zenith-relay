@@ -96,7 +96,7 @@ pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap)
 
 /// Identifies Relay-managed Codex or ChatGPT traffic without treating an
 /// ordinary OpenAI-compatible API call as a managed client request. The result
-/// controls only the local pool's two-speed policy; it is never forwarded
+/// controls only the local pool's speed policy; it is never forwarded
 /// upstream.
 pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
     if headers
@@ -202,14 +202,16 @@ pub(in crate::gateway) fn apply_codex_routing_hint(
 ) {
     let name = HeaderName::from_static("x-codex-routing-hint");
     headers.remove(&name);
-    if service_tier != DefaultServiceTier::Fast {
-        return;
-    }
+    let tier = match service_tier {
+        DefaultServiceTier::Standard => return,
+        DefaultServiceTier::Fast => "priority",
+        DefaultServiceTier::Ultrafast => "ultrafast",
+    };
     let model = model.trim();
     if model.is_empty() {
         return;
     }
-    let Ok(value) = HeaderValue::from_str(&format!("model={model};tier=priority")) else {
+    let Ok(value) = HeaderValue::from_str(&format!("model={model};tier={tier}")) else {
         return;
     };
     headers.insert(name, value);
@@ -377,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_routing_hint_is_rebuilt_only_for_fast_tier() {
+    fn codex_routing_hint_is_rebuilt_for_each_explicit_speed_tier() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-codex-routing-hint",
@@ -387,6 +389,12 @@ mod tests {
         assert_eq!(
             headers["x-codex-routing-hint"],
             "model=gpt-5.4;tier=priority"
+        );
+
+        apply_codex_routing_hint(&mut headers, "gpt-5.6-sol", DefaultServiceTier::Ultrafast);
+        assert_eq!(
+            headers["x-codex-routing-hint"],
+            "model=gpt-5.6-sol;tier=ultrafast"
         );
 
         apply_codex_routing_hint(&mut headers, "gpt-5.4", DefaultServiceTier::Standard);

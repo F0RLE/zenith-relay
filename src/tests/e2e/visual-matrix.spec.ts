@@ -183,6 +183,10 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/");
       await page.getByRole("button", { name: "Настройки", exact: true }).click();
       await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data", { exact: true })).toBeVisible();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs", { exact: true })).toBeVisible();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\errors", { exact: true })).toBeVisible();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\crashes", { exact: true })).toBeVisible();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toBeVisible();
 
       const groups = page.locator(".settings-group");
       const pageBox = await page.locator(".settings-page").boundingBox();
@@ -199,7 +203,7 @@ for (const theme of ["light", "dark"] as const) {
         const bottomGap = availableBottom - (groupsBox!.y + groupsBox!.height);
         expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(2);
       }
-      await expect(groups).toHaveCount(3);
+      await expect(groups).toHaveCount(4);
       const boxes = await groups.evaluateAll((items) => items.map((item) => {
         const rect = item.getBoundingClientRect();
         return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };
@@ -491,8 +495,8 @@ for (const viewport of viewports) {
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
-    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Скорость запроса" })).toBeVisible();
-    await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения"]);
+    await expect(poolToolbarGroups.nth(0).locator(".pool-speed-control .relay-option-trigger")).toBeVisible();
+    await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Скорость запроса: Обычная", "Настройки распределения"]);
     await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
@@ -515,13 +519,16 @@ for (const viewport of viewports) {
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
-    const speed = page.getByRole("switch", { name: "Скорость запроса" });
-    await expect(page.locator(".pool-speed-control")).toContainText("Скорость запроса");
-    await expect(page.locator(".pool-speed-control .relay-option-trigger")).toHaveCount(0);
-    await expect(page.locator(".pool-speed-track")).toBeVisible();
-    await speed.check();
-    await expect(speed).toBeChecked();
-    await page.screenshot({ path: `output/playwright/pool-speed-switch-ru-dark-${viewport.width}x${viewport.height}.png` });
+    const speed = page.locator(".pool-speed-control");
+    const speedTrigger = speed.locator(".relay-option-trigger");
+    await expect(speedTrigger).toHaveAttribute("aria-label", "Скорость запроса: Обычная");
+    await expect(speedTrigger).toBeVisible();
+    await expect(speedTrigger).toHaveAttribute("data-value", "standard");
+    await speedTrigger.click();
+    await expect(page.locator('[role="option"][data-value="ultrafast"]')).toHaveText("Сверхбыстрая");
+    await page.locator('[role="option"][data-value="fast"]').click();
+    await expect(speedTrigger).toHaveAttribute("data-value", "fast");
+    await page.screenshot({ path: `output/playwright/pool-speed-menu-ru-dark-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Распределение" });
     await expect(distribution).not.toContainText("Скорость запроса");

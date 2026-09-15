@@ -1,5 +1,5 @@
 use std::{env, time::Instant};
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::{
     local_pool, platform,
@@ -208,9 +208,40 @@ pub fn run() {
         .manage(AppState::new())
         .setup(move |app| {
             let handle = app.handle().clone();
-            platform::resolve_codex_home().map_err(std::io::Error::other)?;
-            let relay_state = local_pool::initialize(&handle)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Err(error) = platform::resolve_codex_home() {
+                crate::diagnostics::record_error(
+                    "desktop-startup",
+                    Some("codex_home_unavailable"),
+                    &error,
+                    &[],
+                );
+                return Err(std::io::Error::other(error).into());
+            }
+            let relay_root = match platform::relay_dir(&handle) {
+                Ok(root) => root,
+                Err(error) => {
+                    crate::diagnostics::record_error(
+                        "desktop-startup",
+                        Some("relay_path_unavailable"),
+                        &error,
+                        &[],
+                    );
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
+            crate::diagnostics::initialize(&relay_root);
+            let relay_state = match local_pool::initialize(&handle) {
+                Ok(state) => state,
+                Err(error) => {
+                    crate::diagnostics::record_error(
+                        "desktop-startup",
+                        Some("local_pool_initialize_failed"),
+                        &error.message,
+                        &[],
+                    );
+                    return Err(std::io::Error::other(error.to_string()).into());
+                }
+            };
             app.manage(relay_state);
             local_pool::start_client_auth_watchdog(handle.clone());
             let native_startup_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -235,6 +266,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<local_pool::DesktopState>();
                 let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
+                // Auto-start runs after the WebView is created. Notify every
+                // renderer once the runtime exists so an initial snapshot that
+                // raced startup cannot leave the pool UI with an empty order.
+                let _ = handle.emit("zenith-state-changed", ());
                 crate::tray::refresh_tray(&handle).await;
             });
             Ok(())
@@ -370,6 +405,8 @@ pub fn run() {
             local_pool::commands::recovery::export_usage,
             local_pool::commands::recovery::export_support_bundle,
             local_pool::commands::recovery::preview_support_bundle,
+            crate::diagnostics::record_frontend_diagnostic,
+            crate::diagnostics::get_diagnostic_paths,
             local_pool::commands::remote_server::connect_remote_server,
             local_pool::commands::remote_server::get_remote_server_state,
             local_pool::commands::remote_server::get_remote_runtime_order,
@@ -395,12 +432,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Zenith Relay");
 
-    app.run(|app_handle, event| {
-        if let RunEvent::ExitRequested { api, code, .. } = event {
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { api, code, .. } => {
             let state = app_handle.state::<AppState>();
             if code.is_none() && state.should_prevent_exit() {
                 api.prevent_exit();
             }
         }
+        RunEvent::Exit => crate::diagnostics::shutdown(),
+        _ => {}
     });
 }

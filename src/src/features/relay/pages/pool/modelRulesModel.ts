@@ -12,6 +12,7 @@ export function modelSignature(models: ModelSummary[]) {
     model.id,
     model.enabled,
     model.speedSupported,
+    model.speedTiers?.join(","),
     model.speedTier,
     model.speedConfigurable,
     model.codexVisible,

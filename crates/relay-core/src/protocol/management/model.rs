@@ -131,9 +131,13 @@ pub struct ModelSummary {
     /// must not treat this as an advertised upstream capability.
     #[serde(default)]
     pub reasoning_manual_fallback: bool,
-    /// Set only when a current pool route has confirmed an upstream Fast tier.
+    /// Set only when a current pool route has confirmed an upstream faster tier.
     #[serde(default)]
     pub speed_supported: bool,
+    /// Exact request-speed tiers confirmed by current pool routes. Standard is
+    /// included for every active route; faster tiers require upstream evidence.
+    #[serde(default)]
+    pub speed_tiers: Vec<DefaultServiceTier>,
     #[serde(default)]
     pub speed_tier: DefaultServiceTier,
     #[serde(default)]
@@ -145,12 +149,19 @@ pub fn apply_model_speed_summary(
     effective_tier: DefaultServiceTier,
     runtime: Option<&GatewayRuntime>,
 ) {
-    let supported =
-        runtime.is_some_and(|runtime| runtime.model_supports_fast_service_tier(&model.id));
+    let speed_tiers = runtime
+        .map(|runtime| runtime.model_supported_service_tiers(&model.id))
+        .unwrap_or_default();
+    let supported = speed_tiers
+        .iter()
+        .any(|tier| *tier != DefaultServiceTier::Standard);
+    model.speed_tiers = speed_tiers;
     model.speed_supported = supported;
     model.speed_configurable = supported;
     model.speed_tier = if supported {
-        effective_tier
+        runtime
+            .map(|runtime| runtime.model_effective_service_tier(&model.id))
+            .unwrap_or(effective_tier)
     } else {
         DefaultServiceTier::Standard
     };

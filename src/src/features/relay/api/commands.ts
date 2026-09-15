@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AccountExportInput,
@@ -41,6 +41,29 @@ import type {
   UsageExportRow,
   WakeTask,
 } from "./types";
+import { sanitizeFeedbackError } from "../state/feedback";
+
+/**
+ * Keep the command surface typed while making every rejected IPC call
+ * observable in the native error log.  The reporter itself uses the raw
+ * invoke function to avoid an error-reporting loop.
+ */
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return tauriInvoke<T>(command, args).catch((cause) => {
+    if (command !== "record_frontend_diagnostic") {
+      const error = sanitizeFeedbackError(cause, "ipc_failed", "Relay command failed");
+      void tauriInvoke<void>("record_frontend_diagnostic", {
+        input: {
+          source: "tauri-command",
+          operation: command,
+          code: error.code,
+          message: error.message,
+        },
+      }).catch(() => undefined);
+    }
+    throw cause;
+  });
+}
 
 export type UiState = {
   providerActive: boolean;
@@ -174,7 +197,16 @@ export const relayCommands = {
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
   restoreDefaultAccountProfile: () => invoke("restore_codex_account_profile", { profileDir: null }),
   storageInfo: () => invoke<RelayStorageInfo>("get_relay_storage_info"),
-  openFolder: (folder: "data" | "profile_backups" | "opencode_backups") =>
+  recordFrontendDiagnostic: (input: {
+    source: string;
+    message: string;
+    operation?: string;
+    code?: string;
+    stack?: string;
+    fatal?: boolean;
+  }) => invoke<void>("record_frontend_diagnostic", { input }),
+  diagnosticPaths: () => invoke<{ logsPath: string; errorLogsPath: string; crashLogsPath: string; operationLogsPath: string }>("get_diagnostic_paths"),
+  openFolder: (folder: "data" | "logs" | "error_logs" | "crash_logs" | "operation_logs" | "profile_backups" | "opencode_backups") =>
     invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),
   exportUsage: (rows: UsageExportRow[]) => invoke<string | null>("export_usage", { rows }),

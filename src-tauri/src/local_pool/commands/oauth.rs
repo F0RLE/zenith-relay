@@ -62,6 +62,17 @@ pub async fn start_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "start",
+        &[(
+            "account",
+            account_id
+                .as_deref()
+                .map(crate::diagnostics::hash_identifier)
+                .unwrap_or_else(|| "none".to_string()),
+        )],
+    );
     let target_account_id = validate_oauth_target(&state, account_id.as_deref())?;
     let settings = state.store()?.gateway().clone();
     let proxy = common_proxy_config(&settings)?;
@@ -87,6 +98,11 @@ pub async fn resume_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "resume",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     let start = state
         .oauth_flow()
         .resume(&login_id)
@@ -102,6 +118,11 @@ pub fn get_codex_oauth_status(
     login_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "status",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     let start = state.oauth_flow().status(&login_id).map_err(flow_error)?;
     validated_authorization_url(&start)?;
     Ok(start)
@@ -114,6 +135,11 @@ pub async fn submit_codex_oauth_callback(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "callback",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     state
         .oauth_flow()
         .submit_manual_callback(&login_id, &callback_url)
@@ -128,6 +154,11 @@ pub async fn cancel_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "cancel",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     state
         .oauth_flow()
         .cancel(&login_id)
@@ -142,10 +173,20 @@ pub async fn complete_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalAccountRecord> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "complete",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     complete_oauth(&login_id, &state).await.map_err(Into::into)
 }
 
 async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<LocalAccountRecord> {
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "completion_checkpoint",
+        &[("login", crate::diagnostics::hash_identifier(login_id))],
+    );
     let flow = state.oauth_flow();
     let now_ms = super::current_time_ms();
     let settings = state.store()?.gateway().clone();
@@ -266,6 +307,15 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         },
         Err(error) => (previous_models, Some(initial_model_issue(&error))),
     };
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "initial_probes_complete",
+        &[
+            ("login", crate::diagnostics::hash_identifier(login_id)),
+            ("models_found", models.len().to_string()),
+            ("model_issue", model_issue.is_some().to_string()),
+        ],
+    );
     let mut record = new_account_record(
         &credentials,
         AccountAuthMode::OAuth,
@@ -411,6 +461,14 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     credential_store
         .save(&committed_credentials)
         .map_err(credential_error)?;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "credentials_committed",
+        &[(
+            "account",
+            crate::diagnostics::hash_identifier(&local_account_id),
+        )],
+    );
     let account_write = state.store()?.upsert_account(record.clone());
     if let Err(error) = account_write {
         let rollback = rollback_completion_before_authority(
@@ -511,6 +569,14 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         };
         return Err(error);
     }
+    crate::diagnostics::record_operation(
+        "oauth",
+        "completed",
+        &[(
+            "account",
+            crate::diagnostics::hash_identifier(&local_account_id),
+        )],
+    );
     Ok(record)
 }
 

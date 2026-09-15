@@ -973,6 +973,24 @@ impl PoolScheduler {
         })
     }
 
+    /// Returns whether the current affinity owner is eligible for a new
+    /// optional request. Unlike `response_affinity_owner_supports_route`,
+    /// this includes mutable health, quota, and cooldown state. Callers must
+    /// only use it when the request does not carry an opaque continuation.
+    pub(crate) fn response_affinity_owner_is_eligible(
+        &mut self,
+        key: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request_scope: &CandidateScope,
+        now_ms: u64,
+    ) -> Option<bool> {
+        let candidate_id = self.response_affinity.get(key, now_ms)?;
+        self.candidates.get(candidate_id).map(|candidate| {
+            self.is_eligible(candidate, model, allowed_protocols, request_scope, now_ms)
+        })
+    }
+
     /// Returns whether the affinity owner still matches the model and wire
     /// contract, without considering the caller's mutable pool scope. This
     /// distinction lets the request layer reset a model switch immediately,

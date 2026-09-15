@@ -6,6 +6,7 @@ use crate::local_pool::error::CommandError;
 use crate::local_pool::state::DesktopState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Instant;
 use tauri::{AppHandle, State};
 use zenith_relay_core::accounts::{ImportAuthMode, ImportPreview, MAX_IMPORT_ITEMS};
 
@@ -162,6 +163,7 @@ pub async fn start_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb("account-import", "start", &[]);
     let (content, source_file) = normalize_import_input(input)?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
@@ -181,6 +183,7 @@ pub async fn preview_local_account_import_files(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<Option<ImportSessionResponse>> {
+    crate::diagnostics::breadcrumb("account-import", "preview_files", &[]);
     let documents = match paths {
         Some(paths) => Some(read_import_documents(paths)?),
         None => pick_account_import_documents(&app)?,
@@ -197,6 +200,7 @@ pub async fn preview_local_account_import_files(
 pub async fn preview_current_codex_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
+    crate::diagnostics::breadcrumb("account-import", "preview_current_profile", &[]);
     let documents = current_profile_documents(&state)?;
     preview_account_import_documents(documents, &state).await
 }
@@ -214,6 +218,11 @@ pub async fn resume_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "resume",
+        &[("session", crate::diagnostics::hash_identifier(&session_id))],
+    );
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
     let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
@@ -228,6 +237,14 @@ pub async fn prepare_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "prepare",
+        &[(
+            "session",
+            crate::diagnostics::hash_identifier(&input.session_id),
+        )],
+    );
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
     let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
@@ -257,6 +274,11 @@ pub async fn cancel_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "cancel",
+        &[("session", crate::diagnostics::hash_identifier(&session_id))],
+    );
     ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
         .cancel(&session_id)
         .map_err(import_session_error)?;
@@ -270,8 +292,36 @@ pub async fn confirm_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
     let _mutation = state.setup_guard().await;
+    let started = Instant::now();
+    let session_hash = crate::diagnostics::hash_identifier(&input.session_id);
+    let selected_count = input.selected_item_ids.len();
     let add_to_pool = input.add_to_pool;
-    let response = confirm_local_account_import_inner(input, &state, Some(&app)).await?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "confirm_started",
+        &[
+            ("session", session_hash.clone()),
+            ("selected_count", selected_count.to_string()),
+            ("add_to_pool", add_to_pool.to_string()),
+        ],
+    );
+    let response = match confirm_local_account_import_inner(input, &state, Some(&app)).await {
+        Ok(response) => response,
+        Err(error) => {
+            crate::diagnostics::record_error(
+                "account-import",
+                Some(&format!("{:?}", error.code)),
+                &error.message,
+                &[
+                    ("session", session_hash),
+                    ("selected_count", selected_count.to_string()),
+                    ("add_to_pool", add_to_pool.to_string()),
+                    ("duration_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            return Err(error);
+        }
+    };
     let model_refresh_account_ids = if add_to_pool {
         response
             .results
@@ -287,6 +337,24 @@ pub async fn confirm_local_account_import(
     } else {
         Vec::new()
     };
+    let succeeded = response
+        .results
+        .iter()
+        .filter(|result| result.status == ImportItemStatus::Succeeded)
+        .count();
+    let failed = response.results.len().saturating_sub(succeeded);
+    crate::diagnostics::record_operation(
+        "account-import",
+        "confirm_completed",
+        &[
+            ("session", session_hash),
+            ("selected_count", selected_count.to_string()),
+            ("succeeded", succeeded.to_string()),
+            ("failed", failed.to_string()),
+            ("add_to_pool", add_to_pool.to_string()),
+            ("duration_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
     drop(_mutation);
     crate::local_pool::background::refresh_account_models_in_background(
         app,

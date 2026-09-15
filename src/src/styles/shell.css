@@ -637,6 +637,37 @@
   gap: 8px;
 }
 
+.relay-render-error {
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 48px;
+  color: var(--relay-text);
+  text-align: center;
+}
+
+.relay-render-error h1,
+.relay-render-error p {
+  max-width: 620px;
+  margin: 0;
+}
+
+.relay-render-error p {
+  color: var(--relay-muted);
+}
+
+.relay-render-error button {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--relay-accent);
+  border-radius: 7px;
+  background: var(--relay-accent);
+  color: var(--relay-on-accent, #fff);
+  cursor: pointer;
+}
+
 .relay-page-actions .relay-button span {
   white-space: nowrap;
 }

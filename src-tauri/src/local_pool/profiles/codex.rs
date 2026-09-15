@@ -70,6 +70,7 @@ const MODEL_CATALOG_FILE: &str = "codex-model-catalog.json";
 const MODELS_CACHE_FILE: &str = "models_cache.json";
 const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const DESKTOP_DEFAULT_SERVICE_TIER_KEY: &str = "default-service-tier";
+const TOP_LEVEL_SERVICE_TIER_KEY: &str = "service_tier";
 const PERSISTED_ATOM_STATE_KEY: &str = "electron-persisted-atom-state";
 const SERVICE_TIER_CHANGED_KEY: &str = "has-user-changed-service-tier";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
@@ -483,7 +484,7 @@ pub fn sync_default_service_tier(
 
     let mut document =
         parse_config(snapshot_text(&original_config, &config_path)?.unwrap_or_default())?;
-    match default_service_tier {
+    let (desktop_service_tier, top_level_service_tier) = match default_service_tier {
         DefaultServiceTier::Standard => {
             if let Some(desktop) = document.get_mut("desktop") {
                 desktop
@@ -496,6 +497,7 @@ pub fn sync_default_service_tier(
                     })?
                     .remove(DESKTOP_DEFAULT_SERVICE_TIER_KEY);
             }
+            (None, "default")
         }
         DefaultServiceTier::Fast => {
             if document.get("desktop").is_none() {
@@ -508,8 +510,23 @@ pub fn sync_default_service_tier(
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("priority");
+            (Some("priority"), "priority")
         }
-    }
+        DefaultServiceTier::Ultrafast => {
+            if document.get("desktop").is_none() {
+                document["desktop"] = Item::Table(Table::new());
+            }
+            let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "Codex desktop settings must be a table",
+                )
+            })?;
+            desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("ultrafast");
+            (Some("ultrafast"), "ultrafast")
+        }
+    };
+    document[TOP_LEVEL_SERVICE_TIER_KEY] = value(top_level_service_tier);
     let next_config = document.to_string();
 
     let mut state = match snapshot_text(&original_state, &state_path)? {
@@ -538,10 +555,7 @@ pub fn sync_default_service_tier(
         .expect("persisted atom state was normalized to an object");
     persisted.insert(
         DESKTOP_DEFAULT_SERVICE_TIER_KEY.to_string(),
-        match default_service_tier {
-            DefaultServiceTier::Standard => Value::Null,
-            DefaultServiceTier::Fast => Value::String("priority".to_string()),
-        },
+        desktop_service_tier.map_or(Value::Null, |tier| Value::String(tier.to_string())),
     );
     persisted.insert(SERVICE_TIER_CHANGED_KEY.to_string(), Value::Bool(true));
     let next_state = serde_json::to_string(state).map_err(|error| {

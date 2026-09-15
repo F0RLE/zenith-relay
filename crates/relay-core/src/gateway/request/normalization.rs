@@ -5,7 +5,7 @@ const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
 
 /// Owns the service-tier field for one routed request.
 ///
-/// Managed Codex requests use the pool's two-value policy only when the
+/// Managed Codex requests use the pool's speed policy only when the
 /// client did not select an upstream tier. Generic API clients retain their
 /// explicit upstream tier such as `flex`. A request may be retried on several
 /// candidates, so the original client field is retained separately from a
@@ -80,42 +80,39 @@ impl ServiceTierPolicy {
 }
 
 pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServiceTier {
-    if request
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .is_some_and(|tier| {
-            tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast")
-        })
-    {
-        DefaultServiceTier::Fast
-    } else {
-        DefaultServiceTier::Standard
+    match request.get("service_tier").and_then(Value::as_str) {
+        Some(tier) if tier.eq_ignore_ascii_case("ultrafast") => DefaultServiceTier::Ultrafast,
+        Some(tier)
+            if tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast") =>
+        {
+            DefaultServiceTier::Fast
+        }
+        _ => DefaultServiceTier::Standard,
     }
 }
 
-/// Apply the pool's Fast setting after the request owner has removed any tier
+/// Apply the pool's speed setting after the request owner has removed any tier
 /// it does not control.
 ///
-/// `priority` is the upstream OpenAI spelling. Standard deliberately remains
-/// implicit, matching the Codex/Cockpit behavior and preserving arbitrary
-/// client-owned values such as `flex`.
+/// `priority` is the upstream OpenAI spelling for Fast. Standard deliberately
+/// remains implicit, matching the Codex/Cockpit behavior and preserving
+/// arbitrary client-owned values such as `flex`.
 pub(in crate::gateway) fn apply_default_service_tier_if_missing(
     request: &mut Value,
     default: DefaultServiceTier,
 ) {
-    if default != DefaultServiceTier::Fast {
-        return;
-    }
     let Some(object) = request.as_object_mut() else {
         return;
     };
     if object.contains_key("service_tier") {
         return;
     }
-    object.insert(
-        "service_tier".to_string(),
-        Value::String("priority".to_string()),
-    );
+    let value = match default {
+        DefaultServiceTier::Standard => return,
+        DefaultServiceTier::Fast => "priority",
+        DefaultServiceTier::Ultrafast => "ultrafast",
+    };
+    object.insert("service_tier".to_string(), Value::String(value.to_string()));
 }
 
 pub(in crate::gateway) fn normalize_account_request(
@@ -123,8 +120,8 @@ pub(in crate::gateway) fn normalize_account_request(
     responses_lite: bool,
 ) {
     // This transport normalization preserves native account settings. The
-    // request execution layer applies Relay's two-speed pool policy later,
-    // while Responses Lite alone requires `context=all_turns` here.
+    // request execution layer applies Relay's pool speed policy later, while
+    // Responses Lite alone requires `context=all_turns` here.
     object.insert("store".to_string(), Value::Bool(false));
     object.insert("stream".to_string(), Value::Bool(true));
     normalize_account_request_common(object, responses_lite);
@@ -537,6 +534,30 @@ mod tests {
             policy.effective_tier(&request, DefaultServiceTier::Fast, WireApi::Messages),
             DefaultServiceTier::Fast
         );
+    }
+
+    #[test]
+    fn pool_owned_service_tier_injects_ultrafast_and_tracks_it() {
+        let mut request = json!({});
+        let policy = ServiceTierPolicy::pool_owned(&request);
+
+        policy.prepare_for_candidate(
+            &mut request,
+            DefaultServiceTier::Ultrafast,
+            WireApi::Responses,
+        );
+        assert_eq!(request["service_tier"], "ultrafast");
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Ultrafast, WireApi::Responses),
+            DefaultServiceTier::Ultrafast
+        );
+
+        policy.prepare_for_candidate(
+            &mut request,
+            DefaultServiceTier::Standard,
+            WireApi::Responses,
+        );
+        assert!(request.get("service_tier").is_none());
     }
 
     fn const_branches(values: &[Value]) -> Value {

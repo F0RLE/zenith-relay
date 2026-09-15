@@ -173,20 +173,33 @@ fn webview_data_dir_from_root(root: &Path) -> Result<PathBuf, String> {
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| {
-        format!(
-            "failed to create local data directory {}: {error}",
-            path.display()
-        )
-    })?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!(
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(format!(
             "local data path must be a real directory: {}",
             path.display()
-        ));
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|error| {
+                format!(
+                    "failed to create local data directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "local data path must be a real directory: {}",
+                    path.display()
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "failed to inspect local data directory {}: {error}",
+            path.display()
+        )),
     }
-    Ok(())
 }
 
 pub fn capabilities() -> PlatformCapabilities {

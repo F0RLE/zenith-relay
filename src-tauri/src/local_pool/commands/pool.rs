@@ -926,11 +926,11 @@ pub async fn set_local_model_service_tier(
     let runtime = state.gateway.runtime().await;
     if !runtime
         .as_ref()
-        .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical))
+        .is_some_and(|runtime| runtime.model_supports_service_tier(&canonical, input.service_tier))
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "request speed requires a confirmed upstream service tier for this active model route",
+            "requested service tier requires confirmed upstream support for this active model route",
         )
         .into());
     }

@@ -87,6 +87,19 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
     emit_account_import_progress(app, &input.session_id, 0, total, succeeded, failed, None);
 
     for (completed, item_id) in selected_item_ids.into_iter().enumerate() {
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "item_started",
+            &[
+                (
+                    "session",
+                    crate::diagnostics::hash_identifier(&input.session_id),
+                ),
+                ("item", crate::diagnostics::hash_identifier(&item_id)),
+                ("index", completed.to_string()),
+                ("total", total.to_string()),
+            ],
+        );
         let label = row_context
             .get(&item_id)
             .map(|context| context.label.clone())
@@ -153,7 +166,24 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         };
         match result.status {
             ImportItemStatus::Succeeded => succeeded += 1,
-            ImportItemStatus::Failed => failed += 1,
+            ImportItemStatus::Failed => {
+                failed += 1;
+                if let Some(error) = result.error.as_ref() {
+                    crate::diagnostics::record_error(
+                        "account-import",
+                        Some(&error.code),
+                        &error.message,
+                        &[
+                            (
+                                "session",
+                                crate::diagnostics::hash_identifier(&input.session_id),
+                            ),
+                            ("item", crate::diagnostics::hash_identifier(&result.item_id)),
+                            ("index", completed.to_string()),
+                        ],
+                    );
+                }
+            }
         }
         results.push(result);
         emit_account_import_progress(

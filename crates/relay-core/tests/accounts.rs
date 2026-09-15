@@ -5042,6 +5042,113 @@ async fn websocket_continuation_replays_to_another_candidate_after_owner_quota()
 }
 
 #[tokio::test]
+async fn websocket_continuation_replays_on_the_same_connection_when_another_chat_exhausts_owner() {
+    let (owner_upstream, owner_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+            json!({"type": "response.output_text.delta", "delta": "first"}),
+            json!({
+                "type": "response.completed",
+                "response": {"id": "owner-response", "output": []}
+            }),
+        ])))
+        .await;
+    let (replacement_upstream, replacement_state) = spawn_websocket_upstream().await;
+    let authority = ready_authority("owner-account", "owner-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "replacement-source",
+            &replacement_upstream,
+            "replacement-key",
+            10,
+        )],
+        vec![account(
+            "owner-account",
+            "provider-owner",
+            &owner_upstream,
+            100,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "first"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut socket).await;
+    let first = receive_websocket_completion(&mut socket).await;
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+
+    // Another chat exhausts the owner while this client WebSocket remains open.
+    // The next continuation must materialize local history and reconnect to a
+    // compatible API source instead of returning an affinity-owner 429.
+    let exhausted_at = current_time_ms().saturating_add(1);
+    assert!(runtime.sync_account_availability_with_quota(
+        "owner-account",
+        true,
+        CandidateHealth::Healthy,
+        &zenith_relay_core::quota::QuotaSnapshot {
+            limit_reached: true,
+            updated_at_ms: Some(exhausted_at),
+            ..Default::default()
+        },
+        exhausted_at,
+    ));
+
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "second",
+                "previous_response_id": first["response"]["id"]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut socket).await;
+    let _ = receive_websocket_completion(&mut socket).await;
+
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+    let replacement_requests = replacement_state.requests.lock().unwrap();
+    assert_eq!(replacement_requests.len(), 1);
+    assert!(replacement_requests[0]
+        .get("previous_response_id")
+        .is_none());
+    assert_eq!(
+        replacement_requests[0]["input"][0]["content"][0]["text"],
+        "first"
+    );
+    assert_eq!(
+        replacement_requests[0]["input"][1]["content"][0]["text"],
+        "second"
+    );
+    drop(replacement_requests);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+    assert_eq!(
+        events[1].candidate_id.as_deref(),
+        Some("replacement-source")
+    );
+}
+
+#[tokio::test]
 async fn http_continuation_replays_to_api_source_after_account_quota() {
     let reset_at = current_time_ms() / 1_000 + 60 * 60;
     let (owner_upstream, owner_state) = spawn_upstream(vec![
@@ -5136,6 +5243,105 @@ async fn http_continuation_replays_to_api_source_after_account_quota() {
     assert!(events[2].success);
     assert_eq!(
         events[2].candidate_id.as_deref(),
+        Some("replacement-source")
+    );
+}
+
+#[tokio::test]
+async fn http_continuation_replays_to_api_source_when_another_chat_exhausted_the_owner() {
+    let (owner_upstream, owner_state) = spawn_upstream(vec![success_reply("owner-response")]).await;
+    let (replacement_upstream, replacement_state) =
+        spawn_upstream(vec![success_reply("replacement-response")]).await;
+    let authority = ready_authority("owner-account", "owner-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "replacement-source",
+            &replacement_upstream,
+            "replacement-key",
+            10,
+        )],
+        vec![account(
+            "owner-account",
+            "provider-owner",
+            &owner_upstream,
+            100,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+    let client = reqwest::Client::new();
+
+    let first: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "first", "stream": false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["id"], "owner-response");
+
+    // A different chat can consume this account's quota before the original
+    // conversation sends its next turn. The affinity owner is then ineligible
+    // before selection, so Replay must hand the full local conversation to the
+    // next compatible source without retrying the exhausted account.
+    let exhausted_at = current_time_ms().saturating_add(1);
+    assert!(runtime.sync_account_availability_with_quota(
+        "owner-account",
+        true,
+        CandidateHealth::Healthy,
+        &zenith_relay_core::quota::QuotaSnapshot {
+            limit_reached: true,
+            updated_at_ms: Some(exhausted_at),
+            ..Default::default()
+        },
+        exhausted_at,
+    ));
+
+    let continued: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "second",
+            "previous_response_id": first["id"],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(continued["id"], "replacement-response");
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+    let replacement_requests = replacement_state.requests.lock().unwrap();
+    assert_eq!(replacement_requests.len(), 1);
+    assert!(replacement_requests[0]
+        .body
+        .get("previous_response_id")
+        .is_none());
+    assert_eq!(
+        replacement_requests[0].body["input"][0]["content"][0]["text"],
+        "first"
+    );
+    assert_eq!(
+        replacement_requests[0].body["input"][1]["content"][0]["text"],
+        "second"
+    );
+    drop(replacement_requests);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+    assert_eq!(
+        events[1].candidate_id.as_deref(),
         Some("replacement-source")
     );
 }

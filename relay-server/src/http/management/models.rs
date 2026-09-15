@@ -151,11 +151,11 @@ pub async fn set_model_service_tier(
     let runtime = state.runtime().map_err(runtime_error)?;
     if !runtime
         .as_ref()
-        .is_some_and(|runtime| runtime.model_supports_fast_service_tier(&canonical))
+        .is_some_and(|runtime| runtime.model_supports_service_tier(&canonical, input.service_tier))
     {
         return Err(ManagementError::validation(
             "model_service_tier_unsupported",
-            "request speed requires a confirmed upstream service tier for this active model route",
+            "requested service tier requires confirmed upstream support for this active model route",
         ));
     }
     let previous = state

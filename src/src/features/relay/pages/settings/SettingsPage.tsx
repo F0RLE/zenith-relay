@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Database, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
+import { Bug, Database, FileText, FileWarning, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { setI18nLanguage } from "../../../../i18n";
 import { APP_VERSION, restartApplication } from "../../../../platform/desktop";
@@ -42,6 +42,13 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>
         <div className="settings-control-row"><div><strong>{t("settings.currentVersion")}</strong><div className="settings-version-meta" role="status" aria-live="polite"><span>v{APP_VERSION}</span><StatusBadge status={updateStatus.status} label={updateStatus.label} /></div></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={updateCheckState === "checking"} onClick={() => void onCheckUpdates()}>{t("common.check")}</Button></div>
         <div className="settings-control-row settings-path-row"><div><strong>{t("settings.dataPath")}</strong><small><code data-relay-tooltip={storageInfo?.dataPath}>{storageInfo?.dataPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Bug aria-hidden />} title={t("settings.diagnostics")}>
+        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.logsPath")}</strong><small>{t("settings.logsHint")}<code data-relay-tooltip={storageInfo?.logsPath}>{storageInfo?.logsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-logs"} onClick={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened")}>{t("settings.openLogs")}</Button></div>
+        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.errorLogs")}</strong><small><code data-relay-tooltip={storageInfo?.errorLogsPath}>{storageInfo?.errorLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FileWarning aria-hidden />} busy={busy === "open-error-logs"} onClick={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened")}>{t("settings.openErrors")}</Button></div>
+        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.crashLogs")}</strong><small><code data-relay-tooltip={storageInfo?.crashLogsPath}>{storageInfo?.crashLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<Bug aria-hidden />} busy={busy === "open-crash-logs"} onClick={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened")}>{t("settings.openCrashes")}</Button></div>
+        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.operationLogs")}</strong><small><code data-relay-tooltip={storageInfo?.operationLogsPath}>{storageInfo?.operationLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FileText aria-hidden />} busy={busy === "open-operation-logs"} onClick={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened")}>{t("settings.openOperations")}</Button></div>
       </SettingsGroup>
 
       {mode === "local" ? <SettingsGroup icon={<Database aria-hidden />} title={t("settings.localData")}>

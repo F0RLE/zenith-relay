@@ -28,9 +28,10 @@ upstream controls; a loopback endpoint does not authorize account resale.
 | `relay-server` | User-managed runtime, vault, persistence, management API |
 
 Desktop and server share runtime contracts. React does not read secrets/files,
-call providers, or implement routing. Closing the main window destroys its
-WebView while tray/background runtime survives; exiting the process stops the
-local pool. Distributed multi-server coordination is not implemented.
+call providers, or implement routing. Closing the main window hides and reuses
+its WebView while tray/background runtime survives; explicitly quitting the
+process stops the local pool. Distributed multi-server coordination is not
+implemented.
 
 ## Storage and credentials
 
@@ -41,9 +42,11 @@ Desktop state uses the platform local-data location: normally
 Within it, `data/database`, `data/vault`, `data/catalogs`, and
 `data/migrations` keep durable Relay state separate; `cache` holds temporary
 imports, OAuth state, locks, and the WebView profile; `exports` holds generated
-deployment bundles; and `recovery` holds application-specific backups and
-history-repair operations. The credential-store implementation owns secret
-access. Codex's directory is touched only for reversible integration.
+deployment bundles; `logs/errors`, `logs/crashes`, and `logs/operations` hold
+bounded redacted diagnostics; and `recovery` holds application-specific
+backups and history-repair operations. The credential-store implementation
+owns secret access. Codex's directory is touched only for reversible
+integration.
 
 Ordinary snapshots, usage, diagnostics, screenshots, and exports are redacted.
 Explicit account export is a separate credential-bearing transfer document,

@@ -181,10 +181,33 @@ impl DesktopState {
         let _ = std::thread::Builder::new()
             .name("transient-cleanup".to_string())
             .spawn(move || {
-                let _ = ImportSessionStore::new(transient_root.clone(), NativeSecretBackend)
-                    .cleanup_expired();
-                let _ = repair::cleanup_expired_previews(&transient_root);
-                let _ = repair::cleanup_history_repair_backups(&history_repair_root);
+                if let Err(error) =
+                    ImportSessionStore::new(transient_root.clone(), NativeSecretBackend)
+                        .cleanup_expired()
+                {
+                    crate::diagnostics::record_error(
+                        "startup-cleanup",
+                        Some("import_sessions_cleanup_failed"),
+                        &error.to_string(),
+                        &[],
+                    );
+                }
+                if let Err(error) = repair::cleanup_expired_previews(&transient_root) {
+                    crate::diagnostics::record_error(
+                        "startup-cleanup",
+                        Some("repair_previews_cleanup_failed"),
+                        &error,
+                        &[],
+                    );
+                }
+                if let Err(error) = repair::cleanup_history_repair_backups(&history_repair_root) {
+                    crate::diagnostics::record_error(
+                        "startup-cleanup",
+                        Some("repair_backups_cleanup_failed"),
+                        &error,
+                        &[],
+                    );
+                }
             });
         let mut store = LocalPoolStore::open(root.clone())?;
         let telemetry = store.database();

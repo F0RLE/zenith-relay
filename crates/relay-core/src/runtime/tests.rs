@@ -1189,6 +1189,57 @@ fn response_affinity_owner_tracks_live_key_scope() {
 }
 
 #[test]
+fn optional_response_affinity_is_released_when_owner_needs_reauthentication() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("source-a", "a", &["gpt-test"])),
+            RuntimeSource::unrestricted(source("source-b", "b", &["gpt-test"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    runtime.bind_response_affinity(Some("resp-1"), "source-a", 1);
+    let affinity_key = runtime.response_affinity_key(Some("resp-1")).unwrap();
+    assert!(runtime.set_candidate_health("source-a", CandidateHealth::ReauthRequired));
+    assert_eq!(
+        runtime.response_affinity_owner_supports_route(
+            &authenticated,
+            &affinity_key,
+            "gpt-test",
+            &[WireApi::Responses],
+            2,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        runtime.response_affinity_owner_is_eligible(
+            &authenticated,
+            &affinity_key,
+            "gpt-test",
+            &[WireApi::Responses],
+            2,
+        ),
+        Some(false)
+    );
+
+    let mut optional_affinity = Some(affinity_key.clone());
+    assert!(runtime.release_unroutable_response_affinity(
+        &authenticated,
+        &mut optional_affinity,
+        "gpt-test",
+        &[WireApi::Responses],
+        2,
+    ));
+    assert!(optional_affinity.is_none());
+    assert!(!runtime.has_response_affinity_binding(&affinity_key, 2));
+}
+
+#[test]
 fn active_responses_scope_uses_live_candidate_policy() {
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(

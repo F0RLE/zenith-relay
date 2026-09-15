@@ -1281,6 +1281,59 @@ fn response_affinity_owner_outside_key_scope_can_be_reset_for_fallback() {
 }
 
 #[test]
+fn optional_affinity_reports_a_temporarily_unavailable_owner() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    scheduler.upsert(candidate("fallback"));
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    let scope = CandidateScope::default();
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        scheduler.response_affinity_owner_is_eligible(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true)
+    );
+
+    assert!(scheduler.set_candidate_health("owner", CandidateHealth::ReauthRequired));
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true),
+        "reauth is a temporary availability state, not a route-shape change"
+    );
+    assert_eq!(
+        scheduler.response_affinity_owner_is_eligible(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(false)
+    );
+}
+
+#[test]
 fn removed_candidate_keeps_response_owner_only_until_a_replacement_id_is_upserted() {
     let mut scheduler = PoolScheduler::new();
     scheduler.upsert(candidate("owner"));

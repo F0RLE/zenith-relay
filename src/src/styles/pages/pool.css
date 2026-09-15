@@ -83,18 +83,14 @@
 }
 
 .pool-speed-control {
+  min-width: 0;
   height: 34px;
-  position: relative;
-  display: grid;
-  grid-template-columns: 14px minmax(66px, auto) 32px;
+  display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 3px 7px;
   border: 1px solid var(--relay-border);
   border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-muted);
-  cursor: pointer;
   transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
 }
 
@@ -103,72 +99,69 @@
   background: var(--relay-subtle);
 }
 
-.pool-speed-control:has(> input:focus-visible) {
+.pool-speed-control:has(.relay-option-trigger:focus-visible) {
   outline: 2px solid var(--relay-focus);
   outline-offset: 2px;
 }
 
-.pool-speed-control:has(> input:disabled) {
+.pool-speed-control:has(.relay-option-trigger:disabled) {
   cursor: not-allowed;
   opacity: 0.55;
 }
 
-.pool-speed-control > svg {
+.pool-speed-menu,
+.pool-speed-menu .relay-option-trigger {
+  width: 132px;
+  min-width: 0;
+  height: 32px;
+}
+
+.pool-speed-menu .relay-option-trigger {
+  min-height: 32px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--relay-muted);
+}
+
+.pool-speed-menu .relay-option-trigger:hover,
+.pool-speed-menu .relay-option-trigger[aria-expanded="true"] {
+  border: 0;
+  background: transparent;
+}
+
+.pool-speed-menu .relay-option-trigger > svg:first-child {
   width: 14px;
   height: 14px;
   transition: color 160ms ease, transform 160ms ease;
 }
 
-.pool-speed-control[data-fast="true"] > svg {
-  color: var(--relay-accent-hover);
-  transform: scale(1.08);
+.pool-speed-quick-toggle {
+  width: 34px;
+  height: 32px;
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 34px;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--relay-border);
+  cursor: pointer;
 }
 
-.pool-speed-copy {
-  min-width: 0;
-  display: grid;
-  gap: 0;
-  text-align: left;
-}
-
-.pool-speed-copy small,
-.pool-speed-copy strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pool-speed-copy small {
-  color: var(--relay-muted);
-  font-size: 9px;
-  font-weight: 500;
-  line-height: 11px;
-}
-
-.pool-speed-copy strong {
-  color: var(--relay-text);
-  font-size: 11px;
-  line-height: 14px;
-}
-
-.pool-member-toolbar .pool-speed-control > input {
+.pool-speed-quick-toggle > input {
   position: absolute;
   z-index: 1;
-  top: 7px;
-  right: 7px;
   width: 32px;
   height: 18px;
-  min-height: 18px;
   margin: 0;
-  padding: 0;
-  border: 0;
   opacity: 0;
   cursor: pointer;
 }
 
 .pool-speed-track {
-  width: 32px;
-  height: 18px;
+  width: 26px;
+  height: 16px;
   position: relative;
   display: block;
   border: 1px solid var(--relay-border-strong);
@@ -178,8 +171,8 @@
 }
 
 .pool-speed-track > span {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   position: absolute;
   top: 2px;
   left: 2px;
@@ -189,15 +182,34 @@
   transition: transform 180ms ease, background 180ms ease;
 }
 
-.pool-speed-control > input:checked + .pool-speed-track {
+.pool-speed-quick-toggle > input:focus-visible + .pool-speed-track {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 2px;
+}
+
+.pool-speed-quick-toggle > input:checked + .pool-speed-track {
   border-color: var(--relay-accent-hover);
   background: var(--relay-accent-soft);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-accent) 16%, transparent);
 }
 
-.pool-speed-control > input:checked + .pool-speed-track > span {
+.pool-speed-quick-toggle > input:checked + .pool-speed-track > span {
   background: var(--relay-accent-hover);
-  transform: translateX(14px);
+  transform: translateX(10px);
+}
+
+.pool-speed-quick-toggle > input:disabled,
+.pool-speed-control:has(.relay-option-trigger:disabled) .pool-speed-quick-toggle {
+  cursor: not-allowed;
+}
+
+.pool-speed-control[data-fast="true"] .relay-option-trigger > svg:first-child {
+  color: var(--relay-accent-hover);
+  transform: scale(1.08);
+}
+
+.pool-speed-control[data-speed-tier="ultrafast"] .relay-option-trigger > svg:first-child {
+  color: var(--relay-warning);
 }
 
 .pool-controls {

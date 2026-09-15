@@ -857,11 +857,19 @@ mod tests {
     }
 
     #[test]
-    fn service_tier_defaults_inject_only_fast_without_overriding_client_choice() {
+    fn service_tier_defaults_inject_speed_without_overriding_client_choice() {
         let mut request = json!({});
         apply_default_service_tier_if_missing(&mut request, DefaultServiceTier::Fast);
         assert_eq!(request["service_tier"], "priority");
         assert_eq!(request_service_tier(&request), DefaultServiceTier::Fast);
+
+        let mut ultrafast = json!({});
+        apply_default_service_tier_if_missing(&mut ultrafast, DefaultServiceTier::Ultrafast);
+        assert_eq!(ultrafast["service_tier"], "ultrafast");
+        assert_eq!(
+            request_service_tier(&ultrafast),
+            DefaultServiceTier::Ultrafast
+        );
 
         let mut standard = json!({});
         apply_default_service_tier_if_missing(&mut standard, DefaultServiceTier::Standard);
@@ -878,6 +886,10 @@ mod tests {
         assert_eq!(
             request_service_tier(&json!({"service_tier": "fast"})),
             DefaultServiceTier::Fast
+        );
+        assert_eq!(
+            request_service_tier(&json!({"service_tier": "ultrafast"})),
+            DefaultServiceTier::Ultrafast
         );
         for tier in [None, Some("standard"), Some("default"), Some("flex")] {
             let request = tier.map_or_else(|| json!({}), |tier| json!({"service_tier": tier}));

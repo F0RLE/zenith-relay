@@ -229,11 +229,12 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
     Ok(window)
 }
 
-/// Releases the WebView renderer while preserving the native process, tray,
-/// managed state, and local gateway. Opening Relay from the tray recreates it.
+/// Keeps the primary window alive while moving Relay to the tray. Reusing the
+/// existing WebView avoids a renderer teardown during a close request and lets
+/// the tray reopen the same window reliably.
 pub fn close_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.destroy();
+        let _ = window.hide();
     }
 }
 

@@ -804,6 +804,7 @@ mod tests {
             reasoning_configurable: false,
             reasoning_manual_fallback: false,
             speed_supported: false,
+            speed_tiers: Vec::new(),
             speed_tier: Default::default(),
             speed_configurable: false,
         }

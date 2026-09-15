@@ -680,8 +680,15 @@ fn append_supplemental_windows(
 fn supplemental_service_tier(label: &str) -> Option<DefaultServiceTier> {
     label
         .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|word| word.eq_ignore_ascii_case("priority") || word.eq_ignore_ascii_case("fast"))
-        .then_some(DefaultServiceTier::Fast)
+        .find_map(|word| {
+            if word.eq_ignore_ascii_case("ultrafast") {
+                Some(DefaultServiceTier::Ultrafast)
+            } else if word.eq_ignore_ascii_case("priority") || word.eq_ignore_ascii_case("fast") {
+                Some(DefaultServiceTier::Fast)
+            } else {
+                None
+            }
+        })
 }
 
 fn map_window(
@@ -791,6 +798,9 @@ mod tests {
                 },{
                     "limit_name":"GPT-5.3 Codex Spark",
                     "rate_limit":{"primary_window":{"used_percent":50}}
+                },{
+                    "limit_name":"GPT-5 Ultrafast",
+                    "rate_limit":{"primary_window":{"used_percent":5}}
                 }],
                 "rate_limit_reset_credits":{"available_count":2},
                 "spend_control":{"individual_limit":{"remaining":"222.75"}}
@@ -806,12 +816,17 @@ mod tests {
             quota.secondary.unwrap().available_basis_points,
             Some(10_000)
         );
-        assert_eq!(quota.supplemental.len(), 2);
+        assert_eq!(quota.supplemental.len(), 3);
         assert_eq!(quota.supplemental[0].service_tier, None);
         assert_eq!(quota.supplemental[1].label, "GPT-5 Priority");
         assert_eq!(
             quota.supplemental[1].service_tier,
             Some(DefaultServiceTier::Fast)
+        );
+        assert_eq!(quota.supplemental[2].label, "GPT-5 Ultrafast");
+        assert_eq!(
+            quota.supplemental[2].service_tier,
+            Some(DefaultServiceTier::Ultrafast)
         );
         assert_eq!(quota.reset_credits_available, Some(2));
         assert_eq!(quota.available_credits_micro_units, None);

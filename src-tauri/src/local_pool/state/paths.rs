@@ -44,6 +44,22 @@ impl DesktopState {
         self.storage_paths().exports_root()
     }
 
+    pub fn logs_root(&self) -> PathBuf {
+        self.storage_paths().logs_root()
+    }
+
+    pub fn error_logs_root(&self) -> PathBuf {
+        self.storage_paths().error_logs_root()
+    }
+
+    pub fn crash_logs_root(&self) -> PathBuf {
+        self.storage_paths().crash_logs_root()
+    }
+
+    pub fn operation_logs_root(&self) -> PathBuf {
+        self.storage_paths().operation_logs_root()
+    }
+
     pub fn cache_root(&self) -> PathBuf {
         self.storage_paths().cache_root()
     }
@@ -256,15 +272,27 @@ fn ensure_destination_parent(path: &Path) -> Result<()> {
 }
 
 fn ensure_real_directory(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => return Ok(()),
+        Ok(_) => {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("{description} must be a real directory: {}", path.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
     fs::create_dir_all(path).map_err(io_error)?;
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(LocalPoolError::new(
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("{description} must be a real directory: {}", path.display()),
-        ));
+        ))
     }
-    Ok(())
 }
 
 fn io_error(error: std::io::Error) -> LocalPoolError {

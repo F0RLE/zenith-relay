@@ -12,7 +12,7 @@ import {
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { AccountPlanBadge, Button, EmptyState, IconButton, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
+import { AccountPlanBadge, Button, EmptyState, IconButton, OptionMenu, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
 import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
@@ -204,8 +204,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     () => refreshOneAccountQuota(mode, account.id),
     "feedback.refreshed",
   );
-  const updateServiceTier = async (fast: boolean) => {
-    const defaultServiceTier: DefaultServiceTier = fast ? "fast" : "standard";
+  const updateServiceTier = async (defaultServiceTier: DefaultServiceTier) => {
     if (defaultServiceTier === serviceTier) return;
     setPendingServiceTier(defaultServiceTier);
     try {
@@ -229,12 +228,28 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{nextRouteSummary ? <small className="pool-next-route">{nextRouteSummary}</small> : null}{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} data-relay-tooltip={activeRequestSummary}>{activeRequestSummary}</small> : null}</span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
-            <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} data-relay-tooltip={t("pool.serviceTierHint")}>
-              <Zap aria-hidden />
-              <span className="pool-speed-copy"><small>{t("pool.serviceTier")}</small><strong>{t(`pool.serviceTiers.${serviceTier}`)}</strong></span>
-              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} data-pool-speed-select="true" data-speed-tier={serviceTier} checked={serviceTier === "fast"} disabled={busy === "pool-service-tier"} onChange={(event) => void updateServiceTier(event.target.checked)} />
-              <span className="pool-speed-track" aria-hidden><span /></span>
-            </label>
+            <div className="pool-speed-control" data-fast={serviceTier !== "standard" ? "true" : "false"} data-speed-tier={serviceTier} data-pool-speed-select="true" data-relay-tooltip={t("pool.serviceTierHint")}>
+              <OptionMenu
+                className="pool-speed-menu"
+                label={t("pool.serviceTier")}
+                value={serviceTier}
+                icon={<Zap aria-hidden />}
+                disabled={busy === "pool-service-tier"}
+                onChange={(value) => void updateServiceTier(value as DefaultServiceTier)}
+                options={["standard", "fast", "ultrafast"].map((value) => ({ value, label: t(`pool.serviceTiers.${value}`) }))}
+              />
+              <label className="pool-speed-quick-toggle" data-relay-tooltip={t("pool.serviceTierHint")}>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-label={t("pool.serviceTier")}
+                  checked={serviceTier !== "standard"}
+                  disabled={busy === "pool-service-tier"}
+                  onChange={(event) => void updateServiceTier(event.target.checked ? "fast" : "standard")}
+                />
+                <span className="pool-speed-track" aria-hidden><span /></span>
+              </label>
+            </div>
             <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">

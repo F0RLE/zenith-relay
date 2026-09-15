@@ -3283,18 +3283,20 @@ for (const mode of ["local", "remote"] as const) {
 
     const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
     const speed = model.locator(".model-speed-toggle");
-    await expect(model.locator(".relay-option-trigger")).toHaveCount(0);
+    const speedTrigger = speed.locator(".relay-option-trigger");
+    await expect(speedTrigger).toBeVisible();
     await expect(speed).toBeVisible();
     await expect(model.locator(".model-rule-secondary-actions")).toHaveCSS("opacity", "1");
     expect(await model.locator(".model-rule-secondary-actions > *").evaluateAll((controls) => controls.map((control) => {
       if (control.matches(".model-speed-toggle")) return "speed";
       return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
     }))).toEqual(["reasoning", "speed"]);
-    await expect(speed).toHaveAttribute("aria-pressed", "false");
     await expect(speed).toHaveAttribute("data-speed-tier", "standard");
-    await speed.click();
-    await expect(speed).toHaveAttribute("aria-pressed", "true");
+    await expect(speedTrigger).toHaveAttribute("data-value", "standard");
+    await speedTrigger.click();
+    await page.locator('[role="option"][data-value="fast"]').click();
     await expect(speed).toHaveAttribute("data-speed-tier", "fast");
+    await expect(speedTrigger).toHaveAttribute("data-value", "fast");
     const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
     await expect(claude.locator(".model-speed-toggle")).toHaveCount(0);
 

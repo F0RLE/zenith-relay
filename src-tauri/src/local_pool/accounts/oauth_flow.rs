@@ -25,9 +25,9 @@ enum CallbackLanguage {
     Russian,
 }
 
-const CALLBACK_SUCCESS_HTML_EN: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}button{margin-top:20px;padding:10px 18px;border:1px solid ButtonBorder;border-radius:8px;background:ButtonFace;color:ButtonText;font:inherit;cursor:pointer}button:disabled{cursor:default;opacity:.65}</style><body><main><h1>Account connected</h1><p id="message">You can close this window now.</p><button id="close" type="button">Close window</button></main><script>(function(){"use strict";var button=document.getElementById("close"),message=document.getElementById("message");function closeTab(){var closed=false;try{window.close();closed=window.closed;}catch(_){}if(!closed){try{window.open("","_self");window.close();closed=window.closed;}catch(_){} }if(!closed){message.textContent="You can close this window now.";}}button.addEventListener("click",closeTab);window.setTimeout(closeTab,250);})();</script></body></html>"#;
+const CALLBACK_SUCCESS_HTML_EN: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText;user-select:none;-webkit-user-select:none}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}</style><body><main><h1>Account connected</h1><p>You can close this window now.</p></main></body></html>"#;
 
-const CALLBACK_SUCCESS_HTML_RU: &str = r#"<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}button{margin-top:20px;padding:10px 18px;border:1px solid ButtonBorder;border-radius:8px;background:ButtonFace;color:ButtonText;font:inherit;cursor:pointer}button:disabled{cursor:default;opacity:.65}</style><body><main><h1>Аккаунт подключён</h1><p id="message">Теперь это окно можно закрыть.</p><button id="close" type="button">Закрыть окно</button></main><script>(function(){"use strict";var button=document.getElementById("close"),message=document.getElementById("message");function closeTab(){var closed=false;try{window.close();closed=window.closed;}catch(_){}if(!closed){try{window.open("","_self");window.close();closed=window.closed;}catch(_){} }if(!closed){message.textContent="Теперь это окно можно закрыть.";}}button.addEventListener("click",closeTab);window.setTimeout(closeTab,250);})();</script></body></html>"#;
+const CALLBACK_SUCCESS_HTML_RU: &str = r#"<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText;user-select:none;-webkit-user-select:none}main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}</style><body><main><h1>Аккаунт подключён</h1><p>Теперь это окно можно закрыть.</p></main></body></html>"#;
 
 fn callback_success_html(language: CallbackLanguage) -> &'static str {
     match language {
@@ -1127,8 +1127,10 @@ mod tests {
         assert!(response.contains("Content-Type: text/html; charset=utf-8"));
         assert!(response.contains("text-align:center"));
         assert!(response.contains("You can close this window now."));
-        assert!(response.contains(">Close window<"));
-        assert!(response.contains("window.open(\"\",\"_self\")"));
+        assert!(response.contains("user-select:none"));
+        assert!(response.contains("-webkit-user-select:none"));
+        assert!(!response.contains("<button"));
+        assert!(!response.contains("<script"));
         assert!(!response.contains("authorization-code"));
         wait_until(|| events.has(&start.login_id, OAuthFlowStatus::CallbackReceived)).await;
         assert!(secrets.contains(&callback_secret_ref(&start.login_id)));
