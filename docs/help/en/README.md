@@ -214,6 +214,7 @@ source**. Never include API keys, cookies, tokens, prompts, or provider bodies.
 If a failure repeats, open **Settings → Pool data** and enable **Debug mode**.
 The **Diagnostics** section then appears: `logs/errors` contains errors,
 `logs/crashes` contains crash reports, and `logs/operations` contains short
-import and startup stages. Files are size-bounded and redacted. Detailed debug
-logging is intended only for temporary troubleshooting; errors and crashes are
-always retained.
+import and startup stages. If Relay is interrupted, its next start also reports
+the final redacted stage, even when Debug mode was off. Files are size-bounded
+and redacted. Detailed debug logging is intended only for temporary
+troubleshooting; errors and crashes are always retained.

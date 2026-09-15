@@ -12,9 +12,18 @@ release entries are kept concise and link to the corresponding tag.
   redacted logs for errors, crashes, and important operation stages; each
   folder can be opened directly from the app. Detailed operation logging is
   off by default and can be enabled there when troubleshooting.
+- Local Cockpit-compatible account exports now preserve a safe account name
+  and bounded, de-duplicated tags. Import accepts the same metadata without
+  exposing credentials; existing Relay tags remain authoritative on reimport.
 
 ### Fixed
 
+- Importing an account or API source without adding it to the pool no longer
+  restarts the live local gateway. This prevents an unrelated listener restart
+  from interrupting Relay during inventory-only imports.
+- After an interrupted launch or import, Diagnostics now records the last
+  redacted operation stage on the next start, even when detailed debug logging
+  was disabled.
 - A chat whose original account has run out of quota can now continue through
   the next compatible healthy account or API source. This works for both
   ordinary and WebSocket Responses requests.
@@ -27,9 +36,17 @@ release entries are kept concise and link to the corresponding tag.
 - Refreshed account credits and quota limits are applied to the running pool,
   including when Relay is open only in the tray. Only real provider credits
   are shown as available balance.
+- Background ChatGPT wake checks now use the live gateway runtime, including
+  its token refresh, cooldown, usage, and diagnostics paths, while staying
+  pinned to the account that the scheduler selected.
+- A model can be returned to Standard speed while its route is temporarily
+  unavailable. Fast and Ultrafast are recalculated for every retry candidate,
+  so an unsupported speed is not carried to the next account or API source.
 - Model Rules now shows only models that have a usable route. Stale ownership
   is released when a route becomes unavailable, so a compatible replacement
   can serve the chat.
+- Saving a partial Model Rules reorder now preserves unavailable and
+  binding-only pool models instead of treating them as removed.
 - Pool and Connections cards use consistent account information and
   reauthentication controls. Unavailable accounts remain visible with their
   status instead of making the whole pool look unavailable.

@@ -43,8 +43,9 @@ Within it, `data/database`, `data/vault`, `data/catalogs`, and
 `data/migrations` keep durable Relay state separate; `cache` holds temporary
 imports, OAuth state, locks, and the WebView profile; `exports` holds generated
 deployment bundles; `logs/errors`, `logs/crashes`, and `logs/operations` hold
-bounded redacted diagnostics; detailed operation logging is opt-in through
-Settings; and `recovery` holds application-specific
+bounded redacted diagnostics. A tiny redacted last-stage marker survives an
+interrupted session and is cleared after a clean exit; detailed operation
+logging is opt-in through Settings; and `recovery` holds application-specific
 backups and history-repair operations. The credential-store implementation
 owns secret access. Codex's directory is touched only for reversible
 integration.
