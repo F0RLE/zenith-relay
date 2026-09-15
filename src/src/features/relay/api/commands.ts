@@ -13,6 +13,8 @@ import type {
   ConsumeResetCreditResponse,
   CredentialRefreshResult,
   DefaultServiceTier,
+  DiagnosticPaths,
+  DiagnosticSettings,
   ImportSession,
   LocalUsagePage,
   OpenCodeConfigStatus,
@@ -205,7 +207,9 @@ export const relayCommands = {
     stack?: string;
     fatal?: boolean;
   }) => invoke<void>("record_frontend_diagnostic", { input }),
-  diagnosticPaths: () => invoke<{ logsPath: string; errorLogsPath: string; crashLogsPath: string; operationLogsPath: string }>("get_diagnostic_paths"),
+  diagnosticPaths: () => invoke<DiagnosticPaths>("get_diagnostic_paths"),
+  diagnosticSettings: () => invoke<DiagnosticSettings>("get_diagnostic_settings"),
+  setDiagnosticDebugMode: (enabled: boolean) => invoke<DiagnosticSettings>("set_diagnostic_debug_mode", { enabled }),
   openFolder: (folder: "data" | "logs" | "error_logs" | "crash_logs" | "operation_logs" | "profile_backups" | "opencode_backups") =>
     invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),

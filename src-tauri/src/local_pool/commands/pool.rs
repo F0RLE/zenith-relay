@@ -782,9 +782,7 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
         if source.in_pool
             && source.enabled
             && !source.draining
-            && source
-                .supports_any_wire_api()
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
+            && source.supports_any_wire_api().unwrap_or(false)
             && secret_store::load(&source.secret_ref)?.is_some()
         {
             return Ok(true);
@@ -1076,9 +1074,7 @@ pub async fn set_local_pool_membership(
             .iter()
             .filter(|source| source_ids.contains(&source.id))
         {
-            let supports_any_protocol = source
-                .supports_any_wire_api()
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+            let supports_any_protocol = source.supports_any_wire_api().unwrap_or(false);
             if !supports_any_protocol {
                 return Err(LocalPoolError::new(
                     ErrorCode::Conflict,

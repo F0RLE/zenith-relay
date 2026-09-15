@@ -21,11 +21,12 @@ pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> Loca
     for source in store.sources().iter().filter(|source| source.in_pool) {
         let mut models = Vec::new();
         for wire_api in WireApi::ALL {
-            models.extend(
-                source
-                    .models_for_wire_api(wire_api)
-                    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?,
-            );
+            let Ok(source_models) = source.models_for_wire_api(wire_api) else {
+                // A malformed source is shown as unavailable and must not
+                // prevent model selection from the remaining pool members.
+                continue;
+            };
+            models.extend(source_models);
         }
         if let Some(model) = models
             .into_iter()
@@ -52,10 +53,10 @@ pub(crate) fn local_pool_member_ids(
 ) -> LocalResult<(BTreeSet<String>, BTreeSet<String>)> {
     let mut source_ids = BTreeSet::new();
     for source in sources.iter().filter(|source| source.in_pool) {
-        if source
-            .supports_any_wire_api()
-            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
-        {
+        // A damaged legacy binding is an unavailable candidate, not a reason
+        // to reject the complete local key scope. Runtime admission records a
+        // stable source error and keeps the remaining pool routes usable.
+        if source.supports_any_wire_api().unwrap_or(false) {
             source_ids.insert(source.id.clone());
         }
     }

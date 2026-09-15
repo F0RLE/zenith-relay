@@ -101,6 +101,12 @@ pub(crate) async fn import_source_item(
         discover_models.then(|| Utc::now().to_rfc3339()),
     );
     record.in_pool |= add_to_pool;
+    record.normalize_protocol_bindings().map_err(|_| {
+        ImportItemError::new(
+            "source_protocol_invalid",
+            "imported source protocol binding is invalid",
+        )
+    })?;
     persist_imported_source(state, &record, &api_key, existing.as_ref()).await?;
     Ok(record)
 }

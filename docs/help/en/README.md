@@ -211,6 +211,9 @@ client does not receive two different answers in one stream.
 
 When asking for help, copy the sanitized status, HTTP code, model, and **Error
 source**. Never include API keys, cookies, tokens, prompts, or provider bodies.
-If a failure repeats, open **Settings → Diagnostics**: `logs/errors` contains
-errors, `logs/crashes` contains crash reports, and `logs/operations` contains
-short import and startup stages. Files are size-bounded and redacted.
+If a failure repeats, open **Settings → Pool data** and enable **Debug mode**.
+The **Diagnostics** section then appears: `logs/errors` contains errors,
+`logs/crashes` contains crash reports, and `logs/operations` contains short
+import and startup stages. Files are size-bounded and redacted. Detailed debug
+logging is intended only for temporary troubleshooting; errors and crashes are
+always retained.

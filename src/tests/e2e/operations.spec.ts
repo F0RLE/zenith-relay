@@ -1389,6 +1389,32 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   expect(commands).not.toContain("reset_local_pool_data");
 });
 
+test("diagnostic debug mode is opt-in and persisted by the native settings command", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const debug = page.getByLabel("Debug mode");
+  const poolData = page.locator(".settings-group").filter({ hasText: "Pool data" });
+  const diagnostics = page.locator(".settings-group").filter({ hasText: "Diagnostics" });
+  await expect(poolData.locator(".settings-debug-section")).toHaveCount(1);
+  await expect(poolData.locator(".settings-debug-details")).toHaveCount(0);
+  await expect(diagnostics).toHaveCount(0);
+  await expect(poolData.locator(".settings-control-row").last()).toHaveClass(/settings-danger-row/);
+  await expect(debug).not.toBeChecked();
+  await debug.check();
+  await expect(debug).toBeChecked();
+  await expect(poolData.locator(".settings-debug-details")).toBeVisible();
+  await expect(poolData.getByRole("button", { name: "Open operations" })).toBeVisible();
+  await expect(diagnostics).toHaveCount(1);
+  await expect(page.locator(".settings-group").last()).toContainText("Diagnostics");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_diagnostic_debug_mode")?.args)).toEqual({ enabled: true });
+  await debug.uncheck();
+  await expect(debug).not.toBeChecked();
+  await expect(poolData.locator(".settings-debug-details")).toHaveCount(0);
+  await expect(diagnostics).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_diagnostic_debug_mode").length)).toBe(2);
+});
+
 test("profile switch reminder can cancel a switch and be disabled", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, profileSwitchBackupPrompt: true });
   await page.goto("/");

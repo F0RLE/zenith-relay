@@ -407,6 +407,8 @@ pub fn run() {
             local_pool::commands::recovery::preview_support_bundle,
             crate::diagnostics::record_frontend_diagnostic,
             crate::diagnostics::get_diagnostic_paths,
+            crate::diagnostics::get_diagnostic_settings,
+            crate::diagnostics::set_diagnostic_debug_mode,
             local_pool::commands::remote_server::connect_remote_server,
             local_pool::commands::remote_server::get_remote_server_state,
             local_pool::commands::remote_server::get_remote_runtime_order,

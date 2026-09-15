@@ -183,12 +183,21 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/");
       await page.getByRole("button", { name: "Настройки", exact: true }).click();
       await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data", { exact: true })).toBeVisible();
-      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs", { exact: true })).toBeVisible();
-      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\errors", { exact: true })).toBeVisible();
-      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\crashes", { exact: true })).toBeVisible();
-      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toBeVisible();
-
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\errors", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\crashes", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toHaveCount(0);
       const groups = page.locator(".settings-group");
+      const debugToggle = page.getByLabel("Режим отладки");
+      await expect(debugToggle).toBeVisible();
+      await expect(debugToggle).not.toBeChecked();
+      const diagnostics = groups.filter({ hasText: "Диагностика" });
+      await expect(diagnostics).toHaveCount(0);
+      const poolData = groups.filter({ hasText: "Данные пула" });
+      await expect(poolData.locator(".settings-debug-section")).toHaveCount(1);
+      await expect(poolData.locator(".settings-debug-details")).toHaveCount(0);
+      await expect(poolData.locator(".settings-control-row").last()).toHaveClass(/settings-danger-row/);
+
       const pageBox = await page.locator(".settings-page").boundingBox();
       const headerBox = await page.locator(".settings-page > .relay-page-header").boundingBox();
       const groupsBox = await page.locator(".settings-groups").boundingBox();
@@ -203,7 +212,7 @@ for (const theme of ["light", "dark"] as const) {
         const bottomGap = availableBottom - (groupsBox!.y + groupsBox!.height);
         expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(2);
       }
-      await expect(groups).toHaveCount(4);
+      await expect(groups).toHaveCount(3);
       const boxes = await groups.evaluateAll((items) => items.map((item) => {
         const rect = item.getBoundingClientRect();
         return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };
@@ -211,6 +220,21 @@ for (const theme of ["light", "dark"] as const) {
       expect(boxes.every((box) => box.overflow === 0)).toBe(true);
       expect(Math.max(...boxes.map((box) => box.width)) - Math.min(...boxes.map((box) => box.width))).toBeLessThanOrEqual(1);
       await page.screenshot({ path: `output/playwright/settings-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+
+      await debugToggle.check();
+      const debugDetails = poolData.locator(".settings-debug-details");
+      await expect(debugDetails).toBeVisible();
+      await expect(diagnostics).toHaveCount(1);
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs", { exact: true })).toBeVisible();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\errors", { exact: true })).toBeVisible();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\crashes", { exact: true })).toBeVisible();
+      await expect(diagnostics.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toBeVisible();
+      await expect(groups).toHaveCount(4);
+      await expect(groups.last()).toContainText("Диагностика");
+      await debugDetails.scrollIntoViewIfNeeded();
+      const debugLayout = await poolData.evaluate((item) => ({ overflow: item.scrollWidth - item.clientWidth }));
+      expect(debugLayout.overflow).toBe(0);
+      await poolData.screenshot({ path: `output/playwright/settings-debug-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
 }

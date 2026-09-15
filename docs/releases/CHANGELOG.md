@@ -10,7 +10,8 @@ release entries are kept concise and link to the corresponding tag.
 
 - **Diagnostics** in Settings. Relay keeps separate, size-limited and
   redacted logs for errors, crashes, and important operation stages; each
-  folder can be opened directly from the app.
+  folder can be opened directly from the app. Detailed operation logging is
+  off by default and can be enabled there when troubleshooting.
 
 ### Fixed
 

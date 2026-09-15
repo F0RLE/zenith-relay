@@ -26,6 +26,7 @@ const LOGS_DIRECTORY: &str = "logs";
 const ERRORS_DIRECTORY: &str = "errors";
 const CRASHES_DIRECTORY: &str = "crashes";
 const OPERATIONS_DIRECTORY: &str = "operations";
+const DEBUG_MARKER_FILE: &str = "debug.enabled";
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 const MAX_LOG_FILE_BYTES: u64 = 1_048_576;
 const MAX_RETAINED_ERROR_FILES: usize = 14;
@@ -40,6 +41,10 @@ static STATE: OnceLock<DiagnosticState> = OnceLock::new();
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 static CRASH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+// Detailed operation breadcrumbs are opt-in. Errors and crash reports remain
+// enabled regardless of this flag so a normal installation stays quiet while
+// still retaining the information needed to diagnose a failure.
+static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct DiagnosticState {
     root: Mutex<PathBuf>,
@@ -95,6 +100,12 @@ pub struct DiagnosticPaths {
     pub operation_logs_path: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticSettings {
+    pub debug_enabled: bool,
+}
+
 /// Install the process-wide panic hook before Tauri starts constructing the
 /// application.  The hook is intentionally best effort: diagnostics must
 /// never turn a useful panic into a second panic.
@@ -119,6 +130,23 @@ pub(crate) fn initialize(root: &Path) {
         Err(poisoned) => *poisoned.into_inner() = root.to_path_buf(),
     }
     let layout_ready = ensure_layout(root);
+    let debug_marker = layout_ready.then(|| read_debug_marker(root));
+    let debug_enabled = match debug_marker
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+    {
+        Some(enabled) => *enabled,
+        None => false,
+    };
+    DEBUG_ENABLED.store(debug_enabled, Ordering::Release);
+    if debug_marker.is_some_and(|result| result.is_err()) {
+        record_error(
+            "desktop",
+            Some("diagnostic_debug_marker_invalid"),
+            "diagnostic debug setting could not be read; detailed logging is disabled",
+            &[],
+        );
+    }
     let marker_state = layout_ready.then(|| begin_session_marker(root)).flatten();
     SESSION_ACTIVE.store(marker_state.is_some(), Ordering::Release);
     if marker_state == Some(true) {
@@ -165,6 +193,64 @@ pub(crate) fn paths() -> DiagnosticPaths {
     }
 }
 
+pub(crate) fn settings() -> DiagnosticSettings {
+    DiagnosticSettings {
+        debug_enabled: is_debug_enabled(),
+    }
+}
+
+/// Return whether verbose operation diagnostics are enabled for this Relay
+/// installation. Errors and crash reports intentionally do not use this flag.
+pub(crate) fn is_debug_enabled() -> bool {
+    DEBUG_ENABLED.load(Ordering::Acquire)
+}
+
+/// Persist the opt-in diagnostic verbosity setting as a marker owned by the
+/// Relay logs directory. The marker contains no user data and is created with
+/// `create_new` so a symlink or other unexpected file can never be followed.
+pub(crate) fn set_debug_enabled(enabled: bool) -> Result<(), String> {
+    let state = state();
+    let _guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = root_path();
+    if !ensure_layout(&root) {
+        return Err("diagnostic log directory is unavailable".to_string());
+    }
+    let marker = root.join(LOGS_DIRECTORY).join(DEBUG_MARKER_FILE);
+    if enabled {
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err("diagnostic debug marker is unsafe".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker)
+                    .map_err(|_| "diagnostic debug setting could not be saved".to_string())?;
+            }
+            Err(_) => return Err("diagnostic debug setting could not be read".to_string()),
+        }
+    } else {
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                fs::remove_file(&marker)
+                    .map_err(|_| "diagnostic debug setting could not be saved".to_string())?;
+            }
+            Ok(_) => return Err("diagnostic debug marker is unsafe".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("diagnostic debug setting could not be read".to_string()),
+        }
+    }
+    DEBUG_ENABLED.store(enabled, Ordering::Release);
+    drop(_guard);
+    if enabled {
+        record_operation("diagnostics", "debug_enabled", &[]);
+    }
+    Ok(())
+}
+
 /// Record a native operation breadcrumb.  The latest breadcrumb is copied to
 /// a crash report, so a panic can be tied to the last known stage even when no
 /// normal error response reaches the UI.
@@ -186,6 +272,9 @@ pub(crate) fn breadcrumb(operation: &str, stage: &str, details: &[(&str, String)
 
 pub(crate) fn record_operation(operation: &str, outcome: &str, details: &[(&str, String)]) {
     breadcrumb(operation, outcome, details);
+    if !is_debug_enabled() {
+        return;
+    }
     record_event(
         "operations",
         "info",
@@ -255,6 +344,17 @@ pub fn get_diagnostic_paths() -> DiagnosticPaths {
     paths()
 }
 
+#[tauri::command]
+pub fn get_diagnostic_settings() -> DiagnosticSettings {
+    settings()
+}
+
+#[tauri::command]
+pub fn set_diagnostic_debug_mode(enabled: bool) -> Result<DiagnosticSettings, String> {
+    set_debug_enabled(enabled)?;
+    Ok(settings())
+}
+
 fn state() -> &'static DiagnosticState {
     STATE.get_or_init(|| DiagnosticState {
         root: Mutex::new(fallback_root()),
@@ -302,6 +402,16 @@ fn fallback_root() -> PathBuf {
     }
 }
 
+fn read_debug_marker(root: &Path) -> Result<bool, String> {
+    let marker = root.join(LOGS_DIRECTORY).join(DEBUG_MARKER_FILE);
+    match fs::symlink_metadata(marker) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err("diagnostic debug marker is unsafe".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("diagnostic debug marker could not be read".to_string()),
+    }
+}
+
 fn ensure_layout(root: &Path) -> bool {
     if !ensure_real_directory(root) {
         return false;
@@ -327,6 +437,7 @@ fn ensure_layout(root: &Path) -> bool {
             "errors/      redacted native and renderer error events (JSONL)\n",
             "crashes/     panic reports with the last safe operation breadcrumb\n",
             "operations/  short lifecycle records useful for import/runtime debugging (JSONL)\n",
+            "debug.enabled enables the detailed operation stream and is off by default.\n",
             "session.active is removed on clean exit; its presence marks an interrupted run.\n",
             "\n",
             "Secrets, cookies, prompts, responses, and raw account identities are not stored here.\n",
@@ -404,7 +515,10 @@ fn record_event(
         level,
         kind,
         operation: operation.map(|value| safe_text(value, 120)),
-        code: code.map(|value| safe_text(value, 120)),
+        // Error codes are machine-readable labels, not free-form messages.
+        // Keep the bounded identifier visible so a user can correlate the
+        // red status in the pool with the corresponding diagnostic entry.
+        code: code.map(safe_code),
         message: safe_text(message, MAX_TEXT_BYTES),
         details: values,
     };
@@ -589,6 +703,24 @@ fn prune_files(directory: &Path, prefix: &str, keep: usize) {
 
 fn safe_detail(value: &str) -> String {
     safe_text(value, MAX_TEXT_BYTES)
+}
+
+/// Preserve only the small, canonical alphabet used by diagnostic/error
+/// codes.  Running codes through `safe_text` would treat prefixes such as
+/// `source_` as identity-like text and turn useful labels into
+/// `source_[redacted]`.
+fn safe_code(value: &str) -> String {
+    let value = value.trim();
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        value.to_ascii_lowercase()
+    } else {
+        REDACTED.to_string()
+    }
 }
 
 fn safe_text(value: &str, max_bytes: usize) -> String {
@@ -1179,6 +1311,20 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_codes_remain_actionable_without_allowing_free_form_text() {
+        assert_eq!(
+            safe_code(" source_protocol_invalid "),
+            "source_protocol_invalid"
+        );
+        assert_eq!(
+            safe_code("Gateway-Restart.Failed"),
+            "gateway-restart.failed"
+        );
+        assert_eq!(safe_code("source account invalid"), REDACTED);
+        assert_eq!(safe_code("https://example.test/?token=secret"), REDACTED);
+    }
+
+    #[test]
     fn redaction_hides_embedded_uuid_identifiers_without_losing_operation_context() {
         let value = safe_text(
             "delete-account-123e4567-e89b-12d3-a456-426614174000 failed",
@@ -1209,6 +1355,22 @@ mod tests {
         assert!(root.join("logs/crashes").is_dir());
         assert!(root.join("logs/operations").is_dir());
         assert!(root.join("logs/README.txt").is_file());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn debug_marker_is_disabled_by_default_and_enabled_by_presence() {
+        let root = env::temp_dir().join(format!(
+            "zenith-relay-debug-marker-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        assert!(ensure_layout(&root));
+        assert!(!read_debug_marker(&root).expect("default marker state"));
+        fs::write(root.join(LOGS_DIRECTORY).join(DEBUG_MARKER_FILE), b"").expect("marker");
+        assert!(read_debug_marker(&root).expect("enabled marker state"));
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

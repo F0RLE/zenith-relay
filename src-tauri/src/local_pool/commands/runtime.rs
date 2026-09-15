@@ -15,7 +15,10 @@ use super::super::{
     store::secret_store,
 };
 use super::{pool, profiles};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tauri::{AppHandle, Emitter, Manager};
 use zenith_relay_core::{
     accounts::AccountRecord,
@@ -32,6 +35,12 @@ use zenith_relay_core::{
 use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
 
 pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms;
+
+/// A malformed source record must not make an otherwise usable local pool
+/// disappear. Keep the source in the inventory, exclude only its runtime
+/// route, and expose stable codes to the UI so it can be repaired.
+const SOURCE_PROTOCOL_INVALID_CODE: &str = "source_protocol_invalid";
+const SOURCE_RUNTIME_INVALID_CODE: &str = "source_runtime_invalid";
 
 pub(in crate::local_pool) fn record_catalog_refresh_result(
     state: &DesktopState,
@@ -65,23 +74,44 @@ pub(in crate::local_pool) async fn runtime_from_store(
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed profile can expose every verified source protocol. Requests
     // still select only the protocol they actually use at the gateway edge.
-    let (pool_source_ids, pool_account_ids) =
+    let (mut pool_source_ids, pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
     let mut sources = Vec::new();
+    let mut source_ids = HashSet::new();
     for source in source_records {
         let Some(api_key) = source_api_keys.get(&source.id).cloned().flatten() else {
             continue;
         };
+        let protocol_bindings = match source.effective_protocol_bindings() {
+            Ok(bindings) => bindings,
+            Err(_) => {
+                quarantine_source_runtime_error(state, &source, SOURCE_PROTOCOL_INVALID_CODE);
+                continue;
+            }
+        };
+        let runtime_source = ProviderSource {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            base_url: source.base_url.clone(),
+            api_key,
+            wire_api: source.wire_api,
+            models: source.models.clone(),
+        };
+        if runtime_source.validate().is_err()
+            || source.weight == 0
+            || source.recovery_delay_seconds > 24 * 60 * 60
+        {
+            quarantine_source_runtime_error(state, &source, SOURCE_RUNTIME_INVALID_CODE);
+            continue;
+        }
+        if !source_ids.insert(source.id.clone()) {
+            quarantine_source_runtime_error(state, &source, SOURCE_RUNTIME_INVALID_CODE);
+            continue;
+        }
+        clear_source_runtime_error(state, &source);
         sources.push(RuntimeSource {
-            source: ProviderSource {
-                id: source.id,
-                name: source.name,
-                base_url: source.base_url,
-                api_key,
-                wire_api: source.wire_api,
-                models: source.models,
-            },
-            protocol_bindings: source.protocol_bindings,
+            source: runtime_source,
+            protocol_bindings,
             enabled: source.enabled,
             draining: source.draining,
             priority: source.priority,
@@ -92,6 +122,10 @@ pub(in crate::local_pool) async fn runtime_from_store(
             last_used_at_ms: source.last_used_at.as_deref().and_then(timestamp_ms),
         });
     }
+    // Key scopes must reference only source executors admitted above. Keeping
+    // a stale id for a malformed or credential-less source can make the core
+    // reject an otherwise valid mixed pool while rebuilding the gateway.
+    pool_source_ids.retain(|id| source_ids.contains(id));
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let authority = state.token_authority();
     let mut accounts = Vec::new();
@@ -256,6 +290,97 @@ pub(in crate::local_pool) async fn runtime_from_store(
         settings.chatgpt_interface_quota_reserve_basis_points,
     );
     Ok(Arc::new(runtime))
+}
+
+/// Persist a stable, redacted error for a source that cannot be admitted to
+/// the runtime. The source remains visible in the Connections and Pool
+/// screens, where the missing runtime candidate is rendered as unavailable;
+/// only this source is removed from the current runtime build.
+fn quarantine_source_runtime_error(
+    state: &DesktopState,
+    source: &ProviderSourceRecord,
+    code: &str,
+) {
+    let source_hash = crate::diagnostics::hash_identifier(&source.id);
+    crate::diagnostics::record_error(
+        "gateway-runtime",
+        Some(code),
+        "source configuration is invalid and was excluded from the local gateway",
+        &[("source", source_hash.clone())],
+    );
+
+    let persisted = (|| -> Result<()> {
+        let mut store = state.store()?;
+        let Some(current) = store.source(&source.id).cloned() else {
+            return Ok(());
+        };
+        if !same_source_runtime_configuration(&current, source)
+            || current.last_error.as_deref() == Some(code)
+        {
+            return Ok(());
+        }
+        let mut updated = current;
+        updated.last_error = Some(code.to_string());
+        store.upsert_source(updated)
+    })();
+    if persisted.is_err() {
+        crate::diagnostics::record_error(
+            "gateway-runtime",
+            Some("source_runtime_error_persist_failed"),
+            "source runtime error could not be saved",
+            &[("source", source_hash)],
+        );
+    }
+}
+
+/// Clear only the error owned by runtime admission. Probe/discovery errors
+/// belong to their own operation and must not be erased by an unrelated
+/// runtime rebuild.
+fn clear_source_runtime_error(state: &DesktopState, source: &ProviderSourceRecord) {
+    let persisted = (|| -> Result<()> {
+        let mut store = state.store()?;
+        let Some(current) = store.source(&source.id).cloned() else {
+            return Ok(());
+        };
+        let runtime_error = current.last_error.as_deref().is_some_and(|error| {
+            error == SOURCE_PROTOCOL_INVALID_CODE || error == SOURCE_RUNTIME_INVALID_CODE
+        });
+        if !same_source_runtime_configuration(&current, source) || !runtime_error {
+            return Ok(());
+        }
+        let mut updated = current;
+        updated.last_error = None;
+        store.upsert_source(updated)
+    })();
+    if persisted.is_err() {
+        crate::diagnostics::record_error(
+            "gateway-runtime",
+            Some("source_runtime_error_clear_failed"),
+            "source runtime error could not be cleared",
+            &[("source", crate::diagnostics::hash_identifier(&source.id))],
+        );
+    }
+}
+
+fn same_source_runtime_configuration(
+    current: &ProviderSourceRecord,
+    expected: &ProviderSourceRecord,
+) -> bool {
+    current.id == expected.id
+        && current.name == expected.name
+        && current.enabled == expected.enabled
+        && current.in_pool == expected.in_pool
+        && current.draining == expected.draining
+        && current.base_url == expected.base_url
+        && current.secret_ref == expected.secret_ref
+        && current.wire_api == expected.wire_api
+        && current.protocol_bindings == expected.protocol_bindings
+        && current.models == expected.models
+        && current.allowed_models == expected.allowed_models
+        && current.excluded_models == expected.excluded_models
+        && current.priority == expected.priority
+        && current.weight == expected.weight
+        && current.recovery_delay_seconds == expected.recovery_delay_seconds
 }
 
 /// ChatGPT profile recovery is an optional desktop integration. Its metadata
@@ -746,6 +871,89 @@ mod tests {
         state.gateway.stop().await;
         secret_store::delete(&source_secret_ref).unwrap();
         secret_store::delete(&key.secret_ref).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_source_is_quarantined_without_blocking_other_routes() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-source-quarantine-{id}"));
+        let valid_secret_ref = format!("source:valid-quarantine-{id}");
+        let invalid_secret_ref = format!("source:invalid-quarantine-{id}");
+        let state = DesktopState::open(root.clone()).unwrap();
+        secret_store::save(&valid_secret_ref, "valid-upstream-secret").unwrap();
+        secret_store::save(&invalid_secret_ref, "invalid-upstream-secret").unwrap();
+        let source = |id: &str, secret_ref: String, model: &str| ProviderSourceRecord {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            secret_ref,
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec![model.into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
+            detected_model_prices: Default::default(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        };
+        let valid = source("valid_source", valid_secret_ref.clone(), "gpt-valid");
+        let mut invalid = source("invalid_source", invalid_secret_ref.clone(), "gpt-invalid");
+        invalid.protocol_bindings = vec![zenith_relay_core::SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: zenith_relay_core::SourceAdapter::ResponsesToMessages,
+            reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["gpt-invalid".into()],
+        }];
+        state
+            .store()
+            .unwrap()
+            .replace_records(vec![valid, invalid], Vec::new())
+            .unwrap();
+
+        let runtime = runtime_from_store(&state).await.unwrap();
+        let order = runtime.candidate_runtime_order();
+        assert!(order
+            .iter()
+            .any(|candidate| candidate.candidate_id == "valid_source"));
+        assert!(!order
+            .iter()
+            .any(|candidate| candidate.candidate_id == "invalid_source"));
+        assert_eq!(
+            state
+                .store()
+                .unwrap()
+                .source("invalid_source")
+                .and_then(|source| source.last_error.as_deref()),
+            Some("source_protocol_invalid")
+        );
+
+        secret_store::delete(&valid_secret_ref).unwrap();
+        secret_store::delete(&invalid_secret_ref).unwrap();
+        let key_secret_ref = state
+            .store()
+            .unwrap()
+            .keys()
+            .iter()
+            .find(|key| key.system)
+            .map(|key| key.secret_ref.clone());
+        if let Some(secret_ref) = key_secret_ref {
+            secret_store::delete(&secret_ref).unwrap();
+        }
+        drop(runtime);
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

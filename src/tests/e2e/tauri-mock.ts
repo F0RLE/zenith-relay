@@ -72,6 +72,7 @@ export type MockOptions = {
   updateCheckDelayMs?: number;
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
+  diagnosticDebug?: boolean;
   distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
@@ -473,6 +474,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
     let readyKey = input.readyConnected === false ? "" : "test_zenith_source_key";
     let readyActive = Boolean(readyKey) && (input.readyActive ?? true);
+    let diagnosticDebugEnabled = input.diagnosticDebug ?? false;
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
     let nextCallback = 1;
@@ -967,6 +969,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             crashLogsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\crashes",
             operationLogsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations",
           };
+          case "get_diagnostic_settings": return { debugEnabled: diagnosticDebugEnabled };
+          case "set_diagnostic_debug_mode": diagnosticDebugEnabled = Boolean(args.enabled); return { debugEnabled: diagnosticDebugEnabled };
           case "open_relay_folder": return null;
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.automations = []; localUsage = []; return null;
           case "clear_local_usage": localUsage = []; return null;

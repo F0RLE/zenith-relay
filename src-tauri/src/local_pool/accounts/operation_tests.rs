@@ -1060,6 +1060,68 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
     assert!(!updated.enabled);
     assert!(updated.draining);
 }
+
+#[tokio::test]
+async fn source_import_rejects_an_invalid_existing_protocol_before_persisting() {
+    let id = Uuid::new_v4().simple().to_string();
+    let root = std::env::temp_dir().join(format!("zenith-relay-source-import-invalid-{id}"));
+    let secret_ref = format!("source:import-invalid-{id}");
+    let state = DesktopState::open(root.clone()).unwrap();
+    secret_store::save(&secret_ref, "sk-import-test").unwrap();
+    let source = ProviderSourceRecord {
+        id: "source_existing_invalid".into(),
+        name: "Existing invalid source".into(),
+        enabled: true,
+        in_pool: false,
+        draining: false,
+        base_url: "https://api.example.test/v1".into(),
+        secret_ref: secret_ref.clone(),
+        pricing_provider: None,
+        official_provider_family: None,
+        wire_api: WireApi::Responses,
+        protocol_bindings: vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["gpt-test".into()],
+        }],
+        models: vec!["gpt-test".into()],
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        priority: 0,
+        weight: 1,
+        recovery_delay_seconds: 0,
+        model_price_overrides: Default::default(),
+        detected_model_prices: Default::default(),
+        last_used_at: None,
+        last_test_at: None,
+        last_test_status: None,
+        last_error: None,
+    };
+    state
+        .store()
+        .unwrap()
+        .upsert_source(source.clone())
+        .unwrap();
+
+    let mut parsed = parse_import(
+        r#"{"api_key":"sk-import-test","base_url":"https://api.example.test/v1"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+    let item = parsed.items.remove(0);
+    let result = import_source_item(&state, item, false, false, &["gpt-test".to_string()]).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "source_protocol_invalid");
+    assert_eq!(state.store().unwrap().source(&source.id), Some(&source));
+
+    secret_store::delete(&secret_ref).unwrap();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
     let parsed = parse_import(r#"{"refresh_token":"refresh-rotated"}"#, None, &[]).unwrap();

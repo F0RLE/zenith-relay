@@ -809,3 +809,14 @@ export type RelayStorageInfo = {
   crashLogsPath: string;
   operationLogsPath: string;
 };
+
+export type DiagnosticPaths = {
+  logsPath: string;
+  errorLogsPath: string;
+  crashLogsPath: string;
+  operationLogsPath: string;
+};
+
+export type DiagnosticSettings = {
+  debugEnabled: boolean;
+};
