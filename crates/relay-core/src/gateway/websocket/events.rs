@@ -10,6 +10,8 @@ use serde_json::Value;
 #[derive(Default)]
 pub(super) struct EventTerminal {
     pub(super) outcome: Option<EventTerminalOutcome>,
+    /// Completed Responses object used to materialize a safe native replay.
+    pub(super) response: Option<Value>,
     pub(super) status: Option<StatusCode>,
     pub(super) error_category: Option<&'static str>,
     pub(super) headers: HeaderMap,
@@ -37,6 +39,7 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
     let status = upstream_status_from_value(value);
     EventTerminal {
         outcome,
+        response: value.get("response").cloned(),
         status,
         error_category: upstream_event_failure_category(
             value.get("type").and_then(Value::as_str),

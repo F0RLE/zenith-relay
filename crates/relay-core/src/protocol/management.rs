@@ -21,9 +21,10 @@ pub use account::{
     QuotaWindowUsage, RemoteAccountLocation, RevealedAccountIdentity, SourceSummary,
 };
 pub use model::{
-    apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
-    apply_pool_model_configuration, model_has_api_source_route, pool_candidate_count,
-    pooled_source_runtime_available, source_runtime_available, GatewaySummary, ModelSummary,
+    apply_model_display_order, apply_model_display_order_with_catalog, apply_model_metadata,
+    apply_model_reasoning_summary, apply_model_speed_summary, apply_pool_model_configuration,
+    model_has_api_source_route, pool_candidate_count, pooled_source_runtime_available,
+    source_runtime_available, GatewaySummary, ModelSummary,
 };
 pub use routing::{
     account_candidate_enabled, account_operational_state, operational_status, quota_refresh_status,
@@ -665,7 +666,6 @@ pub fn pool_model_summaries_with_pricing(
                     model.members.len(),
                     enabled,
                     quote,
-                    catalog.rank_for(&id),
                     catalog.image_request_prices(&id),
                 ),
             )
@@ -746,7 +746,6 @@ fn model_summary(
     member_count: usize,
     enabled: bool,
     quote: Option<TokenPrice>,
-    catalog_rank: Option<u32>,
     image_request_prices: Vec<ImageRequestPrice>,
 ) -> ModelSummary {
     let (input, cached, cache_write_5m, cache_write_1h, output) =
@@ -765,7 +764,25 @@ fn model_summary(
         codex_display_name: codex_model_display_name(&id),
         id,
         member_count,
-        catalog_rank,
+        catalog_provider: None,
+        catalog_family: None,
+        catalog_name: None,
+        catalog_release_date: None,
+        catalog_last_updated: None,
+        catalog_status: None,
+        catalog_reasoning: None,
+        catalog_reasoning_method: None,
+        catalog_reasoning_effort_levels: Vec::new(),
+        catalog_default_reasoning_effort: None,
+        catalog_tool_call: None,
+        catalog_structured_output: None,
+        catalog_attachment: None,
+        catalog_open_weights: None,
+        catalog_input_modalities: Vec::new(),
+        catalog_output_modalities: Vec::new(),
+        catalog_context_limit: None,
+        catalog_input_limit: None,
+        catalog_output_limit: None,
         input_micro_usd_per_million: input,
         cached_input_micro_usd_per_million: cached,
         cache_write_5m_micro_usd_per_million: cache_write_5m,
@@ -779,6 +796,7 @@ fn model_summary(
         reasoning_configurable: false,
         reasoning_manual_fallback: false,
         speed_supported: false,
+        speed_tiers: Vec::new(),
         speed_tier: DefaultServiceTier::Standard,
         speed_configurable: false,
     }
@@ -791,17 +809,41 @@ fn resolve_pool_model_price(
     context: &PricingContext,
 ) -> Option<ResolvedPrice> {
     let mut fallback = None;
+    let mut resolved: Option<ResolvedPrice> = None;
     for member in &model.members {
         let Some((kind, candidate_id)) = member.split_once(':') else {
             continue;
         };
-        let resolved = context.candidate_price(catalog, kind, candidate_id, Some(model_id));
-        if resolved.quote.is_some() {
-            return Some(resolved);
+        let candidate = context.candidate_price(catalog, kind, candidate_id, Some(model_id));
+        if let Some(candidate_quote) = candidate.quote {
+            if let Some(mut current) = resolved {
+                let current_quote = current
+                    .quote
+                    .expect("a resolved pool price always has a quote");
+                current.quote = Some(TokenPrice {
+                    input: current_quote.input,
+                    cache_read: current_quote.cache_read,
+                    // The same public model can be exposed by a generic route
+                    // and an Anthropic Messages route. Preserve the primary
+                    // route's price while filling cache-write fields only
+                    // from the route-aware Messages evidence.
+                    cache_write_5m: current_quote
+                        .cache_write_5m
+                        .or(candidate_quote.cache_write_5m),
+                    cache_write_1h: current_quote
+                        .cache_write_1h
+                        .or(candidate_quote.cache_write_1h),
+                    output: current_quote.output,
+                });
+                resolved = Some(current);
+            } else {
+                resolved = Some(candidate);
+            }
+        } else {
+            fallback = Some(candidate);
         }
-        fallback = Some(resolved);
     }
-    fallback
+    resolved.or(fallback)
 }
 
 struct PoolModel {
@@ -867,13 +909,17 @@ mod tests {
     use super::*;
     use crate::{
         accounts::{AccountAuthState, AccountHealthState},
+        model_metadata::ModelMetadataCatalog,
         quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription, SubscriptionStatus},
         CandidateHealth, CandidateQuota,
     };
     use crate::{
         ActiveModelRuntime, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
-        MessagesReasoningMode, PriceEvidence, SourceAdapter,
+        GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, MessagesReasoningMode,
+        PriceEvidence, ProviderSource, RuntimeLocalKey, RuntimeSource, SourceAdapter,
+        SourcePricingMetadata,
     };
+    use std::sync::Arc;
 
     fn runtime_candidate(
         candidate_id: &str,
@@ -925,6 +971,8 @@ mod tests {
             proxy_id: None,
             routing_block_reason: None,
             last_error_code: None,
+            client_auth_status: None,
+            last_client_login_redirect_at_ms: None,
         }
     }
 
@@ -1016,14 +1064,32 @@ mod tests {
     }
 
     #[test]
-    fn model_reasoning_summary_keeps_provider_hints_manual() {
+    fn model_reasoning_summary_does_not_invent_unsupported_manual_levels() {
         let mut model = ModelSummary {
             enabled: true,
             codex_visible: true,
             codex_display_name: String::new(),
             id: "gpt-test".into(),
             member_count: 1,
-            catalog_rank: None,
+            catalog_provider: None,
+            catalog_family: None,
+            catalog_name: None,
+            catalog_release_date: None,
+            catalog_last_updated: None,
+            catalog_status: None,
+            catalog_reasoning: None,
+            catalog_reasoning_method: None,
+            catalog_reasoning_effort_levels: Vec::new(),
+            catalog_default_reasoning_effort: None,
+            catalog_tool_call: None,
+            catalog_structured_output: None,
+            catalog_attachment: None,
+            catalog_open_weights: None,
+            catalog_input_modalities: Vec::new(),
+            catalog_output_modalities: Vec::new(),
+            catalog_context_limit: None,
+            catalog_input_limit: None,
+            catalog_output_limit: None,
             input_micro_usd_per_million: None,
             cached_input_micro_usd_per_million: None,
             cache_write_5m_micro_usd_per_million: None,
@@ -1037,6 +1103,7 @@ mod tests {
             reasoning_configurable: false,
             reasoning_manual_fallback: false,
             speed_supported: false,
+            speed_tiers: Vec::new(),
             speed_tier: DefaultServiceTier::Standard,
             speed_configurable: false,
         };
@@ -1068,10 +1135,10 @@ mod tests {
         assert!(!model.reasoning_manual_fallback);
 
         apply_model_reasoning_summary(&mut model, Some(Vec::new()), Some(&["max".into()]), true);
-        assert_eq!(model.reasoning_levels, ["max"]);
+        assert!(model.reasoning_levels.is_empty());
         assert!(model.reasoning_supported_levels.is_empty());
-        assert_eq!(model.reasoning_allowed_levels, ["max"]);
-        assert!(model.reasoning_configurable);
+        assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(!model.reasoning_configurable);
         assert!(!model.reasoning_manual_fallback);
 
         model.id = "gpt-5.6-terra".into();
@@ -1089,19 +1156,37 @@ mod tests {
         apply_model_reasoning_summary(&mut model, None, None, true);
         assert!(model.reasoning_supported_levels.is_empty());
         assert!(model.reasoning_allowed_levels.is_empty());
-        assert!(model.reasoning_configurable);
-        assert!(model.reasoning_manual_fallback);
+        assert!(!model.reasoning_configurable);
+        assert!(!model.reasoning_manual_fallback);
     }
 
     #[test]
-    fn anthropic_max_is_advertised_as_ultra_for_api_sources() {
+    fn anthropic_modes_are_limited_to_provider_reported_levels() {
         let mut model = ModelSummary {
             enabled: true,
             codex_visible: true,
             codex_display_name: String::new(),
             id: "claude-opus-4-8".into(),
             member_count: 1,
-            catalog_rank: None,
+            catalog_provider: None,
+            catalog_family: None,
+            catalog_name: None,
+            catalog_release_date: None,
+            catalog_last_updated: None,
+            catalog_status: None,
+            catalog_reasoning: None,
+            catalog_reasoning_method: None,
+            catalog_reasoning_effort_levels: Vec::new(),
+            catalog_default_reasoning_effort: None,
+            catalog_tool_call: None,
+            catalog_structured_output: None,
+            catalog_attachment: None,
+            catalog_open_weights: None,
+            catalog_input_modalities: Vec::new(),
+            catalog_output_modalities: Vec::new(),
+            catalog_context_limit: None,
+            catalog_input_limit: None,
+            catalog_output_limit: None,
             input_micro_usd_per_million: None,
             cached_input_micro_usd_per_million: None,
             cache_write_5m_micro_usd_per_million: None,
@@ -1115,6 +1200,7 @@ mod tests {
             reasoning_configurable: false,
             reasoning_manual_fallback: false,
             speed_supported: false,
+            speed_tiers: Vec::new(),
             speed_tier: DefaultServiceTier::Standard,
             speed_configurable: false,
         };
@@ -1124,8 +1210,8 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(model.reasoning_supported_levels, ["low", "max", "ultra"]);
-        assert_eq!(model.reasoning_levels, ["low", "max", "ultra"]);
+        assert_eq!(model.reasoning_supported_levels, ["low", "max"]);
+        assert_eq!(model.reasoning_levels, ["low", "max"]);
     }
 
     #[test]
@@ -1186,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn model_summaries_apply_member_rules_hidden_state_and_catalog_order() {
+    fn model_summaries_apply_member_rules_hidden_state_and_discovery_order() {
         let source = SourceSummary {
             id: "source_1".into(),
             name: "Synthetic".into(),
@@ -1231,8 +1317,114 @@ mod tests {
         assert!(models[2].enabled);
         assert_eq!(models[1].member_count, 1);
         assert!(models[1].output_micro_usd_per_million.is_some());
-        assert!(models[2].catalog_rank.is_none());
         assert!(models[2].output_micro_usd_per_million.is_none());
+    }
+
+    #[test]
+    fn advisory_metadata_changes_only_presentation_fields_and_order() {
+        let source = source_summary("source", &["older", "newer"]);
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        let original_state = models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.clone(),
+                    (
+                        model.enabled,
+                        model.member_count,
+                        model.input_micro_usd_per_million,
+                        model.output_micro_usd_per_million,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let metadata = ModelMetadataCatalog::from_models_dev_json(
+            r#"{
+                "test/newer":{
+                    "name":"Newer",
+                    "family":"test",
+                    "release_date":"2026-01-01",
+                    "reasoning":true,
+                    "reasoning_effort_levels":["low","high"],
+                    "default_reasoning_effort":"low",
+                    "tool_call":true,
+                    "structured_output":true,
+                    "attachment":true,
+                    "open_weights":false,
+                    "modalities":{"input":["text","image"],"output":["text"]},
+                    "limit":{"context":128000,"input":120000,"output":8000}
+                },
+                "test/older":{"name":"Older","family":"test","release_date":"2025-01-01"}
+            }"#,
+        )
+        .unwrap();
+
+        apply_model_metadata(&mut models, &metadata);
+        apply_model_display_order_with_catalog(&mut models, &[], &metadata);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
+        assert_eq!(models[0].catalog_name.as_deref(), Some("Newer"));
+        assert_eq!(models[0].catalog_reasoning, Some(true));
+        assert_eq!(models[0].catalog_reasoning_effort_levels, ["low", "high"]);
+        assert_eq!(
+            models[0].catalog_default_reasoning_effort.as_deref(),
+            Some("low")
+        );
+        assert_eq!(models[0].catalog_tool_call, Some(true));
+        assert_eq!(models[0].catalog_structured_output, Some(true));
+        assert_eq!(models[0].catalog_attachment, Some(true));
+        assert_eq!(models[0].catalog_open_weights, Some(false));
+        assert_eq!(models[0].catalog_input_modalities, ["text", "image"]);
+        assert_eq!(models[0].catalog_output_modalities, ["text"]);
+        assert_eq!(models[0].catalog_context_limit, Some(128_000));
+        assert_eq!(models[0].catalog_input_limit, Some(120_000));
+        assert_eq!(models[0].catalog_output_limit, Some(8_000));
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| {
+                    (
+                        model.id.clone(),
+                        (
+                            model.enabled,
+                            model.member_count,
+                            model.input_micro_usd_per_million,
+                            model.output_micro_usd_per_million,
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            original_state
+        );
+    }
+
+    #[test]
+    fn refreshing_metadata_clears_removed_presentation_fields() {
+        let source = source_summary("source", &["test/model"]);
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        let metadata = ModelMetadataCatalog::from_models_dev_json(
+            r#"{"test/model":{"name":"Model","family":"test","status":"active"}}"#,
+        )
+        .unwrap();
+
+        apply_model_metadata(&mut models, &metadata);
+        assert_eq!(models[0].catalog_name.as_deref(), Some("Model"));
+        assert_eq!(models[0].catalog_provider.as_deref(), Some("test"));
+
+        apply_model_metadata(&mut models, &ModelMetadataCatalog::empty());
+
+        assert_eq!(models[0].catalog_provider, None);
+        assert_eq!(models[0].catalog_family, None);
+        assert_eq!(models[0].catalog_name, None);
+        assert_eq!(models[0].catalog_release_date, None);
+        assert_eq!(models[0].catalog_last_updated, None);
+        assert_eq!(models[0].catalog_status, None);
     }
 
     #[test]
@@ -1256,6 +1448,91 @@ mod tests {
         assert_eq!(
             pool_pricing_source_summary(&[source], &[], &PricingCatalog::empty(), &context),
             PricingSourceSummary::Provider
+        );
+    }
+
+    #[test]
+    fn pool_model_price_keeps_messages_cache_creation_when_generic_route_wins_order() {
+        let generic = source_summary("a-generic", &["claude-test"]);
+        let mut messages = source_summary("z-messages", &["claude-test"]);
+        messages.wire_api = WireApi::Messages;
+        messages.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["claude-test".into()],
+        }];
+        let generic_price = TokenPrice {
+            input: 1_000_000,
+            cache_read: Some(100_000),
+            cache_write_5m: None,
+            cache_write_1h: None,
+            output: 2_000_000,
+        };
+        let messages_price = TokenPrice {
+            cache_write_5m: Some(1_250_000),
+            cache_write_1h: Some(2_500_000),
+            ..generic_price
+        };
+        let context = PricingContext {
+            source_metadata: BTreeMap::from([
+                (
+                    "a-generic".into(),
+                    SourcePricingMetadata {
+                        cache_write_models: BTreeSet::new(),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "z-messages".into(),
+                    SourcePricingMetadata {
+                        cache_write_models: BTreeSet::from(["claude-test".into()]),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            source_evidence: BTreeMap::from([
+                (
+                    "a-generic".into(),
+                    BTreeMap::from([(
+                        "claude-test".into(),
+                        PriceEvidence {
+                            provider: Some(generic_price),
+                            manual: None,
+                        },
+                    )]),
+                ),
+                (
+                    "z-messages".into(),
+                    BTreeMap::from([(
+                        "claude-test".into(),
+                        PriceEvidence {
+                            provider: Some(messages_price),
+                            manual: None,
+                        },
+                    )]),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let models = pool_model_summaries_with_pricing(
+            &[generic, messages],
+            &[],
+            &[],
+            &PricingCatalog::empty(),
+            &context,
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].cache_write_5m_micro_usd_per_million,
+            Some(1_250_000)
+        );
+        assert_eq!(
+            models[0].cache_write_1h_micro_usd_per_million,
+            Some(2_500_000)
         );
     }
 
@@ -1535,7 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_snapshot_configuration_uses_one_shared_policy() {
+    fn pool_snapshot_configuration_hides_speed_without_runtime_evidence() {
         let source = SourceSummary {
             id: "source_1".into(),
             name: "Synthetic".into(),
@@ -1591,13 +1868,77 @@ mod tests {
         assert!(model.custom_price);
         assert_eq!(model.input_micro_usd_per_million, Some(12));
         assert_eq!(model.cached_input_micro_usd_per_million, None);
-        assert_eq!(model.cache_write_5m_micro_usd_per_million, Some(18));
-        assert_eq!(model.cache_write_1h_micro_usd_per_million, Some(9));
+        assert_eq!(model.cache_write_5m_micro_usd_per_million, None);
+        assert_eq!(model.cache_write_1h_micro_usd_per_million, None);
         assert_eq!(model.output_micro_usd_per_million, Some(34));
-        assert_eq!(model.reasoning_levels, ["high"]);
-        assert_eq!(model.speed_tier, DefaultServiceTier::Fast);
-        assert!(model.speed_supported);
+        assert!(model.reasoning_levels.is_empty());
+        assert_eq!(model.speed_tier, DefaultServiceTier::Standard);
+        assert!(!model.speed_supported);
+        assert!(!model.speed_configurable);
         assert_eq!(pool_candidate_count(&[source], &[]), 1);
+    }
+
+    #[test]
+    fn pool_snapshot_does_not_infer_speed_from_a_runtime_default() {
+        let source = SourceSummary {
+            id: "source_1".into(),
+            name: "Synthetic".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        };
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: source.id.clone(),
+                name: source.name.clone(),
+                base_url: source.base_url.clone(),
+                api_key: "synthetic-upstream-secret".into(),
+                wire_api: source.wire_api,
+                models: source.models.clone(),
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key_1".into(),
+                secret: "synthetic-local-secret".into(),
+            })],
+            GatewayRuntimeOptions {
+                default_service_tier: DefaultServiceTier::Fast,
+                ..Default::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+
+        apply_pool_model_configuration(
+            &mut models,
+            std::slice::from_ref(&source),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&runtime),
+        );
+
+        assert_eq!(models[0].speed_tier, DefaultServiceTier::Standard);
+        assert!(!models[0].speed_supported);
+        assert!(!models[0].speed_configurable);
     }
 
     #[test]
@@ -1660,7 +2001,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-routed", "claude-native"]
         );
-        assert!(models[0].speed_supported);
+        assert!(!models[0].speed_supported);
         assert!(!models[1].speed_supported);
         assert_eq!(models[1].speed_tier, DefaultServiceTier::Standard);
     }

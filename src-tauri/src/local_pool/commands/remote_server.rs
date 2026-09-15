@@ -112,6 +112,7 @@ pub enum RemoteServerAction {
     StartGateway,
     StopGateway,
     SetCodexBackgroundTasks,
+    SetChatgptRetryUntilAvailable,
     SetCodexWebsockets,
     CreateWakeTask,
     UpdateWakeTask { id: String },
@@ -734,6 +735,11 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::SetCodexBackgroundTasks => (
             Method::POST,
             "/gateway/codex-background-tasks".to_string(),
+            true,
+        ),
+        RemoteServerAction::SetChatgptRetryUntilAvailable => (
+            Method::POST,
+            "/gateway/chatgpt-retry-until-available".to_string(),
             true,
         ),
         RemoteServerAction::SetCodexWebsockets => {

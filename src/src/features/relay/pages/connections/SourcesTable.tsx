@@ -5,6 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
 import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolBindingsEditor";
+import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { effectiveSourceProtocolBindings, sourceSupportsAnyWireApi, sourceSupportsNativeResponses } from "../../sourceProtocolBindings";
 import { sourceHost } from "../../sourceUrl";
@@ -67,6 +68,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
   const [sort, setSort] = useState<{ key: SourceSortKey; direction: SourceSortDirection }>({ key: "runtime", direction: "asc" });
+  const [launchSourceId, setLaunchSourceId] = useState<string | null>(null);
   const sourcesSnapshot = runtime?.sources ?? EMPTY_SOURCES;
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
   const retryTimestamps = useMemo(() => runtimeOrder
@@ -88,6 +90,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
   }
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
+  const launchSource = launchSourceId ? sourcesSnapshot.find((source) => source.id === launchSourceId) ?? null : null;
   const sortColumn = (key: SourceSortKey) => setSort((current) =>
     current.key === key
       ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
@@ -177,14 +180,24 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
               <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
-              <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => {
-                void activateCodexProfile(`launch-source-${source.id}`, () => relayCommands.launchCodexSource(source.id), true)
-                  .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", source.id); });
-              }} />
+              <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => setLaunchSourceId(source.id)} />
             </div></td>
           </tr>;
         })}</tbody>
       </table>
+      {launchSource ? <ApplicationPickerDialog
+        title={t("sources.launchPickerTitle")}
+        showLaunchToggle={false}
+        onClose={() => setLaunchSourceId(null)}
+        onChatGPT={() => {
+          void activateCodexProfile(`launch-source-${launchSource.id}`, () => relayCommands.launchCodexSource(launchSource.id), true)
+            .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", launchSource.id); });
+        }}
+        onOpenCode={() => {
+          void perform(`launch-source-${launchSource.id}`, () => relayCommands.launchOpenCodeSource(launchSource.id), "feedback.launched")
+            .then((launched) => { if (launched) localStorage.setItem("relay.directSourceId", launchSource.id); });
+        }}
+      /> : null}
     </div>
   );
 }

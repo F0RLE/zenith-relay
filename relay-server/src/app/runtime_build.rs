@@ -39,6 +39,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let routing_policy = state.store.routing_policy()?;
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
+    let chatgpt_retry_until_available = state.store.chatgpt_retry_until_available()?;
     let (mut pool_source_ids, mut pool_account_ids) =
         pool_member_ids(&source_records, &account_records);
     if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
@@ -98,6 +99,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             image_pricing_catalog: Some(state.pricing_catalog()),
+            model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
             model_reasoning_allowed_levels,
             response_affinity_store: Some(state.store.clone()),
             provider_storm_breaker: true,
@@ -111,6 +113,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(codex_websockets_enabled);
+    runtime.set_chatgpt_retry_until_available(chatgpt_retry_until_available);
     let breaker_store = state.store.clone();
     runtime.set_chatgpt_team_breaker_callback(move |account_ids| {
         let _ = breaker_store.block_accounts_for_team(&account_ids);

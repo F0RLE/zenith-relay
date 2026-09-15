@@ -1,7 +1,14 @@
 use crate::ApiModelPriceOverride;
 use serde_json::Value;
 
-pub(super) fn detected_model_price(model: &Value) -> Option<ApiModelPriceOverride> {
+/// Cache-write tariffs are Anthropic Messages-contract evidence.  A generic
+/// OpenAI-compatible model list can use similarly named fields for unrelated
+/// caches, so never expose 5m/1h creation prices unless discovery queried a
+/// real Messages route.
+pub(super) fn detected_model_price(
+    model: &Value,
+    messages_cache_write_supported: bool,
+) -> Option<ApiModelPriceOverride> {
     let pricing = model.get("pricing").filter(|value| value.is_object());
     let input = price_component(
         model,
@@ -47,36 +54,41 @@ pub(super) fn detected_model_price(model: &Value) -> Option<ApiModelPriceOverrid
     )
     .or_else(|| ttl_price(model, "promptCacheReadCostsByTtl", "5m"))
     .or_else(|| ttl_price(model, "promptCacheReadCostsByTtl", "1h"));
-    let cache_write_5m = price_component(
-        model,
-        pricing,
-        &[
-            "cacheWrite5mMicrousdPerMillion",
-            "cacheWrite5mMicroUsdPerMillion",
-            "cache_write_5m_microusd_per_million",
-            "cache_write_5m_micro_usd_per_million",
-            "cacheCreationInputCostMicrousdPerMillion",
-            "cache_creation_input_cost_microusd_per_million",
-        ],
-        &[
-            "cacheWriteCostPerToken",
-            "cache_write_cost_per_token",
-            "input_cache_write",
-        ],
-    )
-    .or_else(|| ttl_price(model, "promptCacheWriteCostsByTtl", "5m"));
-    let cache_write_1h = price_component(
-        model,
-        pricing,
-        &[
-            "cacheWrite1hMicrousdPerMillion",
-            "cacheWrite1hMicroUsdPerMillion",
-            "cache_write_1h_microusd_per_million",
-            "cache_write_1h_micro_usd_per_million",
-        ],
-        &[],
-    )
-    .or_else(|| ttl_price(model, "promptCacheWriteCostsByTtl", "1h"));
+    let (cache_write_5m, cache_write_1h) = if messages_cache_write_supported {
+        let write_5m = price_component(
+            model,
+            pricing,
+            &[
+                "cacheWrite5mMicrousdPerMillion",
+                "cacheWrite5mMicroUsdPerMillion",
+                "cache_write_5m_microusd_per_million",
+                "cache_write_5m_micro_usd_per_million",
+                "cacheCreationInputCostMicrousdPerMillion",
+                "cache_creation_input_cost_microusd_per_million",
+            ],
+            &[
+                "cacheWriteCostPerToken",
+                "cache_write_cost_per_token",
+                "input_cache_write",
+            ],
+        )
+        .or_else(|| ttl_price(model, "promptCacheWriteCostsByTtl", "5m"));
+        let write_1h = price_component(
+            model,
+            pricing,
+            &[
+                "cacheWrite1hMicrousdPerMillion",
+                "cacheWrite1hMicroUsdPerMillion",
+                "cache_write_1h_microusd_per_million",
+                "cache_write_1h_micro_usd_per_million",
+            ],
+            &[],
+        )
+        .or_else(|| ttl_price(model, "promptCacheWriteCostsByTtl", "1h"));
+        (write_5m, write_1h)
+    } else {
+        (None, None)
+    };
     ApiModelPriceOverride::from_optional_fields(
         Some(input),
         cached_input,
@@ -163,13 +175,16 @@ mod tests {
 
     #[test]
     fn detects_direct_microusd_catalog_prices() {
-        let price = detected_model_price(&json!({
-            "id": "zenith-model",
-            "inputCostMicrousdPerMillion": 2_500_000,
-            "cachedInputCostMicrousdPerMillion": 250_000,
-            "cacheCreationInputCostMicrousdPerMillion": 3_125_000,
-            "outputCostMicrousdPerMillion": 15_000_000,
-        }));
+        let price = detected_model_price(
+            &json!({
+                "id": "zenith-model",
+                "inputCostMicrousdPerMillion": 2_500_000,
+                "cachedInputCostMicrousdPerMillion": 250_000,
+                "cacheCreationInputCostMicrousdPerMillion": 3_125_000,
+                "outputCostMicrousdPerMillion": 15_000_000,
+            }),
+            true,
+        );
         assert_eq!(
             price,
             Some(ApiModelPriceOverride {
@@ -184,13 +199,16 @@ mod tests {
 
     #[test]
     fn detects_ttl_cache_prices_for_both_windows() {
-        let price = detected_model_price(&json!({
-            "id": "ttl-model",
-            "inputCostMicrousdPerMillion": 1_000_000,
-            "outputCostMicrousdPerMillion": 2_000_000,
-            "promptCacheReadCostsByTtl": { "5m": 100_000, "1h": 200_000 },
-            "promptCacheWriteCostsByTtl": { "5m": 1_250_000, "1h": 2_500_000 },
-        }))
+        let price = detected_model_price(
+            &json!({
+                "id": "ttl-model",
+                "inputCostMicrousdPerMillion": 1_000_000,
+                "outputCostMicrousdPerMillion": 2_000_000,
+                "promptCacheReadCostsByTtl": { "5m": 100_000, "1h": 200_000 },
+                "promptCacheWriteCostsByTtl": { "5m": 1_250_000, "1h": 2_500_000 },
+            }),
+            true,
+        )
         .unwrap();
 
         assert_eq!(price.cached_input_micro_usd_per_million, Some(100_000));
@@ -200,15 +218,18 @@ mod tests {
 
     #[test]
     fn detects_openrouter_style_token_prices_without_floating_point() {
-        let price = detected_model_price(&json!({
-            "id": "external-model",
-            "pricing": {
-                "prompt": "0.0000025",
-                "completion": "0.000015",
-                "input_cache_read": "0.00000025",
-                "input_cache_write": "0.000003125",
-            }
-        }));
+        let price = detected_model_price(
+            &json!({
+                "id": "external-model",
+                "pricing": {
+                    "prompt": "0.0000025",
+                    "completion": "0.000015",
+                    "input_cache_read": "0.00000025",
+                    "input_cache_write": "0.000003125",
+                }
+            }),
+            true,
+        );
         assert_eq!(
             price,
             Some(ApiModelPriceOverride {
@@ -222,14 +243,35 @@ mod tests {
     }
 
     #[test]
+    fn ignores_cache_creation_prices_outside_an_anthropic_messages_route() {
+        let price = detected_model_price(
+            &json!({
+                "id": "openai-compatible-model",
+                "inputCostMicrousdPerMillion": 1_000_000,
+                "outputCostMicrousdPerMillion": 2_000_000,
+                "cacheCreationInputCostMicrousdPerMillion": 1_250_000,
+                "promptCacheWriteCostsByTtl": { "5m": 1_250_000, "1h": 2_500_000 }
+            }),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(price.cache_write_5m_micro_usd_per_million, None);
+        assert_eq!(price.cache_write_1h_micro_usd_per_million, None);
+    }
+
+    #[test]
     fn detects_scientific_notation_without_floating_point() {
-        let price = detected_model_price(&json!({
-            "id": "scientific-model",
-            "pricing": {
-                "prompt": 1e-6,
-                "completion": 2.5e-6,
-            }
-        }));
+        let price = detected_model_price(
+            &json!({
+                "id": "scientific-model",
+                "pricing": {
+                    "prompt": 1e-6,
+                    "completion": 2.5e-6,
+                }
+            }),
+            false,
+        );
         assert_eq!(
             price,
             Some(ApiModelPriceOverride {
@@ -244,31 +286,43 @@ mod tests {
 
     #[test]
     fn ignores_incomplete_or_invalid_catalog_prices() {
-        assert!(detected_model_price(&json!({
-            "id": "incomplete",
-            "inputCostMicrousdPerMillion": 1_000_000,
-        }))
+        assert!(detected_model_price(
+            &json!({
+                "id": "incomplete",
+                "inputCostMicrousdPerMillion": 1_000_000,
+            }),
+            false
+        )
         .is_none());
-        assert!(detected_model_price(&json!({
-            "id": "invalid",
-            "pricing": { "prompt": "-1", "completion": "0.000001" },
-        }))
+        assert!(detected_model_price(
+            &json!({
+                "id": "invalid",
+                "pricing": { "prompt": "-1", "completion": "0.000001" },
+            }),
+            false
+        )
         .is_none());
     }
 
     #[test]
     fn does_not_turn_request_priced_models_into_zero_cost_token_models() {
-        assert!(detected_model_price(&json!({
-            "id": "image-model",
-            "inputCostMicrousdPerMillion": 0,
-            "outputCostMicrousdPerMillion": 0,
-            "requestCostMicrousd": 500_000,
-        }))
+        assert!(detected_model_price(
+            &json!({
+                "id": "image-model",
+                "inputCostMicrousdPerMillion": 0,
+                "outputCostMicrousdPerMillion": 0,
+                "requestCostMicrousd": 500_000,
+            }),
+            false
+        )
         .is_none());
-        assert!(detected_model_price(&json!({
-            "id": "image-model-openrouter",
-            "pricing": { "prompt": "0", "completion": "0", "request": "0.5" },
-        }))
+        assert!(detected_model_price(
+            &json!({
+                "id": "image-model-openrouter",
+                "pricing": { "prompt": "0", "completion": "0", "request": "0.5" },
+            }),
+            false
+        )
         .is_none());
     }
 }

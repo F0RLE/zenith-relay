@@ -64,6 +64,7 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     let object = request
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
+    super::contracts::validate_bridge_compaction(request)?;
     let previous_response_id = object
         .get("previous_response_id")
         .and_then(Value::as_str)

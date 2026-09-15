@@ -81,6 +81,11 @@ export function useConfirm() {
   return confirm;
 }
 
+export function mergeDescribedBy(...values: Array<string | undefined>) {
+  const ids = new Set(values.flatMap((value) => value?.split(/\s+/).filter(Boolean) ?? []));
+  return ids.size ? [...ids].join(" ") : undefined;
+}
+
 export function Button({ children, icon, variant = "secondary", busy, className, title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
   const tooltip = useTooltip<HTMLElement>(title ?? "");
   const hasTooltip = Boolean(title);
@@ -89,8 +94,8 @@ export function Button({ children, icon, variant = "secondary", busy, className,
     ref={hasTooltip && !disabled ? (node) => { tooltip.anchorRef.current = node; } : undefined}
     type={props.type ?? "button"}
     className={`relay-button ${variant}${className ? ` ${className}` : ""}`}
-    aria-describedby={hasTooltip ? tooltip.describedBy : props["aria-describedby"]}
     {...props}
+    aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
     disabled={disabled}
     onMouseEnter={disabled ? undefined : (event) => { if (hasTooltip) tooltip.show(); onMouseEnter?.(event); }}
     onMouseLeave={disabled ? undefined : (event) => { if (hasTooltip) tooltip.hideAfterHover(); onMouseLeave?.(event); }}
@@ -101,10 +106,13 @@ export function Button({ children, icon, variant = "secondary", busy, className,
     {busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span>
   </button>;
   return <>
-    {hasTooltip && disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hide}>{button}</span> : button}
+    {hasTooltip && disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" tabIndex={0} aria-describedby={tooltip.describedBy} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover}>{button}</span> : button}
     {hasTooltip ? tooltip.tooltip : null}
   </>;
 }
+
+// Both component-owned and delegated hints share one visible tooltip.
+let dismissActiveTooltip: (() => void) | undefined;
 
 export function useTooltip<T extends HTMLElement>(label: string) {
   const anchorRef = useRef<T>(null);
@@ -112,27 +120,29 @@ export function useTooltip<T extends HTMLElement>(label: string) {
   const tooltipId = useId();
   const [visible, setVisible] = useState(false);
   const [instant, setInstant] = useState(false);
+  const [activation, setActivation] = useState(0);
   const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom"; arrowLeft: number } | null>(null);
 
-  const showNow = () => {
-    setInstant(true);
-    setPosition(null);
-    setVisible(true);
-  };
-  const show = () => {
-    setInstant(false);
-    setPosition(null);
-    setVisible(true);
-  };
-  const hide = () => {
+  const hide = useCallback(() => {
     setVisible(false);
-  };
+    if (dismissActiveTooltip === hide) dismissActiveTooltip = undefined;
+  }, []);
+  const activate = useCallback((immediate: boolean) => {
+    if (dismissActiveTooltip !== hide) dismissActiveTooltip?.();
+    dismissActiveTooltip = hide;
+    setInstant(immediate);
+    setPosition(null);
+    setActivation((value) => value + 1);
+    setVisible(true);
+  }, [hide]);
+  const showNow = useCallback(() => activate(true), [activate]);
+  const show = useCallback(() => activate(false), [activate]);
   const pointerStart = () => {
     hide();
   };
 
   useLayoutEffect(() => {
-    if (!visible) return;
+    if (!visible || !label) return;
     const anchor = anchorRef.current?.getBoundingClientRect();
     const tooltip = tooltipRef.current;
     if (!anchor || !tooltip) return;
@@ -156,23 +166,42 @@ export function useTooltip<T extends HTMLElement>(label: string) {
       arrowInset,
       Math.min(anchorCenter - left, tooltip.offsetWidth - arrowInset),
     );
+    top = Math.max(margin, Math.min(top, window.innerHeight - tooltip.offsetHeight - margin));
     setPosition({ left, top, placement, arrowLeft });
-  }, [label, visible]);
+  }, [label, visible, activation]);
+
+  useEffect(() => () => {
+    if (dismissActiveTooltip === hide) dismissActiveTooltip = undefined;
+  }, [hide]);
 
   useEffect(() => {
     if (!visible) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") hide(); };
-    window.addEventListener("resize", hide);
-    window.addEventListener("scroll", hide, true);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("resize", hide);
-      window.removeEventListener("scroll", hide, true);
-      document.removeEventListener("keydown", onKeyDown);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || dismissActiveTooltip !== hide) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      hide();
     };
-  }, [visible]);
+    window.addEventListener("resize", hide);
+    window.addEventListener("blur", hide);
+    window.addEventListener("scroll", hide, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("pointerdown", hide, true);
+    const observer = new MutationObserver(() => {
+      if (!anchorRef.current?.isConnected) hide();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", hide);
+      window.removeEventListener("blur", hide);
+      window.removeEventListener("scroll", hide, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("pointerdown", hide, true);
+    };
+  }, [hide, visible]);
 
-  const tooltip = visible && typeof document !== "undefined" ? createPortal(
+  const tooltip = visible && label && typeof document !== "undefined" ? createPortal(
     <div
       ref={tooltipRef}
       id={tooltipId}
@@ -194,10 +223,11 @@ export function useTooltip<T extends HTMLElement>(label: string) {
 
   return {
     anchorRef,
-    describedBy: visible ? tooltipId : undefined,
+    describedBy: visible && label ? tooltipId : undefined,
     hide,
-    hideAfterHover: () => { if (document.activeElement !== anchorRef.current) hide(); },
+    hideAfterHover: () => { if (!anchorRef.current?.matches(":focus-visible")) hide(); },
     show,
+    showNow,
     showAfterFocus: () => { if (anchorRef.current?.matches(":focus-visible")) showNow(); },
     pointerStart,
     tooltip,
@@ -212,8 +242,8 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
     type={props.type ?? "button"}
     className={`relay-icon-button ${className}`.trim()}
     aria-label={label}
-    aria-describedby={tooltip.describedBy}
     {...props}
+    aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
     onMouseEnter={disabled ? undefined : (event) => { tooltip.show(); onMouseEnter?.(event); }}
     onMouseLeave={disabled ? undefined : (event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
     onFocus={disabled ? undefined : (event) => { tooltip.showAfterFocus(); onFocus?.(event); }}
@@ -223,7 +253,7 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
     {icon}
   </button>;
   return <>
-    {disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hide}>{button}</span> : button}
+    {disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" tabIndex={0} aria-describedby={tooltip.describedBy} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover}>{button}</span> : button}
     {tooltip.tooltip}
   </>;
 }
@@ -253,8 +283,8 @@ export function ActionMenuItem({ children, icon, danger = false, className = "",
       type="button"
       role="menuitem"
       className={classes || undefined}
-      aria-describedby={hasTooltip ? tooltip.describedBy : props["aria-describedby"]}
       {...props}
+      aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
       onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}
       onMouseEnter={(event) => { if (hasTooltip) tooltip.show(); onMouseEnter?.(event); }}
       onMouseLeave={(event) => { if (hasTooltip) tooltip.hideAfterHover(); onMouseLeave?.(event); }}

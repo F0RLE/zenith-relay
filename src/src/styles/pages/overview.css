@@ -36,6 +36,10 @@
   background: var(--relay-surface);
 }
 
+.pool-summary[data-has-provider-credits="true"] {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .metric-band > div,
 .pool-summary > div {
   min-width: 0;
@@ -51,6 +55,13 @@
 .metric-band > div:last-child,
 .pool-summary > div:last-child {
   border-right: 0;
+}
+
+.pool-summary > div > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .metric-band svg {

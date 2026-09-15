@@ -166,6 +166,7 @@ async fn pool_does_not_inject_unconfirmed_fast_without_overriding_client_service
         vec![source("source", &upstream, "source-key", &[MODEL], 0)],
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
+            model_metadata_catalog: None,
             max_retry_candidates: 3,
             default_service_tier: DefaultServiceTier::Fast,
             ..GatewayRuntimeOptions::default()
@@ -215,11 +216,14 @@ async fn pool_does_not_inject_unconfirmed_fast_without_overriding_client_service
 
 #[tokio::test]
 async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_source() {
-    let (source_a, state_a) = spawn_upstream(
-        "source-a-key",
-        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "loser", None)],
-    )
-    .await;
+    for status in [StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE] {
+        assert_server_error_fallback(status).await;
+    }
+}
+
+async fn assert_server_error_fallback(status: StatusCode) {
+    let (source_a, state_a) =
+        spawn_upstream("source-a-key", vec![status_reply(status, "loser", None)]).await;
     let (source_b, state_b) = spawn_upstream(
         "source-b-key",
         vec![
@@ -235,6 +239,7 @@ async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_sourc
         ],
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
+            model_metadata_catalog: None,
             max_retry_candidates: 3,
             cooldown_after_failures: 1,
             ..GatewayRuntimeOptions::default()
@@ -291,6 +296,109 @@ async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_sourc
         ),
         (1, "source-b", true)
     );
+}
+
+#[tokio::test]
+async fn function_tool_output_stays_on_its_creator_after_a_transient_failure() {
+    let call_id = "call_stateful_01";
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![
+            Reply::Json {
+                status: StatusCode::OK,
+                body: json!({
+                    "id": "resp-tool-owner",
+                    "object": "response",
+                    "model": MODEL,
+                    "output": [{
+                        "type": "function_call",
+                        "id": "fc_stateful_01",
+                        "call_id": call_id,
+                        "name": "run_command",
+                        "arguments": "{\"command\":\"pwd\"}"
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                }),
+                cache_control: "owner",
+                retry_after: None,
+            },
+            status_reply(StatusCode::SERVICE_UNAVAILABLE, "owner", None),
+        ],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![response_reply("resp-wrong-owner", "fallback")],
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let first = request(&gateway, false).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let continuation = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": "C:\\workspace"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(continuation.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(state_a.requests.lock().unwrap().len(), 2);
+    assert!(state_b.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn orphaned_function_tool_output_continues_through_pool_selection() {
+    let (upstream, state) = spawn_upstream(
+        "source-key",
+        vec![response_reply("resp-continued", "unused")],
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(
+        vec![source("source", &upstream, "source-key", &[MODEL], 0)],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_unknown",
+                "output": "result"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "resp-continued"
+    );
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -587,6 +695,7 @@ async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
         ],
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
+            model_metadata_catalog: None,
             max_retry_candidates: 3,
             cooldown_after_failures: 1,
             ..GatewayRuntimeOptions::default()
@@ -889,7 +998,7 @@ async fn unmapped_candidate_is_tried_without_spending_the_execution_budget() {
 }
 
 #[tokio::test]
-async fn stream_bytes_commit_the_response_before_the_first_complete_event() {
+async fn stream_prelude_failure_falls_back_before_any_client_bytes_are_committed() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -925,17 +1034,21 @@ async fn stream_bytes_commit_the_response_before_the_first_complete_event() {
 
     let response = request(&gateway, true).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[CACHE_CONTROL], "loser");
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
     let body = response.text().await.unwrap();
     assert_eq!(body.matches("response.created").count(), 1);
-    assert!(body.contains("response.failed"));
-    assert!(!body.contains("[DONE]"));
+    assert!(!body.contains("response.failed"));
+    assert!(body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
-    assert_eq!(events[0].error_category.as_deref(), Some("upstream_stream"));
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_transport")
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -1092,7 +1205,7 @@ async fn streaming_gateway_bad_request_is_terminal_and_does_not_spend_the_fallba
 }
 
 #[tokio::test]
-async fn bridged_messages_stream_preserves_safe_gateway_error() {
+async fn bridged_messages_prelude_returns_one_safe_terminal_error() {
     let (upstream, state) = spawn_upstream(
         "messages-key",
         vec![Reply::Stream {
@@ -1120,9 +1233,9 @@ async fn bridged_messages_stream_preserves_safe_gateway_error() {
         spawn_gateway(vec![messages], vec![local_key("key", LOCAL_KEY, None)], 3).await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.text().await.unwrap();
-    assert!(body.contains("response.created"), "body={body}");
+    assert!(!body.contains("response.created"), "body={body}");
     assert!(body.contains("service_unavailable"), "body={body}");
     assert!(
         body.contains("Zenith AI service is temporarily unavailable. Please retry later."),
@@ -1144,7 +1257,7 @@ async fn bridged_messages_stream_preserves_safe_gateway_error() {
 }
 
 #[tokio::test]
-async fn stream_does_not_fallback_after_a_native_prelude_reaches_the_client() {
+async fn complete_stream_prelude_failure_falls_back_before_client_output() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -1175,21 +1288,25 @@ async fn stream_does_not_fallback_after_a_native_prelude_reaches_the_client() {
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.headers()[CACHE_CONTROL], "first");
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
     let body = response.text().await.unwrap();
-    assert!(body.contains("response.created"));
-    assert!(body.contains("response.failed"));
-    assert!(!body.contains("[DONE]"));
+    assert!(!body.contains("response.created"));
+    assert!(!body.contains("response.failed"));
+    assert!(body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
-    assert_eq!(events[0].error_category.as_deref(), Some("upstream_stream"));
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_transport")
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
-async fn invalid_sse_after_a_native_prelude_is_reported_without_a_source_switch() {
+async fn invalid_sse_after_a_native_prelude_falls_back_before_a_source_switch() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -1222,18 +1339,19 @@ async fn invalid_sse_after_a_native_prelude_is_reported_without_a_source_switch(
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.headers()[CACHE_CONTROL], "first");
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
     let body = response.text().await.unwrap();
-    assert!(body.contains("response.created"));
-    assert!(body.contains("data: {not-"));
-    assert!(body.contains("response.failed"));
-    assert!(!body.contains("[DONE]"));
+    assert!(!body.contains("response.created"));
+    assert!(!body.contains("data: {not-"));
+    assert!(!body.contains("response.failed"));
+    assert!(body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
     assert_eq!(events[0].error_category.as_deref(), Some("stream_invalid"));
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -1736,17 +1854,9 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
         .iter()
         .map(|request| request.path.as_str())
         .collect::<Vec<_>>();
+    assert_eq!(paths, ["/v1/responses", "/v1/messages", "/v1/messages",]);
     assert_eq!(
-        paths,
-        [
-            "/v1/models",
-            "/v1/responses",
-            "/v1/messages",
-            "/v1/messages",
-        ]
-    );
-    assert_eq!(
-        requests[2].body["tools"][0]["name"].as_str(),
+        requests[1].body["tools"][0]["name"].as_str(),
         Some("PowerShell")
     );
     drop(requests);
@@ -1808,6 +1918,7 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
         ],
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
+            model_metadata_catalog: None,
             max_retry_candidates: 3,
             routing_strategy: Default::default(),
             subscription_plan_order: Vec::new(),
@@ -1913,6 +2024,7 @@ async fn spawn_gateway(
         sources,
         keys,
         GatewayRuntimeOptions {
+            model_metadata_catalog: None,
             max_retry_candidates,
             routing_strategy: Default::default(),
             subscription_plan_order: Vec::new(),

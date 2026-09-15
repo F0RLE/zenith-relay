@@ -24,6 +24,10 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             "/gateway/codex-background-tasks",
             post(set_codex_background_tasks),
         )
+        .route(
+            "/gateway/chatgpt-retry-until-available",
+            post(set_chatgpt_retry_until_available),
+        )
         .route("/gateway/codex-websockets", post(set_codex_websockets))
 }
 
@@ -222,6 +226,44 @@ pub async fn set_codex_background_tasks(
         let _ = state.store.set_codex_background_tasks_enabled(previous);
         if let Some(runtime) = state.runtime().ok().flatten() {
             runtime.set_codex_background_tasks_enabled(previous);
+        }
+        return Err(runtime_error(error));
+    }
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatgptRetryUntilAvailableInput {
+    enabled: bool,
+}
+
+pub async fn set_chatgpt_retry_until_available(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<ChatgptRetryUntilAvailableInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let previous = state
+        .store
+        .chatgpt_retry_until_available()
+        .map_err(store_error)?;
+    state
+        .store
+        .set_chatgpt_retry_until_available(input.enabled)
+        .map_err(store_error)?;
+    let runtime = match state.runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = state.store.set_chatgpt_retry_until_available(previous);
+            return Err(runtime_error(error));
+        }
+    };
+    if let Some(runtime) = runtime {
+        runtime.set_chatgpt_retry_until_available(input.enabled);
+    }
+    if let Err(error) = state.snapshot() {
+        let _ = state.store.set_chatgpt_retry_until_available(previous);
+        if let Some(runtime) = state.runtime().ok().flatten() {
+            runtime.set_chatgpt_retry_until_available(previous);
         }
         return Err(runtime_error(error));
     }

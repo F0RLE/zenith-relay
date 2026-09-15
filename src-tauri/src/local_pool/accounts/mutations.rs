@@ -1,5 +1,5 @@
 use super::import_orchestrator::{
-    apply_account_patch, credential_local_error, validate_account_record, ImportItemError,
+    apply_account_patch, credential_local_error, validate_account_record,
 };
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
 use crate::local_pool::accounts::exports::normalize_account_ids;
@@ -7,7 +7,7 @@ use crate::local_pool::accounts::proxy::ProxyPool;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::{
     apply_account_policy_if_running, current_time_ms, refresh_active_codex_catalog_in_background,
-    refresh_local_gateway_key_scope_if_running, sync_accounts_or_rollback,
+    refresh_local_gateway_key_scope_if_running, sync_account_or_rollback,
 };
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{
@@ -21,7 +21,6 @@ use tauri::{AppHandle, State};
 use zenith_relay_core::automations::AccountSelector;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
-type ItemResult<T> = std::result::Result<T, ImportItemError>;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -70,7 +69,6 @@ pub async fn update_local_account(
     let previous = account.clone();
     apply_account_patch(&mut account, input)?;
     validate_account_record(&account)?;
-    let (old_accounts, old_keys) = current_account_records(&state)?;
     let catalog_changed = account_catalog_visibility_changed(&previous, &account);
     let model_refresh_account =
         (!previous.account.in_pool && account.account.in_pool).then(|| account.account.id.clone());
@@ -85,7 +83,7 @@ pub async fn update_local_account(
         false
     };
     if !updated_in_place {
-        sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+        sync_account_or_rollback(&state, previous, account.clone()).await?;
     }
     state.sync_account_quota_refresh(&account_id, current_time_ms())?;
     let snapshot = state.snapshot().await?;
@@ -143,16 +141,16 @@ pub async fn set_local_account_enabled(
     if account.account.enabled == enabled {
         return state.snapshot().await.map_err(Into::into);
     }
+    let previous = account.clone();
     account.account.enabled = enabled;
     if enabled {
         validate_account_record(&account)?;
     }
-    let (old_accounts, old_keys) = current_account_records(&state)?;
     let catalog_changed = account.account.in_pool;
     state.store()?.upsert_account(account.clone())?;
     let updated_in_place = apply_account_policy_if_running(&state, &account).await;
     if !updated_in_place {
-        sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+        sync_account_or_rollback(&state, previous, account.clone()).await?;
     }
     state.sync_account_quota_refresh(&account_id, current_time_ms())?;
     let snapshot = state.snapshot().await?;
@@ -517,13 +515,6 @@ pub(super) fn release_account_proxy(account_id: &str) -> LocalResult<Option<Prox
     Ok(Some(previous))
 }
 
-pub(super) fn current_account_records(
-    state: &DesktopState,
-) -> LocalResult<(Vec<LocalAccountRecord>, Vec<LocalGatewayKeyRecord>)> {
-    let store = state.store()?;
-    Ok((store.accounts().to_vec(), store.keys().to_vec()))
-}
-
 pub(super) fn current_account_state(
     state: &DesktopState,
 ) -> LocalResult<(
@@ -555,18 +546,6 @@ pub(super) fn prune_account_task_selectors(
         !account_ids.is_empty()
     });
     automations
-}
-
-pub(super) fn restore_credential_item(
-    credential_store: &CredentialStore<NativeSecretBackend>,
-    account_id: &str,
-    old_credential: Option<&StoredCodexCredentials>,
-) -> ItemResult<()> {
-    match old_credential {
-        Some(credentials) => credential_store.save(credentials),
-        None => credential_store.delete(account_id),
-    }
-    .map_err(|_| ImportItemError::recovery("failed to restore previous account credentials"))
 }
 
 pub(super) fn restore_credential_local(
@@ -700,18 +679,6 @@ pub(super) fn recovery_after_delete(
             cause.message, error.message
         ),
     )
-}
-
-pub(super) async fn repair_gateway_after_item_restore(
-    state: &DesktopState,
-    old_accounts: Vec<LocalAccountRecord>,
-    old_keys: Vec<LocalGatewayKeyRecord>,
-) -> ItemResult<()> {
-    sync_accounts_or_rollback(state, old_accounts, old_keys)
-        .await
-        .map_err(|_| {
-            ImportItemError::recovery("failed to rebuild gateway after credential rollback")
-        })
 }
 
 #[cfg(test)]

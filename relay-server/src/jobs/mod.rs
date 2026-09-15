@@ -1,5 +1,7 @@
 mod account_refresh;
+mod codex_release;
 mod health_probe;
+mod model_metadata;
 mod pricing;
 pub(crate) mod quota_refresh;
 mod retention;
@@ -9,6 +11,10 @@ mod weekly_reset;
 use crate::state::AppState;
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
+use zenith_relay_core::{
+    model_metadata::ModelMetadataCatalogLoader,
+    pricing::{pricing_refresh_delay, CatalogRefreshDeadline, PricingCatalogLoader},
+};
 
 pub(crate) use account_refresh::{refresh_account_now, refresh_all_accounts_now};
 
@@ -56,10 +62,102 @@ where
     })
 }
 
+trait ScheduledCatalog: Clone + Send + Sync + 'static {
+    fn next_deadline(&self, now_ms: u64) -> CatalogRefreshDeadline;
+    fn refresh_due(&self, now_ms: u64) -> bool;
+    fn wait_for_change(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn refresh(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
+macro_rules! scheduled_catalog_impl {
+    ($loader:ty) => {
+        impl ScheduledCatalog for $loader {
+            fn next_deadline(&self, now_ms: u64) -> CatalogRefreshDeadline {
+                self.next_refresh_deadline(now_ms)
+            }
+
+            fn refresh_due(&self, now_ms: u64) -> bool {
+                self.refresh_due(now_ms)
+            }
+
+            fn wait_for_change(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(self.wait_for_schedule_change())
+            }
+
+            fn refresh(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {
+                    let _ = self.refresh(false).await;
+                })
+            }
+        }
+    };
+}
+
+scheduled_catalog_impl!(PricingCatalogLoader);
+scheduled_catalog_impl!(ModelMetadataCatalogLoader);
+
+impl<S> ScheduledCatalog for Arc<S>
+where
+    S: ScheduledCatalog,
+{
+    fn next_deadline(&self, now_ms: u64) -> CatalogRefreshDeadline {
+        self.as_ref().next_deadline(now_ms)
+    }
+
+    fn refresh_due(&self, now_ms: u64) -> bool {
+        self.as_ref().refresh_due(now_ms)
+    }
+
+    fn wait_for_change(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.as_ref().wait_for_change()
+    }
+
+    fn refresh(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.as_ref().refresh()
+    }
+}
+
+fn start_catalog_job<S, L>(
+    state: Arc<AppState>,
+    mut shutdown: watch::Receiver<bool>,
+    load: L,
+) -> JoinHandle<()>
+where
+    S: ScheduledCatalog,
+    L: Fn(&AppState) -> S + Send + Sync + 'static,
+{
+    let instance_id = state.capabilities.server_id.clone();
+    tokio::spawn(async move {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            let loader = load(&state);
+            let now_ms = zenith_relay_core::unix_time_ms();
+            let delay = pricing_refresh_delay(&instance_id, loader.next_deadline(now_ms), now_ms);
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() { break; }
+                }
+                _ = tokio::time::sleep(delay) => {}
+                _ = loader.wait_for_change() => continue,
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            if loader.refresh_due(zenith_relay_core::unix_time_ms()) {
+                loader.refresh().await;
+            }
+        }
+    })
+}
+
 pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> BackgroundJobs {
     BackgroundJobs {
         handles: vec![
+            codex_release::start(state.clone(), shutdown.clone()),
             health_probe::start(state.clone(), shutdown.clone()),
+            model_metadata::start(state.clone(), shutdown.clone()),
             pricing::start(state.clone(), shutdown.clone()),
             quota_refresh::start(state.clone(), shutdown.clone()),
             retention::start(state.clone(), shutdown.clone()),

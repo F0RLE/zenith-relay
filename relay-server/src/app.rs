@@ -315,8 +315,10 @@ mod tests {
         assert!(model.custom_price);
         assert_eq!(model.input_micro_usd_per_million, Some(1_000));
         assert_eq!(model.cached_input_micro_usd_per_million, Some(100));
-        assert_eq!(model.cache_write_5m_micro_usd_per_million, Some(1_500));
-        assert_eq!(model.cache_write_1h_micro_usd_per_million, Some(2_000));
+        // Cache creation prices are meaningful only for a confirmed native
+        // Messages route, never for this Responses source.
+        assert_eq!(model.cache_write_5m_micro_usd_per_million, None);
+        assert_eq!(model.cache_write_1h_micro_usd_per_million, None);
         assert_eq!(model.output_micro_usd_per_million, Some(3_000));
     }
 
@@ -403,6 +405,7 @@ mod tests {
             source_id: "source_test".into(),
             candidate_id: Some("source_test".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),

@@ -1,5 +1,6 @@
 mod agent_identity;
 mod codex_identity;
+mod codex_release;
 mod models;
 mod passive_quota;
 mod quota_subscription;
@@ -14,16 +15,23 @@ pub use agent_identity::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
 };
 pub use codex_identity::{
-    valid_codex_client_version, CodexIdentityEnvelope, CODEX_CLIENT_VERSION, CODEX_ORIGINATOR,
+    configure_codex_client_version, configured_codex_client_version, valid_codex_client_version,
+    CodexIdentityEnvelope, CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_STABLE_FALLBACK_VERSION,
+};
+pub use codex_release::{
+    refresh_codex_client_release, CodexRelease, CodexReleaseError, CODEX_RELEASES_API_URL,
+    CODEX_RELEASE_REFRESH_INTERVAL,
 };
 pub use models::{
     CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode, CODEX_MODELS_ENDPOINT,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{
-    merge_subscription_metadata, merge_subscription_metadata_at, parse_subscription_timestamp_ms,
-    subscription_refresh_due, CodexSubscriptionClient, CodexSubscriptionMetadata,
-    CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT, SUBSCRIPTION_REFRESH_INTERVAL_MS,
+    account_ids_from_check_response, merge_subscription_metadata, merge_subscription_metadata_at,
+    parse_subscription_timestamp_ms, resolve_account_check_account_id, subscription_refresh_due,
+    unverified_chatgpt_account_id_hints, AccountCheckIdentityError, CodexSubscriptionClient,
+    CodexSubscriptionMetadata, CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT,
+    SUBSCRIPTION_REFRESH_INTERVAL_MS,
 };
 pub use quota_usage::{
     is_agent_identity_task_invalid_failure, parse_codex_usage, CodexQuotaClient,

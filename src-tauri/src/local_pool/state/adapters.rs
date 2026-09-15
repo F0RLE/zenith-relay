@@ -60,6 +60,7 @@ impl DesktopState {
         DesktopUsageWriter::new(DesktopUsageWriterParts {
             telemetry: self.telemetry.clone(),
             store: self.store.clone(),
+            transient_root: self.transient_root(),
             quota_refresh: self.quota_refresh.clone(),
             quota_refresh_notify: self.quota_refresh_notify.clone(),
             wake: self.wake.clone(),

@@ -216,6 +216,7 @@ pub(super) fn usage_event(
         source_id: route.source_id.clone(),
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
+        account_token_generation: route.account_token_generation,
         client_context_id: route.client_context_id.clone(),
         routing,
         requested_model: Some(requested_model.to_string()),
@@ -373,8 +374,10 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("completion_tokens"))
         .or_else(|| gemini.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
-    event.input_tokens = input_tokens;
-    event.cached_input_tokens = usage
+    if let Some(input_tokens) = input_tokens {
+        event.input_tokens = Some(input_tokens);
+    }
+    let cached_input_tokens = usage
         .get("input_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
         .or_else(|| {
@@ -386,8 +389,11 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("cache_read_input_tokens"))
         .or_else(|| gemini.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)
-        .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
-    event.cache_write_input_tokens = usage
+        .map(|cached| cached.min(input_tokens.unwrap_or(event.input_tokens.unwrap_or(cached))));
+    if let Some(cached_input_tokens) = cached_input_tokens {
+        event.cached_input_tokens = Some(cached_input_tokens);
+    }
+    let cache_write_input_tokens = usage
         .get("input_tokens_details")
         .and_then(|details| details.get("cache_write_tokens"))
         .or_else(|| {
@@ -405,11 +411,14 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                     .saturating_sub(event.cached_input_tokens.unwrap_or_default()),
             )
         });
+    if let Some(cache_write_input_tokens) = cache_write_input_tokens {
+        event.cache_write_input_tokens = Some(cache_write_input_tokens);
+    }
     event.cache_write_ttl = event
         .cache_write_input_tokens
         .filter(|written| *written > 0)
         .and_then(|_| cache_write_ttl_from_usage(usage).or(event.cache_write_ttl));
-    event.reasoning_tokens = usage
+    let reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
             usage
@@ -423,19 +432,33 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| gemini.get("thoughtsTokenCount"))
         .and_then(Value::as_u64)
-        .map(|reasoning| reasoning.min(output_tokens.unwrap_or(reasoning)));
-    event.output_tokens = output_tokens;
+        .map(|reasoning| {
+            reasoning.min(output_tokens.unwrap_or(event.output_tokens.unwrap_or(reasoning)))
+        });
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        event.reasoning_tokens = Some(reasoning_tokens);
+    }
+    if let Some(output_tokens) = output_tokens {
+        event.output_tokens = Some(output_tokens);
+    }
     let reported_total = usage
         .get("total_tokens")
         .or_else(|| gemini.get("totalTokenCount"))
         .and_then(Value::as_u64);
-    event.total_tokens = match (input_tokens, output_tokens) {
-        (Some(input), Some(output)) => {
-            let measured = input.saturating_add(output);
-            Some(reported_total.unwrap_or(measured).max(measured))
-        }
-        _ => reported_total,
-    };
+    if let Some(total_tokens) = reported_total.or_else(|| {
+        input_tokens
+            .zip(output_tokens)
+            .map(|(input, output)| input.saturating_add(output))
+    }) {
+        event.total_tokens = Some(
+            total_tokens.max(
+                event
+                    .input_tokens
+                    .unwrap_or_default()
+                    .saturating_add(event.output_tokens.unwrap_or_default()),
+            ),
+        );
+    }
 }
 
 fn cache_write_ttl_from_usage(usage: &Value) -> Option<CacheWriteTtl> {

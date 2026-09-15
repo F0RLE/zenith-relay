@@ -505,6 +505,7 @@ mod tests {
             source_id: "source".into(),
             candidate_id: Some("source".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),
@@ -535,6 +536,22 @@ mod tests {
         }
     }
 
+    fn private_model_source_event(request_id: &str, source_id: &str) -> UsageEvent {
+        let mut event = aggregate_test_event(request_id, 1, 1_000_000, 0, None, 100_000);
+        event.local_key_id = "key_1".into();
+        event.source_id = source_id.into();
+        event.candidate_id = Some(source_id.into());
+        event.requested_model = Some("private-model".into());
+        event.resolved_model = Some("private-model".into());
+        event.consecutive_failures = Some(0);
+        event.latency_ms = 100;
+        event.ttft_ms = Some(10);
+        event.generation_ms = Some(90);
+        event.cached_input_tokens = Some(0);
+        event.reasoning_tokens = Some(0);
+        event
+    }
+
     #[test]
     fn usage_survives_database_reopen() {
         let root =
@@ -547,6 +564,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            account_token_generation: None,
             client_context_id: Some("client_0123456789ab".into()),
             routing: Some(RoutingDiagnostics {
                 reason: SelectionReason::QuotaHeadroom,
@@ -1238,41 +1256,20 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-usage-page-{}", uuid::Uuid::new_v4()));
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        let mut event = UsageEvent {
-            request_id: "req_page_1".into(),
-            attempt: 1,
-            local_key_id: "key_1".into(),
-            source_id: "openai-codex".into(),
-            candidate_id: Some("account_1".into()),
-            account_id: Some("account_1".into()),
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("gpt-5.4".into()),
-            resolved_model: Some("gpt-5.4".into()),
-            requested_reasoning_effort: None,
-            effective_reasoning_effort: None,
-            wire_api: WireApi::Responses,
-            service_tier: DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: true,
-            http_status: 200,
-            error_category: None,
-            tool_use: ToolUseDiagnostics::default(),
-            cooldown_scope: None,
-            retry_at_ms: None,
-            consecutive_failures: Some(0),
-            latency_ms: 428,
-            ttft_ms: Some(128),
-            generation_ms: Some(300),
-            input_tokens: Some(20),
-            cached_input_tokens: Some(12),
-            cache_write_input_tokens: None,
-            cache_write_ttl: None,
-            reasoning_tokens: Some(5),
-            output_tokens: Some(8),
-            total_tokens: Some(28),
-            quota_snapshot: None,
-        };
+        let mut event = aggregate_test_event("req_page_1", 1, 20, 0, None, 8);
+        event.local_key_id = "key_1".into();
+        event.source_id = "openai-codex".into();
+        event.candidate_id = Some("account_1".into());
+        event.account_id = Some("account_1".into());
+        event.requested_model = Some("gpt-5.4".into());
+        event.resolved_model = Some("gpt-5.4".into());
+        event.consecutive_failures = Some(0);
+        event.latency_ms = 428;
+        event.ttft_ms = Some(128);
+        event.generation_ms = Some(300);
+        event.cached_input_tokens = Some(12);
+        event.cache_write_input_tokens = None;
+        event.reasoning_tokens = Some(5);
         database.record(&event).unwrap();
         event.request_id = "req_page_2".into();
         event.candidate_id = Some("account_2".into());
@@ -1469,6 +1466,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -1542,6 +1540,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -1603,6 +1602,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-5.4".into()),
@@ -1653,43 +1653,8 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        database
-            .record(&UsageEvent {
-                request_id: "req_custom_price".into(),
-                attempt: 1,
-                local_key_id: "key_1".into(),
-                source_id: "source_1".into(),
-                candidate_id: Some("source_1".into()),
-                account_id: None,
-                client_context_id: None,
-                routing: None,
-                requested_model: Some("private-model".into()),
-                resolved_model: Some("private-model".into()),
-                requested_reasoning_effort: None,
-                effective_reasoning_effort: None,
-                wire_api: WireApi::Responses,
-                service_tier: DefaultServiceTier::Standard,
-                applied_service_tier: None,
-                success: true,
-                http_status: 200,
-                error_category: None,
-                tool_use: ToolUseDiagnostics::default(),
-                cooldown_scope: None,
-                retry_at_ms: None,
-                consecutive_failures: Some(0),
-                latency_ms: 100,
-                ttft_ms: Some(10),
-                generation_ms: Some(90),
-                input_tokens: Some(1_000_000),
-                cached_input_tokens: Some(0),
-                cache_write_input_tokens: Some(0),
-                cache_write_ttl: None,
-                reasoning_tokens: Some(0),
-                output_tokens: Some(100_000),
-                total_tokens: Some(1_100_000),
-                quota_snapshot: None,
-            })
-            .unwrap();
+        let event = private_model_source_event("req_custom_price", "source_1");
+        database.record(&event).unwrap();
 
         assert_eq!(
             database
@@ -1737,41 +1702,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        let mut event = UsageEvent {
-            request_id: "req_source_cheap".into(),
-            attempt: 1,
-            local_key_id: "key_1".into(),
-            source_id: "source_cheap".into(),
-            candidate_id: Some("source_cheap".into()),
-            account_id: None,
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("private-model".into()),
-            resolved_model: Some("private-model".into()),
-            requested_reasoning_effort: None,
-            effective_reasoning_effort: None,
-            wire_api: WireApi::Responses,
-            service_tier: DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: true,
-            http_status: 200,
-            error_category: None,
-            tool_use: ToolUseDiagnostics::default(),
-            cooldown_scope: None,
-            retry_at_ms: None,
-            consecutive_failures: Some(0),
-            latency_ms: 100,
-            ttft_ms: Some(10),
-            generation_ms: Some(90),
-            input_tokens: Some(1_000_000),
-            cached_input_tokens: Some(0),
-            cache_write_input_tokens: Some(0),
-            cache_write_ttl: None,
-            reasoning_tokens: Some(0),
-            output_tokens: Some(100_000),
-            total_tokens: Some(1_100_000),
-            quota_snapshot: None,
-        };
+        let mut event = private_model_source_event("req_source_cheap", "source_cheap");
         database.record(&event).unwrap();
         event.request_id = "req_source_expensive".into();
         event.source_id = "source_expensive".into();
@@ -2177,6 +2108,7 @@ mod tests {
                 source_id: "source".into(),
                 candidate_id: None,
                 account_id: None,
+                account_token_generation: None,
                 client_context_id: None,
                 routing: None,
                 requested_model: None,

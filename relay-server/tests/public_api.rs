@@ -3,7 +3,7 @@ use axum::{
     extract::{Request, State},
     http::{
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST},
-        StatusCode,
+        HeaderMap, StatusCode,
     },
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -1429,6 +1429,10 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
         public_base_url: url::Url::parse("http://127.0.0.1:1").unwrap(),
         management_token: "synthetic-management-token-value".to_string(),
         vault_key: [9; 32],
+        account_check_url: url::Url::parse(
+            zenith_relay_server::config::DEFAULT_CODEX_ACCOUNT_CHECK_URL,
+        )
+        .unwrap(),
     };
     let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
     let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
@@ -1469,7 +1473,7 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
-async fn model_reasoning_modes_are_manual_and_hot_applied() {
+async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
     let root = TempDir::new().unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
@@ -1534,9 +1538,9 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
             .iter()
             .map(|level| level["effort"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["low", "medium", "high"]
+        Vec::<&str>::new()
     );
-    assert_eq!(catalog_model["default_reasoning_level"], "medium");
+    assert!(catalog_model.get("default_reasoning_level").is_none());
 
     let runtime = server.state.runtime().unwrap().unwrap();
     let configured_response = client
@@ -1554,7 +1558,7 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
         .iter()
         .find(|model| model["id"] == "gpt-test")
         .unwrap();
-    assert_eq!(configured_model["reasoningAllowedLevels"], json!(["high"]));
+    assert_eq!(configured_model["reasoningAllowedLevels"], json!([]));
     assert!(Arc::ptr_eq(
         &runtime,
         &server.state.runtime().unwrap().unwrap()
@@ -1584,11 +1588,8 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
         .iter()
         .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
         .unwrap();
-    assert_eq!(
-        filtered_model["supported_reasoning_levels"],
-        json!([{"effort": "high", "description": "high"}])
-    );
-    assert_eq!(filtered_model["default_reasoning_level"], "high");
+    assert_eq!(filtered_model["supported_reasoning_levels"], json!([]));
+    assert!(filtered_model.get("default_reasoning_level").is_none());
 
     let manual = client
         .post(format!("{}/models/reasoning", server.origin))
@@ -1605,7 +1606,7 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
             .iter()
             .find(|model| model["id"] == "gpt-test")
             .unwrap()["reasoningAllowedLevels"],
-        json!(["ultra"])
+        json!([])
     );
 
     let reset: Value = client
@@ -3819,6 +3820,7 @@ async fn spawn_server(root: &Path) -> RunningServer {
 }
 
 async fn spawn_server_with_token(root: &Path, management_token: &str) -> RunningServer {
+    let (account_check_url, _account_check_task) = spawn_import_account_check_upstream().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let config = Config {
@@ -3827,6 +3829,7 @@ async fn spawn_server_with_token(root: &Path, management_token: &str) -> Running
         public_base_url: url::Url::parse(&format!("http://{address}")).unwrap(),
         management_token: management_token.to_string(),
         vault_key: [9; 32],
+        account_check_url,
     };
     let store = Arc::new(Store::open(root.join("relay.sqlite")).unwrap());
     let vault = Arc::new(Vault::open(&root.join("vault"), config.vault_key).unwrap());
@@ -3846,6 +3849,51 @@ async fn spawn_server_with_token(root: &Path, management_token: &str) -> Running
         state,
         task,
     }
+}
+
+async fn spawn_import_account_check_upstream() -> (url::Url, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route("/accounts/check", get(test_import_account_check));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (
+        url::Url::parse(&format!("http://{address}/accounts/check")).unwrap(),
+        task,
+    )
+}
+
+async fn test_import_account_check(headers: HeaderMap) -> Json<Value> {
+    assert!(headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Bearer ")));
+    let account_ids = [
+        "synthetic-chatgpt-account-id",
+        "synthetic-zenith-account",
+        "synthetic-batch-account-one",
+        "synthetic-batch-account-two",
+        "synthetic-document-account-1",
+        "synthetic-document-account-2",
+        "synthetic-document-account-3",
+        "synthetic-array-account",
+        "synthetic-label-account",
+        "synthetic-line-account-one",
+        "synthetic-line-account-two",
+        "synthetic-owned-account-one",
+        "synthetic-owned-account-two",
+        "synthetic-abandoned-account",
+        "synthetic-cleanup-trigger-account",
+        "synthetic-proxy-account-id",
+        "synthetic-preset-account-id",
+    ];
+    Json(json!({
+        "account_ordering": account_ids,
+        "accounts": account_ids.into_iter().map(|id| {
+            (id.to_string(), json!({"account": {"id": id}}))
+        }).collect::<serde_json::Map<_, _>>(),
+    }))
 }
 
 async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {

@@ -1,7 +1,61 @@
 use super::*;
 use crate::{scheduler::CooldownReason, Selection, SelectionRequest};
+use std::time::Duration;
+use tokio::time::sleep;
 
 impl GatewayRuntime {
+    /// Waits for either a pool mutation or the next known cooldown to expire.
+    /// The bounded poll prevents a missed `Notify` wake-up from turning a
+    /// persistent ChatGPT request into a hot loop while still allowing
+    /// cooldown-only recovery without another external mutation.
+    pub(crate) async fn wait_for_candidate_availability(
+        &self,
+        retry_at_ms: Option<u64>,
+        backoff: Duration,
+        deadline: Option<tokio::time::Instant>,
+    ) -> bool {
+        let notified = self.candidate_availability.notified();
+        let delay = retry_at_ms
+            .map(|retry_at| retry_at.saturating_sub(crate::unix_time_ms()))
+            .map(Duration::from_millis)
+            .map(|delay| delay.min(Duration::from_secs(1)))
+            .unwrap_or_else(|| Duration::from_secs(1))
+            .min(backoff);
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            // A cooldown can elapse in the short gap between scheduler
+            // selection and this wait. That is an immediate retry, not an
+            // expired request window; otherwise a bounded request can fail at
+            // the exact moment its only candidate becomes eligible.
+            if delay.is_zero() {
+                return true;
+            }
+            let delay = delay.min(remaining);
+            return tokio::select! {
+                _ = notified => true,
+                _ = sleep(delay) => tokio::time::Instant::now() < deadline,
+            };
+        }
+        // In persistent mode an already-expired cooldown must not be treated
+        // as a deadline. Fall back to the bounded poll interval instead;
+        // otherwise an `earliest_retry_at` equal to `now` would terminate the
+        // supposedly unbounded wait immediately.
+        let delay = if delay.is_zero() {
+            backoff
+                .min(Duration::from_secs(1))
+                .max(Duration::from_millis(1))
+        } else {
+            delay
+        };
+        tokio::select! {
+            _ = notified => true,
+            _ = sleep(delay) => true,
+        }
+    }
+
     pub(crate) async fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,

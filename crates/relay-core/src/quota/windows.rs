@@ -342,6 +342,15 @@ pub struct QuotaSnapshot {
     #[serde(default)]
     pub limit_reached: bool,
     pub reset_credits_available: Option<u32>,
+    /// Provider-reported credits, expressed in millionths of one credit.
+    /// A fresh positive balance keeps an otherwise exhausted account eligible.
+    pub available_credits_micro_units: Option<u64>,
+    /// A fresh provider ledger explicitly confirmed that credits can still be
+    /// spent. This is separate from reset credits and customer billing.
+    #[serde(default)]
+    pub provider_credits_available: bool,
+    #[serde(default)]
+    pub provider_credits_unlimited: bool,
     #[serde(default)]
     pub direct_balance_micro_usd: Option<u64>,
     pub updated_at_ms: Option<u64>,
@@ -349,6 +358,10 @@ pub struct QuotaSnapshot {
 }
 
 impl QuotaSnapshot {
+    pub fn has_usable_provider_credits(&self) -> bool {
+        self.provider_credits_available
+    }
+
     pub fn window(&self, kind: QuotaWindowKind) -> Option<&QuotaWindow> {
         match kind {
             QuotaWindowKind::Primary => self.primary.as_ref(),

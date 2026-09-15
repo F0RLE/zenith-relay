@@ -617,6 +617,10 @@
   font-weight: 600;
 }
 
+.relay-page-header > div:first-child {
+  min-width: 0;
+}
+
 .relay-page-header p {
   margin: 2px 0 0;
   color: var(--relay-muted);
@@ -631,6 +635,37 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.relay-render-error {
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 48px;
+  color: var(--relay-text);
+  text-align: center;
+}
+
+.relay-render-error h1,
+.relay-render-error p {
+  max-width: 620px;
+  margin: 0;
+}
+
+.relay-render-error p {
+  color: var(--relay-muted);
+}
+
+.relay-render-error button {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--relay-accent);
+  border-radius: 7px;
+  background: var(--relay-accent);
+  color: var(--relay-on-accent, #fff);
+  cursor: pointer;
 }
 
 .relay-page-actions .relay-button span {
@@ -677,6 +712,7 @@
   line-height: 18px;
   font-weight: 500;
   cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
 
 .relay-button {
@@ -869,6 +905,23 @@ input:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--relay-focus);
   outline-offset: 1px;
+}
+
+.relay-button:focus-visible,
+.relay-icon-button:focus-visible,
+.mode-picker-trigger:focus-visible,
+.relay-sidebar nav button:focus-visible,
+.sidebar-footer button:focus-visible,
+.sidebar-update:focus-visible {
+  outline: 0;
+  border-color: var(--relay-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-focus) 28%, transparent);
+}
+
+.relay-tabs button:focus-visible {
+  outline: 0;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-focus) 28%, transparent);
 }
 
 .relay-tabs {

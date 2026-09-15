@@ -1,11 +1,12 @@
 pub(crate) mod accounts;
 pub(crate) mod applications;
 pub(crate) mod background;
+mod client_auth_watchdog;
 pub mod commands;
 mod error;
 mod host;
 mod models;
-mod profiles;
+pub(crate) mod profiles;
 mod remote;
 mod response_affinity;
 mod state;
@@ -24,10 +25,11 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     let root = crate::platform::relay_dir(app)
         .map_err(|message| error::LocalPoolError::new(error::ErrorCode::Io, message))?;
     create_storage_directory(&root)?;
-    state::migrate_recovery_layout(&root)?;
+    state::migrate_storage_layout(&root)?;
     let directory_ready = started.elapsed();
     let vault_started = Instant::now();
-    store::secret_store::initialize(&root.join("data"))?;
+    let paths = crate::storage_paths::StoragePaths::from_root(&root);
+    store::secret_store::initialize(&paths.vault_root(), &paths.migration_root())?;
     let vault_ms = vault_started.elapsed().as_secs_f64() * 1_000.0;
     let secrets_ready = started.elapsed();
     let state = DesktopState::open(root)?;
@@ -50,6 +52,14 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
         );
     }
     Ok(state)
+}
+
+/// Starts observers only after `DesktopState` has been registered in Tauri.
+/// The watchdog obtains that state from `AppHandle`, so starting it during
+/// initialization could race `app.manage` in optimized builds and abort the
+/// desktop process before its first window was created.
+pub(crate) fn start_client_auth_watchdog(app: tauri::AppHandle) {
+    client_auth_watchdog::start(app);
 }
 
 fn create_storage_directory(path: &Path) -> error::Result<()> {

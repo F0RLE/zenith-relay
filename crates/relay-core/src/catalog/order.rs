@@ -1,58 +1,6 @@
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashSet},
-};
+use std::collections::{BTreeMap, HashSet};
 
 const MAX_MODEL_ID_BYTES: usize = 256;
-
-const NO_REASONING: &[&str] = &[];
-// Claude's `ultra` is Relay's explicit top tier.  The Messages adapter maps
-// it to Anthropic's `max` effort, so every Claude contract that exposes max
-// can safely advertise ultra as a distinct Codex choice.
-const CLAUDE_HIGH_REASONING: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
-const CLAUDE_STANDARD_REASONING: &[&str] = &["low", "medium", "high", "max", "ultra"];
-const GEMINI_PRO_REASONING: &[&str] = &["low", "medium", "high"];
-const GEMINI_PRO_REDUCED_REASONING: &[&str] = &["low", "high"];
-const GEMINI_FLASH_REASONING: &[&str] = &["minimal", "low", "medium", "high"];
-const GEMINI_FLASH_STANDARD_REASONING: &[&str] = &["low", "medium", "high"];
-const GROK_46_REASONING: &[&str] = &["low", "medium", "high", "xhigh"];
-const GROK_45_REASONING: &[&str] = &["low", "medium", "high"];
-const GROK_43_REASONING: &[&str] = &["none", "low", "medium", "high"];
-const GLM_52_REASONING: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const GLM_53_REASONING: &[&str] = &["low", "high", "max"];
-const GPT_56_REASONING: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
-
-const KNOWN_REASONING_DEFAULTS: &[(&str, &[&str])] = &[
-    ("claude-opus-5", CLAUDE_HIGH_REASONING),
-    ("claude-opus-4-8", CLAUDE_HIGH_REASONING),
-    ("claude-opus-4-7", CLAUDE_HIGH_REASONING),
-    ("claude-sonnet-5", CLAUDE_HIGH_REASONING),
-    ("claude-opus-4-6", CLAUDE_STANDARD_REASONING),
-    ("claude-sonnet-4-6", CLAUDE_STANDARD_REASONING),
-    ("claude-haiku-4-5", NO_REASONING),
-    ("gemini-3.1-pro-preview", GEMINI_PRO_REASONING),
-    ("gemini-2.5-pro", GEMINI_PRO_REASONING),
-    ("gemini-3.7-flash", GEMINI_PRO_REASONING),
-    ("gemini-3-pro", GEMINI_PRO_REDUCED_REASONING),
-    ("gemini-3-pro-preview", GEMINI_PRO_REDUCED_REASONING),
-    ("gemini-3.6-flash", GEMINI_FLASH_REASONING),
-    ("gemini-3.5-flash", GEMINI_FLASH_REASONING),
-    ("gemini-3-flash", GEMINI_FLASH_REASONING),
-    ("gemini-3-flash-preview", GEMINI_FLASH_REASONING),
-    ("gemini-3.1-flash-lite", GEMINI_FLASH_REASONING),
-    ("gemini-3.1-flash-lite-preview", GEMINI_FLASH_REASONING),
-    ("gemini-2.5-flash", GEMINI_FLASH_STANDARD_REASONING),
-    ("gemini-2.5-flash-lite", GEMINI_FLASH_STANDARD_REASONING),
-    ("grok-4.6", GROK_46_REASONING),
-    ("grok-4.5", GROK_45_REASONING),
-    ("grok-4.3", GROK_43_REASONING),
-    ("grok-4.20-0309-reasoning", NO_REASONING),
-    ("grok-4.20-0309-non-reasoning", &["none"]),
-    ("grok-build-0.1", NO_REASONING),
-    ("glm-5.2", GLM_52_REASONING),
-    ("glm-5.3", GLM_53_REASONING),
-    ("glm-5.1", NO_REASONING),
-];
 
 #[derive(Clone, Copy)]
 enum KnownModelFamily {
@@ -61,24 +9,6 @@ enum KnownModelFamily {
     Gemini,
     Grok,
     Zai,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct SemanticModelSortKey {
-    family_rank: u8,
-    image_rank: u8,
-    tier_rank: u8,
-    version_rank: Vec<i64>,
-    modifier_rank: u8,
-    preview_rank: u8,
-    model: String,
-}
-
-#[derive(Clone, Debug)]
-struct OrderedModel {
-    id: String,
-    upstream_order: usize,
-    semantic_key: Option<SemanticModelSortKey>,
 }
 
 /// Checks the common persisted model-ID boundary after callers trim their input.
@@ -106,13 +36,6 @@ pub fn reasoning_policy_key(model: &str) -> String {
     }
 }
 
-/// Returns whether Relay can apply its Standard/Fast request policy to a
-/// model. The policy maps to OpenAI service tiers, so provider namespaces are
-/// ignored but non-OpenAI model families remain in Standard mode.
-pub fn model_supports_fast_service_tier(model: &str) -> bool {
-    is_openai_model(&model_leaf(model).to_ascii_lowercase())
-}
-
 /// Looks up the shared policy first, then preserves a saved model-specific
 /// setting from earlier Relay versions until the user edits that model.
 ///
@@ -127,26 +50,6 @@ pub fn reasoning_policy_levels<'a>(
         .get(&key)
         .or_else(|| policies.get(&model.trim().to_ascii_lowercase()))
         .map(Vec::as_slice)
-}
-
-/// Verified model defaults used when an upstream catalog omits reasoning
-/// metadata. `Some(&[])` deliberately means that the model has no effort
-/// picker, not that Relay should invent a generic list.
-pub fn known_model_reasoning_levels(model: &str) -> Option<&'static [&'static str]> {
-    let leaf = model_leaf(model).to_ascii_lowercase();
-    KNOWN_REASONING_DEFAULTS
-        .iter()
-        .find_map(|(known_model, levels)| (*known_model == leaf).then_some(*levels))
-        .or_else(|| leaf.starts_with("gpt-5.6").then_some(GPT_56_REASONING))
-}
-
-/// Anthropic's highest effort is exposed by Relay as `ultra` while the
-/// upstream Messages contract still receives `max`.  Keep this inference
-/// scoped to Anthropic models; a `max` level from another provider is not
-/// evidence that it supports Relay's `ultra` alias.
-pub fn anthropic_max_implies_ultra(model: &str) -> bool {
-    let leaf = model_leaf(model).to_ascii_lowercase();
-    matches!(known_model_family(&leaf), Some(KnownModelFamily::Anthropic))
 }
 
 /// Normalizes effort identifiers and keeps every level in the order used by
@@ -187,42 +90,64 @@ fn reasoning_level_rank(level: &str) -> u8 {
     }
 }
 
-/// Normalize, deduplicate, and order model IDs for a launcher or Codex picker.
-///
-/// Familiar model families use a semantic hierarchy: company, model class,
-/// version, and release modifier. Unknown IDs retain their upstream order.
+/// Normalize and deduplicate model IDs while retaining discovery order.
+/// Presentation ordering is supplied by the optional models.dev catalog.
 pub fn canonicalize_model_ids<I, S>(models: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut seen = HashSet::new();
-    let mut ordered = Vec::new();
-    for (upstream_order, model) in models.into_iter().enumerate() {
-        let model = model.as_ref().trim();
-        if model.is_empty() {
-            continue;
-        }
-        let normalized = model.to_ascii_lowercase();
-        if seen.insert(normalized) {
-            ordered.push(OrderedModel {
-                id: model.to_string(),
-                upstream_order,
-                semantic_key: semantic_model_sort_key(model),
-            });
+    normalize_model_ids(models)
+}
+
+/// Applies an operator's saved order while retaining discovery order for new
+/// models. Catalog-aware callers use `ModelMetadataCatalog::merge_display_order`.
+pub fn merge_model_display_order<I, S>(models: I, saved_order: &[String]) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let source_order = normalize_model_ids(models);
+    let source_keys = source_order
+        .iter()
+        .map(|model| model.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    if !saved_order.iter().any(|model| {
+        let key = model.trim().to_ascii_lowercase();
+        !key.is_empty() && source_keys.contains(&key)
+    }) {
+        return source_order;
+    }
+    let catalog = source_order;
+    let catalog_positions = catalog
+        .iter()
+        .enumerate()
+        .map(|(position, model)| (model.to_ascii_lowercase(), position))
+        .collect::<BTreeMap<_, _>>();
+    let mut saved = HashSet::new();
+    let mut ordered = Vec::with_capacity(catalog.len());
+    for model in saved_order {
+        let key = model.trim().to_ascii_lowercase();
+        if !key.is_empty() && saved.insert(key.clone()) && catalog_positions.contains_key(&key) {
+            ordered.push(catalog[catalog_positions[&key]].clone());
         }
     }
-    ordered.sort_by(
-        |left, right| match (&left.semantic_key, &right.semantic_key) {
-            (Some(left_key), Some(right_key)) => left_key
-                .cmp(right_key)
-                .then_with(|| left.upstream_order.cmp(&right.upstream_order)),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => left.upstream_order.cmp(&right.upstream_order),
-        },
-    );
-    ordered.into_iter().map(|model| model.id).collect()
+    for model in catalog {
+        let key = model.to_ascii_lowercase();
+        if saved.contains(&key) {
+            continue;
+        }
+        let model_position = catalog_positions[&key];
+        let insert_at = ordered.iter().position(|existing| {
+            catalog_positions[&existing.to_ascii_lowercase()] > model_position
+        });
+        if let Some(insert_at) = insert_at {
+            ordered.insert(insert_at, model);
+        } else {
+            ordered.push(model);
+        }
+    }
+    ordered
 }
 
 /// Trim and de-duplicate model IDs while preserving the first spelling and
@@ -243,21 +168,6 @@ where
         .collect()
 }
 
-fn semantic_model_sort_key(model: &str) -> Option<SemanticModelSortKey> {
-    let model = model_leaf(model).to_ascii_lowercase();
-    let family = known_model_family(&model)?;
-    let is_image = model_has_term(&model, "image") || model.starts_with("dall-e");
-    Some(SemanticModelSortKey {
-        family_rank: model_family_rank(family),
-        image_rank: u8::from(is_image),
-        tier_rank: model_tier_rank(family, &model, is_image),
-        version_rank: model_version_rank(family, &model),
-        modifier_rank: model_modifier_rank(family, &model),
-        preview_rank: u8::from(model_has_term(&model, "preview")),
-        model,
-    })
-}
-
 fn known_model_family(model: &str) -> Option<KnownModelFamily> {
     if is_openai_model(model) {
         Some(KnownModelFamily::OpenAi)
@@ -272,134 +182,6 @@ fn known_model_family(model: &str) -> Option<KnownModelFamily> {
     } else {
         None
     }
-}
-
-fn model_family_rank(family: KnownModelFamily) -> u8 {
-    match family {
-        KnownModelFamily::OpenAi => 0,
-        KnownModelFamily::Anthropic => 1,
-        KnownModelFamily::Gemini => 2,
-        KnownModelFamily::Grok => 3,
-        KnownModelFamily::Zai => 4,
-    }
-}
-
-fn model_tier_rank(family: KnownModelFamily, model: &str, is_image: bool) -> u8 {
-    match family {
-        KnownModelFamily::Anthropic if model_has_term(model, "fable") => 0,
-        KnownModelFamily::Anthropic if model_has_term(model, "opus") => 1,
-        KnownModelFamily::Anthropic if model_has_term(model, "sonnet") => 2,
-        KnownModelFamily::Anthropic if model_has_term(model, "haiku") => 3,
-        KnownModelFamily::Gemini | KnownModelFamily::OpenAi if is_image => 90,
-        KnownModelFamily::Gemini if model_has_term(model, "pro") => 0,
-        KnownModelFamily::Gemini if model_has_term(model, "lite") => 2,
-        KnownModelFamily::Gemini if model_has_term(model, "flash") => 1,
-        KnownModelFamily::OpenAi
-            if model_has_term(model, "mini") || model_has_term(model, "compact") =>
-        {
-            10
-        }
-        KnownModelFamily::OpenAi if model_has_term(model, "spark") => 20,
-        KnownModelFamily::Grok if model_has_term(model, "build") => 10,
-        KnownModelFamily::Zai
-            if model_has_term(model, "air")
-                || model_has_term(model, "flash")
-                || model_has_term(model, "lite") =>
-        {
-            10
-        }
-        KnownModelFamily::Anthropic | KnownModelFamily::Gemini => 80,
-        _ if is_image => 9,
-        _ => 0,
-    }
-}
-
-fn model_modifier_rank(family: KnownModelFamily, model: &str) -> u8 {
-    match family {
-        KnownModelFamily::OpenAi if model.ends_with("-sol") => 1,
-        KnownModelFamily::OpenAi if model.ends_with("-terra") => 2,
-        KnownModelFamily::OpenAi if model.ends_with("-luna") => 3,
-        KnownModelFamily::OpenAi => 8,
-        KnownModelFamily::Gemini if model_has_term(model, "preview") => 9,
-        KnownModelFamily::Gemini if model.ends_with("-high") => 1,
-        KnownModelFamily::Gemini if model.ends_with("-medium") => 2,
-        KnownModelFamily::Gemini if model.ends_with("-low") => 3,
-        KnownModelFamily::Grok if model.ends_with("-non-reasoning") => 1,
-        KnownModelFamily::Grok if model.ends_with("-reasoning") => 0,
-        _ => 0,
-    }
-}
-
-fn model_version_rank(family: KnownModelFamily, model: &str) -> Vec<i64> {
-    let mut version = model_version_components(family, model);
-    if matches!(family, KnownModelFamily::Grok) && is_dated_grok_release(model) {
-        if let Some(minor) = version.get_mut(1) {
-            if *minor >= 10 && *minor % 10 == 0 {
-                *minor /= 10;
-            }
-        }
-    }
-    version.resize(4, 0);
-    version.into_iter().map(|part| -part).collect()
-}
-
-fn model_version_components(family: KnownModelFamily, model: &str) -> Vec<i64> {
-    let tokens = model.split('-').collect::<Vec<_>>();
-    let Some(first_version_token) = tokens
-        .iter()
-        .position(|token| token.bytes().any(|byte| byte.is_ascii_digit()))
-    else {
-        return Vec::new();
-    };
-
-    if !matches!(family, KnownModelFamily::Anthropic) {
-        return version_token_components(tokens[first_version_token]);
-    }
-
-    let mut version = Vec::with_capacity(4);
-    for token in &tokens[first_version_token..] {
-        if token.len() > 5 && token.bytes().all(|byte| byte.is_ascii_digit()) {
-            break;
-        }
-        let components = version_token_components(token);
-        if components.is_empty() {
-            break;
-        }
-        version.extend(components);
-        if version.len() >= 4 {
-            break;
-        }
-    }
-    version.truncate(4);
-    version
-}
-
-fn version_token_components(token: &str) -> Vec<i64> {
-    token
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter(|part| !part.is_empty() && part.len() <= 5)
-        .filter_map(|part| part.parse::<i64>().ok())
-        .take(4)
-        .collect()
-}
-
-fn is_dated_grok_release(model: &str) -> bool {
-    let mut parts = model.split('-');
-    let (Some("grok"), Some(version), Some(release)) = (parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    version
-        .split('.')
-        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-        && release.len() == 4
-        && release.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn model_has_term(model: &str, term: &str) -> bool {
-    model
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|part| part == term)
 }
 
 fn model_leaf(model: &str) -> &str {
@@ -421,148 +203,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn semantic_catalog_order_matches_the_public_model_hierarchy() {
-        let models = canonicalize_model_ids([
-            "private-second",
-            "grok-build-0.1",
-            "grok-4.20-0309-non-reasoning",
-            "grok-4.20-0309-reasoning",
-            "grok-4.3",
-            "grok-4.5",
-            "grok-4.6",
-            "gemini-2.5-flash-lite",
-            "gemini-3.1-flash-lite",
-            "gemini-2.5-flash",
-            "gemini-3-flash-preview",
-            "gemini-3-flash",
-            "gemini-3.5-flash",
-            "gemini-3.6-flash",
-            "gemini-3.7-flash",
-            "gemini-2.5-pro",
-            "gemini-3-pro-preview",
-            "gemini-3-pro",
-            "gemini-3.1-pro-preview",
-            "claude-haiku-4-5",
-            "claude-sonnet-4-6",
-            "claude-sonnet-5",
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-            "claude-opus-5",
-            "claude-fable-5",
-            "gpt-5.4-mini",
-            "gpt-5.4",
-            "gpt-5.5",
-            "gpt-5.6-terra",
-            "gpt-5.6-sol",
-            "private-first",
-        ]);
-
-        assert_eq!(
-            models,
-            [
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "claude-fable-5",
-                "claude-opus-5",
-                "claude-opus-4-8",
-                "claude-opus-4-7",
-                "claude-opus-4-6",
-                "claude-sonnet-5",
-                "claude-sonnet-4-6",
-                "claude-haiku-4-5",
-                "gemini-3.1-pro-preview",
-                "gemini-3-pro",
-                "gemini-3-pro-preview",
-                "gemini-2.5-pro",
-                "gemini-3.7-flash",
-                "gemini-3.6-flash",
-                "gemini-3.5-flash",
-                "gemini-3-flash",
-                "gemini-3-flash-preview",
-                "gemini-2.5-flash",
-                "gemini-3.1-flash-lite",
-                "gemini-2.5-flash-lite",
-                "grok-4.6",
-                "grok-4.5",
-                "grok-4.3",
-                "grok-4.20-0309-reasoning",
-                "grok-4.20-0309-non-reasoning",
-                "grok-build-0.1",
-                "private-second",
-                "private-first",
-            ]
-        );
-    }
-
-    #[test]
-    fn future_models_use_family_tier_version_and_modifier_not_a_static_catalog() {
-        assert_eq!(
-            canonicalize_model_ids([
-                "private-first",
-                "grok-5.20-0612-non-reasoning",
-                "grok-5.20-0612-reasoning",
-                "grok-5.6",
-                "grok-5.6.1",
-                "gemini-4.1-flash",
-                "gemini-4.1.2-flash",
-                "gemini-3.9-pro",
-                "gemini-4-pro",
-                "claude-sonnet-6",
-                "claude-opus-5",
-                "claude-opus-6",
-                "claude-opus-6-1",
-                "gpt-6.2-terra",
-                "gpt-6.2.1-terra",
-                "gpt-6.2-sol",
-                "gpt-6.2-experimental",
-                "gpt-7.0",
-                "private-second",
-            ]),
-            [
-                "gpt-7.0",
-                "gpt-6.2.1-terra",
-                "gpt-6.2-sol",
-                "gpt-6.2-terra",
-                "gpt-6.2-experimental",
-                "claude-opus-6-1",
-                "claude-opus-6",
-                "claude-opus-5",
-                "claude-sonnet-6",
-                "gemini-4-pro",
-                "gemini-3.9-pro",
-                "gemini-4.1.2-flash",
-                "gemini-4.1-flash",
-                "grok-5.6.1",
-                "grok-5.6",
-                "grok-5.20-0612-reasoning",
-                "grok-5.20-0612-non-reasoning",
-                "private-first",
-                "private-second",
-            ]
-        );
-    }
-
-    #[test]
-    fn namespaced_models_are_grouped_by_their_model_id_not_source() {
-        assert_eq!(
-            canonicalize_model_ids([
-                "source-b/claude-opus-4-8",
-                "source-a/gpt-5.4",
-                "source-c/unknown",
-            ]),
-            [
-                "source-a/gpt-5.4",
-                "source-b/claude-opus-4-8",
-                "source-c/unknown",
-            ]
-        );
-    }
-
-    #[test]
     fn model_id_normalization_preserves_first_spelling_and_source_order() {
         assert_eq!(
             normalize_model_ids([
@@ -573,6 +213,26 @@ mod tests {
                 "CLAUDE-SONNET".to_string(),
             ]),
             ["GPT-5", "claude-sonnet"]
+        );
+    }
+
+    #[test]
+    fn saved_order_keeps_manual_anchors_and_inserts_new_models_by_discovery_order() {
+        let ordered = merge_model_display_order(
+            ["gpt-5.4", "gpt-6-astra", "gpt-5.5", "gpt-5.4-mini"],
+            &["gpt-5.5".into(), "gpt-5.4".into()],
+        );
+        assert_eq!(
+            ordered,
+            ["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+        );
+        assert_eq!(
+            ordered
+                .iter()
+                .filter(|model| ["gpt-5.5", "gpt-5.4"].contains(&model.as_str()))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["gpt-5.5", "gpt-5.4"]
         );
     }
 
@@ -633,71 +293,5 @@ mod tests {
             Some(vec!["low".to_string()])
         );
         assert_eq!(reasoning_policy_levels(&policies, "vendor/private-b"), None);
-    }
-
-    #[test]
-    fn fast_service_tier_is_limited_to_openai_model_families() {
-        assert!(model_supports_fast_service_tier("gpt-5.6-sol"));
-        assert!(model_supports_fast_service_tier("provider/o3"));
-        assert!(!model_supports_fast_service_tier("claude-opus-5"));
-        assert!(!model_supports_fast_service_tier("provider/gemini-3-pro"));
-    }
-
-    #[test]
-    fn known_model_reasoning_levels_match_the_supported_model_contracts() {
-        assert_eq!(
-            known_model_reasoning_levels("vendor/claude-opus-4-8"),
-            Some(["low", "medium", "high", "xhigh", "max", "ultra"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("claude-opus-4-6"),
-            Some(["low", "medium", "high", "max", "ultra"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("claude-haiku-4-5"),
-            Some([].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("gpt-5.6-sol"),
-            Some(["none", "low", "medium", "high", "xhigh", "max"].as_slice())
-        );
-        assert_eq!(known_model_reasoning_levels("unknown-model"), None);
-        assert_eq!(
-            known_model_reasoning_levels("gemini-3-pro"),
-            Some(["low", "high"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("gemini-3.6-flash"),
-            Some(["minimal", "low", "medium", "high"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("grok-4.6"),
-            Some(["low", "medium", "high", "xhigh"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("grok-4.20-0309-non-reasoning"),
-            Some(["none"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("grok-build-0.1"),
-            Some([].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("glm-5.2"),
-            Some(["none", "minimal", "low", "medium", "high", "xhigh", "max"].as_slice())
-        );
-        assert_eq!(
-            known_model_reasoning_levels("glm-5.3"),
-            Some(["low", "high", "max"].as_slice())
-        );
-        assert_eq!(known_model_reasoning_levels("glm-5.1"), Some([].as_slice()));
-    }
-
-    #[test]
-    fn anthropic_max_is_the_only_provider_max_that_implies_ultra() {
-        assert!(anthropic_max_implies_ultra("vendor/claude-fable-5"));
-        assert!(anthropic_max_implies_ultra("claude-opus-4-8"));
-        assert!(!anthropic_max_implies_ultra("gpt-5.6-sol"));
-        assert!(!anthropic_max_implies_ultra("glm-5.2"));
     }
 }

@@ -8,6 +8,7 @@ import {
   poolMembersFromRuntime,
   poolMemberSourceIds,
   poolMemberStatusCounts,
+  poolProviderCreditsSummary,
 } from "../src/features/relay/pages/pool/poolMembersModel";
 
 const member = (kind: "account" | "source", id: string, overrides: Record<string, unknown> = {}) => ({
@@ -84,11 +85,61 @@ describe("pool members model", () => {
     const state = poolActivityState(members, runtimeByMember, order, {
       revision: 7,
       lastCandidateId: "stabilizer::responses",
+      candidates: {},
     });
 
     expect(state.lastActivityMember?.id).toBe("stabilizer");
     expect(state.lastUsedMember).toBeNull();
     expect(state.nextMember?.id).toBe("account-top");
+  });
+
+  test("shows an active account from the activity overlay before a stale order catches up", () => {
+    const members = [member("account", "account-active"), member("source", "source-api-next", { models: ["gpt-5.4"] })];
+    const order = [candidate("source-api-next::responses", { available: true })];
+    const activity = {
+      revision: 11,
+      lastCandidateId: "account-active",
+      candidates: {
+        "account-active": {
+          revision: 11,
+          candidateId: "account-active",
+          inFlight: 1,
+          activeRequestCount: 1,
+          activeModels: [{ model: "gpt-5.4", requestCount: 1 }],
+        },
+      },
+    };
+    const runtimeByMember = poolMemberRuntimeStates(members, order, activity);
+    const state = poolActivityState(members, runtimeByMember, order, activity);
+
+    expect(state.activeMembers.map((item) => item.id)).toEqual(["account-active"]);
+    expect(state.activeRequestTotal).toBe(1);
+    expect(state.activeModels).toEqual([{ model: "gpt-5.4", requestCount: 1 }]);
+    expect(state.nextMember?.id).toBe("source-api-next");
+  });
+
+  test("shows an active API source from the activity overlay before a stale order catches up", () => {
+    const members = [member("source", "source-active", { models: ["gpt-5.4"] }), member("account", "account-next", { models: ["gpt-5.4"] })];
+    const order = [candidate("account-next", { available: true })];
+    const activity = {
+      revision: 12,
+      lastCandidateId: "source-active::responses",
+      candidates: {
+        "source-active::responses": {
+          revision: 12,
+          candidateId: "source-active::responses",
+          inFlight: 2,
+          activeRequestCount: 2,
+          activeModels: [{ model: "gpt-5.4", requestCount: 2 }],
+        },
+      },
+    };
+    const runtimeByMember = poolMemberRuntimeStates(members, order, activity);
+    const state = poolActivityState(members, runtimeByMember, order, activity, ["gpt-5.4"]);
+
+    expect(state.activeMembers.map((item) => item.id)).toEqual(["source-active"]);
+    expect(state.activeRequestTotal).toBe(2);
+    expect(state.nextMember?.id).toBe("account-next");
   });
 
   test("does not expose a stale healthy candidate for an unavailable member", () => {
@@ -126,5 +177,30 @@ describe("pool members model", () => {
       member("account", "quota", { operationalStatus: "quotaWait" }),
     ];
     expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, errors: 2, disabled: 1 });
+  });
+
+  test("sums provider credits only for accounts currently in the pool", () => {
+    const members = [
+      member("account", "account-one", { quota: { availableCreditsMicroUnits: 1_250_000 } }),
+      member("account", "account-two", { quota: { availableCreditsMicroUnits: 2_750_000 } }),
+      member("account", "account-outside", { inPool: false, quota: { availableCreditsMicroUnits: 99_000_000 } }),
+      member("source", "source-without-account-credits"),
+    ];
+
+    expect(poolProviderCreditsSummary(members)).toEqual({ kind: "finite", availableCredits: 4 });
+  });
+
+  test("shows unlimited provider credits and omits the summary without a ledger", () => {
+    expect(poolProviderCreditsSummary([
+      member("account", "unlimited", { quota: { providerCreditsUnlimited: true } }),
+      member("account", "finite", { quota: { availableCreditsMicroUnits: 2_000_000 } }),
+    ])).toEqual({ kind: "unlimited" });
+    expect(poolProviderCreditsSummary([member("account", "missing"), member("source", "source-only")])).toBeNull();
+  });
+
+  test("omits a zero credit balance from the summary", () => {
+    expect(poolProviderCreditsSummary([
+      member("account", "empty", { quota: { availableCreditsMicroUnits: 0 } }),
+    ])).toBeNull();
   });
 });

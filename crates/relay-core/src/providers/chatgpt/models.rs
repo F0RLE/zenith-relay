@@ -258,12 +258,6 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     slug: String,
-    #[serde(default)]
-    supported_in_api: Option<bool>,
-    #[serde(default)]
-    visibility: Option<String>,
-    #[serde(default)]
-    upgrade: Option<serde_json::Value>,
 }
 
 fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
@@ -278,14 +272,10 @@ fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
     Ok(response
         .models
         .into_iter()
-        .filter(|model| model.supported_in_api != Some(false))
-        .filter(|model| {
-            !model
-                .visibility
-                .as_deref()
-                .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
-                || model.upgrade.is_some()
-        })
+        // This endpoint is the account's authoritative model inventory.
+        // `supported_in_api` describes the upstream's current API capability,
+        // not whether the account owns the model. Retaining the model lets
+        // Relay expose newly enabled capabilities without a hardcoded list.
         .filter_map(|model| {
             let slug = model.slug.trim();
             (!slug.is_empty()
@@ -449,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovers_unique_supported_slugs_with_codex_request_contract() {
+    async fn discovers_unique_account_slugs_with_codex_request_contract() {
         let (endpoint, server) =
             spawn(Router::new().route("/backend-api/codex/models", get(successful_models))).await;
         let models = CodexModelsClient::with_endpoint(endpoint)
@@ -462,7 +452,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(models, vec!["gpt-5", "gpt-legacy", "gpt-5-mini"]);
+        assert_eq!(
+            models,
+            vec![
+                "gpt-5",
+                "gpt-hidden",
+                "gpt-internal",
+                "gpt-legacy",
+                "gpt-5-mini"
+            ]
+        );
         let rendered = format!("{models:?}");
         assert!(!rendered.contains("description-secret"));
         assert!(!rendered.contains("instructions-secret"));

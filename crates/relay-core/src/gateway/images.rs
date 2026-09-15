@@ -517,7 +517,10 @@ async fn execute_prepared(
             .send_authorized_request(&route.candidate_id, upstream, None)
             .await
         {
-            Ok(upstream) => upstream,
+            Ok(upstream) => {
+                route.account_token_generation = upstream.account_token_generation;
+                upstream.response
+            }
             Err(error) => {
                 let failure = AttemptFailure::authorized_request(error);
                 let state = apply_attempt_failure_cooldown(

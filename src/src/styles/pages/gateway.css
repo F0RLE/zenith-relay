@@ -22,6 +22,10 @@
   margin: 14px 0;
 }
 
+.pool-summary[data-has-provider-credits="true"] {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .pool-controls .pool-summary {
   margin: 0;
   border: 0;
@@ -69,6 +73,21 @@
   min-width: 0;
 }
 
+.gateway-opencode-panel {
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.gateway-opencode-development {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--relay-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
 .gateway-page:has(> .gateway-empty-tab-panel) {
   min-height: 100%;
   display: flex;
@@ -99,7 +118,8 @@
   box-shadow: var(--relay-shadow-soft);
 }
 
-.codex-websockets-control {
+.codex-websockets-control,
+.chatgpt-retry-until-available-control {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(240px, 0.8fr) minmax(280px, 1.2fr);
@@ -113,7 +133,8 @@
 }
 
 .gateway-settings-panel > .codex-background-tasks-control,
-.gateway-settings-panel > .codex-websockets-control {
+.gateway-settings-panel > .codex-websockets-control,
+.gateway-settings-panel > .chatgpt-retry-until-available-control {
   border: 0;
   border-bottom: 1px solid var(--relay-border);
   border-radius: 0;
@@ -218,6 +239,56 @@
 }
 
 .codex-websockets-toggle {
+  min-height: 48px;
+}
+
+.chatgpt-retry-until-available-heading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.chatgpt-retry-until-available-heading > div {
+  min-width: 0;
+}
+
+.chatgpt-retry-until-available-heading h2,
+.chatgpt-retry-until-available-heading p {
+  margin: 0;
+}
+
+.chatgpt-retry-until-available-heading h2 {
+  color: var(--relay-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.chatgpt-retry-until-available-heading p {
+  max-width: 620px;
+  margin-top: 3px;
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.chatgpt-retry-until-available-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.chatgpt-retry-until-available-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chatgpt-retry-until-available-toggle {
   min-height: 48px;
 }
 

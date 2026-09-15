@@ -1,4 +1,5 @@
 use super::{collect_response_body, valid_access_token, ResponseBodyError};
+use crate::accounts::decode_unverified_jwt_payload;
 use crate::quota::QuotaRefreshFailure;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::{
@@ -356,8 +357,106 @@ struct AccountCheckRecord {
     node: Value,
 }
 
+/// The result of an authenticated ChatGPT account-check response is the only
+/// authoritative source for an imported account identity. IDs found in an
+/// import document or an unsigned JWT payload are hints only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountCheckIdentityError {
+    /// The authenticated response did not contain a usable account id.
+    Missing,
+    /// The authenticated response contained account ids, but none matched the
+    /// identity hint supplied by the import.
+    Mismatch,
+}
+
+/// Returns all bounded account ids in an authenticated account-check payload,
+/// preserving the provider's account ordering where it supplies one.
+pub fn account_ids_from_check_response(payload: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    for record in account_records(payload) {
+        let Some(account_id) = record_account_id(&record) else {
+            continue;
+        };
+        if !ids
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&account_id))
+        {
+            ids.push(account_id);
+        }
+    }
+    ids
+}
+
+/// Selects the authenticated account which matches the imported identity
+/// hints. With no hints, the provider's first ordered account is used.
+pub fn resolve_account_check_account_id(
+    payload: &Value,
+    claimed_account_ids: &[&str],
+) -> Result<String, AccountCheckIdentityError> {
+    let account_ids = account_ids_from_check_response(payload);
+    if account_ids.is_empty() {
+        return Err(AccountCheckIdentityError::Missing);
+    }
+    if claimed_account_ids.is_empty() {
+        return Ok(account_ids[0].clone());
+    }
+    account_ids
+        .iter()
+        .find(|account_id| {
+            claimed_account_ids
+                .iter()
+                .map(|value| value.trim())
+                .any(|value| !value.is_empty() && value.eq_ignore_ascii_case(account_id))
+        })
+        .cloned()
+        .ok_or(AccountCheckIdentityError::Mismatch)
+}
+
+/// Extracts account ids from a JWT without treating the unsigned claims as
+/// trusted. Callers must still reconcile these hints with an authenticated
+/// account-check response before persisting them.
+pub fn unverified_chatgpt_account_id_hints(token: &str) -> Vec<String> {
+    let Some(payload) = decode_unverified_jwt_payload::<Value>(token) else {
+        return Vec::new();
+    };
+    let Some(auth) = payload
+        .get("https://api.openai.com/auth")
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for name in ["chatgpt_account_id", "account_id"] {
+        let Some(value) = auth.get(name).and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if value.is_empty()
+            || value.len() > MAX_ACCOUNT_ID_BYTES
+            || value.chars().any(char::is_control)
+            || ids.iter().any(|existing: &String| existing == value)
+        {
+            continue;
+        }
+        ids.push(value.to_string());
+    }
+    ids
+}
+
 fn account_records(payload: &Value) -> Vec<AccountCheckRecord> {
-    let accounts = payload.get("accounts").unwrap_or(payload);
+    let Some(accounts) = payload.get("accounts") else {
+        return (payload.is_object()
+            && record_account_id(&AccountCheckRecord {
+                key: None,
+                node: payload.clone(),
+            })
+            .is_some())
+        .then(|| AccountCheckRecord {
+            key: None,
+            node: payload.clone(),
+        })
+        .into_iter()
+        .collect();
+    };
     match accounts {
         Value::Array(values) => values
             .iter()
@@ -367,14 +466,35 @@ fn account_records(payload: &Value) -> Vec<AccountCheckRecord> {
                 node: node.clone(),
             })
             .collect(),
-        Value::Object(values) if payload.get("accounts").is_some() => values
-            .iter()
-            .filter(|(_, value)| value.is_object())
-            .map(|(key, node)| AccountCheckRecord {
-                key: Some(key.clone()),
-                node: node.clone(),
-            })
-            .collect(),
+        Value::Object(values) => {
+            let mut records = Vec::with_capacity(values.len());
+            let ordered_keys = payload
+                .get("account_ordering")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            for key in ordered_keys {
+                if let Some(node) = values.get(key).filter(|value| value.is_object()) {
+                    records.push(AccountCheckRecord {
+                        key: Some(key.to_string()),
+                        node: node.clone(),
+                    });
+                }
+            }
+            for (key, node) in values.iter().filter(|(_, value)| value.is_object()) {
+                if !records
+                    .iter()
+                    .any(|record| record.key.as_deref() == Some(key.as_str()))
+                {
+                    records.push(AccountCheckRecord {
+                        key: Some(key.clone()),
+                        node: node.clone(),
+                    });
+                }
+            }
+            records
+        }
         _ => Vec::new(),
     }
 }
@@ -463,6 +583,7 @@ mod tests {
         routing::get,
         Json, Router,
     };
+    use base64::Engine;
     use serde_json::json;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -488,6 +609,57 @@ mod tests {
         assert_eq!(metadata.account_id.as_deref(), Some("account-target"));
         assert_eq!(metadata.plan_type.as_deref(), Some("business"));
         assert_eq!(metadata.active_until_ms, Some(1_788_998_400_000));
+    }
+
+    #[test]
+    fn account_check_identity_requires_an_authenticated_match() {
+        let payload = json!({
+            "account_ordering": ["second", "first"],
+            "accounts": {
+                "first": {"account": {"id": "account-first"}},
+                "second": {"account": {"id": "account-second"}}
+            }
+        });
+
+        assert_eq!(
+            account_ids_from_check_response(&payload),
+            vec!["account-second", "account-first"]
+        );
+        assert_eq!(
+            resolve_account_check_account_id(&payload, &["account-first"]),
+            Ok("account-first".to_string())
+        );
+        assert_eq!(
+            resolve_account_check_account_id(&payload, &["unrelated-account"]),
+            Err(AccountCheckIdentityError::Mismatch)
+        );
+        assert_eq!(
+            resolve_account_check_account_id(&json!({"accounts": []}), &[]),
+            Err(AccountCheckIdentityError::Missing)
+        );
+        assert_eq!(
+            resolve_account_check_account_id(&payload, &[]),
+            Ok("account-second".to_string())
+        );
+    }
+
+    #[test]
+    fn account_check_hints_are_unverified_and_bounded() {
+        let payload = json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-from-jwt",
+                "account_id": "account-alias"
+            }
+        });
+        let token = format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        );
+        assert_eq!(
+            unverified_chatgpt_account_id_hints(&token),
+            vec!["account-from-jwt", "account-alias"]
+        );
+        assert!(unverified_chatgpt_account_id_hints("not-a-jwt").is_empty());
     }
 
     #[test]

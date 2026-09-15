@@ -3,10 +3,14 @@ use crate::{
     accounts::AccountAuthState,
     quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
     runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
-    ApiEquivalentSummary, ApiModelPriceOverride, SourceProtocolBinding, WireApi,
+    runtime_source_models_with_cache_write_pricing, ApiEquivalentSummary, ApiModelPriceOverride,
+    SourceProtocolBinding, WireApi,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 const MIN_WEEKLY_WINDOW_MINUTES: u32 = 6 * 24 * 60;
 const MAX_WEEKLY_WINDOW_MINUTES: u32 = 8 * 24 * 60;
@@ -78,6 +82,18 @@ impl SourceSummary {
 
     pub fn supports_any_wire_api(&self) -> bool {
         !self.models_for_any_wire_api().is_empty()
+    }
+
+    /// Returns models that have at least one confirmed Anthropic-style
+    /// Messages upstream route. Cache creation tariffs are valid only for
+    /// those routes, even when the same model is also exposed by Responses or
+    /// another generic API route.
+    pub fn models_with_cache_write_pricing(&self) -> BTreeSet<String> {
+        runtime_source_models_with_cache_write_pricing(
+            &self.protocol_bindings,
+            self.wire_api,
+            &self.models,
+        )
     }
 }
 
@@ -214,6 +230,10 @@ pub struct AccountSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_block_reason: Option<AccountRoutingBlockReason>,
     pub last_error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_auth_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_client_login_redirect_at_ms: Option<u64>,
 }
 
 pub fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {

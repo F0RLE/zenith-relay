@@ -7,29 +7,30 @@ pub(crate) fn source_image_input_capabilities(
     manifest: &Value,
     configured_models: &BTreeSet<String>,
 ) -> BTreeMap<String, bool> {
-    manifest
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            let object = model.as_object()?;
-            let id = object.get("id")?.as_str()?.trim();
-            if !configured_models
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(id))
-            {
-                return None;
-            }
-            Some((
-                id.to_ascii_lowercase(),
-                source_model_declares_image_input(object).unwrap_or(false),
-            ))
-        })
-        .collect()
+    let mut capabilities = BTreeMap::new();
+    for (id, supports_image) in super::source_catalog_model_rows(manifest).filter_map(|model| {
+        let object = model.as_object()?;
+        let id = super::source_catalog_model_id(object)?;
+        if !configured_models
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(id))
+        {
+            return None;
+        }
+        Some((
+            id.to_ascii_lowercase(),
+            source_model_declares_image_input(object)?,
+        ))
+    }) {
+        capabilities.entry(id).or_insert(supports_image);
+    }
+    capabilities
 }
 
 pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<bool> {
+    if let Some(input) = model.get("modalities").and_then(|value| value.get("input")) {
+        return Some(array_contains_image(input));
+    }
     for key in [
         "input_modalities",
         "inputModalities",
@@ -69,4 +70,27 @@ fn array_contains_image(value: &Value) -> bool {
             })
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_and_generic_manifests_keep_unknown_separate_from_text_only() {
+        let manifest = json!({"models":[
+            {"slug":"vision", "modalities":{"input":["text","image"]}},
+            {"slug":"text", "input_modalities":["text"]},
+            {"slug":"unknown"},
+            {"slug":"unconfigured", "supports_vision":true}
+        ]});
+        assert_eq!(
+            source_image_input_capabilities(
+                &manifest,
+                &BTreeSet::from(["vision".into(), "text".into(), "unknown".into()])
+            ),
+            BTreeMap::from([("vision".into(), true), ("text".into(), false)])
+        );
+    }
 }

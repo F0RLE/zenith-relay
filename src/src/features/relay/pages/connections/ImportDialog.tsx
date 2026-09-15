@@ -4,8 +4,12 @@ import { Loader2, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountImportProgress, ConfirmAccountImportResponse, ImportSession, RelayMode } from "../../api/types";
-import { AccountPlanBadge, Button, Dialog, StatusBadge, StatusIcon } from "../../components/Ui";
+import { AccountPlanBadge, Button, Dialog, StatusIcon } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import {
+  beginAccountImportConfirmation,
+  finishAccountImportConfirmation,
+} from "../../state/relayPreferences";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { useProxyPool } from "./ProxyDialogs";
 
@@ -13,7 +17,7 @@ type ImportFailure = { itemId: string; code: string; label?: string; identity?: 
 
 function selectedImportItemIds(session?: ImportSession) {
   return session?.preview.rows
-    .filter((row) => row.selectable && row.defaultSelected)
+    .filter((row) => row.defaultSelected)
     .map((row) => row.itemId) ?? [];
 }
 
@@ -33,8 +37,13 @@ export function ImportDialog({ initialPaths, initialSession, modeOverride, defau
   const [assignProxy, setAssignProxy] = useState(false);
   const [fileLoading, setFileLoading] = useState(Boolean(initialPaths?.length));
   const activeSessionId = useRef<string | null>(initialSession?.sessionId ?? null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const initialPreviewStarted = useRef(false);
+  const mounted = useRef(true);
+  const confirmInFlight = useRef(false);
+  const closing = useRef(false);
   const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  const importOperationBusy = busy?.startsWith("import-") ?? false;
   const acceptSession = (next: ImportSession) => {
     setSession(next);
     setOwnedSessionId(next.sessionId);
@@ -45,27 +54,50 @@ export function ImportDialog({ initialPaths, initialSession, modeOverride, defau
     setSelected(selectedImportItemIds(next));
   };
   const cancel = async () => {
+    if (importOperationBusy || confirmInFlight.current || closing.current) return;
+    closing.current = true;
     const sessionId = session?.sessionId ?? ownedSessionId;
-    if (mode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId));
-    activeSessionId.current = null;
-    onClose();
+    try {
+      if (mode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId));
+    } finally {
+      activeSessionId.current = null;
+      if (mounted.current) onClose();
+    }
   };
   const preview = async () => {
     if (mode === "local") {
       const result: { current: ImportSession | null } = { current: null };
+      let startedSessionId: string | null = null;
       const ok = await perform("import-preview", async () => {
         const started = await relayCommands.startImport(content);
-        setOwnedSessionId(started.sessionId);
+        startedSessionId = started.sessionId;
+        activeSessionId.current = started.sessionId;
+        if (mounted.current) setOwnedSessionId(started.sessionId);
         result.current = await relayCommands.prepareImport(started.sessionId, false);
       });
+      if (!mounted.current) {
+        if (startedSessionId) void relayCommands.cancelImport(startedSessionId).catch(() => undefined);
+        return;
+      }
       if (ok && result.current) acceptSession(result.current);
-      else if (!ok) setCommandFailed(true);
+      else {
+        // `startImport` creates a temporary session before parsing.  If the
+        // parser/metadata probe fails, release that session immediately so a
+        // repeated preview cannot accumulate stale state or crash cleanup.
+        if (startedSessionId) {
+          if (activeSessionId.current === startedSessionId) activeSessionId.current = null;
+          setOwnedSessionId((current) => current === startedSessionId ? null : current);
+          void relayCommands.cancelImport(startedSessionId).catch(() => undefined);
+        }
+        setCommandFailed(true);
+      }
       return;
     }
     const result: { current: ImportSession | null } = { current: null };
     const ok = await perform("import-preview", async () => {
       result.current = await relayCommands.remoteAction({ type: "preview_account_batch_import" }, { content }) as ImportSession;
     });
+    if (!mounted.current) return;
     if (ok && result.current) acceptSession(result.current);
     else if (!ok) setCommandFailed(true);
   };
@@ -77,64 +109,87 @@ export function ImportDialog({ initialPaths, initialSession, modeOverride, defau
         result.current = mode === "local"
           ? await relayCommands.previewImportFiles(paths)
           : await relayCommands.previewRemoteImportFiles(paths);
+        if (result.current) activeSessionId.current = result.current.sessionId;
       });
+      if (!mounted.current) return;
       if (ok && result.current) acceptSession(result.current);
       else if (!ok) setCommandFailed(true);
     } finally {
-      setFileLoading(false);
+      if (!mounted.current && mode === "local" && result.current) {
+        void relayCommands.cancelImport(result.current.sessionId).catch(() => undefined);
+      }
+      if (mounted.current) setFileLoading(false);
     }
   };
   const confirm = async (selectedIds = selected) => {
-    if (!session) return;
+    if (!session || confirmInFlight.current || closing.current) return;
+    confirmInFlight.current = true;
+    const sessionId = session.sessionId;
     setCommandFailed(false);
-    setProgress({ sessionId: session.sessionId, completed: 0, total: selectedIds.length, succeeded: 0, failed: 0 });
-    if (mode === "local") {
+    setProgress({ sessionId, completed: 0, total: selectedIds.length, succeeded: 0, failed: 0 });
+    try {
+      if (mode === "local") {
+        const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
+        beginAccountImportConfirmation();
+        let ok = false;
+        try {
+          ok = await perform("import-confirm", async () => {
+            result.current = await relayCommands.confirmImport(sessionId, selectedIds, addToPool);
+          });
+        } finally {
+          finishAccountImportConfirmation();
+        }
+        if (!mounted.current) return;
+        if (!ok) {
+          setProgress(null);
+          setCommandFailed(true);
+          return;
+        }
+        if (assignProxy && result.current) {
+          const accountIds = result.current.results.flatMap((item) => item.status === "succeeded" && item.account ? [item.account.account.id] : []);
+          if (accountIds.length) await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds));
+        }
+        if (!mounted.current) return;
+        const failures = collectImportFailures(result.current, session);
+        setProgress(null);
+        if (failures.length) {
+          setSelected(failures.map((failure) => failure.itemId));
+          setCompleted(failures);
+          return;
+        }
+        // Clear the cleanup marker before notifying a parent.  Onboarding may
+        // replace the whole wizard immediately, and its unmount cleanup must
+        // not race a confirmation that has already committed.
+        activeSessionId.current = null;
+        onImported?.();
+        if (mounted.current) onClose();
+        return;
+      }
       const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
       const ok = await perform("import-confirm", async () => {
-        result.current = await relayCommands.confirmImport(session.sessionId, selectedIds, addToPool);
-      });
+        result.current = await relayCommands.remoteAction(
+          { type: "confirm_account_batch_import" },
+          { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool },
+        ) as Awaited<ReturnType<typeof relayCommands.confirmImport>>;
+      }, "feedback.accountAdded");
+      if (!mounted.current) return;
       if (!ok) {
         setProgress(null);
         setCommandFailed(true);
         return;
       }
-      if (assignProxy && result.current) {
-        const accountIds = result.current.results.flatMap((item) => item.status === "succeeded" && item.account ? [item.account.account.id] : []);
-        if (accountIds.length) await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds));
-      }
       const failures = collectImportFailures(result.current, session);
-      if (result.current?.results.some((item) => item.status === "succeeded")) onImported?.();
       setProgress(null);
       if (failures.length) {
         setSelected(failures.map((failure) => failure.itemId));
         setCompleted(failures);
-        return;
+      } else {
+        activeSessionId.current = null;
+        onImported?.();
+        if (mounted.current) onClose();
       }
-      activeSessionId.current = null;
-      onClose();
-      return;
-    }
-    const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
-    const ok = await perform("import-confirm", async () => {
-      result.current = await relayCommands.remoteAction(
-        { type: "confirm_account_batch_import" },
-        { sessionId: session.sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool },
-      ) as Awaited<ReturnType<typeof relayCommands.confirmImport>>;
-    }, "feedback.accountAdded");
-    if (!ok) {
-      setProgress(null);
-      setCommandFailed(true);
-      return;
-    }
-    const failures = collectImportFailures(result.current, session);
-    if (result.current?.results.some((item) => item.status === "succeeded")) onImported?.();
-    setProgress(null);
-    if (failures.length) {
-      setSelected(failures.map((failure) => failure.itemId));
-      setCompleted(failures);
-    } else {
-      activeSessionId.current = null;
-      onClose();
+    } finally {
+      confirmInFlight.current = false;
     }
   };
   const retryFailed = () => {
@@ -144,6 +199,12 @@ export function ImportDialog({ initialPaths, initialSession, modeOverride, defau
     setSelected(failedIds);
     void confirm(failedIds);
   };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   useEffect(() => {
     if (mode !== "local") return;
     let disposed = false;
@@ -169,17 +230,29 @@ export function ImportDialog({ initialPaths, initialSession, modeOverride, defau
       void relayCommands.cancelImport(activeSessionId.current).catch(() => undefined);
     }
   }, [mode]);
+  const importRows = session?.preview.rows ?? [];
   const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
     ? current.filter((id) => id !== itemId)
     : [...current, itemId]);
+  // Keep invalid rows selectable so the user can explicitly submit them and
+  // receive a per-item failure result instead of losing the row silently.
+  // Rust still validates the item and never imports unusable credentials.
+  const importRowIds = importRows.map((row) => row.itemId);
+  const selectedImportRowCount = importRowIds.filter((itemId) => selected.includes(itemId)).length;
+  const allImportRowsSelected = importRowIds.length > 0 && selectedImportRowCount === importRowIds.length;
+  const someImportRowsSelected = selectedImportRowCount > 0 && !allImportRowsSelected;
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someImportRowsSelected;
+  }, [someImportRowsSelected]);
+  const toggleAll = (checked: boolean) => setSelected(checked ? importRowIds : []);
   const selectedAccountCount = session?.preview.rows.filter((row) => selected.includes(row.itemId) && row.authMode !== "api_key").length ?? 0;
   const localProxyOptions = mode === "local";
   const footer = completed
-    ? <><Button variant="secondary" onClick={cancel}>{t("common.close")}</Button><Button variant="primary" onClick={retryFailed}>{t("accounts.retryFailed")}</Button></>
-    : <><Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{fileLoading ? null : session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={() => void confirm()}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
-  const body = busy === "import-confirm" && progress ? <div className="import-progress" role="status" aria-live="polite"><header><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.importProgress", { completed: progress.completed, total: progress.total })}</strong><small>{mode === "local" && progress.currentLabel ? t("accounts.importCurrent", { name: progress.currentLabel }) : t("accounts.importProcessing")}</small></div><b>{progress.completed}/{progress.total}</b></header><progress max={Math.max(1, progress.total)} value={mode === "local" ? progress.completed : undefined} />{mode === "local" ? <p>{t("accounts.importProgressSummary", { succeeded: progress.succeeded, failed: progress.failed })}</p> : null}</div> : completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code title={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><div className="import-preview-heading"><div><strong>{t("accounts.importReady")}</strong><span>{t("accounts.importReadyHint", { selected: selected.length, total: session.preview.rows.length })}</span></div><StatusBadge status={selected.length ? "ready" : "warning"} label={t("accounts.selectedCount", { count: selected.length })} /></div>{session.preview.description ? <div className="import-package-description"><span>{t("accounts.importPackageDescription")}</span><MarkdownPreview content={session.preview.description} /></div> : null}<div className="relay-table-wrap"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
+    ? <><Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.close")}</Button><Button variant="primary" disabled={importOperationBusy} onClick={retryFailed}>{t("accounts.retryFailed")}</Button></>
+    : <><Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.cancel")}</Button>{fileLoading ? null : session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy} onClick={() => void confirm()}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim() || importOperationBusy} onClick={preview}>{t("accounts.preview")}</Button>}</>;
+  const body = busy === "import-confirm" && progress ? <div className="import-progress" role="status" aria-live="polite"><header><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.importProgress", { completed: progress.completed, total: progress.total })}</strong><small>{mode === "local" && progress.currentLabel ? t("accounts.importCurrent", { name: progress.currentLabel }) : t("accounts.importProcessing")}</small></div><b>{progress.completed}/{progress.total}</b></header><progress max={Math.max(1, progress.total)} value={mode === "local" ? progress.completed : undefined} />{mode === "local" ? <p>{t("accounts.importProgressSummary", { succeeded: progress.succeeded, failed: progress.failed })}</p> : null}</div> : completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code data-relay-tooltip={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><div className="import-preview-heading"><div><strong>{t("accounts.importReady")}</strong><span>{t("accounts.importReadyHint", { selected: selected.length, total: session.preview.rows.length })}</span></div></div>{session.preview.description ? <div className="import-package-description"><span>{t("accounts.importPackageDescription")}</span><MarkdownPreview content={session.preview.description} /></div> : null}<div className="relay-table-wrap"><table className="relay-table"><thead><tr><th className="import-select-cell"><input ref={selectAllRef} type="checkbox" checked={allImportRowsSelected} disabled={!importRowIds.length || importOperationBusy} aria-label={t("accounts.selectAllImport")} aria-checked={someImportRowsSelected ? "mixed" : allImportRowsSelected ? "true" : "false"} data-relay-tooltip={t("accounts.selectAllImport")} onChange={(event) => toggleAll(event.target.checked)} /></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
     const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
-    return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusIcon status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td><AccountPlanBadge planType={row.plan ?? null} unknown="-" /></td></tr>;
+      return <tr className={selected.includes(row.itemId) ? "selected" : undefined} key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={importOperationBusy} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusIcon status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td><AccountPlanBadge planType={row.plan ?? null} unknown="-" /></td></tr>;
   })}</tbody></table></div>{canImportToPool || localProxyOptions ? <div className="post-import-options"><span>{t("accounts.afterImport")}</span>{canImportToPool ? <label><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span><strong>{t("accounts.addImportedToPool")}</strong><small>{t("accounts.addToPoolHint")}</small></span></label> : null}{localProxyOptions ? <label><input type="checkbox" checked={assignProxy} disabled={!proxyPool || proxyPool.total === 0 || selectedAccountCount === 0} onChange={(event) => setAssignProxy(event.target.checked)} /><span><strong>{t("proxies.assignStoredAfterAdd")}</strong><small>{proxyPool ? t(proxyPool.total ? "proxies.importAssignmentHint" : "proxies.noStored", { total: proxyPool.total, selected: selectedAccountCount, count: proxyPool.total }) : t("common.loading")}</small></span></label> : null}</div> : null}</div> : fileLoading || busy === "import-preview" ? <div className="import-file-loading" role="status" aria-live="polite"><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.readingImportFiles")}</strong><p>{t("accounts.readingImportFilesHint")}</p></div></div> : <div className="relay-form import-start"><button type="button" className="import-file-source" disabled={busy === "import-files"} onClick={() => void chooseFiles()}><span>{busy === "import-files" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}</span><strong>{t("accounts.chooseImportFiles")}</strong><small>{t("accounts.importFileHint")}</small></button><div className="import-source-divider"><span>{t("accounts.orPaste")}</span></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label><p className="form-note">{t("accounts.importFormatsHint")}</p></div>;
   return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={footer}>{commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}{body}</Dialog>;
 }

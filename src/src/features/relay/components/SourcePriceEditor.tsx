@@ -1,11 +1,12 @@
 import { Power, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { SourceSummary } from "../api/types";
-import { groupModels, supportsCacheWritePricing } from "../modelGroups";
+import { groupModels, orderModelIdsBySnapshot } from "../modelGroups";
 import {
   formatModelPricePlaceholder,
   parseEditableModelPrice,
 } from "../modelPricing";
+import { sourceModelsWithCacheWritePricing } from "../sourceProtocolBindings";
 import { useRelayState } from "../state/RelayStateProvider";
 import { IconButton } from "./Ui";
 import {
@@ -28,10 +29,16 @@ type SourcePriceEditorProps = {
 export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onToggleModel, presentation = "disclosure" }: SourcePriceEditorProps) {
   const { t } = useTranslation();
   const { runtime } = useRelayState();
-  const models = sourcePriceModels(source);
-  const groups = groupModels(models, (model) => model);
+  const sourceModels = sourcePriceModels(source);
+  const catalogModels = new Map(
+    (runtime?.gateway.models ?? []).map((model) => [model.id.toLowerCase(), model]),
+  );
+  const models = orderModelIdsBySnapshot(sourceModels, runtime?.gateway.models ?? []);
+  const groups = groupModels(models, {
+    metadata: (model) => catalogModels.get(model.toLowerCase()),
+  });
   const detectedPrices = new Map(Object.entries(source.detectedModelPrices ?? {}).map(([model, price]) => [model.toLowerCase(), price]));
-  const catalogPrices = new Map((runtime?.gateway.models ?? []).map((model) => [model.id.toLowerCase(), model]));
+  const catalogPrices = catalogModels;
   const modelSelectionEnabled = Boolean(enabledModels && onToggleModel);
   const enabledModelIds = new Set((enabledModels ?? []).map((model) => model.toLowerCase()));
   const enabledCount = modelSelectionEnabled
@@ -45,9 +52,15 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   const count = modelSelectionEnabled
     ? `${t("common.enabled")}: ${enabledCount}/${models.length}`
     : t(manualOverrideCount ? "sources.manualPrices" : "sources.apiPricesInUse", { count: manualOverrideCount });
+  // Anthropic 5m/1h cache creation is a Messages-contract capability. A
+  // generic catalog price field is not enough evidence: showing it on an
+  // OpenAI/Responses route invites an invalid cache-control request.
+  const cacheWriteModels = new Set(
+    sourceModelsWithCacheWritePricing(source).map((model) => model.toLowerCase()),
+  );
   const content = <div className="source-price-content"><div className="source-price-groups">
       {groups.map((group) => {
-        const cacheWrite = group.id === "anthropic";
+        const cacheWrite = group.items.some((model) => cacheWriteModels.has(model.toLowerCase()));
         const groupEnabledCount = modelSelectionEnabled
           ? group.items.filter((model) => enabledModelIds.has(model.toLowerCase())).length
           : group.items.length;
@@ -59,12 +72,12 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
               const key = model.toLowerCase();
               const draft = drafts[key];
               const inherited = detectedPrices.get(key) ?? catalogPrices.get(key);
-              const showWrites = supportsCacheWritePricing(model);
+              const showWrites = cacheWriteModels.has(key);
               const enabled = !modelSelectionEnabled || enabledModelIds.has(key);
               return <div className="source-price-row" key={key} data-custom-price={draft ? "true" : "false"} data-member-model-id={modelSelectionEnabled ? model : undefined} data-enabled={modelSelectionEnabled ? String(enabled) : undefined}>
                 <div className="source-price-model" data-selectable={modelSelectionEnabled ? "true" : "false"}>
                   {modelSelectionEnabled ? <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => onToggleModel?.(model)} /> : null}
-                  <code title={model}>{model}</code>
+                  <code data-relay-tooltip={model}>{model}</code>
                 </div>
                 <PriceInput label={t("sources.inputPriceFor", { model })} value={draft?.input ?? ""} placeholder={formatModelPricePlaceholder(inherited?.inputMicroUsdPerMillion)} invalid={draft != null && parseEditableModelPrice(draft.input) == null} onChange={(value) => setField(key, "input", value)} />
                 <PriceInput label={t("sources.outputPriceFor", { model })} value={draft?.output ?? ""} placeholder={formatModelPricePlaceholder(inherited?.outputMicroUsdPerMillion)} invalid={draft != null && parseEditableModelPrice(draft.output) == null} onChange={(value) => setField(key, "output", value)} />

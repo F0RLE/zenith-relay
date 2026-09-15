@@ -63,9 +63,9 @@ The **Model Rules** table is also where model behavior is controlled:
   the selected mode through; it does not invent a mode or send a separate probe
   request for each one.
 - **Request speed** is the Standard/Fast service-tier choice for OpenAI-family
-  models. Relay maps Fast to OpenAI's `priority` request tier; it is a speed
-  request, not another quota or another model. Other model families always use
-  Standard through this pool control.
+  models. Relay maps Fast to the upstream `priority` request tier; it is a
+  request, not a capability check, speed guarantee, another quota, or another
+  model. Other model families always use Standard through this pool control.
 - **Price** is the provider or verified catalog price, with an explicit local
   override when needed. It is used for API-equivalent estimates and does not
   alter the provider invoice.
@@ -108,7 +108,9 @@ Connecting either application preserves the state Relay needs to reverse its
 own configuration. The ChatGPT client can use every enabled, compatible model
 in the pool through the endpoint, not only models from the ChatGPT family.
 OpenCode receives the prepared pool model snapshot and its reasoning variants
-when connected.
+when connected. From an API source row, use **Launch** to choose ChatGPT or
+OpenCode; OpenCode then uses that source's endpoint and verified native
+Responses models directly instead of the pool connection.
 Reasoning, request speed, price rules, and pool order still come from **Pool**.
 
 The ChatGPT application's WebSocket preference is separate from the provider transport.
@@ -143,6 +145,12 @@ connection. That restore changes only Relay-managed configuration and sign-in
 state, preserves unrelated settings, and refuses to overwrite a newer manual
 sign-in.
 
+If Codex actually shows its sign-in page, Relay marks that specific account for
+attention but does not block account switching from a cached token expiry. Use
+**Force-refresh sign-in** in the account menu to check the current refresh
+token: retry a temporary failure, or sign in to that account again only when
+the refresh token is no longer valid.
+
 When ChatGPT crosses between its native account and a Relay/API connection,
 Relay repairs the affected conversation metadata for the target provider. The
 repair is transactional in both directions and rolls back if the profile change
@@ -154,11 +162,21 @@ the managed provider while preserving compatible user changes, then consumes
 the saved recovery point. The local pool reset first attempts the managed
 ChatGPT restore, then removes local accounts, sources, settings, and usage.
 
-Relay-owned files are stored under `%LOCALAPPDATA%\\Zenith Relay`. Runtime data
-and the encrypted vault are in `data`, temporary imports and deployment bundles
-are in `cache`, and recovery files are grouped under
-`recovery/applications/chatgpt`, `recovery/applications/opencode`, and
-`recovery/operations/history-repair`.
+Relay-owned files use the platform local-data location: normally
+`%LOCALAPPDATA%\\Zenith Relay` on Windows,
+`~/Library/Application Support/Zenith Relay` on macOS, and
+`$XDG_DATA_HOME/Zenith Relay` (normally `~/.local/share/Zenith Relay`) on Linux.
+`data/database` stores SQLite, `data/vault` encrypted data,
+`data/catalogs` model and price catalogs, and `data/migrations` migration
+markers. Temporary imports, OAuth state, locks, and the WebView profile live in
+`cache`; deployment bundles live in `exports/deployments`; recovery files are
+grouped under `recovery/applications/chatgpt`,
+`recovery/applications/opencode`, and `recovery/operations/history-repair`.
+
+After an update, Relay moves only its own prior flat files into these categories.
+It does not change ChatGPT, Codex, or Cockpit folders. If both an old and a new
+copy of an important file exist, Relay deletes neither one and asks for recovery
+instead of selecting a copy.
 
 Account export is different from a snapshot: it is a credential-bearing transfer
 file. Treat it as a secret, use it only for the intended import, and delete it
@@ -193,3 +211,10 @@ client does not receive two different answers in one stream.
 
 When asking for help, copy the sanitized status, HTTP code, model, and **Error
 source**. Never include API keys, cookies, tokens, prompts, or provider bodies.
+If a failure repeats, open **Settings → Pool data** and enable **Debug mode**.
+The **Diagnostics** section then appears: `logs/errors` contains errors,
+`logs/crashes` contains crash reports, and `logs/operations` contains short
+import and startup stages. If Relay is interrupted, its next start also reports
+the final redacted stage, even when Debug mode was off. Files are size-bounded
+and redacted. Detailed debug logging is intended only for temporary
+troubleshooting; errors and crashes are always retained.

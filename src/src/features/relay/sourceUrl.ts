@@ -6,3 +6,12 @@ export function sourceHost(value: string) {
     return value;
   }
 }
+
+/** Returns an explicitly configured URL port without rejecting partial state. */
+export function sourcePort(value: string) {
+  try {
+    return new URL(value).port;
+  } catch {
+    return "";
+  }
+}

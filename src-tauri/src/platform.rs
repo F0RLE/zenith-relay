@@ -1,3 +1,4 @@
+use crate::storage_paths::StoragePaths;
 use serde::Serialize;
 use std::{
     env,
@@ -8,7 +9,6 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 const RELAY_DIRECTORY: &str = "Zenith Relay";
-const WEBVIEW_DIRECTORY: &str = "com.zenith.codex";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,7 +161,7 @@ pub fn webview_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn webview_data_dir_from_root(root: &Path) -> Result<PathBuf, String> {
-    let directory = root.join("cache").join(WEBVIEW_DIRECTORY);
+    let directory = StoragePaths::from_root(root).webview_root();
     ensure_real_directory(&directory)?;
     if cfg!(windows) {
         Ok(directory)
@@ -173,20 +173,33 @@ fn webview_data_dir_from_root(root: &Path) -> Result<PathBuf, String> {
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| {
-        format!(
-            "failed to create local data directory {}: {error}",
-            path.display()
-        )
-    })?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!(
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(format!(
             "local data path must be a real directory: {}",
             path.display()
-        ));
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|error| {
+                format!(
+                    "failed to create local data directory {}: {error}",
+                    path.display()
+                )
+            })?;
+            let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "local data path must be a real directory: {}",
+                    path.display()
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "failed to inspect local data directory {}: {error}",
+            path.display()
+        )),
     }
-    Ok(())
 }
 
 pub fn capabilities() -> PlatformCapabilities {
@@ -206,16 +219,39 @@ mod tests {
 
     #[test]
     fn branded_data_and_webview_paths_are_stable() {
-        let local = PathBuf::from("local").join("com.zenith.codex");
+        let local = PathBuf::from("local").join("com.zenith.relay");
         let root = relay_dir_from_local(&local).unwrap();
         assert_eq!(root, PathBuf::from("local").join("Zenith Relay"));
         let expected = if cfg!(windows) {
-            root.join("cache/com.zenith.codex")
+            root.join("cache/webview")
         } else {
-            root.join("cache/com.zenith.codex/EBWebView")
+            root.join("cache/webview/EBWebView")
         };
         assert_eq!(webview_data_dir_from_root(&root).unwrap(), expected);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn branded_root_is_a_sibling_of_the_platform_data_directory() {
+        for local in [
+            PathBuf::from("windows-local-data").join("com.zenith.relay"),
+            PathBuf::from("macos-application-support").join("com.zenith.relay"),
+            PathBuf::from("linux-xdg-data").join("com.zenith.relay"),
+        ] {
+            assert_eq!(
+                relay_dir_from_local(&local).unwrap(),
+                local.parent().unwrap().join(RELAY_DIRECTORY)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_tauri_identifier_keeps_the_same_relay_owned_root() {
+        let parent = PathBuf::from("local-data");
+        assert_eq!(
+            relay_dir_from_local(&parent.join("com.zenith.codex")).unwrap(),
+            relay_dir_from_local(&parent.join("com.zenith.relay")).unwrap()
+        );
     }
 
     #[test]

@@ -12,11 +12,12 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 use zenith_relay_core::protocol::{
-    account_operational_state, apply_model_display_order, apply_pool_model_configuration,
-    operational_status, pool_candidate_count, pool_model_summaries_with_pricing,
-    pool_pricing_source_summary, pooled_source_runtime_available, source_runtime_available,
-    AccountOperationalInput, AccountSummary, Capabilities, GatewaySummary, QuotaWindowUsage,
-    RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+    account_operational_state, apply_model_display_order_with_catalog, apply_model_metadata,
+    apply_pool_model_configuration, operational_status, pool_candidate_count,
+    pool_model_summaries_with_pricing, pool_pricing_source_summary,
+    pooled_source_runtime_available, source_runtime_available, AccountOperationalInput,
+    AccountSummary, Capabilities, GatewaySummary, QuotaWindowUsage, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
     pricing::{CatalogRefreshOutcome, PricingError},
@@ -83,6 +84,7 @@ pub(crate) async fn build_local_runtime_state(
     let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
     let catalog = state.pricing_catalog();
+    let model_metadata = state.model_metadata_catalog();
     let pricing = super::pricing_context(&inputs.gateway, &inputs.sources, &inputs.accounts);
     let equivalents = state
         .telemetry
@@ -207,6 +209,7 @@ pub(crate) async fn build_local_runtime_state(
         &catalog,
         &pricing,
     );
+    apply_model_metadata(&mut models, &model_metadata);
     apply_pool_model_configuration(
         &mut models,
         &source_summaries,
@@ -216,7 +219,11 @@ pub(crate) async fn build_local_runtime_state(
         &inputs.gateway.model_service_tier_overrides,
         runtime.as_deref(),
     );
-    apply_model_display_order(&mut models, &inputs.gateway.model_display_order);
+    apply_model_display_order_with_catalog(
+        &mut models,
+        &inputs.gateway.model_display_order,
+        &model_metadata,
+    );
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
@@ -274,6 +281,7 @@ pub(crate) async fn build_local_runtime_state(
             ),
             codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
             codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
+            chatgpt_retry_until_available: inputs.gateway.chatgpt_retry_until_available,
             routing_order,
         },
         platform: platform::platform_name().to_string(),
@@ -435,6 +443,8 @@ fn local_account_summary(
         ),
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
+        client_auth_status: record.client_auth_status.clone(),
+        last_client_login_redirect_at_ms: record.last_client_login_redirect_at_ms,
     })
 }
 
@@ -515,6 +525,7 @@ mod parity_tests {
                 chatgpt_interface_quota_reserve_basis_points: Some(100),
                 codex_background_tasks_enabled: true,
                 codex_websockets_enabled: true,
+                chatgpt_retry_until_available: false,
                 routing_order: Vec::new(),
             },
             platform: "test".into(),

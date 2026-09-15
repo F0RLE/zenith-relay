@@ -119,6 +119,7 @@ pub(crate) fn build_local_account_export_document(
                 created_at_ms: record.account.created_at_ms,
                 priority: record.priority,
                 enabled: record.account.enabled,
+                tags: record.account.tags.clone(),
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;

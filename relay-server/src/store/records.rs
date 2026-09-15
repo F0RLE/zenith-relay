@@ -92,6 +92,19 @@ impl Store {
         )
     }
 
+    pub fn chatgpt_retry_until_available(&self) -> Result<bool, String> {
+        Ok(self
+            .metadata("chatgpt_retry_until_available")?
+            .is_some_and(|value| value == "true"))
+    }
+
+    pub fn set_chatgpt_retry_until_available(&self, enabled: bool) -> Result<(), String> {
+        self.set_metadata(
+            "chatgpt_retry_until_available",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
     pub fn sources(&self) -> Result<Vec<SourceRecord>, String> {
         self.list_records("sources")
     }

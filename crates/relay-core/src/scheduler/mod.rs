@@ -7,7 +7,8 @@ mod selection;
 
 pub use affinity::AffinityCache;
 pub use candidate::{
-    account_candidate_health, CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate,
+    account_candidate_health, CandidateHealth, CandidateKind, CandidateQuotaState, CandidateScope,
+    RuntimeCandidate,
 };
 pub use capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 pub(crate) use cooldown::CooldownReason;

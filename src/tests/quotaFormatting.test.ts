@@ -27,6 +27,12 @@ describe("quota formatting", () => {
     expect(formatSupplementalQuotaLabel("Code Review", undefined, translate)).toBe("Code Review");
   });
 
+  test("identifies and labels the provider ultrafast quota", () => {
+    const translate = ((key: string) => key === "quota.ultrafastTier" ? "Ultrafast tier" : key) as never;
+    expect(formatSupplementalQuotaLabel("GPT-5 ultrafast", "ultrafast", translate)).toBe("GPT-5 · Ultrafast tier");
+    expect(isFastSupplementalQuota({ label: "GPT-5 ultrafast", serviceTier: "ultrafast" })).toBe(true);
+  });
+
   test("recognizes legacy fast labels without a typed service tier", () => {
     expect(isFastSupplementalQuota({ label: "GPT-5.4 priority", serviceTier: null })).toBe(true);
     expect(isFastSupplementalQuota({ label: "Code Review", serviceTier: undefined })).toBe(false);

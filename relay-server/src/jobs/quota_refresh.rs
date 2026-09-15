@@ -10,9 +10,9 @@ use zenith_relay_core::{
         recover_model_discovery_state, reduce_account_quota, AccountAuthState, AccountQuotaOutcome,
     },
     providers::chatgpt::{
-        bearer_authorization, is_agent_identity_task_invalid_failure, subscription_refresh_due,
-        CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
-        CODEX_MODELS_CLIENT_VERSION,
+        bearer_authorization, configured_codex_client_version,
+        is_agent_identity_task_invalid_failure, subscription_refresh_due, CodexModelsClient,
+        CodexQuotaClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
     },
     quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
 };
@@ -291,11 +291,12 @@ async fn discover_account_models(
         "Zenith Relay Server",
     )
     .map_err(|_| ("models_client_init".to_string(), false))?;
+    let client_version = configured_codex_client_version();
     let mut result = client
         .discover_authorized(
             authorization,
             &credential.chatgpt_account_id,
-            CODEX_MODELS_CLIENT_VERSION,
+            &client_version,
         )
         .await;
     if credential.is_agent_identity()
@@ -320,7 +321,7 @@ async fn discover_account_models(
             .discover_authorized(
                 authorization,
                 &credential.chatgpt_account_id,
-                CODEX_MODELS_CLIENT_VERSION,
+                &client_version,
             )
             .await;
     }

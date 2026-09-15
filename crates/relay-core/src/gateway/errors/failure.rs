@@ -80,7 +80,7 @@ impl AttemptFailure {
         Self {
             status: StatusCode::BAD_GATEWAY,
             category,
-            message: "upstream stream failed before the first event",
+            message: "upstream stream failed before client output",
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -141,6 +141,18 @@ pub(crate) fn retryable_failure(
     if !failure_category_requires_cooldown(category) {
         return false;
     }
+    if matches!(
+        category,
+        "upstream_unauthorized"
+            | "upstream_account_disabled"
+            | "upstream_forbidden"
+            | "upstream_region_unsupported"
+            | "upstream_model_not_found"
+            | "upstream_content_policy"
+            | "upstream_invalid_request"
+    ) {
+        return false;
+    }
     if category == "upstream_candidate_rejected" {
         // A new request may safely try another source. Responses continuations
         // are bound to their creator, so retrying an unclassified rejection
@@ -150,15 +162,10 @@ pub(crate) fn retryable_failure(
     retryable_status(status, has_previous_response_id)
         || matches!(
             category,
-            "upstream_unauthorized"
-                | "upstream_account_disabled"
-                | "upstream_usage_not_included"
+            "upstream_usage_not_included"
                 | "upstream_quota_exhausted"
-                | "upstream_region_unsupported"
-                | "upstream_model_not_found"
                 | "upstream_model_unsupported"
                 | "upstream_model_capacity"
-                | "upstream_candidate_rejected"
                 | "upstream_websocket_connection_limit"
                 | "upstream_rate_limited"
                 | "upstream_refresh_token_reused"
@@ -169,6 +176,12 @@ pub(crate) fn retryable_failure(
                 | "upstream_bad_gateway"
                 | "upstream_unavailable"
                 | "upstream_gateway_timeout"
+                | "upstream_transport_timeout"
+                | "upstream_transport_connect"
+                | "upstream_transport_body"
+                | "upstream_transport_request"
+                | "upstream_transport"
+                | "upstream_error"
         )
 }
 
@@ -264,6 +277,114 @@ pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8])
     )
 }
 
+/// Detects the narrow Responses validation failure caused by a historical
+/// tool item that omitted `call_id`. This deliberately does not match generic
+/// invalid-call-id or arbitrary required-field errors: the request repair is
+/// allowed only when the upstream identifies the missing field itself.
+pub(crate) fn responses_call_id_is_missing(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return responses_call_id_is_missing_text(&normalized_error_text(payload));
+    };
+    responses_call_id_is_missing_value(&value)
+}
+
+pub(crate) fn responses_call_id_is_missing_value(value: &Value) -> bool {
+    let code = [
+        "/code",
+        "/error/code",
+        "/body/error/code",
+        "/response/error/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .any(|code| {
+        matches!(
+            code.to_ascii_lowercase().as_str(),
+            "missing_call_id" | "call_id_required" | "missing_required_call_id"
+        )
+    });
+    code || responses_call_id_is_missing_text(&upstream_error_text(value))
+}
+
+fn responses_call_id_is_missing_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    if (!text.contains("call_id") && !text.contains("call id"))
+        || text.contains("invalid call_id")
+        || text.contains("invalid call id")
+    {
+        return false;
+    }
+    let normalized = text
+        .chars()
+        .map(|character| match character {
+            '`' | '\'' | '"' | ':' | '.' | '-' | '/' => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    text_has_any(
+        &normalized,
+        &[
+            "missing field call_id",
+            "missing required field call_id",
+            "missing required parameter call_id",
+            "missing parameter call_id",
+            "required field call_id",
+            "required parameter call_id",
+            "field call_id is required",
+            "parameter call_id is required",
+            "call_id is required",
+            "call_id was required",
+            "call_id is missing",
+            "call_id was missing",
+            "missing call_id",
+            "call_id missing",
+            "call_id must be provided",
+            "call_id must be present",
+            "call_id was not provided",
+            "missing field call id",
+            "missing required field call id",
+            "missing required parameter call id",
+            "missing parameter call id",
+            "required field call id",
+            "required parameter call id",
+            "field call id is required",
+            "parameter call id is required",
+            "call id is required",
+            "call id was required",
+            "call id is missing",
+            "call id was missing",
+            "missing call id",
+            "call id missing",
+            "call id must be provided",
+            "call id must be present",
+            "call id was not provided",
+        ],
+    )
+}
+
+/// Detects the specific Responses rejection produced when imported history
+/// contains a tool call without its matching output. The caller must still
+/// prove that the request contains such an incomplete call before recovery.
+pub(crate) fn responses_tool_call_is_missing_output(payload: &[u8]) -> bool {
+    responses_tool_call_is_missing_output_message(&normalized_error_text(payload))
+}
+
+pub(crate) fn responses_tool_call_is_missing_output_message(message: &str) -> bool {
+    text_has_any(
+        &message.to_ascii_lowercase(),
+        &[
+            "no tool output found for function call",
+            "no tool output found for custom tool call",
+            "no tool output found for apply patch call",
+            "unanswered_function_call",
+        ],
+    )
+}
+
 /// Zenith Gateway intentionally hides provider-specific 400 details. A
 /// Responses continuation with tool output can use the local replay state to
 /// recover the preceding tool call when this exact public envelope is returned.
@@ -319,6 +440,55 @@ pub(crate) fn responses_message_item_id_requires_msg_prefix(payload: &[u8]) -> b
     text.contains("input[")
         && text.contains(".id")
         && text.contains("expected an id that begins with 'msg'")
+        // Some Responses-compatible gateways report stale message items
+        // after context compaction as a missing text part instead.
+        || text.contains("text part msg_") && text.contains(" not found")
+}
+
+/// A client can deliberately switch models in a Responses conversation.  The
+/// old upstream response is then unusable by the new route, but a normal text
+/// continuation is still replayable without `previous_response_id`.  Never
+/// apply this escape hatch to an orphaned tool output: without its matching
+/// function-call item, sending it to another route would corrupt tool state.
+pub(crate) fn recoverable_response_model_switch(
+    status: StatusCode,
+    category: &str,
+    has_previous_response_id: bool,
+    has_unpaired_tool_output: bool,
+    payload: &[u8],
+) -> bool {
+    if status != StatusCode::BAD_REQUEST || !has_previous_response_id || has_unpaired_tool_output {
+        return false;
+    }
+
+    category == "upstream_tool_call_mismatch" || {
+        let text = normalized_error_text(payload);
+        (text.contains("previous_response_id")
+            && text_has_any(&text, &["model", "mismatch", "switch"]))
+            || (text.contains("previous response") && text_has_any(&text, &["model", "mismatch"]))
+            || (text.contains("tool") && text_has_any(&text, &["model", "mismatch"]))
+    }
+}
+
+/// A cache write is a route-local optimization. Providers use several
+/// different error envelopes for rejecting cache-control/ephemeral writes;
+/// treat only explicit cache-write wording as a retryable route failure.
+pub(crate) fn prompt_cache_write_rejected(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("cache")
+        && text_has_any(
+            &text,
+            &[
+                "write",
+                "writ",
+                "creation",
+                "create",
+                "cache_control",
+                "cache-control",
+                "ephemeral",
+                "ttl",
+            ],
+        )
 }
 
 pub(crate) fn previous_response_not_found_value(value: &Value) -> bool {

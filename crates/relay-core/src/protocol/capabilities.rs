@@ -28,6 +28,7 @@ pub enum Feature {
     ProfileKeyRotation,
     CodexBackgroundTasks,
     CodexWebsockets,
+    ChatgptRetryUntilAvailable,
     Images,
 }
 
@@ -56,6 +57,7 @@ impl Feature {
             Self::ProfileKeyRotation => "profile_key_rotation",
             Self::CodexBackgroundTasks => "codex_background_tasks",
             Self::CodexWebsockets => "codex_websockets",
+            Self::ChatgptRetryUntilAvailable => "chatgpt_retry_until_available",
             Self::Images => "images",
         }
     }
@@ -120,6 +122,7 @@ impl Capabilities {
             Feature::ProfileKeyRotation,
             Feature::CodexBackgroundTasks,
             Feature::CodexWebsockets,
+            Feature::ChatgptRetryUntilAvailable,
             Feature::Images,
         ]
         .into_iter()

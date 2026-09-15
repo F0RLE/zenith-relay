@@ -158,12 +158,12 @@ export function ApiProviderForm({
             {(value.models ?? []).length ? <div className="source-model-chips" aria-label={t("sources.manualModels")}>
               {(value.models ?? []).map((model) => <span className="source-model-chip" key={model}>
                 <code>{model}</code>
-                <button type="button" onClick={() => removeModel(model)} aria-label={t("sources.removeManualModel", { model })} title={t("common.delete")}>
+                <button type="button" onClick={() => removeModel(model)} aria-label={t("sources.removeManualModel", { model })} data-relay-tooltip={t("common.delete")}>
                   <X aria-hidden />
                 </button>
               </span>)}
             </div> : <small id="source-manual-models-hint">{t("sources.manualModelsHint")}</small>}
-            <label className="source-auto-route-toggle" title={t("sources.autoAssignModelsHint")}>
+            <label className="source-auto-route-toggle" data-relay-tooltip={t("sources.autoAssignModelsHint")}>
               <input
                 type="checkbox"
                 checked={value.autoAssignModels !== false}

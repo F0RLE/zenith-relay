@@ -1,5 +1,4 @@
 use crate::{
-    codex_config::load_api_key_for_launch,
     launcher::is_codex_running,
     local_pool::{
         accounts::{collect_limited, LimitedBodyError},
@@ -7,13 +6,14 @@ use crate::{
         models::{LocalGatewayKeyRecord, ProviderSourceRecord},
         profiles::codex,
         state::DesktopState,
-        store::secret_store,
     },
     platform::default_codex_home,
 };
 use std::time::Duration;
 use url::Url;
-use zenith_relay_core::{providers::chatgpt::CODEX_MODELS_CLIENT_VERSION, SourceAdapter, WireApi};
+use zenith_relay_core::{
+    providers::chatgpt::configured_codex_client_version, SourceAdapter, WireApi,
+};
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
 const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
@@ -30,8 +30,9 @@ pub(super) async fn fetch_codex_model_catalog(
     let mut url = base.join("models").map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "pool model address is invalid")
     })?;
+    let client_version = configured_codex_client_version();
     url.query_pairs_mut()
-        .append_pair("client_version", CODEX_MODELS_CLIENT_VERSION);
+        .append_pair("client_version", &client_version);
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
@@ -91,83 +92,6 @@ pub(super) async fn fetch_codex_model_catalog(
     }
     serde_json::to_string(&catalog)
         .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "model catalog failed").into())
-}
-
-pub(super) async fn fetch_direct_source_model_manifest(
-    base_url: &str,
-    secret: &str,
-) -> Result<serde_json::Value, CommandError> {
-    let mut base = Url::parse(base_url).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "source API address is invalid")
-    })?;
-    if !base.path().ends_with('/') {
-        base.set_path(&format!("{}/", base.path()));
-    }
-    let url = base.join("models").map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "source model address is invalid")
-    })?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|_| {
-            LocalPoolError::new(
-                ErrorCode::GatewayUnavailable,
-                "source model request could not be initialized",
-            )
-        })?;
-    let response = client
-        .get(url)
-        .bearer_auth(secret)
-        .send()
-        .await
-        .map_err(|_| {
-            LocalPoolError::new(
-                ErrorCode::GatewayUnavailable,
-                "source model catalog is unavailable",
-            )
-        })?;
-    if !response.status().is_success() {
-        return Err(LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "source model catalog request was rejected",
-        )
-        .into());
-    }
-    let body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
-        .await
-        .map_err(|error| {
-            LocalPoolError::new(
-                ErrorCode::GatewayUnavailable,
-                match error {
-                    LimitedBodyError::TooLarge => "source model catalog is too large",
-                    LimitedBodyError::Transport => "source model catalog could not be read",
-                },
-            )
-        })?;
-    let manifest: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "source returned an invalid model catalog",
-        )
-    })?;
-    let has_models = manifest
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|models| !models.is_empty());
-    let has_data = manifest
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|models| !models.is_empty());
-    if !has_models && !has_data {
-        return Err(LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "source returned no usable model metadata",
-        )
-        .into());
-    }
-    Ok(manifest)
 }
 
 pub(super) enum CodexCatalogRefreshTarget {
@@ -248,22 +172,10 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
         }
         CodexCatalogRefreshTarget::DirectSource(source) => {
             let models = direct_source_response_models(source.as_ref())?;
-            let api_key = load_direct_source_api_key(
-                &source.base_url,
-                &source.secret_ref,
-                secret_store::load,
-                load_api_key_for_launch,
-                secret_store::save,
-            )?;
-            let manifest = Some(
-                fetch_direct_source_model_manifest(&source.base_url, &api_key)
-                    .await
-                    .map_err(|error| LocalPoolError::new(error.code, error.message))?,
-            );
-            let Some(catalog) = codex::direct_source_model_catalog_with_manifest(
+            let Some(catalog) = codex::direct_source_model_catalog_with_capabilities(
                 &profile_dir,
                 &models,
-                manifest.as_ref(),
+                &state.model_metadata_catalog(),
             )?
             else {
                 return Ok(CodexCatalogRefreshStatus::Skipped);

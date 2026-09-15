@@ -1,4 +1,5 @@
 use super::{AccountSummary, OperationalStatus, SourceSummary};
+use crate::model_metadata::{ModelMetadataCatalog, ReasoningMethod};
 use crate::{
     ApiModelPriceOverride, CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier,
     GatewayRuntime, ImageRequestPrice, RoutingStrategy,
@@ -43,6 +44,8 @@ pub struct GatewaySummary {
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
     #[serde(default)]
+    pub chatgpt_retry_until_available: bool,
+    #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
 }
 
@@ -64,7 +67,46 @@ pub struct ModelSummary {
     pub codex_visible: bool,
     #[serde(default)]
     pub codex_display_name: String,
-    pub catalog_rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_last_updated: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_status: Option<String>,
+    /// Advisory model metadata from models.dev. These fields describe the
+    /// model family, but never grant runtime access to a source or account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_reasoning_method: Option<ReasoningMethod>,
+    #[serde(default)]
+    pub catalog_reasoning_effort_levels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_default_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_tool_call: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_structured_output: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_attachment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_open_weights: Option<bool>,
+    #[serde(default)]
+    pub catalog_input_modalities: Vec<String>,
+    #[serde(default)]
+    pub catalog_output_modalities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_context_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_input_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_output_limit: Option<u64>,
     pub input_micro_usd_per_million: Option<u64>,
     pub cached_input_micro_usd_per_million: Option<u64>,
     #[serde(default)]
@@ -89,10 +131,13 @@ pub struct ModelSummary {
     /// must not treat this as an advertised upstream capability.
     #[serde(default)]
     pub reasoning_manual_fallback: bool,
-    /// Compatibility flag for older management clients. Fast maps to an
-    /// OpenAI service tier and is unavailable for other model families.
+    /// Set only when a current pool route has confirmed an upstream faster tier.
     #[serde(default)]
     pub speed_supported: bool,
+    /// Exact request-speed tiers confirmed by current pool routes. Standard is
+    /// included for every active route; faster tiers require upstream evidence.
+    #[serde(default)]
+    pub speed_tiers: Vec<DefaultServiceTier>,
     #[serde(default)]
     pub speed_tier: DefaultServiceTier,
     #[serde(default)]
@@ -101,13 +146,22 @@ pub struct ModelSummary {
 
 pub fn apply_model_speed_summary(
     model: &mut ModelSummary,
-    configured_tier: Option<DefaultServiceTier>,
+    effective_tier: DefaultServiceTier,
+    runtime: Option<&GatewayRuntime>,
 ) {
-    let supported = crate::model_supports_fast_service_tier(&model.id);
+    let speed_tiers = runtime
+        .map(|runtime| runtime.model_supported_service_tiers(&model.id))
+        .unwrap_or_default();
+    let supported = speed_tiers
+        .iter()
+        .any(|tier| *tier != DefaultServiceTier::Standard);
+    model.speed_tiers = speed_tiers;
     model.speed_supported = supported;
     model.speed_configurable = supported;
     model.speed_tier = if supported {
-        configured_tier.unwrap_or(DefaultServiceTier::Standard)
+        runtime
+            .map(|runtime| runtime.model_effective_service_tier(&model.id))
+            .unwrap_or(effective_tier)
     } else {
         DefaultServiceTier::Standard
     };
@@ -127,20 +181,42 @@ pub fn apply_pool_model_configuration(
 ) {
     for model in models {
         let model_id = model.id.clone();
+        let cache_write_route = sources.iter().any(|source| {
+            source
+                .models_with_cache_write_pricing()
+                .contains(&model_id.to_ascii_lowercase())
+        });
         if let Some(price) = model_price_overrides.get(&model_id.trim().to_ascii_lowercase()) {
             model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
             model.cached_input_micro_usd_per_million = price.cached_input_micro_usd_per_million;
-            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
-            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
+            model.cache_write_5m_micro_usd_per_million = cache_write_route
+                .then_some(price.cache_write_5m_micro_usd_per_million)
+                .flatten();
+            model.cache_write_1h_micro_usd_per_million = cache_write_route
+                .then_some(price.cache_write_1h_micro_usd_per_million)
+                .flatten();
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
         let has_api_source_route = model_has_api_source_route(sources, &model_id);
         let has_pool_route =
             has_api_source_route || super::model_has_native_account_route(accounts, &model_id);
+        // A provider can return an explicit empty reasoning list when its
+        // generic `/models` endpoint has no capability metadata. Treat that
+        // as an absent declaration for the management projection so the
+        // official catalog can still describe a known model. A non-empty
+        // provider declaration remains authoritative and is not widened by
+        // the catalog fallback.
+        let reported_reasoning_levels = runtime
+            .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id))
+            .filter(|levels| !levels.is_empty())
+            .or_else(|| {
+                (!model.catalog_reasoning_effort_levels.is_empty())
+                    .then(|| model.catalog_reasoning_effort_levels.clone())
+            });
         apply_model_reasoning_summary(
             model,
-            runtime.and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id)),
+            reported_reasoning_levels,
             crate::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
             has_pool_route,
         );
@@ -148,7 +224,10 @@ pub fn apply_pool_model_configuration(
             model,
             model_service_tier_overrides
                 .get(&model_id.to_ascii_lowercase())
-                .copied(),
+                .copied()
+                .or_else(|| runtime.map(GatewayRuntime::default_service_tier))
+                .unwrap_or(DefaultServiceTier::Standard),
+            runtime,
         );
     }
 }
@@ -176,11 +255,21 @@ pub fn pool_candidate_count(sources: &[SourceSummary], accounts: &[AccountSummar
 /// newly discovered upstream model. Unknown or stale saved IDs are ignored;
 /// models absent from the saved list keep their upstream-relative order.
 pub fn apply_model_display_order(models: &mut [ModelSummary], saved_order: &[String]) {
-    let positions = saved_order
+    apply_model_display_order_with_catalog(models, saved_order, &ModelMetadataCatalog::empty());
+}
+
+/// Applies saved presentation order and uses the external metadata catalog
+/// only for newly discovered models. Runtime routing is never consulted here.
+pub fn apply_model_display_order_with_catalog(
+    models: &mut [ModelSummary],
+    saved_order: &[String],
+    catalog: &ModelMetadataCatalog,
+) {
+    let order = catalog.merge_display_order(models.iter().map(|model| &model.id), saved_order);
+    let positions = order
         .iter()
         .enumerate()
-        .map(|(position, model)| (model.trim().to_ascii_lowercase(), position))
-        .filter(|(model, _)| !model.is_empty())
+        .map(|(position, model)| (model.to_ascii_lowercase(), position))
         .collect::<BTreeMap<_, _>>();
     models.sort_by_key(|model| {
         positions
@@ -190,9 +279,39 @@ pub fn apply_model_display_order(models: &mut [ModelSummary], saved_order: &[Str
     });
 }
 
-/// Adds provider-reported defaults and the operator's manual override to a
-/// pooled management model. Provider-reported modes are enabled until the
-/// operator edits the list; a present empty override disables them all. The
+pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadataCatalog) {
+    for model in models {
+        // Snapshots can be refreshed in place by callers. Clear the complete
+        // presentation projection before applying the new catalog so a model
+        // removed from metadata cannot retain fields from an older snapshot.
+        let metadata = catalog.resolve(&model.id);
+        model.catalog_provider = metadata.map(|metadata| metadata.provider.clone());
+        model.catalog_family = metadata.and_then(|metadata| metadata.family.clone());
+        model.catalog_name = metadata.and_then(|metadata| metadata.name.clone());
+        model.catalog_release_date = metadata.and_then(|metadata| metadata.release_date.clone());
+        model.catalog_last_updated = metadata.and_then(|metadata| metadata.last_updated.clone());
+        model.catalog_status = metadata.and_then(|metadata| metadata.status.clone());
+        let capabilities = metadata
+            .map(|metadata| metadata.capabilities.clone())
+            .unwrap_or_else(crate::model_metadata::ModelCapabilities::unknown_model);
+        model.catalog_reasoning = capabilities.reasoning;
+        model.catalog_reasoning_method = capabilities.reasoning_method;
+        model.catalog_reasoning_effort_levels = capabilities.reasoning_effort_levels;
+        model.catalog_default_reasoning_effort = capabilities.default_reasoning_effort;
+        model.catalog_tool_call = capabilities.tool_call;
+        model.catalog_structured_output = capabilities.structured_output;
+        model.catalog_attachment = capabilities.attachment;
+        model.catalog_open_weights = capabilities.open_weights;
+        model.catalog_input_modalities = capabilities.input_modalities;
+        model.catalog_output_modalities = capabilities.output_modalities;
+        model.catalog_context_limit = capabilities.context_limit;
+        model.catalog_input_limit = capabilities.input_limit;
+        model.catalog_output_limit = capabilities.output_limit;
+    }
+}
+
+/// Applies models.dev reasoning levels and a narrowing operator override to a
+/// pooled management model. A present empty override disables all levels. The
 /// route flag covers both native OAuth accounts and API sources.
 pub fn apply_model_reasoning_summary(
     model: &mut ModelSummary,
@@ -206,30 +325,10 @@ pub fn apply_model_reasoning_summary(
     model.reasoning_configurable = false;
     model.reasoning_manual_fallback = false;
 
-    // Provider metadata is the current route contract. Known model defaults
-    // are only a fallback for providers that omit the field entirely; using
-    // them first hides newly introduced/provider-specific efforts.
-    let known_levels = crate::known_model_reasoning_levels(&model.id);
-    let reported_levels_missing = reported_levels.is_none();
-    let mut declared_levels = match reported_levels {
-        Some(levels) => levels,
-        None => known_levels
-            .map(|levels| levels.iter().copied().map(str::to_string).collect())
-            .unwrap_or_default(),
-    };
-    if crate::anthropic_max_implies_ultra(&model.id)
-        && declared_levels
-            .iter()
-            .any(|level| level.eq_ignore_ascii_case("max"))
-        && !declared_levels
-            .iter()
-            .any(|level| level.eq_ignore_ascii_case("ultra"))
-    {
-        declared_levels.push("ultra".to_string());
-    }
+    let declared_levels = reported_levels.unwrap_or_default();
     model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);
-    model.reasoning_manual_fallback =
-        has_pool_route && reported_levels_missing && known_levels.is_none();
+    // A reasoning boolean is not an effort enum. Keep the levels unknown until
+    // an automatic metadata source declares them explicitly.
     if has_pool_route {
         let effective_levels = saved_manual_levels.unwrap_or(&model.reasoning_supported_levels);
         model.reasoning_allowed_levels = crate::canonicalize_reasoning_levels(effective_levels);
@@ -239,11 +338,10 @@ pub fn apply_model_reasoning_summary(
                 .reasoning_supported_levels
                 .iter()
                 .any(|supported| supported.eq_ignore_ascii_case(level))
-                || saved_manual_levels.is_some()
         });
         model.reasoning_levels = model.reasoning_allowed_levels.clone();
     }
-    model.reasoning_configurable = has_pool_route;
+    model.reasoning_configurable = has_pool_route && !model.reasoning_supported_levels.is_empty();
 }
 
 /// Returns whether an eligible pooled API source can serve this model through

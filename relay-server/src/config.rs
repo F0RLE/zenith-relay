@@ -11,7 +11,13 @@ pub struct Config {
     pub public_base_url: Url,
     pub management_token: String,
     pub vault_key: [u8; 32],
+    /// Official authenticated account-check endpoint used to validate imported
+    /// ChatGPT account identities before a credential is persisted.
+    pub account_check_url: Url,
 }
+
+pub const DEFAULT_CODEX_ACCOUNT_CHECK_URL: &str =
+    "https://chatgpt.com/backend-api/wham/accounts/check";
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
@@ -31,12 +37,15 @@ impl Config {
         let vault_key = env::var("ZENITH_RELAY_VAULT_KEY")
             .map_err(|_| "ZENITH_RELAY_VAULT_KEY is required".to_string())?;
         let vault_key = decode_vault_key(&vault_key)?;
+        let account_check_url = Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_URL)
+            .expect("the built-in account-check URL must be valid");
         Ok(Self {
             bind,
             data_dir,
             public_base_url,
             management_token,
             vault_key,
+            account_check_url,
         })
     }
 
@@ -48,6 +57,7 @@ impl Config {
             public_base_url: Url::parse(&format!("http://{bind}")).unwrap(),
             management_token: "synthetic-management-token-value".to_string(),
             vault_key: [7; 32],
+            account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_URL).unwrap(),
         }
     }
 }

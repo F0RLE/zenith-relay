@@ -48,6 +48,23 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["complete_codex_oauth", "set_local_pool_membership", "get_local_runtime_state", "attach_codex_to_local_gateway"]));
   expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: ["account_synthetic"], sourceIds: [], inPool: true } });
   expect(calls.findLast((call) => call.command === "attach_codex_to_local_gateway")?.args).toEqual({ boundOauthAccountId: null });
+  expect(calls.map((call) => call.command)).not.toContain("launch_managed_codex_profile");
+});
+
+test("local quick setup connects OpenCode to the pool without launching a client", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
+  await page.getByRole("button", { name: "OpenCode", exact: true }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "connect_opencode_to_local_gateway"))).toBe(true);
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).not.toContain("restart_opencode_app");
+  expect(commands).not.toContain("launch_managed_codex_profile");
 });
 
 test("local quick setup imports through the unified dialog and selects pool membership", async ({ page }) => {

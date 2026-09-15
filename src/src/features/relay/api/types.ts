@@ -1,6 +1,6 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
-export type DefaultServiceTier = "standard" | "fast";
+export type DefaultServiceTier = "standard" | "fast" | "ultrafast";
 export type ObservedServiceTier = string;
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
@@ -28,6 +28,11 @@ export type QuotaSnapshot = {
   supplemental?: SupplementalQuotaWindow[];
   limitReached: boolean;
   resetCreditsAvailable: number | null;
+  /** Provider-reported credits in millionths of one credit; informational only. */
+  availableCreditsMicroUnits?: number | null;
+  /** Fresh positive or unlimited provider credits keep an exhausted account eligible. */
+  providerCreditsAvailable?: boolean;
+  providerCreditsUnlimited?: boolean;
   directBalanceMicroUsd?: number | null;
   updatedAtMs: number | null;
   error: { code: string; occurredAtMs: number } | null;
@@ -166,6 +171,16 @@ export type AccountSummary = {
   proxyId?: string | null;
   routingBlockReason?: "disabled" | "not_in_pool" | "draining" | "secret_unavailable" | "proxy_unavailable" | "reauth_required" | "auth_error" | "checkpoint" | "captcha" | "subscription_forbidden" | "subscription_expired" | "account_unhealthy" | "quota_exhausted" | null;
   lastErrorCode: string | null;
+  clientAuthStatus?: "login_required" | "available" | null;
+  lastClientLoginRedirectAtMs?: number | null;
+};
+
+export type CredentialRefreshResult = {
+  accountId: string;
+  status: "refreshed" | "retryable_failure" | "requires_reauth";
+  code: string;
+  expiresAtMs?: number | null;
+  generation?: number | null;
 };
 
 export type RevealedAccountIdentity = {
@@ -179,7 +194,25 @@ export type ModelSummary = {
   memberCount: number;
   codexVisible: boolean;
   codexDisplayName: string;
-  catalogRank: number | null;
+  catalogProvider?: string | null;
+  catalogFamily?: string | null;
+  catalogName?: string | null;
+  catalogReleaseDate?: string | null;
+  catalogLastUpdated?: string | null;
+  catalogStatus?: string | null;
+  catalogReasoning?: boolean | null;
+  catalogReasoningMethod?: "effort" | "toggle" | "budget_tokens" | "adaptive" | "unknown" | null;
+  catalogReasoningEffortLevels?: string[];
+  catalogDefaultReasoningEffort?: string | null;
+  catalogToolCall?: boolean | null;
+  catalogStructuredOutput?: boolean | null;
+  catalogAttachment?: boolean | null;
+  catalogOpenWeights?: boolean | null;
+  catalogInputModalities?: string[];
+  catalogOutputModalities?: string[];
+  catalogContextLimit?: number | null;
+  catalogInputLimit?: number | null;
+  catalogOutputLimit?: number | null;
   inputMicroUsdPerMillion: number | null;
   cachedInputMicroUsdPerMillion?: number | null;
   cacheWrite5mMicroUsdPerMillion?: number | null;
@@ -193,6 +226,8 @@ export type ModelSummary = {
   reasoningConfigurable?: boolean;
   reasoningManualFallback?: boolean;
   speedSupported?: boolean;
+  /** Exact speed tiers confirmed by current routes, including standard. */
+  speedTiers?: DefaultServiceTier[];
   speedTier?: DefaultServiceTier;
   speedConfigurable?: boolean;
 };
@@ -246,6 +281,12 @@ export type RuntimeActivitySnapshot = {
 export type RuntimeActivityState = {
   revision: number;
   lastCandidateId: string | null;
+  /**
+   * The latest event for every touched candidate. The runtime order is
+   * eventually consistent, so the pool needs these facts while its next
+   * snapshot is still in flight.
+   */
+  candidates: Readonly<Record<string, RuntimeActivitySnapshot>>;
 };
 
 export type WakeTask = {
@@ -298,6 +339,7 @@ export type RuntimeSnapshot = {
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     codexBackgroundTasksEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
+    chatgptRetryUntilAvailable?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
@@ -762,4 +804,19 @@ export type SupportBundlePreview = {
 
 export type RelayStorageInfo = {
   dataPath: string;
+  logsPath: string;
+  errorLogsPath: string;
+  crashLogsPath: string;
+  operationLogsPath: string;
+};
+
+export type DiagnosticPaths = {
+  logsPath: string;
+  errorLogsPath: string;
+  crashLogsPath: string;
+  operationLogsPath: string;
+};
+
+export type DiagnosticSettings = {
+  debugEnabled: boolean;
 };

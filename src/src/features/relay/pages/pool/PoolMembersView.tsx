@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, CheckCheck, CircleAlert, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, LogIn, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
+import { Activity, CheckCheck, CircleAlert, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, SourceStats, SourceSummary } from "../../api/types";
@@ -9,12 +9,16 @@ import {
   refreshOneAccountQuota,
   type AccountQuotaRefreshReport,
 } from "../../accountQuotaRefresh";
-import { subscriptionExpiryFormatter, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
+import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { AccountPlanBadge, Button, EmptyState, IconButton, QuotaStack, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
+import { AccountPlanBadge, Button, EmptyState, IconButton, OptionMenu, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
-import { formatDetailedRemainingTime, isFastSupplementalQuota } from "../../quotaFormatting";
+import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
+import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
+import { AccountSubscriptionLine } from "../../components/AccountSubscriptionLine";
+import { formatDetailedRemainingTime } from "../../quotaFormatting";
+import { formatNumber } from "../../numberFormatting";
 import { activeRequestCount, apiSourceRole, upcomingModelRetries } from "../../routingOrder";
 import { memberName, type PoolMember } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
@@ -30,6 +34,7 @@ import {
   poolMembersFromRuntime,
   poolMemberSourceIds,
   poolMemberStatusCounts,
+  poolProviderCreditsSummary,
   memberCanRoute,
 } from "./poolMembersModel";
 
@@ -59,8 +64,17 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     [runtime?.accounts, runtime?.sources],
   );
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
-  const runtimeByMember = useMemo(() => poolMemberRuntimeStates(poolMembers, runtimeOrder), [poolMembers, runtimeOrder]);
+  const runtimeByMember = useMemo(
+    () => poolMemberRuntimeStates(poolMembers, runtimeOrder, runtimeActivity),
+    [poolMembers, runtimeActivity, runtimeOrder],
+  );
   const members = useMemo(() => orderedPoolMembers(poolMembers, runtimeOrder), [poolMembers, runtimeOrder]);
+  const providerCredits = useMemo(() => poolProviderCreditsSummary(members), [members]);
+  const providerCreditsValue = providerCredits == null
+    ? null
+    : providerCredits.kind === "unlimited"
+      ? "∞"
+      : formatNumber(providerCredits.availableCredits, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 1 });
   const visibleModelIds = runtime?.gateway.visibleModelIds ?? EMPTY_VISIBLE_MODELS;
   const sourceIds = useMemo(() => poolMemberSourceIds(members), [members]);
   const memberTimestamps = useMemo(() => members.flatMap((member) => [
@@ -73,7 +87,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     runtimeByMember.get(member.id)?.nextRetryAtMs,
   ]), [members, runtimeByMember]);
   const nowMs = useRelativeTimeClock(memberTimestamps);
-  const subscriptionExpiryFormat = subscriptionExpiryFormatter(i18n.language);
   const refreshSourceStats = useCallback(async (sourceId: string, refreshModels = false, operationManaged = false) => {
     if (mode === "zenith") return;
     const generation = sourceStatsGeneration.current;
@@ -147,6 +160,9 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
       : idleRouteSummary;
+  const nextRouteSummary = firstActiveMember && nextMember
+    ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
+    : null;
   const unavailableRouteErrors = members
     .map((member) => member.kind === "source" ? member.lastErrorCode?.trim() : currentAccountErrorCode(member))
     .filter((code): code is string => Boolean(code));
@@ -188,8 +204,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     () => refreshOneAccountQuota(mode, account.id),
     "feedback.refreshed",
   );
-  const updateServiceTier = async (fast: boolean) => {
-    const defaultServiceTier = fast ? "fast" : "standard";
+  const updateServiceTier = async (defaultServiceTier: DefaultServiceTier) => {
     if (defaultServiceTier === serviceTier) return;
     setPendingServiceTier(defaultServiceTier);
     try {
@@ -210,15 +225,31 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : null}</span></div>
+        <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{nextRouteSummary ? <small className="pool-next-route">{nextRouteSummary}</small> : null}{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} data-relay-tooltip={activeRequestSummary}>{activeRequestSummary}</small> : null}</span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
-            <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
-              <Zap aria-hidden />
-              <span className="pool-speed-copy"><small>{t("pool.serviceTier")}</small><strong>{t(`pool.serviceTiers.${serviceTier}`)}</strong></span>
-              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} checked={serviceTier === "fast"} disabled={busy === "pool-service-tier"} onChange={(event) => void updateServiceTier(event.target.checked)} />
-              <span className="pool-speed-track" aria-hidden><span /></span>
-            </label>
+            <div className="pool-speed-control" data-fast={serviceTier !== "standard" ? "true" : "false"} data-speed-tier={serviceTier} data-pool-speed-select="true" data-relay-tooltip={t("pool.serviceTierHint")}>
+              <OptionMenu
+                className="pool-speed-menu"
+                label={t("pool.serviceTier")}
+                value={serviceTier}
+                icon={<Zap aria-hidden />}
+                disabled={busy === "pool-service-tier"}
+                onChange={(value) => void updateServiceTier(value as DefaultServiceTier)}
+                options={["standard", "fast", "ultrafast"].map((value) => ({ value, label: t(`pool.serviceTiers.${value}`) }))}
+              />
+              <label className="pool-speed-quick-toggle" data-relay-tooltip={t("pool.serviceTierHint")}>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-label={t("pool.serviceTier")}
+                  checked={serviceTier !== "standard"}
+                  disabled={busy === "pool-service-tier"}
+                  onChange={(event) => void updateServiceTier(event.target.checked ? "fast" : "standard")}
+                />
+                <span className="pool-speed-track" aria-hidden><span /></span>
+              </label>
+            </div>
             <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
@@ -227,7 +258,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           </div>
         </div>
       </div>
-      <div className="pool-summary"><div><span>{t("pool.memberStatus.rotation")}</span><i aria-hidden="true">—</i><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><i aria-hidden="true">—</i><strong>{counts.quotaWait}</strong></div><div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{counts.errors}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><i aria-hidden="true">—</i><strong>{counts.disabled}</strong></div></div>
+      <div className="pool-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}><div><span>{t("pool.memberStatus.rotation")}</span><i aria-hidden="true">—</i><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><i aria-hidden="true">—</i><strong>{counts.quotaWait}</strong></div><div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{counts.errors}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><i aria-hidden="true">—</i><strong>{counts.disabled}</strong></div>{providerCreditsValue != null ? <div className="pool-summary-provider-credits" data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><span>{t("pool.totalProviderCredits")}</span><i aria-hidden="true">—</i><strong>{providerCreditsValue}</strong></div> : null}</div>
     </div>
     {routingAlert}
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><CheckCheck aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
@@ -245,12 +276,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         const detail = member.kind === "source"
           ? `${member.wireApi} · ${member.baseUrl}`
           : member.label;
-        const subscriptionExpiry = member.kind === "account"
-          ? member.subscription.activeUntilMs == null
-            ? { date: t("pool.subscriptionExpiryUnknown"), remaining: null }
-            : { date: subscriptionExpiryFormat.format(member.subscription.activeUntilMs), remaining: formatDetailedRemainingTime(member.subscription.activeUntilMs, nowMs, t) }
-          : null;
         const isCurrent = activeRequestCount(runtimeState) > 0;
+        const isNext = !isCurrent && nextMember?.kind === member.kind && nextMember.id === member.id;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.lastUsedAtMs != null && runtimeState.lastUsedAtMs === lastUsedRuntime?.lastUsedAtMs;
         const modelRetries = upcomingModelRetries(runtimeState, nowMs);
         const firstModelRetry = modelRetries[0];
@@ -288,10 +315,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
             ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
             : undefined;
         const parallelRequests = activeRequestCount(runtimeState);
-        // Source failures are represented by the status icon. Keep only a
-        // retry countdown in the card tooltip so the same error is not shown
-        // again by the WebView title and the card footer.
-        const sourceRuntimeTitle = runtimeHint || undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removing = busy === `pool-remove-${member.id}`;
@@ -302,21 +325,22 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         const indicatorHint = member.kind === "source"
           ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
           : [runtimeHint, indicatorLabel].filter(Boolean).join(" · ");
-        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}${isLastUsed ? " last-used" : ""}`} role="listitem" title={[codexInterface ? t("pool.codexInterfaceHint") : null, member.kind === "source" ? sourceRuntimeTitle : null].filter(Boolean).join(" · ") || undefined} data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
+        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-next={isNext ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
           <header className="pool-member-card-header">
             {member.kind === "account" && displayedErrorCode
               ? <IconButton className="pool-member-kind-icon" data-status="error" label={indicatorLabel} icon={<UserRound aria-hidden />} onClick={() => setErrorDetails(member)} />
-              : <StatusIcon className="pool-member-kind-icon" status={indicatorTone} label={indicatorHint} showTooltip={!(member.kind === "source" && visibleMemberErrorCode)}>{member.kind === "source" ? <Cloud aria-hidden /> : <UserRound aria-hidden />}</StatusIcon>}
+              : <StatusIcon className="pool-member-kind-icon" status={indicatorTone} label={[indicatorHint, codexInterface ? t("pool.codexInterfaceHint") : null].filter(Boolean).join(" · ")} showTooltip={!(member.kind === "source" && visibleMemberErrorCode)}>{member.kind === "source" ? <Cloud aria-hidden /> : <UserRound aria-hidden />}</StatusIcon>}
             <div className="pool-member-identity">
-              <strong className="pool-member-name" title={identity === detail ? identity : `${identity} · ${detail}`}>{identity}</strong>
-              <div className="pool-member-meta">{member.kind === "account" ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /> : <small title={detail}>{detail}</small>}</div>
+              <strong className="pool-member-name" data-relay-tooltip={member.kind === "account" && identity !== detail ? `${identity} · ${detail}` : identity}>{identity}</strong>
+              <div className="pool-member-meta">{member.kind === "account" ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /> : <small data-relay-tooltip={detail}>{detail}</small>}</div>
             </div>
           </header>
           <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>
-            {member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} onReauthenticate={onReauthenticate} /> : <PoolSourceStats source={member} {...(sourceStats[member.id] ? { state: sourceStats[member.id] } : {})} />}
+            {member.kind === "account" ? <AccountQuotaPanel account={member} nowMs={nowMs} onReauthenticate={onReauthenticate} /> : <PoolSourceStats source={member} {...(sourceStats[member.id] ? { state: sourceStats[member.id] } : {})} />}
             {mode === "local" && member.kind === "account" ? <ResetCreditsControl account={member} onCompleted={() => refresh()} /> : null}
           </div>
-          <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}{runtimeHint ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-runtime-hint" data-warning="false">{runtimeHint}</span></> : null}</> : <div className="pool-member-runtime-meta"><div><span>{t("pool.operationMode")}</span><strong>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</strong></div><div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div>}</div>
+          {member.kind === "account" ? <AccountProviderQuotaStrip account={member} /> : null}
+          {member.kind === "account" ? <><AccountSubscriptionLine activeUntilMs={member.subscription.activeUntilMs} nowMs={nowMs} />{runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}</> : <div className="pool-member-context" data-kind="source"><div className="pool-member-runtime-meta"><div><span>{t("pool.operationMode")}</span><strong>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</strong></div><div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div></div>}
           {member.kind === "account" && accountValueVisible ? <AccountValueStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">
@@ -338,15 +362,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   </>;
 }
 
-function PoolAccountQuota({ account, nowMs, onReauthenticate }: { account: AccountSummary; nowMs: number; onReauthenticate: (account: AccountSummary) => void }) {
-  const { t } = useTranslation();
-  const hasQuota = Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.some((item) => !isFastSupplementalQuota(item)));
-  // A signed-out account must ask for sign-in even when the last quota refresh
-  // still reports a successful snapshot.
-  const status = accountQuotaRefreshState(account);
-  return <>{status === "requires_reauth" ? <button type="button" className={`account-quota-refresh-state ${status} is-action`} onClick={() => onReauthenticate(account)}><LogIn aria-hidden /><span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></button> : !hasQuota ? <div className={`account-quota-refresh-state ${status}`} role="status">{status === "refreshing" ? <Loader2 className="spin" aria-hidden /> : status === "updated" ? <CheckCheck aria-hidden /> : status === "failed" ? <RefreshCw aria-hidden /> : <Clock3 aria-hidden />}<span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></div> : <QuotaStack snapshot={account.quota} nowMs={nowMs} concise />}</>;
-}
-
 function PoolSourceStats({ source, state }: { source: SourceSummary; state?: SourceStatsState }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
@@ -366,8 +381,8 @@ function PoolSourceStats({ source, state }: { source: SourceSummary; state?: Sou
     ? stats.requests == null ? "—" : formatFullNumber(stats.requests, locale)
     : "—";
   return <dl className="pool-source-stats">
-    <div title={state?.failed ? t("overview.sourceStatsUnavailable") : !providerStats && !state?.loading ? t("overview.sourceStatsUnsupported") : undefined}><dt>{t("overview.balance")}</dt><dd data-muted={!providerStats ? "true" : undefined}>{balance}</dd></div>
-    <div title={!providerStats ? t("pool.apiEquivalentHint", { count: source.apiEquivalent.unpricedTokens }) : undefined}><dt>{providerStats ? t("overview.spent") : t("pool.apiEquivalent")}</dt><dd>{spent}</dd></div>
+    <div data-relay-tooltip={state?.failed ? t("overview.sourceStatsUnavailable") : !providerStats && !state?.loading ? t("overview.sourceStatsUnsupported") : undefined}><dt>{t("overview.balance")}</dt><dd data-muted={!providerStats ? "true" : undefined}>{balance}</dd></div>
+    <div data-relay-tooltip={!providerStats ? t("pool.apiEquivalentHint", { count: source.apiEquivalent.unpricedTokens }) : undefined}><dt>{providerStats ? t("overview.spent") : t("pool.apiEquivalent")}</dt><dd>{spent}</dd></div>
     <div><dt>{t("usage.requests")}</dt><dd>{requests}</dd></div>
     <div><dt>{t("common.models")}</dt><dd>{formatFullNumber(source.models.length, locale)}</dd></div>
   </dl>;

@@ -1,19 +1,19 @@
-use super::{
-    account_id_from_check_response, imported_identity, CODEX_ACCOUNT_CHECK_ENDPOINT,
-    MAX_ACCOUNT_PROFILE_RESPONSE_BYTES,
-};
+use super::claims::ImportedIdentity;
+use super::MAX_ACCOUNT_PROFILE_RESPONSE_BYTES;
 use crate::local_pool::accounts::credentials::{bearer_authorization, StoredCodexCredentials};
 use crate::local_pool::accounts::import_orchestrator::{
     credential_item_error, ImportItemError, ItemResult,
 };
 use crate::local_pool::accounts::oauth::CodexOAuthClient;
 use crate::local_pool::accounts::{collect_limited, LimitedBodyError};
-use reqwest::header::HeaderValue;
+use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION};
 use reqwest::redirect::Policy;
 use std::time::Duration;
 use url::Url;
 use zenith_relay_core::accounts::ParsedImportItem;
-use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
+use zenith_relay_core::providers::chatgpt::{
+    resolve_account_check_account_id, AccountCheckIdentityError, AgentIdentityCredential,
+};
 use zenith_relay_core::ProxyConfig;
 
 pub(in crate::local_pool::accounts) struct ImportedCredentialMaterial {
@@ -24,6 +24,9 @@ pub(in crate::local_pool::accounts) struct ImportedCredentialMaterial {
     pub(in crate::local_pool::accounts) expires_at_ms: Option<u64>,
     pub(in crate::local_pool::accounts) email: Option<String>,
     pub(in crate::local_pool::accounts) provider_account_id: Option<String>,
+    /// Untrusted IDs collected from the import document and JWT claims. They
+    /// are retained only until the authenticated account check completes.
+    pub(in crate::local_pool::accounts) account_id_hints: Vec<String>,
     pub(in crate::local_pool::accounts) provider_user_id: Option<String>,
     pub(in crate::local_pool::accounts) organization_id: Option<String>,
     pub(in crate::local_pool::accounts) plan_type: Option<String>,
@@ -120,14 +123,29 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
     subscription_active_until_hint: Option<u64>,
     proxy: Option<&ProxyConfig>,
     request_timeout_seconds: u64,
+    endpoint: &Url,
 ) -> ItemResult<ImportedCredentialMaterial> {
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(ImportItemError::new(
+            "provider_account_lookup_failed",
+            "ChatGPT account lookup endpoint is invalid",
+        ));
+    }
     let email = item.email().map(str::to_string);
     let item_account_id = item.account_id.clone();
     let item_user_id = item.chatgpt_user_id.clone();
     let organization_id = item.organization_id.clone();
+    let item_account_is_fedramp = item.account_is_fedramp;
     let secrets = item.into_secrets();
     let original_refresh = secrets.refresh_token().map(str::to_string);
-    let imported_identity = imported_identity(secrets.id_token(), secrets.access_token());
+    let imported_identity = super::imported_identity(secrets.id_token(), secrets.access_token());
+    let account_id_hints = account_id_hints(item_account_id, &imported_identity)?;
 
     let agent_identity = match (secrets.agent_private_key(), secrets.agent_runtime_id()) {
         (Some(private_key), Some(runtime_id)) => Some(
@@ -166,7 +184,8 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             id_token: secrets.id_token().map(str::to_string),
             expires_at_ms: imported_identity.access_expires_at_ms,
             email: email.or(imported_identity.email),
-            provider_account_id: imported_identity.provider_account_id.or(item_account_id),
+            provider_account_id: account_id_hints.first().cloned(),
+            account_id_hints,
             provider_user_id: imported_identity.provider_user_id.or(item_user_id),
             organization_id,
             plan_type: imported_identity
@@ -175,9 +194,10 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             subscription_active_until_ms: imported_identity
                 .subscription_active_until_ms
                 .or(subscription_active_until_hint),
-            account_is_fedramp: imported_identity.account_is_fedramp,
+            account_is_fedramp: item_account_is_fedramp || imported_identity.account_is_fedramp,
         };
-        return resolve_import_account_identity(material, proxy, request_timeout_seconds).await;
+        return resolve_import_account_identity(material, endpoint, proxy, request_timeout_seconds)
+            .await;
     }
 
     let Some(refresh_token) = original_refresh else {
@@ -194,7 +214,8 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             id_token: None,
             expires_at_ms: None,
             email: email.or(imported_identity.email),
-            provider_account_id: imported_identity.provider_account_id.or(item_account_id),
+            provider_account_id: account_id_hints.first().cloned(),
+            account_id_hints,
             provider_user_id: imported_identity.provider_user_id.or(item_user_id),
             organization_id,
             plan_type: imported_identity
@@ -203,7 +224,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             subscription_active_until_ms: imported_identity
                 .subscription_active_until_ms
                 .or(subscription_active_until_hint),
-            account_is_fedramp: imported_identity.account_is_fedramp,
+            account_is_fedramp: item_account_is_fedramp || imported_identity.account_is_fedramp,
         });
     };
     let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
@@ -241,6 +262,11 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         .as_ref()
         .is_some_and(|claims| claims.account_is_fedramp());
     let (access_token, rotated_refresh, id_token, expires_at_ms) = tokens.into_secret_parts();
+    let mut account_id_hints = account_id_hints;
+    if let Some(account_id) = oauth_account_id {
+        push_account_id_hint(&mut account_id_hints, account_id);
+    }
+    ensure_account_id_hints_are_consistent(&account_id_hints)?;
     let material = ImportedCredentialMaterial {
         access_token,
         agent_identity,
@@ -248,9 +274,8 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         id_token,
         expires_at_ms,
         email: email.or(oauth_email).or(imported_identity.email),
-        provider_account_id: oauth_account_id
-            .or(imported_identity.provider_account_id)
-            .or(item_account_id),
+        provider_account_id: account_id_hints.first().cloned(),
+        account_id_hints,
         provider_user_id: oauth_user_id
             .or(imported_identity.provider_user_id)
             .or(item_user_id),
@@ -262,29 +287,27 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             .subscription_active_until_ms
             .or(oauth_subscription_active_until_ms)
             .or(subscription_active_until_hint),
-        account_is_fedramp: account_is_fedramp || imported_identity.account_is_fedramp,
+        account_is_fedramp: item_account_is_fedramp
+            || account_is_fedramp
+            || imported_identity.account_is_fedramp,
     };
-    resolve_import_account_identity(material, proxy, request_timeout_seconds).await
+    resolve_import_account_identity(material, endpoint, proxy, request_timeout_seconds).await
 }
 
 pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     mut material: ImportedCredentialMaterial,
+    endpoint: &Url,
     proxy: Option<&ProxyConfig>,
     request_timeout_seconds: u64,
 ) -> ItemResult<ImportedCredentialMaterial> {
-    if material.provider_account_id.is_some() {
+    if material.access_token.is_empty() {
         return Ok(material);
     }
-    let endpoint = Url::parse(CODEX_ACCOUNT_CHECK_ENDPOINT).map_err(|_| {
-        ImportItemError::new(
-            "provider_account_lookup_failed",
-            "ChatGPT account lookup is unavailable",
-        )
-    })?;
     material.provider_account_id = Some(
-        lookup_import_account_id(
-            endpoint,
+        lookup_import_account_id_with_hints(
+            endpoint.to_owned(),
             &material.access_token,
+            &material.account_id_hints,
             proxy,
             Duration::from_secs(request_timeout_seconds.max(1)),
         )
@@ -293,15 +316,27 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     Ok(material)
 }
 
+#[cfg(test)]
 pub(in crate::local_pool::accounts) async fn lookup_import_account_id(
     endpoint: Url,
     access_token: &str,
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
 ) -> ItemResult<String> {
-    let authorization = HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
-        ImportItemError::new("access_token_rejected", "imported access token is invalid")
-    })?;
+    lookup_import_account_id_with_hints(endpoint, access_token, &[], proxy, timeout).await
+}
+
+async fn lookup_import_account_id_with_hints(
+    endpoint: Url,
+    access_token: &str,
+    claimed_account_ids: &[String],
+    proxy: Option<&ProxyConfig>,
+    timeout: Duration,
+) -> ItemResult<String> {
+    let authorization =
+        crate::local_pool::accounts::credentials::bearer_authorization(access_token).map_err(
+            |_| ImportItemError::new("access_token_rejected", "imported access token is invalid"),
+        )?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(timeout)
@@ -319,8 +354,8 @@ pub(in crate::local_pool::accounts) async fn lookup_import_account_id(
     })?;
     let response = http
         .get(endpoint)
-        .header(reqwest::header::AUTHORIZATION, authorization)
-        .header(reqwest::header::ACCEPT, "application/json")
+        .header(AUTHORIZATION, authorization)
+        .header(ACCEPT, "application/json")
         .send()
         .await
         .map_err(|_| {
@@ -365,10 +400,57 @@ pub(in crate::local_pool::accounts) async fn lookup_import_account_id(
             "ChatGPT account lookup returned invalid JSON",
         )
     })?;
-    account_id_from_check_response(&payload).ok_or_else(|| {
-        ImportItemError::new(
-            "provider_account_id_missing",
-            "ChatGPT account lookup did not return an account id",
-        )
+    let claimed_account_ids = claimed_account_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    resolve_account_check_account_id(&payload, &claimed_account_ids).map_err(|error| {
+        let (code, message) = match error {
+            AccountCheckIdentityError::Missing => (
+                "provider_account_id_missing",
+                "ChatGPT account lookup did not return an account id",
+            ),
+            AccountCheckIdentityError::Mismatch => (
+                "account_identity_mismatch",
+                "imported account identity does not match the authenticated account",
+            ),
+        };
+        ImportItemError::new(code, message)
     })
+}
+
+fn account_id_hints(
+    item_account_id: Option<String>,
+    imported_identity: &ImportedIdentity,
+) -> ItemResult<Vec<String>> {
+    let mut hints = Vec::with_capacity(imported_identity.account_id_hints.len() + 1);
+    if let Some(account_id) = item_account_id {
+        push_account_id_hint(&mut hints, account_id);
+    }
+    for account_id in &imported_identity.account_id_hints {
+        push_account_id_hint(&mut hints, account_id.clone());
+    }
+    ensure_account_id_hints_are_consistent(&hints)?;
+    Ok(hints)
+}
+
+fn push_account_id_hint(hints: &mut Vec<String>, value: String) {
+    let value = value.trim();
+    if !value.is_empty()
+        && !hints
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(value))
+    {
+        hints.push(value.to_string());
+    }
+}
+
+fn ensure_account_id_hints_are_consistent(hints: &[String]) -> ItemResult<()> {
+    if hints.len() > 1 {
+        return Err(ImportItemError::new(
+            "account_identity_claim_conflict",
+            "imported account identity claims do not agree",
+        ));
+    }
+    Ok(())
 }

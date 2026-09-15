@@ -24,6 +24,10 @@ fn cli_backup_and_restore_preserve_database_and_encrypted_vault() {
             public_base_url: Url::parse("http://127.0.0.1:14999").unwrap(),
             management_token: "synthetic-management-token-value".into(),
             vault_key: [7; 32],
+            account_check_url: Url::parse(
+                zenith_relay_server::config::DEFAULT_CODEX_ACCOUNT_CHECK_URL,
+            )
+            .unwrap(),
         },
         store,
         vault,

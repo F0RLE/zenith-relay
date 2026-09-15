@@ -257,6 +257,38 @@ impl StoredCodexCredentials {
         self.generation
     }
 
+    /// Compares a complete persisted credential snapshot without formatting or
+    /// exposing any sensitive token material. Rollback paths use this as a
+    /// compare-and-restore guard so they cannot overwrite a later credential
+    /// rotation for the same local account.
+    pub fn matches_snapshot(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.local_account_id == other.local_account_id
+            && self.access_token == other.access_token
+            && self.refresh_token == other.refresh_token
+            && self.id_token == other.id_token
+            && self.expires_at_ms == other.expires_at_ms
+            && self.issued_at_ms == other.issued_at_ms
+            && self.generation == other.generation
+            && self.email == other.email
+            && self.provider_account_id == other.provider_account_id
+            && self.provider_user_id == other.provider_user_id
+            && self.organization_id == other.organization_id
+            && self.plan_type == other.plan_type
+            && self.account_is_fedramp == other.account_is_fedramp
+            && self.proxy_url == other.proxy_url
+            && self.bypass_common_proxy == other.bypass_common_proxy
+            && match (&self.agent_identity, &other.agent_identity) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.private_key() == right.private_key()
+                        && left.runtime_id() == right.runtime_id()
+                        && left.task_id() == right.task_id()
+                }
+                _ => false,
+            }
+    }
+
     pub fn provider_account_id(&self) -> Option<&str> {
         self.provider_account_id.as_deref()
     }

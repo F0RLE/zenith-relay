@@ -25,6 +25,7 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
     let request = json!({
         "model": "alias",
         "input": "inspect",
+        "reasoning": {"effort": "high", "summary": "auto"},
         "tools": [{
             "type": "computer_use_preview",
             "name": "PowerShell",
@@ -48,11 +49,132 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
 
     assert!(prepared.is_passthrough());
     assert_eq!(prepared.upstream_body()["model"], "resolved-model");
+    assert_eq!(prepared.upstream_body()["reasoning"], request["reasoning"]);
     assert_eq!(prepared.upstream_body()["tools"], request["tools"]);
     assert!(prepared
         .translate_response_bytes(br#"{}"#)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn native_context_management_remains_client_owned() {
+    let request = json!({
+        "model": "alias",
+        "input": "hello",
+        "context_management": [{"type": "compaction", "compact_threshold": 1000}]
+    });
+
+    let responses = SourceAdapter::Native
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &request,
+            model: "resolved-model",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            previous: None,
+            response_scope: "responses-route",
+            response_id_seed: "request-context-management",
+        })
+        .unwrap();
+    assert_eq!(
+        responses.upstream_body()["context_management"],
+        request["context_management"]
+    );
+
+    for wire_api in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        let prepared = SourceAdapter::Native
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: wire_api,
+                request: &request,
+                model: "resolved-model",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                previous: None,
+                response_scope: "non-responses-route",
+                response_id_seed: "request-context-management",
+            })
+            .unwrap();
+        assert_eq!(
+            prepared.upstream_body()["context_management"],
+            request["context_management"]
+        );
+    }
+}
+
+#[test]
+fn response_bridges_reject_context_management_before_translation() {
+    let request = json!({
+        "model": "alias",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "context_management": [{"type": "compaction", "compact_threshold": 1000}]
+    });
+
+    for adapter in [
+        SourceAdapter::ResponsesToMessages,
+        SourceAdapter::ResponsesToGemini,
+    ] {
+        let error = adapter
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &request,
+                model: "resolved-model",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                previous: None,
+                response_scope: "bridge-route",
+                response_id_seed: "request-context-management",
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "adapter_compaction_unsupported");
+        assert!(error.is_route_incompatible());
+    }
+}
+
+#[test]
+fn compaction_history_requires_native_responses_without_mutating_input() {
+    for kind in ["compaction", "compaction_summary"] {
+        for input in [
+            json!([{ "type": kind, "encrypted_content": "opaque-fixture" }]),
+            json!({ "type": kind, "encrypted_content": "opaque-fixture" }),
+        ] {
+            let request = json!({"model": "alias", "input": input});
+            let original = request.clone();
+            for adapter in [
+                SourceAdapter::Native,
+                SourceAdapter::ResponsesToMessages,
+                SourceAdapter::ResponsesToGemini,
+            ] {
+                let result = adapter.prepare_request(AdapterRequestContext {
+                    client_wire_api: WireApi::Responses,
+                    request: &request,
+                    model: "resolved-model",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
+                    previous: None,
+                    response_scope: "compaction-route",
+                    response_id_seed: "compaction-request",
+                });
+                match result {
+                    Ok(prepared) => {
+                        assert_eq!(adapter, SourceAdapter::Native);
+                        assert_eq!(prepared.upstream_body()["input"], original["input"]);
+                    }
+                    Err(error) => {
+                        assert_ne!(adapter, SourceAdapter::Native);
+                        assert_eq!(error.code(), "adapter_compaction_unsupported");
+                        assert!(error.is_route_incompatible());
+                        assert!(!error.is_upstream_failure());
+                    }
+                }
+                assert_eq!(request, original);
+            }
+        }
+    }
 }
 
 #[test]
@@ -1423,6 +1545,17 @@ fn native_responses_replay_store_is_route_scoped_bounded_and_expiring() {
     assert!(store
         .get("key-a", "resp_store_02", "route-a", 112)
         .is_none());
+}
+
+#[test]
+fn native_replay_does_not_store_an_unresolved_previous_response_reference() {
+    let request = json!({
+        "model": "alias",
+        "input": "continue",
+        "previous_response_id": "resp_missing"
+    });
+    let upstream = json!({"id": "resp_next", "output": []});
+    assert!(NativeResponsesReplayState::from_response(&request, "gpt-test", &upstream).is_none());
 }
 
 #[test]

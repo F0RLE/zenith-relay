@@ -219,6 +219,10 @@
   background: var(--relay-subtle);
 }
 
+.connections-account-summary[data-has-provider-credits="true"] {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .connections-account-summary > div {
   min-width: 0;
   min-height: 42px;
@@ -864,8 +868,8 @@
   justify-content: center;
   gap: 6px;
   min-height: 30px;
-  margin: 0 12px 10px;
-  padding: 6px 4px 0;
+  margin: 0 10px;
+  padding: 8px 0;
   overflow: hidden;
   border: 0;
   border-top: 1px solid var(--relay-border);
@@ -1033,6 +1037,7 @@
 
 .compact-quota-layout {
   min-height: 72px;
+  flex: 1;
   padding: 8px 10px;
 }
 
@@ -1069,7 +1074,11 @@
   text-align: center;
 }
 
-.compact-quota-layout .quota-meter-heading > span { grid-area: label; }
+.compact-quota-layout .quota-meter-heading > span {
+  grid-area: label;
+  font-size: 11px;
+  line-height: 16px;
+}
 .compact-quota-layout .quota-meter-heading > strong { grid-area: value; }
 
 .compact-quota-layout .quota-meter-heading small {
@@ -1083,6 +1092,8 @@
 
 .compact-quota-layout .quota-meter-heading small {
   width: 100%;
+  font-size: 9px;
+  line-height: 12px;
   text-align: center;
 }
 
@@ -1108,6 +1119,44 @@
 
 .compact-quota-layout .quota-meter[data-level="critical"] .quota-meter-heading > strong {
   color: var(--relay-error);
+}
+
+/* An upstream credit ledger is not a reset token or a Relay value estimate.
+ * Keep it with the provider quota it describes, on its own compact row. */
+.account-provider-quota-strip {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  align-self: stretch;
+  flex-shrink: 0;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--relay-border);
+  font-variant-numeric: tabular-nums;
+}
+
+.account-provider-quota-strip dt,
+.account-provider-quota-strip dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-provider-quota-strip dt {
+  color: var(--relay-muted);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.account-provider-quota-strip dd {
+  color: var(--relay-text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 16px;
 }
 
 .account-card-footer {
@@ -1595,6 +1644,26 @@
   width: 14px;
   height: 14px;
   justify-self: center;
+}
+
+.relay-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.relay-option-copy > span,
+.relay-option-copy > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relay-option-copy > small {
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 450;
+  line-height: 13px;
 }
 
 .app-context-menu {

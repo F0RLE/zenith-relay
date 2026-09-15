@@ -396,6 +396,13 @@ pub struct UsageEvent {
     pub candidate_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Transient credential provenance for desktop account-state handling.
+    ///
+    /// It is deliberately excluded from persisted/exported usage. The desktop
+    /// callback uses it only to make a delayed 401 a no-op when a newer OAuth
+    /// credential generation is already stored for the same account.
+    #[serde(skip)]
+    pub account_token_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_context_id: Option<String>,
     #[serde(default)]
@@ -434,6 +441,10 @@ impl UsageEvent {
         if relay_error_category(category) || adapter_error_category_is_relay(category) {
             return Some(ErrorOrigin::Relay);
         }
+        // The origin identifies the selected Relay route, not the vendor's
+        // internal component that produced the status. Keep account traffic
+        // attributed to the account so diagnostics and response headers do
+        // not disagree for service-wide 5xx/capacity failures.
         if self.account_id.is_some() {
             return Some(ErrorOrigin::Account);
         }
@@ -464,6 +475,12 @@ impl UsageEvent {
                     | "upstream_model_not_found"
                     | "upstream_model_unsupported"
                     | "upstream_usage_not_included"
+                    | "upstream_model_capacity"
+                    | "upstream_overloaded"
+                    | "upstream_server_error"
+                    | "upstream_bad_gateway"
+                    | "upstream_unavailable"
+                    | "upstream_gateway_timeout"
                     | "image_generation_not_enabled"
             )
         )
@@ -503,6 +520,7 @@ mod tests {
             source_id: "source".into(),
             candidate_id: Some("candidate".into()),
             account_id: account_id.map(str::to_owned),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),
@@ -567,6 +585,28 @@ mod tests {
             failed_usage_event("adapter_invalid_request", Some("account")).error_origin(),
             Some(ErrorOrigin::Relay)
         );
+        assert_eq!(
+            failed_usage_event("upstream_overloaded", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("upstream_server_error", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+    }
+
+    #[test]
+    fn upstream_service_failures_do_not_mark_the_selected_account() {
+        for category in [
+            "upstream_model_capacity",
+            "upstream_overloaded",
+            "upstream_server_error",
+            "upstream_bad_gateway",
+            "upstream_unavailable",
+            "upstream_gateway_timeout",
+        ] {
+            assert!(!failed_usage_event(category, Some("account")).affects_account_state());
+        }
     }
 
     #[test]

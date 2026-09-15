@@ -67,6 +67,10 @@ pub struct GatewaySettings {
     pub codex_background_tasks_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
+    /// When enabled, managed ChatGPT requests wait for a temporary provider
+    /// outage to recover instead of returning the last retryable failure.
+    #[serde(default)]
+    pub chatgpt_retry_until_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_refresh_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,6 +310,12 @@ pub struct LocalAccountRecord {
     pub cooldowns: BTreeMap<String, u64>,
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Observation from the official Codex client. This is informational and
+    /// must never be used as a routing or account-switch hard block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_auth_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_client_login_redirect_at_ms: Option<u64>,
 }
 
 impl LocalAccountRecord {
@@ -376,6 +386,7 @@ impl Default for GatewaySettings {
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             codex_background_tasks_enabled: true,
             codex_websockets_enabled: true,
+            chatgpt_retry_until_available: false,
             catalog_refresh_error: None,
             catalog_refresh_error_at_ms: None,
             hidden_models: Vec::new(),

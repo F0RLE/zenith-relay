@@ -162,7 +162,14 @@ jobs:
             }
             $notes = "## Development build`n`nThis build is not a published release."
           }
-          $body = "$downloads`n`n<!-- relay-notes:en -->`n$notes"
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            foreach ($locale in @("en", "ru")) {
+              if ($notes -notmatch "(?im)<!--\s*relay-notes:$locale\s*-->") {
+                throw "Release notes for $env:GITHUB_REF_NAME must include a relay-notes:$locale section"
+              }
+            }
+          }
+          $body = "$downloads`n`n$notes"
           $body | Set-Content -Path release-notes.md -Encoding utf8
       - uses: tauri-apps/tauri-action@v1
         env:
@@ -233,6 +240,15 @@ jobs:
               gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md --prerelease
             } else {
               gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md
+            }
+            # Every platform matrix job reaches this step. Another job may
+            # create the Release after the view above but before this create;
+            # accept that expected race only when the Release is now visible.
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $env:GITHUB_REF_NAME > $null 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to create or find GitHub Release $env:GITHUB_REF_NAME"
+              }
             }
           }
           Get-ChildItem "artifacts/zenith-relay-${{ matrix.name }}*" -File -ErrorAction SilentlyContinue |

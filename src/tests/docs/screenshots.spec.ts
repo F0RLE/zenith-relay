@@ -28,8 +28,9 @@ const shots: Array<{ file: string; nav: string; mock: MockOptions; prepare?: (pa
     nav: "Pool",
     mock: { mode: "local", populated: true, accountCount: 4, quotaAvailable: true, mixedModels: true },
     prepare: async (page) => {
-      await expect(page.locator(".pool-member-list .pool-member-card").first()).toBeVisible();
-      await expect(page.locator(".pool-summary")).toBeVisible();
+      await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+      await expect(page.locator(".model-rules-table")).toBeVisible();
+      await expect(page.locator(".model-rules-table tr[data-model-id]").first()).toBeVisible();
     },
   },
   {

@@ -74,6 +74,7 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
     let object = request
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
+    super::contracts::validate_bridge_compaction(request)?;
     for key in ["background", "include"] {
         if object.get(key).is_some_and(|value| !value.is_null()) {
             return Err(AdapterError::unsupported_binding());

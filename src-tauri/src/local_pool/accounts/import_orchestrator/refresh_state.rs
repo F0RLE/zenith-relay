@@ -23,7 +23,7 @@ pub(in crate::local_pool::accounts) fn apply_quota_outcome_with_transitions(
     now_ms: u64,
 ) -> (AccountQuotaOutcome, Vec<QuotaTransition>) {
     match outcome {
-        QuotaRefreshOutcome::Updated(data) => match apply_quota_success(account, data) {
+        QuotaRefreshOutcome::Updated(data) => match apply_quota_success(account, *data) {
             Ok(applied) => (
                 AccountQuotaOutcome::Updated {
                     transitions: applied.transitions,

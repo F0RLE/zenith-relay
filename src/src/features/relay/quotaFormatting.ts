@@ -29,7 +29,9 @@ export function formatQuotaRemaining(basisPoints: number | null, locale: string)
 }
 
 export function isFastSupplementalQuota(item: { label: string; serviceTier?: DefaultServiceTier | null }) {
-  return item.serviceTier === "fast" || /\b(priority|fast)\b/i.test(item.label);
+  return item.serviceTier === "fast"
+    || item.serviceTier === "ultrafast"
+    || /\b(priority|fast|ultrafast)\b/i.test(item.label);
 }
 
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
@@ -50,11 +52,13 @@ export function formatSupplementalQuotaLabel(
   t: TFunction,
 ) {
   const normalized = label.trim();
-  if (serviceTier !== "fast") return normalized;
+  if (serviceTier !== "fast" && serviceTier !== "ultrafast") return normalized;
+  const tierPattern = serviceTier === "ultrafast" ? /\bultrafast\b/gi : /\b(priority|fast)\b/gi;
   const baseLabel = normalized
-    .replace(/\b(priority|fast)\b/gi, "")
+    .replace(tierPattern, "")
     .replace(/\s{2,}/g, " ")
     .replace(/\s*[·-]\s*$/u, "")
     .trim();
-  return baseLabel ? `${baseLabel} · ${t("quota.fastTier")}` : t("quota.fastTier");
+  const tierLabel = t(serviceTier === "ultrafast" ? "quota.ultrafastTier" : "quota.fastTier");
+  return baseLabel ? `${baseLabel} · ${tierLabel}` : tierLabel;
 }

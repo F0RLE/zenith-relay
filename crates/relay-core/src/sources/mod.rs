@@ -332,6 +332,24 @@ pub fn runtime_source_models_for_any_wire_api(
     Ok(models)
 }
 
+/// Returns models with a confirmed Anthropic-style Messages upstream route.
+/// Cache creation pricing is valid only for these model/route combinations.
+pub fn runtime_source_models_with_cache_write_pricing(
+    protocol_bindings: &[SourceProtocolBinding],
+    fallback_wire_api: WireApi,
+    source_models: &[String],
+) -> BTreeSet<String> {
+    runtime_source_protocol_bindings(protocol_bindings.to_vec(), fallback_wire_api, source_models)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|binding| {
+            binding.adapter.upstream_protocol(binding.wire_api) == UpstreamProtocol::Messages
+        })
+        .flat_map(|binding| binding.model_ids)
+        .map(|model| model.to_ascii_lowercase())
+        .collect()
+}
+
 /// Reports whether a confirmed route exposes at least one model through the
 /// requested client protocol.
 pub fn runtime_source_supports_wire_api(

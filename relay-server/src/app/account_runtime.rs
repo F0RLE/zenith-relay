@@ -268,5 +268,7 @@ pub(super) fn account_summary(
         proxy_id: record.proxy_id.clone(),
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.last_error_code.clone(),
+        client_auth_status: None,
+        last_client_login_redirect_at_ms: None,
     }
 }

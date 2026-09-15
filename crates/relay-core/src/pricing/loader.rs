@@ -2,18 +2,16 @@ use super::{
     payload_hash, CatalogRefreshDeadline, CatalogRefreshKind, PricingCacheEnvelope, PricingCatalog,
     PricingCatalogHandle, PricingError, PRICING_REFRESH_INTERVAL_SECONDS,
 };
+use crate::catalog_io::{self, CatalogIoError};
 use reqwest::{header, Client, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 pub const DEFAULT_CATALOG_MAX_AGE_MS: u64 = PRICING_REFRESH_INTERVAL_SECONDS * 1_000;
@@ -90,23 +88,15 @@ impl PricingCacheStore {
     }
 
     pub fn read(&self) -> Result<Option<PricingCacheEnvelope>, PricingError> {
-        let metadata = match fs::metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(PricingError::Io),
-        };
-        if metadata.len() > u64::try_from(MAX_CATALOG_RESPONSE_BYTES).unwrap_or(u64::MAX) {
-            return Err(PricingError::CacheTooLarge);
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        File::open(&self.path)
-            .map_err(|_| PricingError::Io)?
-            .read_to_end(&mut bytes)
-            .map_err(|_| PricingError::Io)?;
-        let envelope = serde_json::from_slice::<PricingCacheEnvelope>(&bytes)
-            .map_err(|_| PricingError::InvalidCache)?;
-        envelope.validate()?;
-        Ok(Some(envelope))
+        let envelope =
+            catalog_io::read_json::<PricingCacheEnvelope>(&self.path, MAX_CATALOG_RESPONSE_BYTES)
+                .map_err(|error| map_catalog_io_error(error, true))?;
+        envelope
+            .map(|envelope| {
+                envelope.validate()?;
+                Ok(envelope)
+            })
+            .transpose()
     }
 
     pub fn read_catalog(
@@ -119,28 +109,9 @@ impl PricingCacheStore {
 
     pub fn write(&self, envelope: &PricingCacheEnvelope) -> Result<(), PricingError> {
         envelope.validate()?;
-        let parent = self.path.parent().ok_or(PricingError::Io)?;
-        fs::create_dir_all(parent).map_err(|_| PricingError::Io)?;
-        let suffix = unique_suffix();
-        let temp_path = self.path.with_extension(format!("tmp-{suffix}"));
-        let bytes = serde_json::to_vec(envelope).map_err(|_| PricingError::InvalidCache)?;
-        if bytes.len() > MAX_CATALOG_RESPONSE_BYTES {
-            return Err(PricingError::CacheTooLarge);
-        }
-        let write_result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temp_path)
-                .map_err(|_| PricingError::Io)?;
-            file.write_all(&bytes).map_err(|_| PricingError::Io)?;
-            file.sync_all().map_err(|_| PricingError::Io)?;
-            replace_file(&temp_path, &self.path)
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&temp_path);
-        }
-        write_result
+        catalog_io::write_json_if_changed(&self.path, envelope, MAX_CATALOG_RESPONSE_BYTES)
+            .map(|_| ())
+            .map_err(|error| map_catalog_io_error(error, true))
     }
 
     /// Persist an envelope only when its serialized value changed.  A refresh
@@ -149,11 +120,8 @@ impl PricingCacheStore {
     /// envelope rather than on the payload hash alone.
     pub fn write_if_changed(&self, envelope: &PricingCacheEnvelope) -> Result<bool, PricingError> {
         envelope.validate()?;
-        if self.read().ok().flatten().as_ref() == Some(envelope) {
-            return Ok(false);
-        }
-        self.write(envelope)?;
-        Ok(true)
+        catalog_io::write_json_if_changed(&self.path, envelope, MAX_CATALOG_RESPONSE_BYTES)
+            .map_err(|error| map_catalog_io_error(error, true))
     }
 }
 
@@ -350,9 +318,9 @@ impl PricingCatalogLoader {
             return self.refresh_failed(PricingError::HttpStatus(response.status().as_u16()));
         }
         let response_headers = response.headers().clone();
-        let payload = match collect_json(response).await {
+        let payload = match catalog_io::response_json(response, MAX_CATALOG_RESPONSE_BYTES).await {
             Ok(payload) => payload,
-            Err(error) => return self.refresh_failed(error),
+            Err(error) => return self.refresh_failed(map_catalog_io_error(error, false)),
         };
         let payload_sha256 = match payload_hash(&payload) {
             Ok(hash) => hash,
@@ -507,62 +475,18 @@ impl PricingCatalogLoader {
     }
 }
 
-async fn collect_json(mut response: reqwest::Response) -> Result<Value, PricingError> {
-    if response.content_length().is_some_and(|length| {
-        length > u64::try_from(MAX_CATALOG_RESPONSE_BYTES).unwrap_or(u64::MAX)
-    }) {
-        return Err(PricingError::CacheTooLarge);
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| PricingError::Network)? {
-        if bytes.len().saturating_add(chunk.len()) > MAX_CATALOG_RESPONSE_BYTES {
-            return Err(PricingError::CacheTooLarge);
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| PricingError::InvalidCatalog)
-}
-
-fn replace_file(temp: &Path, target: &Path) -> Result<(), PricingError> {
-    if fs::rename(temp, target).is_ok() {
-        return Ok(());
-    }
-    // Windows does not replace an existing file with rename. Keep a recoverable
-    // backup while installing the fully synced temporary file.
-    if target.exists() {
-        let backup = target.with_extension(format!("bak-{}", unique_suffix()));
-        fs::rename(target, &backup).map_err(|_| PricingError::Io)?;
-        match fs::rename(temp, target) {
-            Ok(()) => {
-                let _ = fs::remove_file(backup);
-                Ok(())
-            }
-            Err(_) => {
-                let _ = fs::rename(&backup, target);
-                Err(PricingError::Io)
-            }
-        }
-    } else {
-        Err(PricingError::Io)
-    }
-}
-
-fn unique_suffix() -> String {
-    format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default()
-    )
-}
-
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
+    catalog_io::unix_time_ms()
+}
+
+fn map_catalog_io_error(error: CatalogIoError, cache: bool) -> PricingError {
+    match error {
+        CatalogIoError::TooLarge => PricingError::CacheTooLarge,
+        CatalogIoError::Io => PricingError::Io,
+        CatalogIoError::Network => PricingError::Network,
+        CatalogIoError::InvalidJson if cache => PricingError::InvalidCache,
+        CatalogIoError::InvalidJson => PricingError::InvalidCatalog,
+    }
 }
 
 fn is_stale(fetched_at_ms: u64, now_ms: u64, max_age_ms: u64) -> bool {
@@ -595,6 +519,7 @@ fn header_string(headers: &reqwest::header::HeaderMap, name: header::HeaderName)
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

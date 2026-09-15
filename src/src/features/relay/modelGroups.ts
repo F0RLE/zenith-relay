@@ -1,291 +1,98 @@
-type KnownModelProviderGroup = "chatgpt" | "openai" | "anthropic" | "other";
+import type { ModelSummary } from "./api/types";
 
-export type ModelProviderGroup = KnownModelProviderGroup | `provider-${string}`;
+export type ModelCatalogIdentity = Pick<
+  ModelSummary,
+  "catalogProvider" | "catalogFamily"
+>;
 
-type ModelGroup<T> = {
-  id: ModelProviderGroup;
+export type ModelGroup<T> = {
+  id: string;
+  provider: string;
   label: string;
   items: T[];
 };
 
-const knownGroupOrder: KnownModelProviderGroup[] = ["chatgpt", "openai", "anthropic"];
-const otherGroup = "other" as const;
-const dynamicGroupPrefix = "provider-";
-const knownCompanyByFamily: Record<string, string> = {
-  gemini: "Google",
-  glm: "Z.ai",
-  zai: "Z.ai",
-  grok: "xAI",
+type GroupModelsOptions<T> = {
+  metadata?: (item: T) => ModelCatalogIdentity | null | undefined;
+  isNativeChatGpt?: (item: T) => boolean;
 };
 
-type SemanticModelFamily = "openai" | "anthropic" | "gemini" | "grok" | "zai";
+const OTHER_PROVIDER = "other";
 
-type SemanticModelSortKey = {
-  familyRank: number;
-  imageRank: number;
-  tierRank: number;
-  versionRank: number[];
-  modifierRank: number;
-  previewRank: number;
-  id: string;
-};
-
-function modelLeaf(model: string) {
-  const id = model.trim().toLowerCase();
-  return id.slice(id.lastIndexOf("/") + 1);
-}
-
-function isOpenAiModel(model: string) {
-  return /^(gpt-|codex-|o\d|text-|dall-e)/.test(model);
-}
-
-function semanticModelFamily(model: string): SemanticModelFamily | null {
-  if (isOpenAiModel(model)) return "openai";
-  if (model.startsWith("claude-")) return "anthropic";
-  if (model.startsWith("gemini-")) return "gemini";
-  if (model.startsWith("grok-")) return "grok";
-  if (model.startsWith("glm-")) return "zai";
-  return null;
-}
-
-function modelHasTerm(model: string, term: string) {
-  return model.split(/[^a-z0-9]+/).includes(term);
-}
-
-function modelFamilyRank(family: SemanticModelFamily) {
-  return ({ openai: 0, anthropic: 1, gemini: 2, grok: 3, zai: 4 } as const)[family];
-}
-
-function modelTierRank(family: SemanticModelFamily, model: string, isImage: boolean) {
-  if (family === "anthropic") {
-    if (modelHasTerm(model, "fable")) return 0;
-    if (modelHasTerm(model, "opus")) return 1;
-    if (modelHasTerm(model, "sonnet")) return 2;
-    if (modelHasTerm(model, "haiku")) return 3;
-    return 80;
+/**
+ * Group models by company, never by the catalog's finer-grained families.
+ * Item order is never changed here: the snapshot is the presentation-order
+ * authority and old snapshots without metadata retain discovery order.
+ */
+export function groupModels<T>(
+  items: readonly T[],
+  options: GroupModelsOptions<T> = {},
+): ModelGroup<T>[] {
+  const groups = new Map<string, ModelGroup<T>>();
+  for (const item of items) {
+    const metadata = options.metadata?.(item);
+    const provider = normalizeCatalogValue(
+      options.isNativeChatGpt?.(item) ? "openai" : metadata?.catalogProvider,
+    ) ?? OTHER_PROVIDER;
+    const key = provider;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.items.push(item);
+      continue;
+    }
+    groups.set(key, {
+      id: `catalog-${encodeURIComponent(provider)}`,
+      provider,
+      label: provider === OTHER_PROVIDER ? "Other" : displayCatalogValue(provider),
+      items: [item],
+    });
   }
-  if ((family === "gemini" || family === "openai") && isImage) return 90;
-  if (family === "gemini") {
-    if (modelHasTerm(model, "pro")) return 0;
-    if (modelHasTerm(model, "lite")) return 2;
-    if (modelHasTerm(model, "flash")) return 1;
-    return 80;
-  }
-  if (family === "openai") {
-    if (modelHasTerm(model, "mini") || modelHasTerm(model, "compact")) return 10;
-    if (modelHasTerm(model, "spark")) return 20;
-    return 0;
-  }
-  if (family === "grok") return modelHasTerm(model, "build") ? 10 : 0;
-  if (family === "zai") {
-    return modelHasTerm(model, "air") || modelHasTerm(model, "flash") || modelHasTerm(model, "lite") ? 10 : 0;
-  }
-  return isImage ? 9 : 0;
+  return [...groups.values()];
 }
 
-function modelModifierRank(family: SemanticModelFamily, model: string) {
-  if (family === "openai") {
-    if (model.endsWith("-sol")) return 1;
-    if (model.endsWith("-terra")) return 2;
-    if (model.endsWith("-luna")) return 3;
-    return 8;
-  }
-  if (family === "gemini") {
-    if (modelHasTerm(model, "preview")) return 9;
-    if (model.endsWith("-high")) return 1;
-    if (model.endsWith("-medium")) return 2;
-    if (model.endsWith("-low")) return 3;
-  }
-  if (family === "grok") {
-    if (model.endsWith("-non-reasoning")) return 1;
-    if (model.endsWith("-reasoning")) return 0;
-  }
-  return 0;
-}
-
-function versionTokenComponents(token: string) {
-  return (token.match(/\d+/g) ?? [])
-    .filter((part) => part.length <= 5)
-    .slice(0, 4)
-    .map(Number);
-}
-
-function modelVersionComponents(family: SemanticModelFamily, model: string) {
-  const tokens = model.split("-");
-  const firstVersionToken = tokens.findIndex((token) => /\d/.test(token));
-  if (firstVersionToken < 0) return [];
-  if (family !== "anthropic") return versionTokenComponents(tokens[firstVersionToken] ?? "");
-
-  const version: number[] = [];
-  for (const token of tokens.slice(firstVersionToken)) {
-    if (/^\d{6,}$/.test(token)) break;
-    const components = versionTokenComponents(token);
-    if (!components.length) break;
-    version.push(...components);
-    if (version.length >= 4) break;
-  }
-  return version.slice(0, 4);
-}
-
-function modelVersionRank(family: SemanticModelFamily, model: string) {
-  const version = modelVersionComponents(family, model);
-  const [, versionToken, release] = model.split("-");
-  if (family === "grok" && /^\d+(?:\.\d+)*$/.test(versionToken ?? "") && /^\d{4}$/.test(release ?? "")) {
-    const minor = version[1];
-    if (minor != null && minor >= 10 && minor % 10 === 0) version[1] = minor / 10;
-  }
-  return [...version.map((part) => -part), ...Array(Math.max(0, 4 - version.length)).fill(0)];
-}
-
-function semanticModelSortKey(model: string): SemanticModelSortKey | null {
-  const id = modelLeaf(model);
-  const family = semanticModelFamily(id);
-  if (!family) return null;
-  const isImage = modelHasTerm(id, "image") || id.startsWith("dall-e");
-  return {
-    familyRank: modelFamilyRank(family),
-    imageRank: Number(isImage),
-    tierRank: modelTierRank(family, id, isImage),
-    versionRank: modelVersionRank(family, id),
-    modifierRank: modelModifierRank(family, id),
-    previewRank: Number(modelHasTerm(id, "preview")),
-    id,
-  };
-}
-
-function compareNumberArrays(left: readonly number[], right: readonly number[]) {
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const delta = (left[index] ?? 0) - (right[index] ?? 0);
-    if (delta) return delta;
-  }
-  return 0;
-}
-
-function compareSemanticModelKeys(left: SemanticModelSortKey, right: SemanticModelSortKey) {
-  return left.familyRank - right.familyRank
-    || left.imageRank - right.imageRank
-    || left.tierRank - right.tierRank
-    || compareNumberArrays(left.versionRank, right.versionRank)
-    || left.modifierRank - right.modifierRank
-    || left.previewRank - right.previewRank
-    || left.id.localeCompare(right.id);
-}
-
-function launcherGroupRank(model: string, nativeChatGpt: boolean) {
-  const group = modelProviderGroup(model, nativeChatGpt);
-  if (group === "chatgpt") return 0;
-  if (group === "openai") return 1;
-  if (group === "anthropic") return 2;
-  const family = semanticModelFamily(modelLeaf(model));
-  if (family === "gemini") return 3;
-  if (family === "grok") return 4;
-  if (family === "zai") return 5;
-  return group === otherGroup ? Number.MAX_SAFE_INTEGER : 6;
-}
-
-function dynamicModelFamily(model: string) {
-  const id = modelLeaf(model);
-  const family = id.match(/^[a-z]+(?:\d+(?=[-._]|$))?/i)?.[0]?.replace(/\d+$/, "").toLowerCase();
-  return family || null;
-}
-
-function dynamicGroupLabel(family: string) {
-  const company = knownCompanyByFamily[family];
-  if (company) return company;
-  return family.length <= 3
-    ? family.toUpperCase()
-    : `${family[0]!.toUpperCase()}${family.slice(1)}`;
-}
-
-export function modelProviderGroupLabel(group: ModelProviderGroup) {
-  return group.startsWith(dynamicGroupPrefix)
-    ? dynamicGroupLabel(group.slice(dynamicGroupPrefix.length))
-    : group;
-}
-
-export function modelProviderGroup(model: string, nativeChatGpt = false): ModelProviderGroup {
-  const id = modelLeaf(model);
-  if (nativeChatGpt && isOpenAiModel(id)) return "chatgpt";
-  if (id.startsWith("claude-")) return "anthropic";
-  if (isOpenAiModel(id)) return "openai";
-  const family = dynamicModelFamily(id);
-  return family ? `provider-${family}` : otherGroup;
+/** Deduplicate model IDs without applying a second presentation order. */
+export function uniqueModelIds(models: readonly string[]) {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    const key = model.trim().toLowerCase();
+    return Boolean(key) && !seen.has(key) && seen.add(key);
+  });
 }
 
 /**
- * Presentation grouping only. Native ChatGPT models still retain their
- * native flag and exact IDs for routing; the launcher shows all OpenAI-family
- * models together to avoid making equivalent access paths look duplicated.
+ * Put IDs known by the current snapshot in backend order. IDs found only in
+ * usage history follow in their first-seen order.
  */
-export function modelProviderGroupForDisplay(model: string, nativeChatGpt = false): ModelProviderGroup {
-  const group = modelProviderGroup(model, nativeChatGpt);
-  return group === "chatgpt" ? "openai" : group;
-}
-
-function compareModelIdsForLauncher(
-  left: string,
-  right: string,
-  leftNativeChatGpt: boolean,
-  rightNativeChatGpt: boolean,
+export function orderModelIdsBySnapshot(
+  models: readonly string[],
+  summaries: readonly ModelSummary[],
 ) {
-  const groupOrder = launcherGroupRank(left, leftNativeChatGpt) - launcherGroupRank(right, rightNativeChatGpt);
-  if (groupOrder) return groupOrder;
-  const leftKey = semanticModelSortKey(left);
-  const rightKey = semanticModelSortKey(right);
-  if (leftKey && rightKey) return compareSemanticModelKeys(leftKey, rightKey);
-  if (leftKey) return -1;
-  if (rightKey) return 1;
-  return 0;
+  const unique = uniqueModelIds(models);
+  const byId = new Map(unique.map((model) => [model.toLowerCase(), model]));
+  const ordered = summaries
+    .map((model) => byId.get(model.id.toLowerCase()))
+    .filter((model): model is string => Boolean(model));
+  const known = new Set(ordered.map((model) => model.toLowerCase()));
+  return [...ordered, ...unique.filter((model) => !known.has(model.toLowerCase()))];
 }
 
-/// Launcher-only presentation ordering. Familiar model families use the same
-/// semantic hierarchy as the public catalog; unknown IDs retain source order.
-export function sortModelsForLauncher<T>(
-  items: T[],
-  model: (item: T) => string,
-  isNativeChatGpt: (item: T) => boolean = () => false,
-) {
-  return items
-    .map((item, sourceOrder) => ({ item, sourceOrder }))
-    .sort((left, right) => (
-      compareModelIdsForLauncher(
-        model(left.item),
-        model(right.item),
-        isNativeChatGpt(left.item),
-        isNativeChatGpt(right.item),
-      ) || left.sourceOrder - right.sourceOrder
-    ))
-    .map(({ item }) => item);
+function normalizeCatalogValue(value: string | null | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || null;
 }
 
-export function sortModelIdsForLauncher(models: string[]) {
-  return sortModelsForLauncher(models, (model) => model);
+function displayCatalogValue(value: string) {
+  return value
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map(displayCatalogPart)
+    .join(" ");
 }
 
-export function groupModels<T>(
-  items: T[],
-  model: (item: T) => string,
-  isNativeChatGpt: (item: T) => boolean = () => false,
-) {
-  const groups = new Map<ModelProviderGroup, T[]>();
-  for (const item of sortModelsForLauncher(items, model, isNativeChatGpt)) {
-    const group = modelProviderGroupForDisplay(model(item), isNativeChatGpt(item));
-    const values = groups.get(group);
-    if (values) values.push(item);
-    else groups.set(group, [item]);
-  }
-  const orderedGroups: ModelProviderGroup[] = [
-    ...knownGroupOrder.filter((id) => groups.has(id)),
-    ...[...groups.keys()].filter((id) => id.startsWith(dynamicGroupPrefix)),
-    ...(groups.has(otherGroup) ? [otherGroup] : []),
-  ];
-  return orderedGroups.map((id): ModelGroup<T> => ({
-    id,
-    label: modelProviderGroupLabel(id),
-    items: groups.get(id)!,
-  }));
-}
-
-export function supportsCacheWritePricing(model: string) {
-  return modelProviderGroup(model) === "anthropic";
+function displayCatalogPart(part: string) {
+  if (part === "openai") return "OpenAI";
+  if (part === "xai") return "xAI";
+  if (part === "zai") return "Z.ai";
+  if (part === "gpt") return "GPT";
+  return `${part[0]!.toUpperCase()}${part.slice(1)}`;
 }

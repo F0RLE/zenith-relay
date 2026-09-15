@@ -1,6 +1,6 @@
 use super::{
-    runtime_now_ms, AuthorizedRequestError, ChatGptAccountExecutor, ExecutorPrepareError,
-    GatewayRuntime, PreparedAuthorization,
+    runtime_now_ms, AuthorizedRequestError, AuthorizedResponse, ChatGptAccountExecutor,
+    ExecutorPrepareError, GatewayRuntime, PreparedAuthorization,
 };
 use crate::accounts::TokenAuthorityError;
 use crate::providers::chatgpt::{
@@ -54,7 +54,12 @@ impl GatewayRuntime {
                         authorization: agent
                             .authorization(now_ms)
                             .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
-                        identity: Some(account.identity.clone()),
+                        identity: Some(
+                            account
+                                .identity
+                                .with_configured_client_version()
+                                .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
+                        ),
                         token_generation: None,
                         agent_task_id: agent.task_id().map(str::to_string),
                     });
@@ -111,7 +116,12 @@ impl GatewayRuntime {
         Ok(PreparedAuthorization {
             header_name: AUTHORIZATION,
             authorization,
-            identity: Some(account.identity.clone()),
+            identity: Some(
+                account
+                    .identity
+                    .with_configured_client_version()
+                    .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
+            ),
             token_generation: Some(prepared.tokens.generation()),
             agent_task_id: None,
         })
@@ -174,7 +184,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         request: reqwest::RequestBuilder,
         client_version: Option<&str>,
-    ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
+    ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
         let first_request = request
             .try_clone()
             .ok_or(AuthorizedRequestError::NotReplayable)?;
@@ -182,10 +192,8 @@ impl GatewayRuntime {
             .prepare_authorization(candidate_id, runtime_now_ms())
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
-        let response = apply_prepared_authorization(first_request, &prepared, client_version)?
-            .send()
-            .await
-            .map_err(AuthorizedRequestError::Transport)?;
+        let response =
+            send_prepared_authorization(first_request, &prepared, client_version).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
             if let Some(task_id) = prepared.agent_task_id.as_deref() {
                 let (response, invalid_task) =
@@ -197,7 +205,10 @@ impl GatewayRuntime {
                         response.headers(),
                         runtime_now_ms(),
                     );
-                    return Ok(response);
+                    return Ok(AuthorizedResponse {
+                        response,
+                        account_token_generation: prepared.token_generation,
+                    });
                 }
                 drop(response);
                 let refreshed = self
@@ -208,17 +219,18 @@ impl GatewayRuntime {
                     )
                     .await
                     .map_err(AuthorizedRequestError::Prepare)?;
-                let response = apply_prepared_authorization(request, &refreshed, client_version)?
-                    .send()
-                    .await
-                    .map_err(AuthorizedRequestError::Transport)?;
+                let response =
+                    send_prepared_authorization(request, &refreshed, client_version).await?;
                 self.observe_codex_quota_headers(
                     candidate_id,
                     response.status(),
                     response.headers(),
                     runtime_now_ms(),
                 );
-                return Ok(response);
+                return Ok(AuthorizedResponse {
+                    response,
+                    account_token_generation: refreshed.token_generation,
+                });
             }
         }
         if response.status() != StatusCode::UNAUTHORIZED || prepared.token_generation.is_none() {
@@ -228,7 +240,10 @@ impl GatewayRuntime {
                 response.headers(),
                 runtime_now_ms(),
             );
-            return Ok(response);
+            return Ok(AuthorizedResponse {
+                response,
+                account_token_generation: prepared.token_generation,
+            });
         }
 
         drop(response);
@@ -241,17 +256,17 @@ impl GatewayRuntime {
             )
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
-        let response = apply_prepared_authorization(request, &refreshed, client_version)?
-            .send()
-            .await
-            .map_err(AuthorizedRequestError::Transport)?;
+        let response = send_prepared_authorization(request, &refreshed, client_version).await?;
         self.observe_codex_quota_headers(
             candidate_id,
             response.status(),
             response.headers(),
             runtime_now_ms(),
         );
-        Ok(response)
+        Ok(AuthorizedResponse {
+            response,
+            account_token_generation: refreshed.token_generation,
+        })
     }
 }
 
@@ -338,22 +353,45 @@ async fn inspect_agent_identity_unauthorized(
     Ok((reqwest::Response::from(restored), invalid))
 }
 
+async fn send_prepared_authorization(
+    request: reqwest::RequestBuilder,
+    prepared: &PreparedAuthorization,
+    client_version: Option<&str>,
+) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
+    let (client, request) = apply_prepared_authorization(request, prepared, client_version)?;
+    client
+        .execute(request)
+        .await
+        .map_err(AuthorizedRequestError::Transport)
+}
+
+/// Build the request before adding account authorization so the existing
+/// downstream headers can be inspected and preserved. `RequestBuilder::headers`
+/// cannot express that distinction: applying a second header map replaces the
+/// client's identity even when it was already valid.
 fn apply_prepared_authorization(
     request: reqwest::RequestBuilder,
     prepared: &PreparedAuthorization,
     client_version: Option<&str>,
-) -> std::result::Result<reqwest::RequestBuilder, AuthorizedRequestError> {
-    let request = request.header(prepared.header_name.clone(), prepared.authorization.clone());
-    let Some(identity) = prepared.identity.as_ref() else {
-        return Ok(request);
-    };
-    let identity = match client_version {
-        Some(version) => identity
-            .with_client_version(version)
-            .map_err(|_| AuthorizedRequestError::NotReplayable)?,
-        None => identity.clone(),
-    };
-    Ok(identity.apply(request))
+) -> std::result::Result<(reqwest::Client, reqwest::Request), AuthorizedRequestError> {
+    let (client, request) = request.build_split();
+    let mut request = request.map_err(AuthorizedRequestError::Transport)?;
+    request
+        .headers_mut()
+        .insert(prepared.header_name.clone(), prepared.authorization.clone());
+    if let Some(identity) = prepared.identity.as_ref() {
+        // A model-catalog request has no forwarded client headers, so its
+        // requested version is a useful fallback. For normal routed requests
+        // the explicit downstream identity remains authoritative.
+        let identity = match client_version {
+            Some(version) => identity
+                .with_client_version(version)
+                .map_err(|_| AuthorizedRequestError::NotReplayable)?,
+            None => identity.clone(),
+        };
+        identity.insert(request.headers_mut());
+    }
+    Ok((client, request))
 }
 
 fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepareError {

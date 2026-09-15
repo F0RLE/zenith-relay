@@ -3,18 +3,25 @@ use crate::{
     launcher::restart_opencode,
     local_pool::{
         error::{CommandError, ErrorCode, LocalPoolError},
+        models::ProviderSourceRecord,
         state::DesktopState,
+        store::secret_store,
     },
     platform::default_opencode_config_path,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
 use tauri::State;
-use zenith_relay_core::protocol::ModelSummary;
+use zenith_relay_core::{
+    model_metadata::{ModelCapabilities, ModelMetadataCatalog},
+    protocol::ModelSummary,
+    SourceAdapter, WireApi,
+};
 
 const PROVIDER_ID: &str = "zenith-relay";
 const MAX_SNAPSHOT_NAME_CHARS: usize = 80;
@@ -324,41 +331,81 @@ fn model_ids(models: &[ModelSummary]) -> Vec<ModelSummary> {
         .collect()
 }
 
+fn capability_config(id: &str, capabilities: &ModelCapabilities, levels: &[String]) -> Value {
+    let mut value = json!({
+        "name": id,
+        "attachment": capabilities.attachment.unwrap_or_else(|| capabilities.input_modalities.iter().any(|mode| mode != "text")),
+        "reasoning": capabilities.reasoning == Some(true),
+        "tool_call": capabilities.tool_call == Some(true),
+        "modalities": {"input": capabilities.input_modalities, "output": capabilities.output_modalities}
+    });
+    if let (Some(context), Some(output)) = (capabilities.context_limit, capabilities.output_limit) {
+        value["limit"] = json!({"context": context, "output": output});
+        if let Some(input) = capabilities.input_limit {
+            value["limit"]["input"] = json!(input);
+        }
+    }
+    if capabilities.reasoning == Some(true) && !levels.is_empty() {
+        value["variants"] = Value::Object(
+            levels
+                .iter()
+                .map(|level| (level.clone(), json!({"reasoningEffort": level})))
+                .collect(),
+        );
+    }
+    value
+}
+
 fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
     models
         .iter()
         .map(|model| {
-            let mut value = Map::new();
-            value.insert("name".into(), Value::String(model.id.clone()));
-            // Relay accepts image attachments and forwards them to the active
-            // route. OpenCode requires both fields before it exposes image
-            // attachments for a custom provider model.
-            value.insert("attachment".into(), Value::Bool(true));
-            value.insert(
-                "modalities".into(),
-                json!({"input": ["text", "image"], "output": ["text"]}),
-            );
-            let levels = if !model.reasoning_allowed_levels.is_empty() {
-                model.reasoning_allowed_levels.clone()
-            } else if !model.reasoning_supported_levels.is_empty() && !model.reasoning_configurable
-            {
-                model.reasoning_supported_levels.clone()
+            let capabilities =
+                if model.catalog_input_modalities.is_empty() && model.catalog_provider.is_none() {
+                    ModelCapabilities::unknown_model()
+                } else {
+                    ModelCapabilities {
+                        reasoning: model.catalog_reasoning,
+                        tool_call: model.catalog_tool_call,
+                        attachment: model.catalog_attachment,
+                        input_modalities: model.catalog_input_modalities.clone(),
+                        output_modalities: model.catalog_output_modalities.clone(),
+                        context_limit: model.catalog_context_limit,
+                        input_limit: model.catalog_input_limit,
+                        output_limit: model.catalog_output_limit,
+                        ..ModelCapabilities::default()
+                    }
+                };
+            let supported_levels = if model.reasoning_supported_levels.is_empty() {
+                &model.catalog_reasoning_effort_levels
             } else {
-                Vec::new()
+                &model.reasoning_supported_levels
             };
-            if !levels.is_empty() {
-                value.insert("reasoning".into(), Value::Bool(true));
-                value.insert(
-                    "variants".into(),
-                    Value::Object(
-                        levels
-                            .iter()
-                            .map(|level| (level.clone(), json!({ "reasoningEffort": level })))
-                            .collect(),
-                    ),
-                );
-            }
-            (model.id.clone(), Value::Object(value))
+            let levels = supported_levels
+                .iter()
+                .filter(|level| {
+                    !model.reasoning_configurable || model.reasoning_allowed_levels.contains(level)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            (
+                model.id.clone(),
+                capability_config(&model.id, &capabilities, &levels),
+            )
+        })
+        .collect()
+}
+
+fn model_config_ids(models: &[String], metadata: &ModelMetadataCatalog) -> Map<String, Value> {
+    models
+        .iter()
+        .filter(|model| !model.trim().is_empty())
+        .map(|model| {
+            let capabilities = metadata.capabilities_for(model);
+            (
+                model.clone(),
+                capability_config(model, &capabilities, &capabilities.reasoning_effort_levels),
+            )
         })
         .collect()
 }
@@ -372,6 +419,23 @@ fn managed_provider(base_url: &str, secret: &str, models: &[ModelSummary]) -> Va
             "apiKey": secret,
         },
         "models": model_config(models),
+    })
+}
+
+fn managed_provider_for_source(
+    base_url: &str,
+    secret: &str,
+    models: &[String],
+    metadata: &ModelMetadataCatalog,
+) -> Value {
+    json!({
+        "npm": PROVIDER_NPM,
+        "name": "Zenith Relay",
+        "options": {
+            "baseURL": base_url,
+            "apiKey": secret,
+        },
+        "models": model_config_ids(models, metadata),
     })
 }
 
@@ -518,6 +582,96 @@ pub async fn connect_opencode_to_local_gateway(
     })
 }
 
+/// Configure OpenCode to use one API source directly. This is intentionally
+/// separate from the pool connection: selecting a source in the Connections
+/// table must not silently fall back to the local pool and must preserve the
+/// source's exact endpoint and credential.
+#[tauri::command]
+pub async fn launch_opencode_source(
+    source_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<OpenCodeConnectionResult, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let source = state
+        .store()?
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    if !source.enabled {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source must be enabled before launching OpenCode",
+        )
+        .into());
+    }
+    let models = source_opencode_models(&source)?;
+    let secret = secret_store::load(&source.secret_ref)?
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    let path = default_opencode_config_path();
+    let mut config = read_config(&path)?;
+    let backup_created = backup_original_config(&state, &path, None)?;
+    let provider = managed_provider_for_source(
+        &source.base_url,
+        &secret,
+        &models,
+        &state.model_metadata_catalog(),
+    );
+    config
+        .entry("$schema")
+        .or_insert_with(|| Value::String("https://opencode.ai/config.json".into()));
+    config
+        .entry("provider")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let providers = config
+        .get_mut("provider")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "OpenCode provider configuration must be an object",
+            )
+        })?;
+    providers.insert(PROVIDER_ID.into(), provider);
+    config.insert(
+        "model".into(),
+        Value::String(format!("{PROVIDER_ID}/{}", models[0])),
+    );
+    write_config(&path, &config)?;
+    restart_opencode().map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::Io,
+            format!("failed to restart OpenCode: {error}"),
+        )
+    })?;
+    Ok(OpenCodeConnectionResult {
+        path: path.display().to_string(),
+        model_count: models.len(),
+        backup_created,
+    })
+}
+
+fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, LocalPoolError> {
+    let mut seen = HashSet::new();
+    let models = source
+        .effective_protocol_bindings()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
+        .into_iter()
+        .filter(|binding| {
+            binding.wire_api == WireApi::Responses && binding.adapter == SourceAdapter::Native
+        })
+        .flat_map(|binding| binding.model_ids)
+        .filter(|model| !model.trim().is_empty())
+        .filter(|model| seen.insert(model.clone()))
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source has no compatible Responses API models",
+        ));
+    }
+    Ok(models)
+}
+
 #[tauri::command]
 pub fn restart_opencode_app() -> Result<(), CommandError> {
     restart_opencode().map_err(|error| {
@@ -571,10 +725,45 @@ pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<b
 mod tests {
     use super::{
         apply_managed_provider, managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
-        remove_managed_configuration, PROVIDER_ID, PROVIDER_NPM,
+        remove_managed_configuration, source_opencode_models, ErrorCode, ProviderSourceRecord,
+        SourceAdapter, PROVIDER_ID, PROVIDER_NPM,
     };
     use serde_json::{json, Map, Value};
-    use zenith_relay_core::protocol::ModelSummary;
+    use std::collections::BTreeMap;
+    use zenith_relay_core::{protocol::ModelSummary, SourceProtocolBinding, WireApi};
+
+    fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceRecord {
+        ProviderSourceRecord {
+            id: "source".into(),
+            name: "Source".into(),
+            enabled: true,
+            in_pool: false,
+            draining: false,
+            base_url: "https://provider.example/v1".into(),
+            secret_ref: "source:test".into(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_bindings: bindings,
+            models: vec![
+                "gpt-test".into(),
+                "gpt-other".into(),
+                "chat-only".into(),
+                "claude".into(),
+            ],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        }
+    }
 
     fn model(id: &str, enabled: bool) -> ModelSummary {
         ModelSummary {
@@ -583,7 +772,25 @@ mod tests {
             member_count: 1,
             codex_visible: enabled,
             codex_display_name: id.into(),
-            catalog_rank: None,
+            catalog_provider: None,
+            catalog_family: None,
+            catalog_name: None,
+            catalog_release_date: None,
+            catalog_last_updated: None,
+            catalog_status: None,
+            catalog_reasoning: None,
+            catalog_reasoning_method: None,
+            catalog_reasoning_effort_levels: Vec::new(),
+            catalog_default_reasoning_effort: None,
+            catalog_tool_call: None,
+            catalog_structured_output: None,
+            catalog_attachment: None,
+            catalog_open_weights: None,
+            catalog_input_modalities: Vec::new(),
+            catalog_output_modalities: Vec::new(),
+            catalog_context_limit: None,
+            catalog_input_limit: None,
+            catalog_output_limit: None,
             input_micro_usd_per_million: None,
             cached_input_micro_usd_per_million: None,
             cache_write_5m_micro_usd_per_million: None,
@@ -597,6 +804,7 @@ mod tests {
             reasoning_configurable: false,
             reasoning_manual_fallback: false,
             speed_supported: false,
+            speed_tiers: Vec::new(),
             speed_tier: Default::default(),
             speed_configurable: false,
         }
@@ -647,6 +855,77 @@ mod tests {
             provider["models"]["gpt-5.6-sol"]["modalities"]["input"],
             json!(["text", "image"])
         );
+    }
+
+    #[test]
+    fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
+        let metadata = super::ModelMetadataCatalog::from_models_dev_json(
+            r#"{
+            "test/text-only": {"reasoning": true, "reasoning_effort_levels": ["low", "high"],
+            "attachment": false, "tool_call": true,
+            "modalities": {"input": ["text"], "output": ["text"]},
+            "limit": {"context": 32000, "input": 24000, "output": 8000}}
+        }"#,
+        )
+        .unwrap();
+        let mut models = vec![model("text-only", true), model("unknown", true)];
+        zenith_relay_core::protocol::apply_model_metadata(&mut models, &metadata);
+        let pooled = super::model_config(&models);
+        let direct = super::model_config_ids(&["text-only".into(), "unknown".into()], &metadata);
+        assert_eq!(pooled, direct);
+        assert_eq!(pooled["text-only"]["attachment"], false);
+        assert_eq!(pooled["text-only"]["modalities"]["input"], json!(["text"]));
+        assert_eq!(pooled["text-only"]["tool_call"], true);
+        assert_eq!(pooled["text-only"]["limit"]["context"], 32000);
+        assert_eq!(
+            pooled["unknown"]["modalities"]["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(pooled["unknown"]["reasoning"], false);
+        assert_eq!(pooled["unknown"]["tool_call"], false);
+        assert!(pooled["unknown"].get("limit").is_none());
+        models[0].reasoning_configurable = true;
+        models[0].reasoning_allowed_levels = vec!["high".into(), "max".into()];
+        let filtered = super::model_config(&models);
+        assert_eq!(
+            filtered["text-only"]["variants"],
+            json!({"high": {"reasoningEffort": "high"}})
+        );
+
+        models[0].reasoning_supported_levels = vec!["low".into(), "high".into(), "ultra".into()];
+        models[0].reasoning_allowed_levels = vec!["high".into(), "ultra".into()];
+        let native = super::model_config(&models);
+        assert_eq!(
+            native["text-only"]["variants"],
+            json!({
+                "high": {"reasoningEffort": "high"},
+                "ultra": {"reasoningEffort": "ultra"}
+            })
+        );
+    }
+
+    #[test]
+    fn direct_source_models_are_limited_to_native_responses() {
+        let source = source(vec![
+            SourceProtocolBinding::legacy(
+                WireApi::Responses,
+                &["gpt-test".into(), "gpt-other".into(), "gpt-test".into()],
+            ),
+            SourceProtocolBinding::legacy(WireApi::ChatCompletions, &["chat-only".into()]),
+        ]);
+
+        assert_eq!(
+            source_opencode_models(&source).unwrap(),
+            ["gpt-test", "gpt-other"]
+        );
+    }
+
+    #[test]
+    fn direct_source_models_reject_bridge_only_routes() {
+        let mut binding = SourceProtocolBinding::legacy(WireApi::Responses, &["claude".into()]);
+        binding.adapter = SourceAdapter::ResponsesToMessages;
+        let error = source_opencode_models(&source(vec![binding])).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
     }
 
     #[test]

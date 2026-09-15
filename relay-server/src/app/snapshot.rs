@@ -12,11 +12,11 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 use zenith_relay_core::{
     pricing::{PricingCatalog, PricingContext, PricingMetadata},
     protocol::{
-        apply_model_display_order, apply_pool_model_configuration, pool_candidate_count,
-        pool_model_summaries_with_pricing, pool_pricing_source_summary,
-        pooled_source_runtime_available, source_runtime_available, AccountSummary, GatewaySummary,
-        ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
-        UsageQuery,
+        apply_model_display_order_with_catalog, apply_model_metadata,
+        apply_pool_model_configuration, pool_candidate_count, pool_model_summaries_with_pricing,
+        pool_pricing_source_summary, pooled_source_runtime_available, source_runtime_available,
+        AccountSummary, GatewaySummary, ProxyMode, QuotaWindowUsage, RuntimeStateSnapshot,
+        RuntimeTargetSummary, SourceSummary, UsageQuery,
     },
     ApiEquivalentSummary, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
 };
@@ -49,6 +49,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let model_display_order = state.store.model_display_order()?;
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
     let pricing_catalog = state.pricing_catalog();
+    let model_metadata = state.model_metadata_catalog();
     let pricing_context = state.pricing_context()?;
     let equivalents = state
         .store
@@ -56,6 +57,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let runtime = state.runtime()?;
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
+    let chatgpt_retry_until_available = state.store.chatgpt_retry_until_available()?;
     let running = state.store.gateway_enabled()? && runtime.is_some();
     let routing_order = runtime
         .as_ref()
@@ -86,6 +88,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &pricing_catalog,
         &pricing_context,
     );
+    apply_model_metadata(&mut models, &model_metadata);
     apply_pool_model_configuration(
         &mut models,
         &source_summaries,
@@ -95,7 +98,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &model_service_tier_overrides,
         runtime.as_deref(),
     );
-    apply_model_display_order(&mut models, &model_display_order);
+    apply_model_display_order_with_catalog(&mut models, &model_display_order, &model_metadata);
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
@@ -150,6 +153,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             chatgpt_interface_quota_reserve_basis_points: None,
             codex_background_tasks_enabled,
             codex_websockets_enabled,
+            chatgpt_retry_until_available,
             routing_order,
         },
         platform: std::env::consts::OS.to_string(),

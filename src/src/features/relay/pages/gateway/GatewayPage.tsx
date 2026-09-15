@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { ArrowRightLeft, CheckCircle2, CircleAlert, Copy, KeyRound, Loader2, Network, Play, Plug, RefreshCw, RotateCw, Save, Square, UserRound } from "lucide-react";
+import { ArrowRightLeft, CheckCircle2, CircleAlert, Copy, KeyRound, Loader2, Network, Play, RefreshCw, RotateCw, Save, Square, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import { isCodexOauthAccountEligible } from "../../accountStatus";
 import { ActionMenu, ActionMenuItem, Button, CopyButton, EmptyState, IconButton, OptionMenu, PageHeader, SettingToggle, Tabs, copyText, formatAccountPlan, useConfirm } from "../../components/Ui";
 import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTasksControl";
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
+import { ChatgptRetryUntilAvailableControl } from "../../components/ChatgptRetryUntilAvailableControl";
+import { sourcePort } from "../../sourceUrl";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type GatewayTab = "api" | "chatgpt" | "opencode";
@@ -73,11 +75,22 @@ export function GatewayPage() {
     {t("gateway.launchChatGPT")}
   </Button> : null;
 
+  const openCodeActions = mode === "local" ? <Button
+    variant="primary"
+    busy={busy === "opencode-launch"}
+    disabled={!running}
+    title={!running ? t("gateway.start") : undefined}
+    icon={<Play aria-hidden />}
+    onClick={() => perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched")}
+  >
+    {t("gateway.launchOpenCode")}
+  </Button> : null;
+
   return <section className="relay-page gateway-page">
     <PageHeader
       title={t("nav.gateway")}
       subtitle={t(`gateway.tabSubtitles.${activeTab}.${mode}`)}
-      actions={activeTab === "api" || activeTab === "chatgpt" ? (activeTab === "api" ? apiActions : chatGptActions) : null}
+      actions={activeTab === "api" ? apiActions : activeTab === "chatgpt" ? chatGptActions : openCodeActions}
     />
     <Tabs value={activeTab} onChange={(value) => setActiveTab(value as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />
     {activeTab === "api"
@@ -90,7 +103,7 @@ function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: stri
   const { t } = useTranslation();
   const { mode, runtime, busy, perform } = useRelayState();
   const confirm = useConfirm();
-  const currentPort = mode === "local" && endpoint ? new URL(endpoint).port : "";
+  const currentPort = mode === "local" ? sourcePort(endpoint) : "";
   const [port, setPort] = useState(currentPort);
   useEffect(() => setPort(currentPort), [currentPort]);
 
@@ -141,7 +154,7 @@ function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: stri
         </header>
         <div className="gateway-api-connection-controls">
           <div className="gateway-endpoint-value">
-            <code title={endpoint}>{endpoint}</code>
+            <code data-relay-tooltip={endpoint}>{endpoint}</code>
             <CopyButton value={endpoint} label={t("gateway.copyEndpoint")} />
             {mode === "local" ? <form className="gateway-api-port-control" onSubmit={(event) => { event.preventDefault(); void savePort(); }}>
               <label>
@@ -192,6 +205,7 @@ function GatewayChatGPTTab() {
         <ChatGPTSetup />
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
+        <ChatgptRetryUntilAvailableControl className="gateway-setting-row" />
       </div>
     </div>
   </section>;
@@ -199,31 +213,10 @@ function GatewayChatGPTTab() {
 
 function GatewayOpenCodeTab() {
   const { t } = useTranslation();
-  const { mode, runtime, busy, perform } = useRelayState();
-  const [status, setStatus] = useState<import("../../api/types").OpenCodeConfigStatus | null>(null);
-  const refreshStatus = () => {
-    if (mode !== "local") return;
-    void relayCommands.getOpenCodeConfigStatus().then(setStatus).catch(() => setStatus(null));
-  };
-  useEffect(refreshStatus, [mode]);
-  if (mode !== "local") return <section className="gateway-tab-panel gateway-empty-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
-    <EmptyState title={t("gateway.openCodeEmptyTitle")} description={t("gateway.openCodeEmptyDescription")} />
-  </section>;
-  const connect = () => perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved").then(refreshStatus);
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
-    <div className="gateway-workspace">
-      <div className="gateway-settings-panel gateway-application-panel">
-        <section className="gateway-setting-row client-setup opencode-client-setup">
-          <div className="opencode-provider-status">
-            <span className={`relay-status ${status?.configured ? "ready" : "info"}`}>
-              {status?.configured ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />}
-              {status?.configured ? t("gateway.openCodeConfigured", { count: status.modelCount }) : t("gateway.openCodeNotConfigured")}
-            </span>
-            <div className="inline-actions">
-              <Button variant="primary" icon={<Plug aria-hidden />} busy={busy === "opencode-connect"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : undefined} onClick={() => void connect()}>{t("gateway.openCodeConnect")}</Button>
-            </div>
-          </div>
-        </section>
+    <div className="gateway-opencode-panel">
+      <div className="gateway-opencode-development" role="status">
+        <strong>{t("gateway.openCodeInDevelopment")}</strong>
       </div>
     </div>
   </section>;

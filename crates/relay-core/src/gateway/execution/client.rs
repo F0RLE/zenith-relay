@@ -4,8 +4,9 @@ use super::super::now_ms;
 use super::super::request::{
     candidate_protocols, chat_request_is_text_or_image_only, chat_request_uses_tools,
     client_context_fingerprint, codex_background_request_kind, forwarded_codex_headers,
-    forwarded_messages_headers, is_managed_codex_client, request_id, ServiceTierPolicy,
-    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    forwarded_messages_headers, is_managed_codex_client, request_id, response_tool_call_ids,
+    tool_call_output_ids, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
+    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::request::{execute_request, RequestExecution};
 use crate::protocol::ClientWireApi;
@@ -91,10 +92,11 @@ async fn execute_client_request_inner(
             )
         }
     };
-    let service_tier_policy = if is_managed_codex_client(&headers) {
-        ServiceTierPolicy::pool_owned()
+    let managed_codex_client = is_managed_codex_client(&headers);
+    let service_tier_policy = if managed_codex_client {
+        ServiceTierPolicy::pool_owned(&request)
     } else {
-        ServiceTierPolicy::client_owned()
+        ServiceTierPolicy::client_owned(&request)
     };
     if wire_api == WireApi::ChatCompletions && chat_request_uses_tools(&request) {
         return api_error(
@@ -159,12 +161,62 @@ async fn execute_client_request_inner(
             return blocked_background_response(wire_api, stream, &request_id, kind);
         }
     }
-    let Some(resolved_model) = runtime.resolve_visible_model(
-        &key,
-        &requested_model,
-        candidate_protocols(wire_api),
-        now_ms(),
-    ) else {
+    let response_affinity_key = (wire_api == WireApi::Responses)
+        .then(|| {
+            runtime
+                .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
+        })
+        .flatten();
+    let tool_output_ids = if wire_api == WireApi::Responses {
+        tool_call_output_ids(&request)
+    } else {
+        Vec::new()
+    };
+    let tool_call_ids = if wire_api == WireApi::Responses {
+        response_tool_call_ids(&request)
+    } else {
+        Vec::new()
+    };
+    let has_unpaired_tool_output = tool_output_ids
+        .iter()
+        .any(|output_id| !tool_call_ids.iter().any(|call_id| call_id == output_id));
+    let response_binding_known = response_affinity_key
+        .as_deref()
+        .is_some_and(|key| runtime.has_response_affinity_binding(key, now_ms()));
+    let tool_affinity_key = tool_output_ids.iter().find_map(|call_id| {
+        let affinity_key = runtime.tool_call_affinity_key(&key.id, call_id)?;
+        runtime
+            .has_response_affinity_binding(&affinity_key, now_ms())
+            .then_some(affinity_key)
+    });
+    let has_previous_response_id = response_affinity_key.is_some();
+    // A model switch can make an old tool call lose its route affinity. Keep
+    // the current conversation alive and let normal pool selection continue it.
+    let response_affinity_key = if response_binding_known {
+        response_affinity_key
+    } else {
+        tool_affinity_key.or(response_affinity_key)
+    };
+
+    let resolved_model = runtime
+        .resolve_visible_model(
+            &key,
+            &requested_model,
+            candidate_protocols(wire_api),
+            now_ms(),
+        )
+        .or_else(|| {
+            (managed_codex_client && runtime.chatgpt_retry_until_available())
+                .then(|| {
+                    runtime.resolve_configured_model(
+                        &key,
+                        &requested_model,
+                        candidate_protocols(wire_api),
+                    )
+                })
+                .flatten()
+        });
+    let Some(resolved_model) = resolved_model else {
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available in this managed pool",
@@ -173,12 +225,6 @@ async fn execute_client_request_inner(
     };
     let responses_lite = (wire_api == WireApi::Responses)
         .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
-        .flatten();
-    let response_affinity_key = (wire_api == WireApi::Responses)
-        .then(|| {
-            runtime
-                .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
-        })
         .flatten();
     let client_context_id = client_context_fingerprint(&headers);
     let forwarded_headers = match wire_api {
@@ -189,7 +235,7 @@ async fn execute_client_request_inner(
         WireApi::Gemini => super::super::request::forwarded_bridge_gemini_headers(&headers),
     };
     execute_request(RequestExecution {
-        runtime,
+        runtime: runtime.clone(),
         key,
         request,
         service_tier_policy,
@@ -200,6 +246,11 @@ async fn execute_client_request_inner(
         forwarded_headers,
         client_context_id,
         response_affinity_key,
+        requires_affinity_owner: has_previous_response_id || has_unpaired_tool_output,
+        // Keep client eligibility with the request. The mutable setting is
+        // read at every wait decision so a running request observes a toggle
+        // change without granting this behavior to non-ChatGPT clients.
+        wait_for_candidate_availability: managed_codex_client,
         wire_api,
         responses_lite,
         allow_previous_response_reset: true,

@@ -273,7 +273,12 @@ fn parse_account_container(object: &Map<String, Value>) -> Result<ParsedEntries,
     let accounts = object
         .get("accounts")
         .and_then(Value::as_array)
-        .expect("account container checked by caller");
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorCode::MalformedJson,
+                "account container has no account list",
+            )
+        })?;
     let (entries, warnings) = parse_account_container_items(object, accounts)?;
     Ok((ImportFormat::JsonArray, entries, warnings, None))
 }

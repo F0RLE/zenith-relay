@@ -102,10 +102,10 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
         </div>
         <p className="source-role-help">{t(`sources.roleHints.${sourceRole}`)}</p>
         <div className="source-priority-policy">
-          <header title={t("sources.sourceOrderHint")}><strong>{t("sources.sourceOrder")}</strong><small className="sr-only">{t("sources.sourceOrderHint")}</small></header>
+          <header><strong data-relay-tooltip={t("sources.sourceOrderHint")}>{t("sources.sourceOrder")}</strong><small className="sr-only">{t("sources.sourceOrderHint")}</small></header>
           <div className="subscription-plan-order source-priority-order" role="list" aria-label={t("sources.sourceOrder")}>{orderedSources.map((source, index) => {
             return <div key={source.id} className="subscription-plan-order-row source-priority-row" role="listitem" data-source-id={source.id} data-current={source.id === member.id ? "true" : undefined} data-dragging={draggedSource === source.id ? "true" : undefined} data-drop-target={dropTarget === source.id ? "true" : undefined} data-drop-after={dropTarget === source.id && dropAfter ? "true" : undefined}>
-              <button className="source-priority-drag-handle" data-source-drag-handle type="button" aria-label={t("sources.reorderSource", { source: source.name })} title={t("sources.reorderSource", { source: source.name })} onPointerDown={(event) => startSourceDrag(event, source.id)}><GripVertical aria-hidden /></button>
+              <button className="source-priority-drag-handle" data-source-drag-handle type="button" aria-label={t("sources.reorderSource", { source: source.name })} data-relay-tooltip={t("sources.reorderSource", { source: source.name })} onPointerDown={(event) => startSourceDrag(event, source.id)}><GripVertical aria-hidden /></button>
               <span className="subscription-plan-rank">{index + 1}</span>
               <span className="source-priority-name"><strong>{source.name}</strong>{source.id === member.id ? <small>{t("sources.currentSource")}</small> : null}</span>
               <div className="inline-actions"><IconButton label={t("sources.moveSourceUp", { source: source.name })} icon={<ArrowUp aria-hidden />} disabled={index === 0} onClick={() => moveSourceBy(source.id, -1)} /><IconButton label={t("sources.moveSourceDown", { source: source.name })} icon={<ArrowDown aria-hidden />} disabled={index === orderedSources.length - 1} onClick={() => moveSourceBy(source.id, 1)} /></div>

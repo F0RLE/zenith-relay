@@ -33,10 +33,7 @@ mod history;
 mod policy;
 mod process;
 
-use catalog::{
-    fetch_codex_model_catalog, fetch_direct_source_model_manifest, load_direct_source_api_key,
-    validate_direct_source,
-};
+use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_direct_source};
 pub(in crate::local_pool) use catalog::{refresh_active_codex_catalog, CodexCatalogRefreshStatus};
 pub(crate) use history::{
     discard_codex_history_backup, history_provider_changed, synchronize_codex_history,
@@ -131,36 +128,6 @@ pub async fn attach_codex_to_local_gateway(
             "managed pool is not available for any enabled candidate",
         )
         .into());
-    }
-    // Connecting an already attached profile is a no-op. The previous flow
-    // stopped ChatGPT, synced its active account, rebuilt the catalog, and
-    // started the desktop app again on every click. Apart from being slow,
-    // repeated clicks could leave several launch requests queued behind the
-    // profile lock. Keep the existing active binding and let the caller only
-    // launch ChatGPT when it is actually closed.
-    let requested_oauth_account_id = bound_oauth_account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let same_oauth_binding = |binding: &codex::ProfileBinding| {
-        if disable_oauth_binding.unwrap_or(false) {
-            binding.bound_oauth_account_id.is_none()
-        } else {
-            requested_oauth_account_id.is_none()
-                || binding.bound_oauth_account_id.as_deref() == requested_oauth_account_id
-        }
-    };
-    if let Some(binding) =
-        codex::profile_bindings(&default_codex_home(), &state.profile_backup_root())?
-            .into_iter()
-            .find(|binding| {
-                binding.active
-                    && binding.credential_kind == codex::ProfileCredentialKind::LocalGateway
-                    && binding.credential_id == key_id
-                    && same_oauth_binding(binding)
-            })
-    {
-        return Ok(ProfileActivation { binding });
     }
     let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
     let profile_dir = default_codex_home();
@@ -521,19 +488,9 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
 
 pub(crate) async fn prepare_ready_api_profile(state: &DesktopState) -> Result<bool, CommandError> {
     let _mutation = state.setup_guard().await;
-    let profile_dir = default_codex_home();
-    let restore_local_gateway = codex::credential_kind(&profile_dir, &state.profile_backup_root())?
-        == Some(codex::ProfileCredentialKind::LocalGateway);
-    let stopped = stop_codex_and_sync_account(state).await?;
-    if !restore_local_gateway {
-        return Ok(stopped);
-    }
-    let result = codex::restore(&profile_dir, &state.profile_backup_root()).map_err(Into::into);
-    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
-    if result.is_ok() {
-        set_runtime_pool_interface_reserve(state, None, 0).await;
-    }
-    result.map(|()| stopped)
+    // Detach and attach belong to the same profile transaction, not a
+    // preparatory UI call that can discard the active connection on failure.
+    stop_codex_and_sync_account(state).await
 }
 
 #[tauri::command]
@@ -600,13 +557,10 @@ pub async fn launch_codex_source(
         secret_store::save,
     )?;
     let profile_dir = default_codex_home();
-    let manifest = fetch_direct_source_model_manifest(&source.base_url, &api_key)
-        .await
-        .ok();
-    let catalog = codex::direct_source_model_catalog_with_manifest(
+    let catalog = codex::direct_source_model_catalog_with_capabilities(
         &profile_dir,
         &response_models,
-        manifest.as_ref(),
+        &state.model_metadata_catalog(),
     )?;
     if catalog.is_none() {
         return Err(LocalPoolError::new(

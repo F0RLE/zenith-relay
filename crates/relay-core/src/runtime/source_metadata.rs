@@ -11,7 +11,8 @@ use crate::catalog::{
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{
-    CandidateScope, Error, MessagesReasoningMode, ModelRules, Result, SourceAdapter, WireApi,
+    CandidateKind, CandidateScope, Error, MessagesReasoningMode, ModelRules, Result, SourceAdapter,
+    WireApi,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use futures_util::future::join_all;
@@ -196,7 +197,7 @@ impl GatewayRuntime {
 
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
-        let mut declared_reasoning = Vec::<(String, String, BTreeSet<String>, bool)>::new();
+        let mut declared_reasoning = Vec::<(String, String, BTreeSet<String>, bool, bool)>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
         for SourceMetadataManifest {
             candidate_id,
@@ -226,10 +227,7 @@ impl GatewayRuntime {
             }
             for model in &configured_models {
                 let model_key = model.to_ascii_lowercase();
-                let supports_image = matches!(
-                    adapter,
-                    SourceAdapter::ResponsesToMessages | SourceAdapter::ResponsesToGemini
-                ) || declared_image_support
+                let supports_image = declared_image_support
                     .get(&model_key)
                     .copied()
                     .unwrap_or(false);
@@ -238,32 +236,35 @@ impl GatewayRuntime {
                     .or_default()
                     .push(supports_image);
                 let capabilities = reasoning.get(&model_key).cloned().and_then(|capabilities| {
-                    let mut capabilities =
+                    let capabilities =
                         source_reasoning_for_route(capabilities, adapter, reasoning_mode)?;
-                    capabilities.apply_model_implied_efforts(&model_key);
                     Some(capabilities)
                 });
                 // Keep provider-declared modes as catalog metadata. A refresh
                 // never becomes request admission evidence, and omission of
                 // reasoning fields must not affect ordinary model routing.
-                if reasoning.contains_key(&model_key) {
-                    declared_reasoning.push((
-                        model_key.clone(),
-                        candidate_id.clone(),
-                        capabilities
-                            .as_ref()
-                            .map(|capabilities| {
-                                capabilities
-                                    .effort_ids()
-                                    .map(str::to_ascii_lowercase)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        capabilities
-                            .as_ref()
-                            .is_some_and(SourceReasoningCapabilities::is_empty),
-                    ));
-                }
+                // Reconcile every configured model, not only models that have
+                // a declaration in this snapshot. A successful refresh that
+                // removes reasoning metadata must clear the previous route's
+                // declaration; transient failures still return the cached
+                // manifest above and therefore preserve it.
+                declared_reasoning.push((
+                    model_key.clone(),
+                    candidate_id.clone(),
+                    capabilities
+                        .as_ref()
+                        .map(|capabilities| {
+                            capabilities
+                                .effort_ids()
+                                .map(str::to_ascii_lowercase)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    capabilities
+                        .as_ref()
+                        .is_some_and(SourceReasoningCapabilities::is_empty),
+                    reasoning.contains_key(&model_key),
+                ));
                 if let Some(capabilities) = capabilities {
                     reasoning_by_model
                         .entry(model_key)
@@ -290,7 +291,7 @@ impl GatewayRuntime {
         }
         self.update_declared_source_reasoning(declared_reasoning, &current_reasoning_levels);
         for (model, route_support) in image_support_by_model {
-            if route_support.iter().all(|supports_image| *supports_image) {
+            if route_support.iter().any(|supports_image| *supports_image) {
                 metadata.image_models.insert(model);
             }
         }
@@ -299,7 +300,7 @@ impl GatewayRuntime {
 
     fn update_declared_source_reasoning(
         &self,
-        declared_reasoning: Vec<(String, String, BTreeSet<String>, bool)>,
+        declared_reasoning: Vec<(String, String, BTreeSet<String>, bool, bool)>,
         current_reasoning_levels: &BTreeMap<String, Vec<String>>,
     ) {
         let mut declared = self
@@ -307,7 +308,22 @@ impl GatewayRuntime {
             .declared_reasoning
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (model, candidate_id, efforts, explicitly_empty) in declared_reasoning {
+        for (model, candidate_id, efforts, explicitly_empty, declared_now) in declared_reasoning {
+            if !declared_now {
+                if let Some(routes) = declared.efforts.get_mut(&model) {
+                    routes.remove(&candidate_id);
+                    if routes.is_empty() {
+                        declared.efforts.remove(&model);
+                    }
+                }
+                if let Some(routes) = declared.empty_routes.get_mut(&model) {
+                    routes.remove(&candidate_id);
+                    if routes.is_empty() {
+                        declared.empty_routes.remove(&model);
+                    }
+                }
+                continue;
+            }
             if efforts.is_empty() {
                 let remove_model = declared.efforts.get_mut(&model).is_some_and(|routes| {
                     routes.remove(&candidate_id);
@@ -602,6 +618,14 @@ impl GatewayRuntime {
         let Some(model) = self.resolve_model(key, model) else {
             return Vec::new();
         };
+        self.codex_model_chatgpt_account_ids_for_resolved(key, &model)
+    }
+
+    pub(crate) fn codex_model_chatgpt_account_ids_for_resolved(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Vec<String> {
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
         self.chatgpt_accounts
@@ -610,13 +634,78 @@ impl GatewayRuntime {
                 account
                     .configured_models
                     .iter()
-                    .any(|candidate| candidate.eq_ignore_ascii_case(&model))
+                    .any(|candidate| candidate.eq_ignore_ascii_case(model))
                     && scheduler.candidate(&account.id).is_some_and(|candidate| {
-                        candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                        candidate.is_configured(model, &[WireApi::Responses], &scope)
                     })
             })
             .map(|account| account.id.clone())
             .collect()
+    }
+
+    /// Responses Lite is a whole-request transport contract, not a property
+    /// of an individual fallback candidate. Automatic Lite is safe only when
+    /// every configured route in this key scope is an official Codex account
+    /// with confirmed Lite support for this exact model. Otherwise an attempt
+    /// could switch tools or reasoning context between Lite and full Responses.
+    ///
+    /// This deliberately checks configured routes rather than current health,
+    /// so a temporary cooldown cannot silently change the request contract.
+    pub(crate) fn codex_model_responses_routes_all_support_lite(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> bool {
+        self.codex_model_configured_responses_routes_all_support_lite(key, model, false)
+    }
+
+    /// Equivalent to [`Self::codex_model_responses_routes_all_support_lite`]
+    /// for account-only endpoints. Generic API routes are intentionally
+    /// excluded because those endpoints never select them.
+    pub(crate) fn codex_model_account_responses_routes_all_support_lite(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> bool {
+        self.codex_model_configured_responses_routes_all_support_lite(key, model, true)
+    }
+
+    fn codex_model_configured_responses_routes_all_support_lite(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        account_only: bool,
+    ) -> bool {
+        let Some(model) = self.resolve_model(key, model) else {
+            return false;
+        };
+        let scope = key.scope_snapshot();
+        // Do not hold the scheduler lock while inspecting catalog metadata.
+        // Metadata can refresh independently, and a conservative false result
+        // is preferable to blocking route selection.
+        let configured = {
+            let scheduler = self.lock_scheduler();
+            scheduler
+                .candidates()
+                .filter(|candidate| {
+                    candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                        && (!account_only || candidate.kind == CandidateKind::OAuthAccount)
+                })
+                .map(|candidate| (candidate.id.clone(), candidate.kind))
+                .collect::<Vec<_>>()
+        };
+        if configured.is_empty() {
+            return false;
+        }
+        let model = model.to_ascii_lowercase();
+        let lite_models = self
+            .codex_responses_lite_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        configured.into_iter().all(|(candidate_id, kind)| {
+            kind == CandidateKind::OAuthAccount
+                && lite_models.contains(&(candidate_id, model.clone()))
+        })
     }
 
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
@@ -636,18 +725,100 @@ impl GatewayRuntime {
 
     pub fn source_declared_reasoning_levels(&self, model: &str) -> Option<Vec<String>> {
         let model = model.trim().to_ascii_lowercase();
-        let declared = self
+        let (source_levels, has_explicit_empty_source_declaration) = {
+            let declared = self
+                .model_metadata
+                .declared_reasoning
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                declared.levels.get(&model).cloned(),
+                declared
+                    .empty_routes
+                    .get(&model)
+                    .is_some_and(|routes| !routes.is_empty()),
+            )
+        };
+
+        // A generic API route may explicitly declare no reasoning modes for
+        // itself while an account route for the same model exposes native
+        // ChatGPT modes. Route-local emptiness suppresses only the catalog
+        // fallback; it must not erase positive native metadata.
+        let native_levels = self.native_chatgpt_reasoning_levels(&model);
+        let mut levels = source_levels.unwrap_or_default();
+        levels.extend(native_levels.iter().cloned());
+        let levels = crate::canonicalize_reasoning_levels(levels);
+        if !levels.is_empty() {
+            return Some(levels);
+        }
+        if has_explicit_empty_source_declaration {
+            return Some(Vec::new());
+        }
+
+        let mut levels = self.model_capabilities(&model).reasoning_effort_levels;
+        levels.extend(native_levels);
+        let levels = crate::canonicalize_reasoning_levels(levels);
+        (!levels.is_empty()).then_some(levels)
+    }
+
+    fn native_chatgpt_reasoning_levels(&self, model: &str) -> Vec<String> {
+        let manifests = self
             .model_metadata
-            .declared_reasoning
+            .codex_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        declared.levels.get(&model).cloned().or_else(|| {
-            declared
-                .empty_routes
-                .get(&model)
-                .filter(|routes| !routes.is_empty())
-                .map(|_| Vec::new())
-        })
+        let levels = manifests
+            .iter()
+            .filter(|(candidate_id, _)| self.chatgpt_accounts.contains_key(*candidate_id))
+            .flat_map(|(_, manifest)| {
+                manifest
+                    .value
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter(|entry| {
+                entry
+                    .get("slug")
+                    .or_else(|| entry.get("id"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(model))
+            })
+            .flat_map(crate::catalog::codex_reasoning_level_ids)
+            .collect::<Vec<_>>();
+        crate::canonicalize_reasoning_levels(levels)
+    }
+
+    pub(crate) fn model_has_translated_ultra_route(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> bool {
+        let Some(model) = self.resolve_model(key, model) else {
+            return false;
+        };
+        let scope = key.scope_snapshot();
+        let scheduler = self.lock_scheduler();
+        self.source_candidate_bindings
+            .iter()
+            .any(|(candidate_id, binding)| {
+                binding.adapter == SourceAdapter::ResponsesToMessages
+                    && binding.reasoning_mode.supports_effort("ultra")
+                    && scheduler.candidate(candidate_id).is_some_and(|candidate| {
+                        candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                    })
+            })
+    }
+
+    pub(crate) fn model_capabilities(
+        &self,
+        model: &str,
+    ) -> crate::model_metadata::ModelCapabilities {
+        self.model_metadata_catalog
+            .as_ref()
+            .map(|catalog| catalog.snapshot().capabilities_for(model))
+            .unwrap_or_else(crate::model_metadata::ModelCapabilities::unknown_model)
     }
 
     pub(crate) fn model_reasoning_policy_levels(&self, model: &str) -> Option<Vec<String>> {

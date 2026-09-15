@@ -138,6 +138,26 @@ export function sourceModelsForWireApi(
   });
 }
 
+/**
+ * Cache writes are an upstream Messages capability. Include both native
+ * Messages routes and Responses routes translated by the Messages adapter.
+ */
+export function sourceModelsWithCacheWritePricing(source: ProtocolBindingSource) {
+  const bindings = runtimeSourceProtocolBindings(source);
+  const seen = new Set<string>();
+  return bindings.flatMap((binding) => {
+    const messagesUpstream = binding.wireApi === "messages"
+      || normalizedAdapter(binding) === "responses_to_messages";
+    if (!messagesUpstream) return [];
+    return sourceBindingModels(source, bindings, binding).filter((model) => {
+      const normalized = model.toLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+  });
+}
+
 export function sourceSupportsWireApi(
   source: ProtocolBindingSource,
   wireApi: SourceWireApi,

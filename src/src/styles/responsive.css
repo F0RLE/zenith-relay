@@ -3,7 +3,7 @@
   .relay-page { padding: 0 16px 24px; }
   .relay-page-header { min-height: 64px; }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pool-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .pool-summary[data-has-provider-credits="true"] { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .pool-member-state {
     display: flex;
     align-items: center;
@@ -35,20 +35,40 @@
   .relay-shell[data-page="profiles"] .relay-table { min-width: 720px; }
   .relay-shell[data-page="usage"] .usage-request-table { min-width: 0; }
   .usage-request-table [data-column="connection"],
+  .usage-request-table [data-column="speed"],
+  .usage-request-table [data-column="tier"],
   .usage-request-table [data-column="tokens"] {
     display: none;
   }
+  .usage-request-table col[data-column="time"] { width: 14%; }
+  .usage-request-table col[data-column="status"] { width: 8%; }
+  .usage-request-table col[data-column="model"] { width: 17%; }
+  .usage-request-table col[data-column="protocol"] { width: 14%; }
+  .usage-request-table col[data-column="timing"] { width: 18%; }
+  .usage-request-table col[data-column="equivalent"] { width: 13%; }
+  .usage-request-table col[data-column="request"] { width: 16%; }
   .usage-request-table th {
     height: auto;
+    padding-inline: 4px;
+    font-size: 11px;
     line-height: 14px;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+  }
+  .usage-request-table .usage-column-heading {
+    padding-inline: 4px;
+  }
+  .usage-request-table th[data-column="request"] .usage-column-heading > span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
   }
   .usage-request-table .usage-column-heading > svg {
     display: none;
   }
   .usage-request-table td[data-column="timing"] {
     line-height: 15px;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
@@ -602,13 +622,15 @@
 
 @media (max-width: 700px) {
   .codex-background-tasks-control,
-  .codex-websockets-control {
+  .codex-websockets-control,
+  .chatgpt-retry-until-available-control {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
 
   .codex-background-tasks-toggle,
-  .codex-websockets-toggle {
+  .codex-websockets-toggle,
+  .chatgpt-retry-until-available-toggle {
     width: 100%;
   }
 
@@ -642,6 +664,12 @@
   .pool-summary,
   .connections-account-summary,
   .runtime-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pool-summary[data-has-provider-credits="true"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .connections-account-summary[data-has-provider-credits="true"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .overview-analytics-header {
@@ -877,9 +905,8 @@
 @media (prefers-reduced-motion: reduce) {
   .subscription-plan-order-row,
   .pool-speed-control,
-  .pool-speed-control > svg,
-  .pool-speed-track,
-  .pool-speed-track > span {
+  .pool-speed-control .relay-option-trigger,
+  .pool-speed-control .relay-option-trigger > svg {
     transition: none;
   }
 

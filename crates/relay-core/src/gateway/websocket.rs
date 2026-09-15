@@ -6,11 +6,14 @@ use super::errors::{
 use super::execution::execute_client_request;
 use super::now_ms;
 use super::request::{
-    apply_codex_routing_hint, client_context_fingerprint, forwarded_codex_headers,
-    CODEX_RESPONSES_LITE_HEADER,
+    apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
+    forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event};
-use super::streaming::{has_output_delta, parse_sse_event};
+use super::streaming::{
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    is_known_non_output_event, parse_sse_event, MAX_SSE_EVENT_BYTES,
+};
 use super::turn_state::{
     guard_account_request, note_account_response_header, CODEX_TURN_STATE_HEADER,
 };
@@ -120,7 +123,18 @@ async fn handle_connection(
         bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
         return;
     }
-    let connected = match connect_upstream(&runtime, &key, &headers, request, true, 0).await {
+    let connected = match connect_upstream_while_client_connected(
+        &mut downstream,
+        &runtime,
+        &key,
+        &headers,
+        request,
+        true,
+        0,
+        None,
+    )
+    .await
+    {
         Ok(connected) => connected,
         Err(failure) if failure.category == "upstream_websocket_unsupported" => {
             bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
@@ -180,12 +194,28 @@ async fn bridge_http_fallback(
 ) {
     let mut stream_id = request.stream_id.clone();
     loop {
-        if let Err(failure) =
-            serve_http_fallback_request(&mut downstream, runtime.clone(), &key, &headers, &request)
-                .await
+        let mut client_visible_output = false;
+        if let Err(failure) = serve_http_fallback_request(
+            &mut downstream,
+            runtime.clone(),
+            &key,
+            &headers,
+            &request,
+            &mut client_visible_output,
+        )
+        .await
         {
-            let request_id = Some(request.request_id.as_str());
-            send_gateway_error(&mut downstream, &failure, request_id).await;
+            if !client_visible_output {
+                let request_id = Some(request.request_id.as_str());
+                send_gateway_error(&mut downstream, &failure, request_id).await;
+            } else if failure.category != "client_closed" {
+                let _ = downstream
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::ERROR,
+                        reason: "upstream stream ended after output".into(),
+                    })))
+                    .await;
+            }
             return;
         }
 
@@ -246,6 +276,7 @@ async fn serve_http_fallback_request(
     _key: &AuthenticatedKey,
     client_headers: &HeaderMap,
     request: &ClientRequest,
+    client_visible_output: &mut bool,
 ) -> Result<(), GatewayFailure> {
     let mut headers = client_headers.clone();
     for name in [
@@ -268,7 +299,11 @@ async fn serve_http_fallback_request(
             *request.headers_mut() = headers;
             request
         })?;
-    let response = execute_client_request(runtime, http_request, WireApi::Responses).await;
+    let response = await_while_client_connected(
+        downstream,
+        execute_client_request(runtime, http_request, WireApi::Responses),
+    )
+    .await?;
     // The HTTP executor already knows whether the selected route belongs to an
     // account or an API provider. Preserve that attribution across the
     // WebSocket bridge instead of turning every fallback response into a Relay
@@ -276,9 +311,12 @@ async fn serve_http_fallback_request(
     let response_origin = fallback_response_origin(&response);
     if !response.status().is_success() {
         let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), MAX_WEBSOCKET_ERROR_BYTES)
-            .await
-            .ok();
+        let body = await_while_client_connected(
+            downstream,
+            axum::body::to_bytes(response.into_body(), MAX_WEBSOCKET_ERROR_BYTES),
+        )
+        .await?
+        .ok();
         return Err(GatewayFailure::upstream_status(
             status,
             body.as_deref(),
@@ -290,26 +328,22 @@ async fn serve_http_fallback_request(
 
     let mut body = response.into_body().into_data_stream();
     let mut pending = Vec::new();
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = await_while_client_connected(downstream, body.next()).await? {
         let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
-        if pending.len().saturating_add(chunk.len()) > MAX_WEBSOCKET_ERROR_BYTES {
-            return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
-        }
         pending.extend_from_slice(&chunk);
         while let Some(end) = crate::protocol::sse_event_end(&pending) {
+            if end > MAX_SSE_EVENT_BYTES {
+                return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
+            }
             let event = pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
                 return Err(GatewayFailure::transport(stream_origin));
             }
-            if let Some(payload) = terminal.payload {
-                let payload = serde_json::to_string(&payload)
-                    .map_err(|_| GatewayFailure::transport(stream_origin))?;
-                if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                    return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
-                }
+            if let Some(payload) = fallback_event_message(&terminal, stream_origin)? {
+                *client_visible_output |= payload.semantic_output;
                 downstream
-                    .send(Message::Text(payload.into()))
+                    .send(payload.message)
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
@@ -317,8 +351,53 @@ async fn serve_http_fallback_request(
                 return Ok(());
             }
         }
+        // Complete events have already been drained above. Only an incomplete
+        // tail counts against the per-event budget; one transport chunk may
+        // contain several complete events whose combined size is larger.
+        if pending.len() > MAX_SSE_EVENT_BYTES {
+            return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
+        }
     }
     Err(GatewayFailure::closed(stream_origin))
+}
+
+struct FallbackEventMessage {
+    message: Message,
+    semantic_output: bool,
+}
+
+fn fallback_event_message(
+    terminal: &super::streaming::TerminalEvent,
+    origin: ErrorOrigin,
+) -> Result<Option<FallbackEventMessage>, GatewayFailure> {
+    if let Some(raw_data) = terminal.raw_data.as_deref() {
+        if raw_data.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+            return Err(GatewayFailure::message_too_large(origin));
+        }
+        let semantic_output = !terminal.is_compaction && semantic_output_payload(raw_data);
+        let message = match String::from_utf8(raw_data.to_vec()) {
+            Ok(text) => Message::Text(text.into()),
+            Err(error) => Message::Binary(error.into_bytes().into()),
+        };
+        return Ok(Some(FallbackEventMessage {
+            message,
+            semantic_output,
+        }));
+    }
+
+    let Some(payload) = terminal.payload.as_ref() else {
+        return Ok(None);
+    };
+    let payload = serde_json::to_vec(payload).map_err(|_| GatewayFailure::transport(origin))?;
+    if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+        return Err(GatewayFailure::message_too_large(origin));
+    }
+    let semantic_output = semantic_output_payload(&payload);
+    let text = String::from_utf8(payload).map_err(|_| GatewayFailure::transport(origin))?;
+    Ok(Some(FallbackEventMessage {
+        message: Message::Text(text.into()),
+        semantic_output,
+    }))
 }
 
 const RELAY_ERROR_ORIGIN_HEADER: &str = "x-zenith-relay-error-origin";
@@ -353,6 +432,7 @@ struct Connected {
     lease: CandidateLease,
     attempt: u16,
     started: Instant,
+    retry_deadline: Option<TokioInstant>,
 }
 
 async fn connect_upstream(
@@ -362,6 +442,7 @@ async fn connect_upstream(
     mut request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
+    retry_deadline: Option<TokioInstant>,
 ) -> Result<Connected, GatewayFailure> {
     let mut tried = HashSet::new();
     let mut attempt = attempt_offset;
@@ -372,14 +453,86 @@ async fn connect_upstream(
     let mut function_item_id_repair_attempted = false;
     let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
-    let mut last_failure = None;
+    let mut legacy_call_id_repair_attempted = false;
+    let mut model_switch_reset_attempted = false;
+    let mut stale_tool_history_recovered = false;
+    let mut last_failure: Option<GatewayFailure> = None;
+    let mut websocket_http_fallback_origin = None;
+    let mut retry_deadline = retry_deadline.or_else(|| {
+        (!runtime.chatgpt_retry_until_available())
+            .then(|| TokioInstant::now() + Duration::from_millis(runtime.chatgpt_retry_window_ms()))
+    });
+    let mut retry_wait_attempt = 0u32;
+    let mut retry_window_expired = false;
 
-    'candidates: while attempts_this_run
-        < super::errors::retry_candidate_limit(
+    'candidates: loop {
+        // `ClientRequest` records that this is an eligible managed ChatGPT
+        // request. Read the setting on every retry cycle so disabling it
+        // releases an active persistent wait after the bounded poll.
+        let retry_until_available = runtime.chatgpt_retry_until_available();
+        // The request keeps its client eligibility, while the setting is live.
+        // If it was enabled after this request began, discard the old bounded
+        // deadline before the next retry cycle.
+        if retry_until_available {
+            retry_deadline = None;
+        }
+        let wait_for_candidate_availability =
+            request.wait_for_candidate_availability && retry_until_available;
+        let attempt_limit = super::errors::retry_candidate_limit(
             runtime.max_retry_candidates(),
             owner_recovery_confirmed,
         ) + usize::from(encrypted_content_recovered)
-    {
+            + usize::from(model_switch_reset_attempted)
+            + usize::from(stale_tool_history_recovered)
+            + usize::from(legacy_call_id_repair_attempted);
+        if attempts_this_run >= attempt_limit {
+            if websocket_http_fallback_origin.is_none()
+                && wait_for_candidate_availability
+                && last_failure.as_ref().is_none_or(|failure| {
+                    super::errors::retryable_failure(
+                        failure.status,
+                        failure.category,
+                        request.has_previous_response_id(),
+                    ) && !matches!(
+                        failure.category,
+                        "upstream_unauthorized"
+                            | "upstream_account_disabled"
+                            | "upstream_usage_not_included"
+                            | "upstream_region_unsupported"
+                            | "upstream_model_not_found"
+                            | "upstream_model_unsupported"
+                            | "upstream_forbidden"
+                            | "upstream_content_policy"
+                            | "upstream_invalid_request"
+                            | "upstream_candidate_rejected"
+                    )
+                })
+            {
+                tried.clear();
+                attempts_this_run = 0;
+                retry_wait_attempt = retry_wait_attempt.saturating_add(1);
+                if !runtime
+                    .wait_for_candidate_availability(
+                        runtime.earliest_retry_at(
+                            key,
+                            &request.resolved_model,
+                            WEBSOCKET_PROTOCOLS,
+                            &tried,
+                            request.response_affinity_key.as_deref(),
+                            now_ms(),
+                        ),
+                        websocket_retry_backoff(retry_wait_attempt),
+                        retry_deadline,
+                    )
+                    .await
+                {
+                    retry_window_expired = true;
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
         let selected = runtime
             .select_and_reserve(
                 key,
@@ -394,6 +547,119 @@ async fn connect_upstream(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            if !request.requires_affinity_owner
+                && runtime.release_unroutable_response_affinity(
+                    key,
+                    &mut request.response_affinity_key,
+                    &request.resolved_model,
+                    WEBSOCKET_PROTOCOLS,
+                    now_ms(),
+                )
+            {
+                continue;
+            }
+            // A previous response is pinned to its original owner.  When a
+            // later WebSocket turn switches to a model that owner cannot
+            // structurally serve, affinity selection returns no candidate
+            // before an upstream request is attempted.  Clear the opaque
+            // continuation once so the new model can use a compatible owner;
+            // temporary health, quota, and cooldown misses remain retryable.
+            if allow_previous_response_reset
+                && request.has_previous_response_id()
+                && !request.has_unpaired_tool_output()
+                && !model_switch_reset_attempted
+                && (request
+                    .response_affinity_key
+                    .as_deref()
+                    .and_then(|affinity_key| {
+                        runtime.response_affinity_owner_supports_model(
+                            affinity_key,
+                            &request.resolved_model,
+                            WEBSOCKET_PROTOCOLS,
+                            now_ms(),
+                        )
+                    })
+                    == Some(false)
+                    || request
+                        .response_affinity_key
+                        .as_deref()
+                        .and_then(|affinity_key| {
+                            runtime.response_affinity_owner_supports_route(
+                                key,
+                                affinity_key,
+                                &request.resolved_model,
+                                WEBSOCKET_PROTOCOLS,
+                                now_ms(),
+                            )
+                        })
+                        == Some(false))
+            {
+                let response_affinity_key = request.response_affinity_key.clone();
+                if request.drop_previous_response_id() {
+                    model_switch_reset_attempted = true;
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    continue;
+                }
+            }
+            // The owner may be temporarily ineligible because its quota or
+            // cooldown changed after the previous turn. Use the bounded native
+            // replay before waiting, then let the next selection choose any
+            // compatible candidate (OAuth or API source).
+            if request.has_previous_response_id() && request.requires_affinity_owner {
+                if let Some(affinity_key) = request.response_affinity_key.clone() {
+                    if let Some(owner_candidate_id) =
+                        runtime.response_affinity_candidate(&affinity_key, now_ms())
+                    {
+                        let owner_model = runtime
+                            .executor_route(
+                                &owner_candidate_id,
+                                &request.resolved_model,
+                                &key.scope_snapshot(),
+                                WEBSOCKET_PROTOCOLS,
+                                false,
+                            )
+                            .map(|route| route.source_model)
+                            .unwrap_or_else(|| request.resolved_model.clone());
+                        match request.replay_native_continuation(
+                            runtime,
+                            &key.id,
+                            &owner_candidate_id,
+                            &owner_model,
+                        ) {
+                            Ok(true) => {
+                                runtime.invalidate_response_affinity(Some(&affinity_key));
+                                tried.clear();
+                                continue;
+                            }
+                            Ok(false) => {}
+                            Err(failure) => return Err(failure),
+                        }
+                    }
+                }
+            }
+            if websocket_http_fallback_origin.is_none() && wait_for_candidate_availability {
+                tried.clear();
+                retry_wait_attempt = retry_wait_attempt.saturating_add(1);
+                if !runtime
+                    .wait_for_candidate_availability(
+                        runtime.earliest_retry_at(
+                            key,
+                            &request.resolved_model,
+                            WEBSOCKET_PROTOCOLS,
+                            &tried,
+                            request.response_affinity_key.as_deref(),
+                            now_ms(),
+                        ),
+                        websocket_retry_backoff(retry_wait_attempt),
+                        retry_deadline,
+                    )
+                    .await
+                {
+                    retry_window_expired = true;
+                    break;
+                }
+                continue;
+            }
             break;
         };
         tried.insert(selected.candidate_id.clone());
@@ -408,7 +674,7 @@ async fn connect_upstream(
             continue;
         };
         request.apply_service_tier_for_route(runtime, &route);
-        route.service_tier = request.service_tier();
+        route.service_tier = request.service_tier(runtime, &route);
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(client_headers);
@@ -423,11 +689,13 @@ async fn connect_upstream(
                 now_ms(),
             );
             drop(lease);
+            websocket_http_fallback_origin = Some(source_error_origin);
             last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
             continue;
         }
         if runtime.websocket_is_http_only(&route.candidate_id, &request.resolved_model, now_ms()) {
             drop(lease);
+            websocket_http_fallback_origin = Some(source_error_origin);
             last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
             continue;
         }
@@ -455,7 +723,7 @@ async fn connect_upstream(
             let mut headers = upstream_headers(
                 client_headers,
                 &prepared,
-                request.responses_lite_for(&route),
+                route.account_id.is_some() && request.responses_lite_for(&route),
                 &request.request_id,
             );
             apply_codex_routing_hint(&mut headers, &route.source_model, route.service_tier);
@@ -505,6 +773,11 @@ async fn connect_upstream(
             };
         };
         drop(refresh_fence);
+        // The final prepared authorization may differ from the first attempt
+        // after an in-band 401 refresh. Preserve its generation on this
+        // request-local route so every later WebSocket usage event is tied to
+        // the credential that actually performed the upgrade.
+        route.account_token_generation = prepared.token_generation;
         let status = upgrade.status();
         let response_headers = upgrade.headers().clone();
         runtime.observe_codex_quota_headers(
@@ -536,12 +809,25 @@ async fn connect_upstream(
             .and_then(Result::ok);
             let failure =
                 GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin);
+            if !legacy_call_id_repair_attempted
+                && body
+                    .as_deref()
+                    .is_some_and(super::errors::responses_call_id_is_missing)
+                && request.repair_legacy_call_ids()
+            {
+                legacy_call_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue 'candidates;
+            }
             if websocket_transport_fallback_status(status) {
                 runtime.mark_websocket_http_only(
                     &route.candidate_id,
                     &request.resolved_model,
                     now_ms(),
                 );
+                websocket_http_fallback_origin = Some(source_error_origin);
                 last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
                 continue 'candidates;
             }
@@ -566,6 +852,58 @@ async fn connect_upstream(
                 response_affinity_hit,
                 response_missing,
             );
+            let model_switch_reset = !model_switch_reset_attempted
+                && super::errors::recoverable_response_model_switch(
+                    status,
+                    failure.category,
+                    request.has_previous_response_id(),
+                    request.has_unpaired_tool_output(),
+                    body.as_deref().unwrap_or_default(),
+                );
+            let response_affinity_key = request.response_affinity_key.clone();
+            let stale_tool_history = !stale_tool_history_recovered
+                && request.has_previous_response_id()
+                && body
+                    .as_deref()
+                    .is_some_and(super::errors::responses_tool_call_is_missing_output)
+                && request.drop_unpaired_tool_calls()
+                && request.drop_previous_response_id();
+            if stale_tool_history {
+                stale_tool_history_recovered = true;
+                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                record_connect_rejection(
+                    runtime, key, &route, &request, attempt, started, &failure,
+                );
+                last_failure = Some(failure);
+                continue;
+            }
+            if model_switch_reset && request.drop_previous_response_id() {
+                model_switch_reset_attempted = true;
+                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                last_failure = Some(failure);
+                continue;
+            }
+            if body
+                .as_deref()
+                .is_some_and(super::errors::prompt_cache_write_rejected)
+            {
+                runtime.invalidate_prompt_affinity(request.prompt_affinity_key.as_deref());
+                record_connect_failure_with_hint(
+                    runtime,
+                    key,
+                    &route,
+                    &request,
+                    attempt,
+                    started,
+                    &failure,
+                    Some(&response_headers),
+                    body.as_deref()
+                        .map(rate_limit_body_hint)
+                        .unwrap_or_default(),
+                );
+                last_failure = Some(failure);
+                continue;
+            }
             if affinity_miss {
                 confirmed_response_missing |= response_missing;
                 owner_recovery_confirmed |= !response_affinity_hit;
@@ -584,7 +922,7 @@ async fn connect_upstream(
                 failure.category,
                 request.has_previous_response_id(),
             ) {
-                if response_affinity_hit {
+                if response_affinity_hit && !request.requires_affinity_owner {
                     runtime.invalidate_response_affinity(request.response_affinity_key.as_deref());
                 }
                 record_connect_failure_with_hint(
@@ -647,6 +985,18 @@ async fn connect_upstream(
                     continue;
                 }
             };
+        if initial_messages_are_empty_incomplete(&initial_messages) {
+            let failure = GatewayFailure::classified(
+                StatusCode::BAD_GATEWAY,
+                "stream_incomplete",
+                source_error_origin,
+            );
+            record_connect_failure(
+                runtime, key, &route, &request, attempt, started, &failure, None,
+            );
+            last_failure = Some(failure);
+            continue;
+        }
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(EventTerminalOutcome::Failure) {
                 let terminal_body = initial_messages.last().and_then(|message| match message {
@@ -696,6 +1046,16 @@ async fn connect_upstream(
                     .status
                     .filter(|status| !status.is_success())
                     .unwrap_or_else(|| super::errors::upstream_failure_status(category));
+                if !legacy_call_id_repair_attempted
+                    && terminal_body.is_some_and(super::errors::responses_call_id_is_missing)
+                    && request.repair_legacy_call_ids()
+                {
+                    legacy_call_id_repair_attempted = true;
+                    attempt = attempt.saturating_sub(1);
+                    attempts_this_run = attempts_this_run.saturating_sub(1);
+                    tried.remove(&route.candidate_id);
+                    continue 'candidates;
+                }
                 if category == "upstream_encrypted_content_invalid"
                     && !encrypted_content_recovered
                     && request.recover_invalid_encrypted_content()
@@ -715,6 +1075,59 @@ async fn connect_upstream(
                     response_affinity_hit,
                     terminal.previous_response_not_found,
                 );
+                let response_affinity_key = request.response_affinity_key.clone();
+                if !stale_tool_history_recovered
+                    && request.has_previous_response_id()
+                    && terminal_body
+                        .is_some_and(super::errors::responses_tool_call_is_missing_output)
+                    && request.drop_unpaired_tool_calls()
+                    && request.drop_previous_response_id()
+                {
+                    stale_tool_history_recovered = true;
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    let failure = GatewayFailure::classified(status, category, source_error_origin);
+                    record_connect_rejection(
+                        runtime, key, &route, &request, attempt, started, &failure,
+                    );
+                    last_failure = Some(failure);
+                    continue;
+                }
+                if !model_switch_reset_attempted
+                    && super::errors::recoverable_response_model_switch(
+                        status,
+                        category,
+                        request.has_previous_response_id(),
+                        request.has_unpaired_tool_output(),
+                        terminal_body.unwrap_or_default(),
+                    )
+                    && request.drop_previous_response_id()
+                {
+                    model_switch_reset_attempted = true;
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    let failure = GatewayFailure::classified(status, category, source_error_origin);
+                    record_connect_rejection(
+                        runtime, key, &route, &request, attempt, started, &failure,
+                    );
+                    last_failure = Some(failure);
+                    continue;
+                }
+                if terminal_body.is_some_and(super::errors::prompt_cache_write_rejected) {
+                    runtime.invalidate_prompt_affinity(request.prompt_affinity_key.as_deref());
+                    let failure = GatewayFailure::classified(status, category, source_error_origin);
+                    record_connect_failure_with_hint(
+                        runtime,
+                        key,
+                        &route,
+                        &request,
+                        attempt,
+                        started,
+                        &failure,
+                        Some(&terminal.headers),
+                        terminal.body_hint,
+                    );
+                    last_failure = Some(failure);
+                    continue;
+                }
                 if affinity_miss
                     || super::errors::retryable_failure(
                         status,
@@ -743,7 +1156,7 @@ async fn connect_upstream(
                             Some(&terminal.headers),
                             terminal.body_hint,
                         );
-                        if response_affinity_hit {
+                        if response_affinity_hit && !request.requires_affinity_owner {
                             runtime.invalidate_response_affinity(
                                 request.response_affinity_key.as_deref(),
                             );
@@ -768,13 +1181,14 @@ async fn connect_upstream(
             lease,
             attempt,
             started,
+            retry_deadline,
         });
     }
 
     if allow_previous_response_reset
         && request.has_previous_response_id()
         && confirmed_response_missing
-        && !request.has_tool_call_output()
+        && !request.has_unpaired_tool_output()
     {
         let mut reset_request = request.clone();
         if reset_request.drop_previous_response_id() {
@@ -785,11 +1199,22 @@ async fn connect_upstream(
                 reset_request,
                 false,
                 attempt,
+                retry_deadline,
             ))
             .await;
         }
     }
 
+    if retry_window_expired {
+        return Err(GatewayFailure::classified(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+            ErrorOrigin::Relay,
+        ));
+    }
+    if let Some(origin) = websocket_http_fallback_origin {
+        return Err(GatewayFailure::websocket_http_fallback(origin));
+    }
     if let Some(retry_at_ms) = runtime.earliest_retry_at(
         key,
         &request.resolved_model,
@@ -801,6 +1226,108 @@ async fn connect_upstream(
         return Err(GatewayFailure::cooldown(retry_at_ms));
     }
     Err(last_failure.unwrap_or_else(GatewayFailure::unavailable))
+}
+
+/// Keeps a persistent pre-output retry cancellable by the client. Candidate
+/// recovery may wait indefinitely, but a closed client WebSocket must release
+/// the request and its lease immediately.
+#[allow(clippy::too_many_arguments)]
+async fn connect_upstream_while_client_connected(
+    downstream: &mut WebSocket,
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    client_headers: &HeaderMap,
+    request: ClientRequest,
+    allow_previous_response_reset: bool,
+    attempt_offset: u16,
+    retry_deadline: Option<TokioInstant>,
+) -> Result<Connected, GatewayFailure> {
+    await_while_client_connected(
+        downstream,
+        connect_upstream(
+            runtime,
+            key,
+            client_headers,
+            request,
+            allow_previous_response_reset,
+            attempt_offset,
+            retry_deadline,
+        ),
+    )
+    .await?
+}
+
+async fn await_while_client_connected<F: std::future::Future>(
+    downstream: &mut WebSocket,
+    future: F,
+) -> Result<F::Output, GatewayFailure> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            message = downstream.recv() => {
+                match message {
+                    Some(Ok(Message::Ping(payload))) => {
+                        downstream
+                            .send(Message::Pong(payload))
+                            .await
+                            .map_err(|_| GatewayFailure::client_closed())?;
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                        return Err(GatewayFailure::client_closed());
+                    }
+                    Some(Ok(Message::Text(_))) | Some(Ok(Message::Binary(_))) => {
+                        return Err(GatewayFailure::invalid_request(
+                            "a response is already in progress",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retry_upstream_connection(
+    downstream: &mut WebSocket,
+    upstream: &mut UpstreamWebSocket,
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    headers: &HeaderMap,
+    state: &mut BridgeState,
+    request: ClientRequest,
+    attempt_offset: u16,
+    retry_deadline: Option<TokioInstant>,
+    request_id: Option<&str>,
+) -> bool {
+    match connect_upstream_while_client_connected(
+        downstream,
+        runtime,
+        key,
+        headers,
+        request,
+        true,
+        attempt_offset,
+        retry_deadline,
+    )
+    .await
+    {
+        Ok(connected) => {
+            install_connected(downstream, upstream, runtime, key, state, connected).await
+        }
+        Err(retry_failure) => {
+            send_gateway_error(downstream, &retry_failure, request_id).await;
+            false
+        }
+    }
+}
+
+fn websocket_retry_backoff(attempt: u32) -> Duration {
+    let exponent = attempt.min(6);
+    let base_ms = 100u64.saturating_mul(1u64 << exponent);
+    let jitter_ms = u64::from((attempt.wrapping_mul(37)) % 100);
+    Duration::from_millis((base_ms + jitter_ms).min(5_000))
 }
 
 async fn initial_application_messages(
@@ -820,9 +1347,8 @@ async fn initial_application_messages(
         if buffered_bytes > MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2) {
             return Err(GatewayFailure::message_too_large(origin));
         }
-        let committed = initial_message_state(&message)
-            .map(|(has_output, terminal)| has_output || terminal.outcome.is_some())
-            .unwrap_or(true);
+        let (has_output, terminal) = initial_message_state(&message);
+        let committed = has_output || terminal.outcome.is_some();
         messages.push(message);
         if committed {
             return Ok(messages);
@@ -872,18 +1398,60 @@ async fn first_application_message(
 }
 
 fn first_message_terminal(message: &UpstreamMessage) -> Option<EventTerminal> {
-    initial_message_state(message).map(|(_, terminal)| terminal)
+    Some(initial_message_state(message).1)
 }
 
-fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTerminal)> {
+fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTerminal) {
     let payload = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
-        _ => return None,
+        // This function is only called for application messages, but retain
+        // conservative behavior if that invariant changes.
+        _ => return (true, EventTerminal::default()),
     };
-    let value = serde_json::from_slice::<Value>(payload).ok()?;
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        // A malformed frame has already reached the bridge and must never be
+        // replayed to another account as if it were setup metadata.
+        return (true, EventTerminal::default());
+    };
     let event_type = value.get("type").and_then(Value::as_str);
-    Some((has_output_delta(&value, event_type), event_terminal(&value)))
+    (
+        has_semantic_output(&value, event_type),
+        event_terminal(&value),
+    )
+}
+
+fn initial_messages_are_empty_incomplete(messages: &[UpstreamMessage]) -> bool {
+    let payloads = messages
+        .iter()
+        .filter_map(|message| match message {
+            UpstreamMessage::Text(text) => serde_json::from_slice(text.as_bytes()).ok(),
+            UpstreamMessage::Binary(bytes) => serde_json::from_slice(bytes.as_ref()).ok(),
+            _ => None,
+        })
+        .collect::<Vec<Value>>();
+    initial_payloads_are_empty_incomplete(&payloads)
+}
+
+fn initial_payloads_are_empty_incomplete(payloads: &[Value]) -> bool {
+    let Some(terminal) = payloads.last() else {
+        return false;
+    };
+    if terminal.get("type").and_then(Value::as_str) != Some("response.incomplete") {
+        return false;
+    }
+    let saw_output = payloads
+        .iter()
+        .any(|payload| has_semantic_output(payload, payload.get("type").and_then(Value::as_str)));
+    let completed_output_items = payloads
+        .iter()
+        .filter(|payload| {
+            let event_type = payload.get("type").and_then(Value::as_str);
+            event_type == Some("response.output_item.done")
+                && !is_compaction_payload(payload, event_type)
+        })
+        .count();
+    is_empty_responses_incomplete(terminal, saw_output, completed_output_items)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1030,6 +1598,9 @@ fn upstream_headers(
     let mut headers = forwarded_codex_headers(client_headers, request_id);
     headers.insert(AUTHORIZATION, prepared.authorization.clone());
     if let Some(identity) = prepared.identity.as_ref() {
+        let identity = codex_client_version(client_headers)
+            .and_then(|version| identity.with_client_version(version).ok())
+            .unwrap_or_else(|| identity.clone());
         identity.insert(&mut headers);
     }
     if responses_lite {
@@ -1076,9 +1647,13 @@ struct InFlight {
     started: Instant,
     response_id: Option<String>,
     prompt_affinity_key: Option<String>,
+    retry_deadline: Option<TokioInstant>,
+    client_visible_output: bool,
+    legacy_call_id_repair_attempted: bool,
 }
 
 struct BridgeState {
+    local_key_id: String,
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
     stream_id: Option<String>,
@@ -1088,6 +1663,12 @@ struct BridgeState {
 }
 
 impl BridgeState {
+    fn can_send_gateway_error(&self) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_none_or(|in_flight| !in_flight.client_visible_output)
+    }
+
     fn request_id(&self) -> Option<&str> {
         self.in_flight
             .as_ref()
@@ -1120,6 +1701,7 @@ async fn bridge(
     let upstream_origin = route_error_origin(&connected.route);
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
     let mut state = BridgeState {
+        local_key_id: key.id.clone(),
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
             request: connected.request.clone(),
@@ -1128,6 +1710,9 @@ async fn bridge(
             started: connected.started,
             response_id: None,
             prompt_affinity_key,
+            retry_deadline: connected.retry_deadline,
+            client_visible_output: false,
+            legacy_call_id_repair_attempted: false,
         }),
         stream_id: connected.request.stream_id.clone(),
         upstream_candidate_id,
@@ -1162,16 +1747,19 @@ async fn bridge(
         tokio::select! {
             _ = sleep_until(semantic_deadline), if semantic_waiting => {
                 let request_id = state.request_id().map(str::to_owned);
+                let can_send_error = state.can_send_gateway_error();
                 finish_incomplete(&runtime, &mut state, "stream_semantic_timeout");
+                if can_send_error {
                 send_gateway_error(
                     &mut downstream,
                     &GatewayFailure::semantic_timeout(state.upstream_origin),
                     request_id.as_deref(),
                 ).await;
+                }
                 break;
             }
             _ = sleep_until(idle_deadline) => {
-                let active_request = state.in_flight.is_some();
+                let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
                 let request_id = state.request_id().map(str::to_owned);
                 finish_incomplete(&runtime, &mut state, "websocket_idle_timeout");
                 if active_request {
@@ -1190,7 +1778,7 @@ async fn bridge(
             }
             _ = heartbeat.tick() => {
                 if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
-                    let active_request = state.in_flight.is_some();
+                    let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
                     let request_id = state.request_id().map(str::to_owned);
                     finish_incomplete(&runtime, &mut state, "upstream_websocket");
                     if active_request {
@@ -1226,8 +1814,11 @@ async fn bridge(
                     Ok(false) => break,
                     Err(failure) => {
                         let request_id = state.request_id().map(str::to_owned);
+                        let can_send_error = state.can_send_gateway_error();
                         finish_incomplete(&runtime, &mut state, failure.category);
+                        if can_send_error {
                         send_gateway_error(&mut downstream, &failure, request_id.as_deref()).await;
+                        }
                         break;
                     }
                 }
@@ -1258,46 +1849,33 @@ async fn bridge(
                             .as_ref()
                             .map(|in_flight| in_flight.event.attempt)
                             .unwrap_or_default();
+                        let retry_deadline = state
+                            .in_flight
+                            .as_ref()
+                            .and_then(|in_flight| in_flight.retry_deadline);
                         finish_incomplete(&runtime, &mut state, category);
-                        match connect_upstream(
+                        if retry_upstream_connection(
+                            &mut downstream,
+                            &mut upstream,
                             &runtime,
                             &key,
                             &headers,
+                            &mut state,
                             request,
-                            true,
                             attempt_offset,
+                            retry_deadline,
+                            request_id.as_deref(),
                         )
                         .await
                         {
-                            Ok(connected) => {
-                                if !install_connected(
-                                    &mut downstream,
-                                    &mut upstream,
-                                    &runtime,
-                                    &key,
-                                    &mut state,
-                                    connected,
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                                continue;
-                            }
-                            Err(retry_failure) => {
-                                send_gateway_error(
-                                    &mut downstream,
-                                    &retry_failure,
-                                    request_id.as_deref(),
-                                )
-                                .await;
-                                break;
-                            }
+                            continue;
                         }
+                        break;
                     }
                     let active_request = state.in_flight.is_some();
+                    let can_send_error = state.can_send_gateway_error();
                     finish_incomplete(&runtime, &mut state, category);
-                    if active_request {
+                    if active_request && can_send_error {
                         if let Some(failure) = failure {
                             send_gateway_error(
                                 &mut downstream,
@@ -1306,9 +1884,91 @@ async fn bridge(
                             )
                             .await;
                         }
+                    } else if active_request {
+                        let _ = downstream
+                            .send(Message::Close(Some(CloseFrame {
+                                code: close_code::ERROR,
+                                reason: "upstream stream ended after output".into(),
+                            })))
+                            .await;
                     }
                     break;
                 };
+                if let Some(request) = repairable_terminal_request(&mut state, &message) {
+                    let request_id = state.request_id().map(str::to_owned);
+                    let attempt_offset = state
+                        .in_flight
+                        .as_ref()
+                        .map(|in_flight| in_flight.event.attempt)
+                        .unwrap_or_default();
+                    let retry_deadline = state
+                        .in_flight
+                        .as_ref()
+                        .and_then(|in_flight| in_flight.retry_deadline);
+                    let terminal = match &message {
+                        UpstreamMessage::Text(text) => {
+                            inspect_upstream_event(text.as_bytes(), &mut state)
+                        }
+                        UpstreamMessage::Binary(bytes) => inspect_upstream_event(bytes, &mut state),
+                        _ => EventTerminal::default(),
+                    };
+                    finish_terminal(&runtime, &mut state, terminal);
+                    if retry_upstream_connection(
+                        &mut downstream,
+                        &mut upstream,
+                        &runtime,
+                        &key,
+                        &headers,
+                        &mut state,
+                        request,
+                        attempt_offset,
+                        retry_deadline,
+                        request_id.as_deref(),
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    break;
+                }
+                if let Some(request) = retryable_terminal_request(&runtime, &state, &message) {
+                    let request_id = state.request_id().map(str::to_owned);
+                    let attempt_offset = state
+                        .in_flight
+                        .as_ref()
+                        .map(|in_flight| in_flight.event.attempt)
+                        .unwrap_or_default();
+                    let retry_deadline = state
+                        .in_flight
+                        .as_ref()
+                        .and_then(|in_flight| in_flight.retry_deadline);
+                    let terminal = match &message {
+                        UpstreamMessage::Text(text) => inspect_upstream_event(text.as_bytes(), &mut state),
+                        UpstreamMessage::Binary(bytes) => inspect_upstream_event(bytes, &mut state),
+                        _ => EventTerminal::default(),
+                    };
+                    // Do not expose a retryable pre-output terminal failure to
+                    // the client. `finish_terminal` retains its usual health,
+                    // quota, telemetry, and lease-settlement behavior first.
+                    finish_terminal(&runtime, &mut state, terminal);
+                    if retry_upstream_connection(
+                        &mut downstream,
+                        &mut upstream,
+                        &runtime,
+                        &key,
+                        &headers,
+                        &mut state,
+                        request,
+                        attempt_offset,
+                        retry_deadline,
+                        request_id.as_deref(),
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    break;
+                }
                 if !handle_upstream_message(&mut downstream, &runtime, &mut state, message).await {
                     break;
                 }
@@ -1319,7 +1979,8 @@ async fn bridge(
 
 fn retryable_disconnect_request(state: &BridgeState) -> Option<ClientRequest> {
     let in_flight = state.in_flight.as_ref()?;
-    if in_flight.request.has_previous_response_id()
+    if in_flight.client_visible_output
+        || in_flight.request.has_previous_response_id()
         || in_flight.request.has_tool_call_output()
         || in_flight.event.ttft_ms.is_some()
         || in_flight.event.output_tokens.is_some()
@@ -1329,6 +1990,85 @@ fn retryable_disconnect_request(state: &BridgeState) -> Option<ClientRequest> {
         return None;
     }
     Some(in_flight.request.clone())
+}
+
+fn retryable_terminal_request(
+    runtime: &GatewayRuntime,
+    state: &BridgeState,
+    message: &UpstreamMessage,
+) -> Option<ClientRequest> {
+    let terminal = first_message_terminal(message)?;
+    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
+        return None;
+    }
+    let in_flight = state.in_flight.as_ref()?;
+    if in_flight.client_visible_output
+        || !runtime.chatgpt_retry_until_available()
+        || !in_flight.request.wait_for_candidate_availability
+        || in_flight.request.has_previous_response_id()
+        || in_flight.request.has_tool_call_output()
+        || in_flight.event.ttft_ms.is_some()
+        || in_flight.event.output_tokens.is_some()
+        || in_flight.event.tool_use.tool_call_count > 0
+        || in_flight.event.tool_use.text_output
+    {
+        return None;
+    }
+    let category = terminal.error_category.unwrap_or_else(|| {
+        super::errors::classify_upstream_error(terminal_failure_status(terminal.status), None)
+            .category
+    });
+    let status = terminal
+        .status
+        .filter(|status| !status.is_success())
+        .unwrap_or_else(|| super::errors::upstream_failure_status(category));
+    let status = super::errors::canonical_upstream_status(status, category);
+    if !super::errors::retryable_failure(status, category, false)
+        || matches!(
+            category,
+            "upstream_unauthorized"
+                | "upstream_account_disabled"
+                | "upstream_usage_not_included"
+                | "upstream_region_unsupported"
+                | "upstream_model_not_found"
+                | "upstream_model_unsupported"
+                | "upstream_forbidden"
+                | "upstream_content_policy"
+                | "upstream_invalid_request"
+                | "upstream_candidate_rejected"
+        )
+    {
+        return None;
+    }
+    Some(in_flight.request.clone())
+}
+
+fn repairable_terminal_request(
+    state: &mut BridgeState,
+    message: &UpstreamMessage,
+) -> Option<ClientRequest> {
+    let terminal = first_message_terminal(message)?;
+    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
+        return None;
+    }
+    let body = match message {
+        UpstreamMessage::Text(text) => Some(text.as_bytes()),
+        UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
+        _ => None,
+    }?;
+    if !super::errors::responses_call_id_is_missing(body) {
+        return None;
+    }
+    let in_flight = state.in_flight.as_mut()?;
+    if in_flight.client_visible_output || in_flight.legacy_call_id_repair_attempted {
+        return None;
+    }
+    let mut request = in_flight.request.clone();
+    if !request.repair_legacy_call_ids() {
+        return None;
+    }
+    in_flight.legacy_call_id_repair_attempted = true;
+    Some(request)
 }
 
 async fn install_connected(
@@ -1347,20 +2087,8 @@ async fn install_connected(
         lease,
         attempt,
         started,
+        retry_deadline,
     } = connected;
-    let event = usage_event(
-        &request.request_id,
-        attempt,
-        &key.id,
-        &route,
-        Some(&request.reasoning_effort_for(&route)),
-        &request.requested_model,
-        true,
-        StatusCode::OK.as_u16(),
-        None,
-        0,
-        request.tool_use_for(&route),
-    );
     let _ = upstream
         .send(UpstreamMessage::Close {
             code: UpstreamCloseCode::Normal,
@@ -1368,24 +2096,19 @@ async fn install_connected(
         })
         .await;
     *upstream = next_upstream;
-    state.lease = Some(lease);
-    state.upstream_candidate_id = route.candidate_id.clone();
-    state.upstream_origin = route_error_origin(&route);
-    state.last_response_id = None;
-    state.in_flight = Some(InFlight {
-        request: request.clone(),
-        route,
-        event,
-        started,
-        response_id: None,
-        prompt_affinity_key: request.prompt_affinity_key,
-    });
-    for message in initial_messages {
-        if !handle_upstream_message(downstream, runtime, state, message).await {
-            return false;
-        }
-    }
-    true
+    install_in_flight(
+        state,
+        key,
+        InFlightInstall {
+            request,
+            route,
+            lease,
+            attempt,
+            started,
+            retry_deadline,
+        },
+    );
+    handle_initial_messages(downstream, runtime, state, initial_messages).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1471,10 +2194,27 @@ async fn start_next_request(
             state.stream_id = Some(stream_id.to_string());
         }
     }
-    if request
+    let same_response_id = request
         .previous_response_id()
-        .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
-    {
+        .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref());
+    let response_affinity_key = request.response_affinity_key.clone();
+    let model_switch_reset = same_response_id
+        && !request.has_unpaired_tool_output()
+        && response_affinity_key.as_deref().and_then(|affinity_key| {
+            runtime.response_affinity_owner_supports_route(
+                key,
+                affinity_key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                now_ms(),
+            )
+        }) == Some(false)
+        && request.drop_previous_response_id();
+    if model_switch_reset {
+        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+        state.last_response_id = None;
+    }
+    if same_response_id && !model_switch_reset {
         let tried = HashSet::new();
         let selected = runtime
             .select_and_reserve(
@@ -1490,6 +2230,21 @@ async fn start_next_request(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            // The owner can become temporarily ineligible while this client
+            // WebSocket stays open because another chat consumed its quota.
+            // Reuse would fail before reaching the owner, so reconnect through
+            // the normal bounded replay path. That path materializes the local
+            // Responses history and removes the opaque owner reference before
+            // choosing a compatible account or API source.
+            if request.has_previous_response_id() && request.requires_affinity_owner {
+                let connected = connect_upstream_while_client_connected(
+                    downstream, runtime, key, headers, request, false, 0, None,
+                )
+                .await?;
+                return Ok(
+                    install_connected(downstream, upstream, runtime, key, state, connected).await,
+                );
+            }
             if let Some(retry_at_ms) = runtime.earliest_retry_at(
                 key,
                 &request.resolved_model,
@@ -1518,7 +2273,7 @@ async fn start_next_request(
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(headers);
         request.apply_service_tier_for_route(runtime, &route);
-        route.service_tier = request.service_tier();
+        route.service_tier = request.service_tier(runtime, &route);
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
         if let Err(failure) =
@@ -1549,10 +2304,18 @@ async fn start_next_request(
             started,
             response_id: None,
             prompt_affinity_key: request.prompt_affinity_key,
+            retry_deadline: (!runtime.chatgpt_retry_until_available()).then(|| {
+                TokioInstant::now() + Duration::from_millis(runtime.chatgpt_retry_window_ms())
+            }),
+            client_visible_output: false,
+            legacy_call_id_repair_attempted: false,
         });
         return Ok(true);
     }
-    let connected = connect_upstream(runtime, key, headers, request, true, 0).await?;
+    let connected = connect_upstream_while_client_connected(
+        downstream, runtime, key, headers, request, true, 0, None,
+    )
+    .await?;
     let Connected {
         upstream: next_upstream,
         initial_messages,
@@ -1561,7 +2324,62 @@ async fn start_next_request(
         lease,
         attempt,
         started,
+        retry_deadline,
     } = connected;
+    let _ = upstream
+        .send(UpstreamMessage::Close {
+            code: UpstreamCloseCode::Normal,
+            reason: String::new(),
+        })
+        .await;
+    *upstream = next_upstream;
+    install_in_flight(
+        state,
+        key,
+        InFlightInstall {
+            request,
+            route,
+            lease,
+            attempt,
+            started,
+            retry_deadline,
+        },
+    );
+    Ok(handle_initial_messages(downstream, runtime, state, initial_messages).await)
+}
+
+async fn handle_initial_messages(
+    downstream: &mut WebSocket,
+    runtime: &GatewayRuntime,
+    state: &mut BridgeState,
+    initial_messages: Vec<UpstreamMessage>,
+) -> bool {
+    for message in initial_messages {
+        if !handle_upstream_message(downstream, runtime, state, message).await {
+            return false;
+        }
+    }
+    true
+}
+
+struct InFlightInstall {
+    request: ClientRequest,
+    route: ExecutorRoute,
+    lease: CandidateLease,
+    attempt: u16,
+    started: Instant,
+    retry_deadline: Option<TokioInstant>,
+}
+
+fn install_in_flight(state: &mut BridgeState, key: &AuthenticatedKey, install: InFlightInstall) {
+    let InFlightInstall {
+        request,
+        route,
+        lease,
+        attempt,
+        started,
+        retry_deadline,
+    } = install;
     let event = usage_event(
         &request.request_id,
         attempt,
@@ -1575,13 +2393,6 @@ async fn start_next_request(
         0,
         request.tool_use_for(&route),
     );
-    let _ = upstream
-        .send(UpstreamMessage::Close {
-            code: UpstreamCloseCode::Normal,
-            reason: String::new(),
-        })
-        .await;
-    *upstream = next_upstream;
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
     state.upstream_origin = route_error_origin(&route);
@@ -1593,13 +2404,10 @@ async fn start_next_request(
         started,
         response_id: None,
         prompt_affinity_key: request.prompt_affinity_key,
+        retry_deadline,
+        client_visible_output: false,
+        legacy_call_id_repair_attempted: false,
     });
-    for message in initial_messages {
-        if !handle_upstream_message(downstream, runtime, state, message).await {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 async fn handle_upstream_message(
@@ -1612,16 +2420,20 @@ async fn handle_upstream_message(
         UpstreamMessage::Text(text) => {
             if text.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
                 let request_id = state.request_id().map(str::to_owned);
+                let can_send_error = state.can_send_gateway_error();
                 finish_incomplete(runtime, state, "stream_event_too_large");
-                send_gateway_error(
-                    downstream,
-                    &GatewayFailure::message_too_large(state.upstream_origin),
-                    request_id.as_deref(),
-                )
-                .await;
+                if can_send_error {
+                    send_gateway_error(
+                        downstream,
+                        &GatewayFailure::message_too_large(state.upstream_origin),
+                        request_id.as_deref(),
+                    )
+                    .await;
+                }
                 return false;
             }
             let terminal = inspect_upstream_event(text.as_bytes(), state);
+            mark_client_visible_output(state, text.as_bytes());
             if downstream.send(Message::Text(text.into())).await.is_err() {
                 finish_incomplete(runtime, state, "client_cancelled");
                 return false;
@@ -1631,16 +2443,20 @@ async fn handle_upstream_message(
         UpstreamMessage::Binary(bytes) => {
             if bytes.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
                 let request_id = state.request_id().map(str::to_owned);
+                let can_send_error = state.can_send_gateway_error();
                 finish_incomplete(runtime, state, "stream_event_too_large");
-                send_gateway_error(
-                    downstream,
-                    &GatewayFailure::message_too_large(state.upstream_origin),
-                    request_id.as_deref(),
-                )
-                .await;
+                if can_send_error {
+                    send_gateway_error(
+                        downstream,
+                        &GatewayFailure::message_too_large(state.upstream_origin),
+                        request_id.as_deref(),
+                    )
+                    .await;
+                }
                 return false;
             }
             let terminal = inspect_upstream_event(&bytes, state);
+            mark_client_visible_output(state, bytes.as_ref());
             if downstream.send(Message::Binary(bytes)).await.is_err() {
                 finish_incomplete(runtime, state, "client_cancelled");
                 return false;
@@ -1650,7 +2466,7 @@ async fn handle_upstream_message(
         UpstreamMessage::Ping(payload) => downstream.send(Message::Ping(payload)).await.is_ok(),
         UpstreamMessage::Pong(payload) => downstream.send(Message::Pong(payload)).await.is_ok(),
         UpstreamMessage::Close { code, reason } => {
-            let active_request = state.in_flight.is_some();
+            let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
             let request_id = state.request_id().map(str::to_owned);
             finish_incomplete(runtime, state, "upstream_websocket_closed");
             if active_request {
@@ -1671,6 +2487,32 @@ async fn handle_upstream_message(
             false
         }
     }
+}
+
+/// Mark a request as owned by the selected route only after the upstream has
+/// emitted semantic response output. Lifecycle/setup events such as
+/// `response.created` are still forwarded to the client, but they do not make
+/// a pre-output reconnect unsafe. Unknown or malformed frames remain
+/// conservative and count as visible output.
+fn mark_client_visible_output(state: &mut BridgeState, payload: &[u8]) {
+    if semantic_output_payload(payload) {
+        if let Some(in_flight) = state.in_flight.as_mut() {
+            in_flight.client_visible_output = true;
+        }
+    }
+}
+
+fn semantic_output_payload(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return true;
+    };
+    let event_type = value.get("type").and_then(Value::as_str);
+    if has_semantic_output(&value, event_type) {
+        return true;
+    }
+    // Compaction and known lifecycle notifications are setup/state. A future
+    // event is safer to classify as visible than to replay it to a client.
+    !is_known_non_output_event(&value, event_type)
 }
 
 fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTerminal {
@@ -1749,6 +2591,16 @@ fn finish_terminal(
         state.last_response_id = in_flight.response_id.clone();
     }
     if terminal_success {
+        if let Some(response) = terminal.response.as_ref() {
+            runtime.capture_native_responses_replay(
+                &state.local_key_id,
+                &in_flight.route.candidate_id,
+                &in_flight.request.native_replay_value(),
+                &in_flight.route.source_model,
+                response,
+                now_ms(),
+            );
+        }
         let recovered = runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
@@ -1848,9 +2700,11 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
 mod tests {
     use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
     use super::{
-        event_terminal, fallback_response_origin, incomplete_requires_cooldown,
-        terminal_failure_status, ClientRequest, EventTerminalOutcome, GatewayFailure,
-        RELAY_ERROR_ORIGIN_HEADER, RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS,
+        event_terminal, fallback_event_message, fallback_response_origin,
+        incomplete_requires_cooldown, initial_payloads_are_empty_incomplete,
+        semantic_output_payload, terminal_failure_status, ClientRequest, EventTerminalOutcome,
+        GatewayFailure, MAX_SSE_EVENT_BYTES, MAX_WEBSOCKET_ERROR_BYTES, RELAY_ERROR_ORIGIN_HEADER,
+        RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS,
     };
     use crate::{
         ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
@@ -1910,6 +2764,113 @@ mod tests {
         assert_eq!(terminal.outcome, Some(EventTerminalOutcome::Incomplete));
         assert_eq!(terminal.error_category, Some("response_incomplete"));
         assert!(!incomplete_requires_cooldown("response_incomplete"));
+    }
+
+    #[test]
+    fn websocket_bootstrap_retries_only_empty_zero_token_incomplete() {
+        let empty = vec![
+            json!({"type": "response.created", "response": {"id": "resp_1"}}),
+            json!({
+                "type": "response.incomplete",
+                "response": {"output": [], "usage": {"output_tokens": 0}}
+            }),
+        ];
+        assert!(initial_payloads_are_empty_incomplete(&empty));
+
+        let with_reasoning = vec![
+            json!({"type": "response.reasoning_text.delta", "delta": "thinking"}),
+            json!({
+                "type": "response.incomplete",
+                "response": {"output": [], "usage": {"output_tokens": 0}}
+            }),
+        ];
+        assert!(!initial_payloads_are_empty_incomplete(&with_reasoning));
+
+        let with_completed_item = vec![
+            json!({"type": "response.output_item.done", "item": {"type": "message"}}),
+            json!({
+                "type": "response.incomplete",
+                "response": {"output": [], "usage": {"output_tokens": 0}}
+            }),
+        ];
+        assert!(!initial_payloads_are_empty_incomplete(&with_completed_item));
+
+        let non_zero = vec![json!({
+            "type": "response.incomplete",
+            "response": {"output": [], "usage": {"output_tokens": 1}}
+        })];
+        assert!(!initial_payloads_are_empty_incomplete(&non_zero));
+    }
+
+    #[test]
+    fn websocket_setup_events_do_not_commit_route_ownership() {
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.created","response":{"id":"resp_1"}}"#
+        ));
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.in_progress","response":{"id":"resp_1"}}"#
+        ));
+        assert!(semantic_output_payload(
+            br#"{"type":"response.output_text.delta","delta":"hello"}"#
+        ));
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.compaction.delta","opaque":true}"#
+        ));
+        assert!(!semantic_output_payload(
+            br#"{"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"opaque"}}"#
+        ));
+    }
+
+    #[test]
+    fn websocket_unknown_or_malformed_frames_are_conservative() {
+        assert!(semantic_output_payload(
+            br#"{"type":"response.future_output_event"}"#
+        ));
+        assert!(semantic_output_payload(b"not-json"));
+    }
+
+    #[test]
+    fn http_fallback_preserves_opaque_compaction_data() {
+        let terminal = super::parse_sse_event(
+            b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
+        );
+        let message = fallback_event_message(&terminal, ErrorOrigin::Account)
+            .ok()
+            .flatten()
+            .expect("opaque compaction must produce a WebSocket message");
+
+        assert!(!message.semantic_output);
+        match message.message {
+            axum::extract::ws::Message::Text(text) => {
+                assert_eq!(text.to_string(), "encrypted-compaction-fragment")
+            }
+            other => assert!(
+                matches!(other, axum::extract::ws::Message::Text(_)),
+                "UTF-8 compaction data should remain a text message"
+            ),
+        }
+    }
+
+    #[test]
+    fn http_fallback_does_not_commit_response_setup_events() {
+        let terminal = super::parse_sse_event(
+            br#"data: {"type":"response.created","response":{"id":"resp_setup"}}
+
+"#,
+        );
+        let message = fallback_event_message(&terminal, ErrorOrigin::Account)
+            .ok()
+            .flatten()
+            .expect("setup event must still be forwarded");
+
+        assert!(!message.semantic_output);
+    }
+
+    #[test]
+    fn sse_fallback_limit_is_wider_than_the_error_body_limit() {
+        assert_eq!(MAX_WEBSOCKET_ERROR_BYTES, 1024 * 1024);
+        assert_eq!(MAX_SSE_EVENT_BYTES, 16 * 1024 * 1024);
+        const _: () = assert!(MAX_SSE_EVENT_BYTES > MAX_WEBSOCKET_ERROR_BYTES);
     }
 
     #[test]
@@ -2045,7 +3006,7 @@ mod tests {
             crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
             HeaderValue::from_static("true"),
         );
-        let request = ClientRequest::parse(
+        let request_result = ClientRequest::parse(
             &runtime,
             &key,
             &headers,
@@ -2055,8 +3016,11 @@ mod tests {
                 "previous_response_id": "resp_previous",
                 "prompt_cache_key": "cache-key"
             }"#,
-        )
-        .unwrap_or_else(|_| panic!("request should be accepted"));
+        );
+        assert!(request_result.is_ok(), "request should be accepted");
+        let Ok(request) = request_result else {
+            return;
+        };
         let route = runtime
             .executor_route(
                 "source",
@@ -2066,12 +3030,12 @@ mod tests {
                 false,
             )
             .unwrap();
-        let payload: serde_json::Value = serde_json::from_str(
-            &request
-                .payload_for(&route)
-                .unwrap_or_else(|_| panic!("request should be serializable")),
-        )
-        .unwrap();
+        let payload_result = request.payload_for(&route);
+        assert!(payload_result.is_ok(), "request should be serializable");
+        let Ok(payload_text) = payload_result else {
+            return;
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload_text).unwrap();
 
         assert_eq!(request.requested_model, "relay/upstream-model");
         assert_eq!(request.resolved_model, "upstream-model");
@@ -2081,6 +3045,91 @@ mod tests {
         assert_eq!(payload["type"], "response.create");
         assert_eq!(payload["model"], "upstream-model");
         assert_eq!(payload["input"], "hello");
+    }
+
+    #[test]
+    fn websocket_lite_contract_is_normalized_before_non_account_routing() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        let request_result = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": "hello",
+                "parallel_tool_calls": true
+            }"#,
+        );
+        assert!(request_result.is_ok(), "request should be accepted");
+        let Ok(request) = request_result else {
+            return;
+        };
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .expect("test source should be routable");
+        let payload_result = request.payload_for(&route);
+        assert!(payload_result.is_ok(), "request should serialize");
+        let Ok(payload_bytes) = payload_result else {
+            return;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
+
+        assert_eq!(payload["parallel_tool_calls"], false);
+        assert!(request.responses_lite_for(&route));
+    }
+
+    #[test]
+    fn websocket_lite_contract_rejects_non_boolean_parallel_tools() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        let parse_result = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": "hello",
+                "parallel_tool_calls": "yes"
+            }"#,
+        );
+        assert!(
+            parse_result.is_err(),
+            "non-boolean Lite tool setting must be rejected"
+        );
+        let error = match parse_result {
+            Err(error) => error,
+            Ok(_) => return,
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "responses Lite requires parallel_tool_calls to be a boolean"
+        );
     }
 
     #[test]
@@ -2181,5 +3230,58 @@ mod tests {
             Some(&json!("item_reasoning"))
         );
         assert!(!request.repair_message_item_ids());
+    }
+
+    #[test]
+    fn websocket_request_repairs_legacy_call_ids_and_recomputes_affinity() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let request_result = ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            br#"{
+                "type": "response.create",
+                "model": "relay/upstream-model",
+                "input": [
+                    {"type":"function_call_output","output":"orphan"},
+                    {"type":"function_call","name":"lookup","arguments":"{}"},
+                    {"type":"function_call_output","output":"result"}
+                ]
+            }"#,
+        );
+        assert!(request_result.is_ok(), "request should be accepted");
+        let Ok(mut request) = request_result else {
+            return;
+        };
+
+        assert!(!request.has_unpaired_tool_output());
+        assert!(request.repair_legacy_call_ids());
+        assert!(!request.has_unpaired_tool_output());
+        assert!(!request.requires_affinity_owner);
+
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .expect("test source should be routable");
+        let payload_result = request.payload_for(&route);
+        assert!(payload_result.is_ok(), "request should serialize");
+        let Ok(payload_bytes) = payload_result else {
+            return;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
+        let input = payload["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], input[1]["call_id"]);
+        assert!(!request.repair_legacy_call_ids());
     }
 }

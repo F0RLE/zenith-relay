@@ -31,25 +31,27 @@
 }
 
 .model-rules > .relay-table-wrap {
-  margin-top: 12px;
+  width: 100%;
+  margin-top: 16px;
   overflow-x: auto;
   border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: transparent;
+  border-radius: 10px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
 }
 
 .model-rules-table {
   width: 100%;
-  min-width: 0;
+  /* Keep the model identity and action buttons readable on compact windows;
+     the wrapper already provides horizontal scrolling when necessary. */
+  min-width: 680px;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
 }
 
-.model-rules-table col[data-column="model"] { width: 35%; }
-.model-rules-table col[data-column="price"] { width: 35%; }
-.model-rules-table col[data-column="speed"] { width: 12%; }
-.model-rules-table col[data-column="actions"] { width: 18%; }
+.model-rules-table col[data-column="model"] { width: 72%; }
+.model-rules-table col[data-column="actions"] { width: 28%; }
 
 .model-rules-table th,
 .model-rules-table td {
@@ -59,9 +61,9 @@
 }
 
 .model-rules-table thead th {
-  padding: 11px 12px 10px;
+  padding: 12px 16px 11px;
   border-bottom: 1px solid var(--relay-border);
-  background: color-mix(in srgb, var(--relay-subtle) 54%, transparent);
+  background: color-mix(in srgb, var(--relay-subtle) 72%, var(--relay-surface));
   color: var(--relay-muted);
   font-size: 10px;
   font-weight: 700;
@@ -70,17 +72,18 @@
 }
 
 .model-rules-table tbody tr[data-model-id] td {
-  padding: 12px 10px;
+  height: 68px;
+  padding: 11px 16px;
   border-bottom: 1px solid var(--relay-border);
-  background: transparent;
+  background: var(--relay-surface);
 }
 
 .model-rules-table tbody tr[data-model-id] td:first-child {
-  padding-left: 16px;
+  padding-left: 18px;
 }
 
 .model-rules-table tbody tr[data-model-id] td:last-child {
-  padding-right: 14px;
+  padding-right: 18px;
 }
 
 .model-rules-table tbody tr[data-model-id]:hover td,
@@ -96,11 +99,11 @@
 
 .model-rules-table .model-group-row th {
   position: static;
-  height: 40px;
-  padding: 8px 12px;
+  height: 46px;
+  padding: 9px 14px;
   border-top: 1px solid var(--relay-border);
   border-bottom: 1px solid var(--relay-border);
-  background: color-mix(in srgb, var(--relay-subtle) 58%, transparent);
+  background: color-mix(in srgb, var(--relay-subtle) 78%, var(--relay-surface));
   color: var(--relay-secondary);
   text-align: left;
 }
@@ -203,12 +206,12 @@
   display: inline-flex;
   align-items: center;
   min-width: min(100%, 420px);
-  gap: 5px;
+  gap: 7px;
 }
 
 .model-group-content small {
   color: var(--relay-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
 }
 
@@ -216,7 +219,7 @@
   min-width: 0;
   display: grid;
   justify-items: start;
-  gap: 3px;
+  gap: 4px;
 }
 
 .model-rule-identity code {
@@ -231,14 +234,15 @@
 .model-rule-identity > strong {
   max-width: 100%;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .model-rule-identity > strong + code {
   color: var(--relay-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
 }
 
@@ -386,8 +390,8 @@
 .model-rule-actions {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 5px;
+  justify-content: flex-end;
+  gap: 7px;
 }
 
 .model-rule-secondary-actions {
@@ -629,24 +633,43 @@
 }
 
 .model-speed-toggle {
-  width: 30px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.model-speed-select,
+.model-speed-select .relay-option-trigger {
+  width: 124px;
+  min-width: 0;
+}
+
+.model-speed-select .relay-option-trigger {
+  min-height: 30px;
   height: 30px;
+  padding: 3px 6px;
   border-radius: 6px;
   border-color: var(--relay-border-strong);
   color: var(--relay-muted);
 }
 
-.model-speed-toggle[aria-pressed="true"] {
+.model-speed-select .relay-option-trigger:hover,
+.model-speed-select .relay-option-trigger[aria-expanded="true"] {
   border-color: color-mix(in srgb, var(--relay-warning) 58%, var(--relay-border));
   background: color-mix(in srgb, var(--relay-warning) 14%, var(--relay-surface));
   color: var(--relay-warning);
 }
 
-.model-speed-toggle[aria-pressed="false"] {
+.model-speed-toggle[data-speed-tier="standard"] .relay-option-trigger {
   background: transparent;
 }
 
-.model-speed-toggle svg {
+.model-speed-toggle[data-speed-tier="ultrafast"] .relay-option-trigger {
+  border-color: color-mix(in srgb, var(--relay-warning) 70%, var(--relay-border));
+  color: var(--relay-warning);
+}
+
+.model-speed-select .relay-option-trigger > svg {
   width: 15px;
   height: 15px;
 }

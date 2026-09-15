@@ -53,6 +53,13 @@ pub struct QuotaRefreshData {
     pub limit_reached: bool,
     pub subscription: Option<SubscriptionInput>,
     pub reset_credits_available: Option<u32>,
+    /// Provider-reported credits, expressed in millionths of one credit.
+    /// A fresh positive balance keeps an otherwise exhausted account eligible.
+    pub available_credits_micro_units: Option<u64>,
+    #[serde(default)]
+    pub provider_credits_available: bool,
+    #[serde(default)]
+    pub provider_credits_unlimited: bool,
     #[serde(default)]
     pub direct_balance_micro_usd: Option<u64>,
     pub observed_at_ms: u64,
@@ -112,6 +119,9 @@ impl QuotaRefreshData {
                 supplemental,
                 limit_reached: self.limit_reached,
                 reset_credits_available: self.reset_credits_available,
+                available_credits_micro_units: self.available_credits_micro_units,
+                provider_credits_available: self.provider_credits_available,
+                provider_credits_unlimited: self.provider_credits_unlimited,
                 direct_balance_micro_usd: self.direct_balance_micro_usd,
                 updated_at_ms: Some(self.observed_at_ms),
                 error: None,

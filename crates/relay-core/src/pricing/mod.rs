@@ -252,6 +252,11 @@ pub struct PriceEvidence {
 pub struct SourcePricingMetadata {
     pub pricing_provider: Option<String>,
     pub official_provider_family: Option<String>,
+    /// Models for which this source has a confirmed Anthropic-style Messages
+    /// route. Cache creation prices are stripped for every other source/model
+    /// combination, including manual and LiteLLM fallback prices.
+    #[serde(default)]
+    pub cache_write_models: BTreeSet<String>,
 }
 
 /// Immutable, storage-neutral context used by usage and snapshot builders.
@@ -280,10 +285,15 @@ impl PricingContext {
         let Some(model) = model.filter(|value| !value.trim().is_empty()) else {
             return ResolvedPrice::unpriced(catalog.metadata());
         };
+        let context_id = if candidate_kind.eq_ignore_ascii_case("source") {
+            source_context_id(candidate_id)
+        } else {
+            candidate_id.to_string()
+        };
         let evidence = self
             .source_evidence
-            .get(candidate_id)
-            .or_else(|| self.source_evidence.get(&normalize(candidate_id)))
+            .get(&context_id)
+            .or_else(|| self.source_evidence.get(&normalize(&context_id)))
             .and_then(|prices| prices.get(&normalize(model)).copied());
         if candidate_kind.eq_ignore_ascii_case("account") {
             return catalog.resolve_account(
@@ -297,9 +307,9 @@ impl PricingContext {
         }
         let metadata = self
             .source_metadata
-            .get(candidate_id)
-            .or_else(|| self.source_metadata.get(&normalize(candidate_id)));
-        catalog.resolve_source(
+            .get(&context_id)
+            .or_else(|| self.source_metadata.get(&normalize(&context_id)));
+        let mut resolved = catalog.resolve_source(
             model,
             metadata.and_then(|value| value.pricing_provider.as_deref()),
             metadata.and_then(|value| value.official_provider_family.as_deref()),
@@ -307,7 +317,16 @@ impl PricingContext {
             evidence
                 .and_then(|value| value.manual)
                 .or_else(|| self.global_manual_prices.get(&normalize(model)).copied()),
-        )
+        );
+        let cache_write_allowed =
+            metadata.is_some_and(|value| value.cache_write_models.contains(&normalize(model)));
+        if !cache_write_allowed {
+            if let Some(quote) = resolved.quote.as_mut() {
+                quote.cache_write_5m = None;
+                quote.cache_write_1h = None;
+            }
+        }
+        resolved
     }
 
     /// A deterministic key for host-side derived caches.  The catalog
@@ -325,6 +344,25 @@ impl PricingContext {
             hex::encode(digest)
         )
     }
+}
+
+fn source_context_id(candidate_id: &str) -> String {
+    let Some((source_id, suffix)) = candidate_id.rsplit_once("::") else {
+        return candidate_id.to_string();
+    };
+    matches!(
+        suffix,
+        "responses"
+            | "responses_to_messages"
+            | "responses_to_gemini"
+            | "chat_completions"
+            | "messages"
+            | "gemini"
+            | "bridge"
+    )
+    .then_some(source_id)
+    .unwrap_or(candidate_id)
+    .to_string()
 }
 
 impl CatalogEntry {
@@ -417,22 +455,6 @@ impl PricingCatalog {
             conflicts,
             unique,
         })
-    }
-
-    /// Returns a stable rank for a model in the current catalog. LiteLLM is a
-    /// JSON object rather than an ordered model list, so the rank is only a
-    /// deterministic presentation hint and must never affect routing.
-    pub fn rank_for(&self, model: &str) -> Option<u32> {
-        let normalized = normalize(model);
-        self.entries
-            .keys()
-            .filter(|id| !self.conflicts.contains(&normalize(id)))
-            .enumerate()
-            .find_map(|(rank, id)| {
-                (normalize(id) == normalized || unqualified(id) == normalized)
-                    .then(|| u32::try_from(rank).ok())
-                    .flatten()
-            })
     }
 
     /// Projects LiteLLM image fields into request-level rows. LiteLLM often
@@ -809,6 +831,7 @@ mod tests {
                 SourcePricingMetadata {
                     pricing_provider: Some("openrouter".into()),
                     official_provider_family: None,
+                    cache_write_models: BTreeSet::new(),
                 },
             )]),
             source_evidence: BTreeMap::from([(
@@ -829,5 +852,66 @@ mod tests {
         assert_eq!(source.quote.unwrap(), provider);
         let account = context.candidate_price(&catalog, "account", "acct", Some("gpt-test"));
         assert_eq!(account.source, PriceSource::Unpriced);
+    }
+
+    #[test]
+    fn cache_creation_price_requires_a_messages_model_route() {
+        let price = TokenPrice {
+            input: 1_000_000,
+            cache_read: Some(100_000),
+            cache_write_5m: Some(1_250_000),
+            cache_write_1h: Some(2_500_000),
+            output: 2_000_000,
+        };
+        let context = PricingContext {
+            source_metadata: BTreeMap::from([
+                (
+                    "generic".into(),
+                    SourcePricingMetadata {
+                        cache_write_models: BTreeSet::new(),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "messages".into(),
+                    SourcePricingMetadata {
+                        cache_write_models: BTreeSet::from(["claude-test".into()]),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            source_evidence: BTreeMap::from([
+                (
+                    "generic".into(),
+                    BTreeMap::from([(
+                        "claude-test".into(),
+                        PriceEvidence {
+                            provider: Some(price),
+                            manual: None,
+                        },
+                    )]),
+                ),
+                (
+                    "messages".into(),
+                    BTreeMap::from([(
+                        "claude-test".into(),
+                        PriceEvidence {
+                            provider: Some(price),
+                            manual: None,
+                        },
+                    )]),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let catalog = PricingCatalog::empty();
+
+        let generic = context.candidate_price(&catalog, "source", "generic", Some("claude-test"));
+        assert_eq!(generic.quote.unwrap().cache_write_5m, None);
+        assert_eq!(generic.quote.unwrap().cache_write_1h, None);
+
+        let messages = context.candidate_price(&catalog, "source", "messages", Some("claude-test"));
+        assert_eq!(messages.quote.unwrap().cache_write_5m, Some(1_250_000));
+        assert_eq!(messages.quote.unwrap().cache_write_1h, Some(2_500_000));
     }
 }

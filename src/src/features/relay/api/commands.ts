@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AccountExportInput,
@@ -11,7 +11,10 @@ import type {
   ConfigurationPresetApplyResult,
   ConfigurationPresetPreview,
   ConsumeResetCreditResponse,
+  CredentialRefreshResult,
   DefaultServiceTier,
+  DiagnosticPaths,
+  DiagnosticSettings,
   ImportSession,
   LocalUsagePage,
   OpenCodeConfigStatus,
@@ -40,6 +43,29 @@ import type {
   UsageExportRow,
   WakeTask,
 } from "./types";
+import { sanitizeFeedbackError } from "../state/feedback";
+
+/**
+ * Keep the command surface typed while making every rejected IPC call
+ * observable in the native error log.  The reporter itself uses the raw
+ * invoke function to avoid an error-reporting loop.
+ */
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return tauriInvoke<T>(command, args).catch((cause) => {
+    if (command !== "record_frontend_diagnostic") {
+      const error = sanitizeFeedbackError(cause, "ipc_failed", "Relay command failed");
+      void tauriInvoke<void>("record_frontend_diagnostic", {
+        input: {
+          source: "tauri-command",
+          operation: command,
+          code: error.code,
+          message: error.message,
+        },
+      }).catch(() => undefined);
+    }
+    throw cause;
+  });
+}
 
 export type UiState = {
   providerActive: boolean;
@@ -86,6 +112,7 @@ export const relayCommands = {
   onImportProgress: (callback: (event: AccountImportProgress) => void) => listen<AccountImportProgress>("relay-account-import-progress", (event) => callback(event.payload)),
   cancelImport: (sessionId: string) => invoke("cancel_local_account_import", { sessionId }),
   refreshAccountQuota: (accountId: string) => invoke("refresh_local_account_quota", { accountId }),
+  forceRefreshAccountCredentials: (accountId: string) => invoke<CredentialRefreshResult>("force_refresh_local_account_credentials", { accountId }),
   refreshAllAccountQuotas: () => invoke<Array<{ accountId: string; status: "succeeded" | "failed" }>>("refresh_all_local_account_quotas"),
   consumeResetCredit: (accountId: string) => invoke<ConsumeResetCreditResponse>("consume_local_reset_credit", { accountId }),
   updateAccount: (input: Record<string, unknown>) => invoke("update_local_account", { input }),
@@ -137,6 +164,8 @@ export const relayCommands = {
   setAccountProxyRequired: (required: boolean) => invoke("set_local_account_proxy_required", { input: { required } }),
   setCodexBackgroundTasks: (enabled: boolean) => invoke("set_local_codex_background_tasks", { input: { enabled } }),
   setRemoteCodexBackgroundTasks: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_codex_background_tasks" }, payload: { enabled } } }),
+  setChatgptRetryUntilAvailable: (enabled: boolean) => invoke("set_local_chatgpt_retry_until_available", { input: { enabled } }),
+  setRemoteChatgptRetryUntilAvailable: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_chatgpt_retry_until_available" }, payload: { enabled } } }),
   setCodexWebsockets: (enabled: boolean) => invoke("set_local_codex_websockets", { input: { enabled } }),
   setCodexProfileWebsockets: (enabled: boolean) => invoke("set_codex_profile_websockets", { input: { enabled } }),
   setRemoteCodexWebsockets: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_codex_websockets" }, payload: { enabled } } }),
@@ -155,6 +184,7 @@ export const relayCommands = {
   getOpenCodeConfigStatus: () => invoke<OpenCodeConfigStatus>("get_opencode_config_status"),
   createOpenCodeSnapshot: (name: string) => invoke<boolean>("create_opencode_snapshot", { name }),
   connectOpenCode: () => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("connect_opencode_to_local_gateway"),
+  launchOpenCodeSource: (sourceId: string) => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("launch_opencode_source", { sourceId }),
   restartOpenCode: () => invoke<void>("restart_opencode_app"),
   restoreOpenCodeConfig: () => invoke<boolean>("restore_opencode_config"),
   restoreCodex: () => invoke("restore_codex_profile"),
@@ -169,7 +199,19 @@ export const relayCommands = {
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
   restoreDefaultAccountProfile: () => invoke("restore_codex_account_profile", { profileDir: null }),
   storageInfo: () => invoke<RelayStorageInfo>("get_relay_storage_info"),
-  openFolder: (folder: "data" | "profile_backups") => invoke("open_relay_folder", { folder }),
+  recordFrontendDiagnostic: (input: {
+    source: string;
+    message: string;
+    operation?: string;
+    code?: string;
+    stack?: string;
+    fatal?: boolean;
+  }) => invoke<void>("record_frontend_diagnostic", { input }),
+  diagnosticPaths: () => invoke<DiagnosticPaths>("get_diagnostic_paths"),
+  diagnosticSettings: () => invoke<DiagnosticSettings>("get_diagnostic_settings"),
+  setDiagnosticDebugMode: (enabled: boolean) => invoke<DiagnosticSettings>("set_diagnostic_debug_mode", { enabled }),
+  openFolder: (folder: "data" | "logs" | "error_logs" | "crash_logs" | "operation_logs" | "profile_backups" | "opencode_backups") =>
+    invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),
   exportUsage: (rows: UsageExportRow[]) => invoke<string | null>("export_usage", { rows }),
   exportSupportBundle: (context: SupportExportContext) => invoke<string | null>("export_support_bundle", { context }),

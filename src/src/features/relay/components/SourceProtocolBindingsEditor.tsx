@@ -254,7 +254,7 @@ export function SourceProtocolBindingsEditor({
                   key={wireApi}
                   className={`source-route-format-heading ${selected ? "selected" : ""}`}
                   data-wire-api={wireApi}
-                  title={`POST ${endpoint}`}
+                  data-relay-tooltip={`POST ${endpoint}`}
                 >
                   <span className="source-route-format-icon" aria-hidden="true"><Icon /></span>
                   <span>
@@ -348,7 +348,8 @@ export function SourceProtocolBindingsEditor({
                         <label
                           key={wireApi}
                           className={`source-route-cell ${checked ? "selected" : ""}`}
-                          title={title}
+                          data-relay-tooltip={title}
+                          tabIndex={disabled ? 0 : undefined}
                         >
                           <span className="source-route-cell-label" aria-hidden="true">
                             {t(`sources.protocolCards.${wireApi}.title`)}
@@ -374,7 +375,8 @@ export function SourceProtocolBindingsEditor({
                     {showsMessagesBridgeColumn
                       ? <label
                           className={`source-route-cell source-route-bridge-cell ${messagesBridgeChecked ? "selected" : ""}`}
-                          title={messagesBridgeTitle}
+                          data-relay-tooltip={messagesBridgeTitle}
+                          tabIndex={messagesBridgeDisabled ? 0 : undefined}
                         >
                           <span className="source-route-cell-label" aria-hidden="true">
                             {t("sources.routeBridgeMessagesTitle")}
@@ -391,7 +393,8 @@ export function SourceProtocolBindingsEditor({
                     {showsGeminiBridgeColumn
                       ? <label
                         className={`source-route-cell source-route-bridge-cell ${geminiBridgeChecked ? "selected" : ""}`}
-                        title={geminiBridgeTitle}
+                        data-relay-tooltip={geminiBridgeTitle}
+                        tabIndex={geminiBridgeDisabled ? 0 : undefined}
                       >
                         <span className="source-route-cell-label" aria-hidden="true">
                           {t("sources.routeBridgeGeminiTitle")}

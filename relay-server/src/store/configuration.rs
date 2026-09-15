@@ -152,6 +152,7 @@ impl Store {
                 match policy.default_service_tier {
                     DefaultServiceTier::Standard => "standard".to_string(),
                     DefaultServiceTier::Fast => "fast".to_string(),
+                    DefaultServiceTier::Ultrafast => "ultrafast".to_string(),
                 },
             ),
             ("image_base_model", image_base_model),
@@ -548,6 +549,7 @@ fn write_configuration(
     let default_service_tier = match settings.routing.default_service_tier {
         DefaultServiceTier::Standard => "standard",
         DefaultServiceTier::Fast => "fast",
+        DefaultServiceTier::Ultrafast => "ultrafast",
     };
     let metadata = [
         (
@@ -692,7 +694,8 @@ fn routing_policy_from_connection(connection: &Connection) -> Result<PresetRouti
     };
     let default_service_tier = match metadata_from(connection, "default_service_tier")?.as_deref() {
         None | Some("standard") => DefaultServiceTier::Standard,
-        Some("fast") => DefaultServiceTier::Fast,
+        Some("fast") | Some("priority") => DefaultServiceTier::Fast,
+        Some("ultrafast") => DefaultServiceTier::Ultrafast,
         Some(_) => return Err("default service tier is invalid".to_string()),
     };
     let image_base_model =

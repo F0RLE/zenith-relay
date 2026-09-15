@@ -75,6 +75,7 @@ pub(crate) async fn stage_returned_remote_account(
         true,
         true,
         &configured_models,
+        state.account_check_url(),
     )
     .await
     .map_err(|error| {
@@ -110,10 +111,18 @@ pub(super) async fn import_account_item(
     discover_models: bool,
     probe_quota: bool,
     configured_models: &[String],
+    account_check_endpoint: &url::Url,
 ) -> ItemResult<(LocalAccountRecord, AccountQuotaOutcome)> {
     ensure_account_import_item(&item)?;
+    let item_hash = crate::diagnostics::hash_identifier(&item.item_id);
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "item_processing_started",
+        &[("item", item_hash.clone())],
+    );
     let issued_at_ms = current_time_ms();
     let item_label = item.label.clone();
+    let imported_tags = item.tags.clone();
     let item_priority = item.priority;
     let settings = state
         .store()
@@ -131,8 +140,14 @@ pub(super) async fn import_account_item(
         context.subscription_active_until_ms,
         import_proxy,
         settings.quota_request_timeout_seconds,
+        account_check_endpoint,
     )
     .await?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "credentials_resolved",
+        &[("item", item_hash.clone())],
+    );
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
         ImportItemError::new(
             "provider_account_id_missing",
@@ -198,13 +213,15 @@ pub(super) async fn import_account_item(
         .is_none_or(|agent| agent.task_id().is_some());
     let discovered_models = if discover_models && identity_is_registered {
         let client = CodexModelsClient::new_with_proxy(proxy.as_ref()).map_err(model_item_error)?;
+        let client_version =
+            zenith_relay_core::providers::chatgpt::configured_codex_client_version();
         let models = client
             .discover_authorized(
                 credentials
                     .authorization(issued_at_ms)
                     .map_err(credential_item_error)?,
                 provider_account_id,
-                zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
+                &client_version,
             )
             .await
             .map_err(model_item_error)?;
@@ -261,6 +278,12 @@ pub(super) async fn import_account_item(
     if existing_account.is_none() && !item_label.trim().is_empty() {
         account.account.label = item_label;
     }
+    // Existing account metadata is authoritative. Imported tags initialize a
+    // new account only, so re-importing a credential cannot erase local tags
+    // selected for automation or operator notes.
+    if existing_account.is_none() {
+        account.account.tags = imported_tags;
+    }
     validate_label(&account.account.label)
         .map_err(|_| ImportItemError::new("invalid_label", "imported account label is invalid"))?;
     account.normalize();
@@ -275,6 +298,11 @@ pub(super) async fn import_account_item(
     } else {
         AccountQuotaOutcome::Skipped
     };
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "persist_ready",
+        &[("item", item_hash.clone())],
+    );
     persist_imported_account(
         state,
         credential_store,
@@ -283,6 +311,11 @@ pub(super) async fn import_account_item(
         account.clone(),
     )
     .await?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "item_processing_completed",
+        &[("item", item_hash)],
+    );
     Ok((account, quota))
 }
 

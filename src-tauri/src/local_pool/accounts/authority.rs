@@ -132,6 +132,44 @@ impl ProcessAccountLocks {
             }
         }
     }
+
+    /// Attempts to acquire a credential lock without waiting for its current
+    /// owner. Compensating transactions use this after an asynchronous
+    /// operation has failed: if a newer login or refresh owns the lock, the
+    /// old transaction must leave its state alone instead of waiting and then
+    /// restoring a stale snapshot.
+    pub fn try_acquire(
+        &self,
+        local_account_id: &str,
+    ) -> Result<Option<ProcessAccountGuard>, ProcessLockError> {
+        validate_local_account_id(local_account_id)?;
+        let lock_dir = self.root.join("locks");
+        ensure_lock_dir(&lock_dir)?;
+        let path = lock_path(&lock_dir, local_account_id);
+        for _ in 0..2 {
+            let owner = LockOwner {
+                owner_token: Uuid::new_v4().hyphenated().to_string(),
+                created_at_ms: now_ms(),
+                process_id: std::process::id(),
+            };
+            match create_lock(&path, &owner) {
+                Ok(()) => {
+                    return Ok(Some(ProcessAccountGuard {
+                        path,
+                        owner_token: owner.owner_token,
+                    }));
+                }
+                Err(CreateLockError::Exists) => {
+                    if !recover_stale_lock(&path, self.config.stale_after_ms)? {
+                        return Ok(None);
+                    }
+                }
+                Err(CreateLockError::Unsafe) => return Err(ProcessLockError::UnsafePath),
+                Err(CreateLockError::Io) => return Err(ProcessLockError::Io),
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub struct ProcessAccountGuard {
@@ -666,6 +704,20 @@ mod tests {
         assert!(path.exists());
         drop(guard);
         assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nonblocking_lock_acquire_leaves_a_live_refresh_owner_undisturbed() {
+        let root = temp_root("try-acquire");
+        let locks = ProcessAccountLocks::with_config(root.clone(), fast_lock_config()).unwrap();
+        let guard = locks.acquire("relay_account_1").await.unwrap();
+        let started = Instant::now();
+
+        assert!(locks.try_acquire("relay_account_1").unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        drop(guard);
         fs::remove_dir_all(root).unwrap();
     }
 

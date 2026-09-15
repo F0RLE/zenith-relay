@@ -1,5 +1,5 @@
 use super::*;
-use crate::scheduler::{CandidateKind, CandidateQuota};
+use crate::scheduler::{CandidateKind, CandidateQuota, CandidateQuotaState};
 use crate::ModelRules;
 use std::collections::{BTreeSet, HashSet};
 
@@ -18,6 +18,8 @@ fn candidate(id: &str) -> RuntimeCandidate {
         model_rules: ModelRules::default(),
         health: CandidateHealth::Healthy,
         quota: CandidateQuota::Unknown,
+        provider_credits_micro_units: None,
+        provider_credits_unlimited: false,
         quota_updated_at_ms: None,
         quota_reset_at_ms: None,
         cooldowns: BTreeMap::new(),
@@ -844,7 +846,7 @@ fn equal_quota_sequential_requests_rotate_without_configured_weight() {
 }
 
 #[test]
-fn quota_highest_uses_parallel_load_only_as_an_equal_quota_tie_break() {
+fn quota_highest_uses_parallel_load_and_fair_rotation_on_equal_quota() {
     let mut scheduler = PoolScheduler::new();
     scheduler.set_routing_strategy(RoutingStrategy::QuotaHighest);
     for id in ["first", "second"] {
@@ -864,6 +866,75 @@ fn quota_highest_uses_parallel_load_only_as_an_equal_quota_tie_break() {
     assert_eq!(
         select(&mut scheduler, &HashSet::new())
             .unwrap()
+            .candidate_id,
+        "second"
+    );
+}
+
+#[test]
+fn quota_highest_prefers_more_fresh_provider_credits_when_quota_matches() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.set_routing_strategy(RoutingStrategy::QuotaHighest);
+    let mut low = oauth_candidate("low");
+    low.quota = CandidateQuota::Available(5_000);
+    low.provider_credits_micro_units = Some(100);
+    let mut high = oauth_candidate("high");
+    high.quota = CandidateQuota::Available(5_000);
+    scheduler.upsert(low);
+    scheduler.upsert(high);
+    assert!(scheduler.update_candidate_quota_at(
+        "high",
+        CandidateQuota::Available(5_000),
+        Some(1_000),
+        None,
+        Some(900),
+        false,
+    ));
+
+    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+    assert_eq!(selected.candidate_id, "high");
+    assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
+}
+
+#[test]
+fn refreshed_account_availability_updates_credit_routing_without_rebuilding() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.set_routing_strategy(RoutingStrategy::QuotaHighest);
+    let mut first = oauth_candidate("first");
+    first.quota = CandidateQuota::Available(5_000);
+    first.provider_credits_micro_units = Some(100);
+    let mut second = oauth_candidate("second");
+    second.quota = CandidateQuota::Available(5_000);
+    second.provider_credits_micro_units = Some(200);
+    scheduler.upsert(first);
+    scheduler.upsert(second);
+
+    assert_eq!(
+        select(&mut scheduler, &HashSet::new())
+            .expect("initial selection")
+            .candidate_id,
+        "second"
+    );
+    assert!(scheduler.update_candidate_availability_with_quota_at(
+        "first",
+        true,
+        CandidateHealth::Healthy,
+        CandidateQuotaState {
+            quota: CandidateQuota::Available(5_000),
+            updated_at_ms: Some(1_000),
+            reset_at_ms: Some(2_000),
+            provider_credits_micro_units: Some(300),
+            provider_credits_unlimited: false,
+        },
+    ));
+
+    let refreshed = scheduler.candidate("first").expect("refreshed candidate");
+    assert_eq!(refreshed.quota_updated_at_ms, Some(1_000));
+    assert_eq!(refreshed.quota_reset_at_ms, Some(2_000));
+    assert_eq!(refreshed.provider_credits_micro_units, Some(300));
+    assert_eq!(
+        select(&mut scheduler, &HashSet::new())
+            .expect("selection after refresh")
             .candidate_id,
         "first"
     );
@@ -1149,6 +1220,145 @@ fn response_affinity_is_mandatory() {
         None,
         "a continuation cannot move to a candidate that did not create the response"
     );
+}
+
+#[test]
+fn response_affinity_owner_outside_key_scope_can_be_reset_for_fallback() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    let mut fallback = candidate("fallback");
+    fallback.priority = 10;
+    scheduler.upsert(fallback);
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    let scope = CandidateScope {
+        source_ids: Some(BTreeSet::from(["fallback".to_string()])),
+        ..CandidateScope::default()
+    };
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(false),
+        "a removed pool member must not keep an opaque response pinned forever"
+    );
+
+    // Affinity selection remains mandatory until the caller resets the
+    // opaque continuation, preserving the safety rule for a still-configured
+    // owner while allowing the request layer to make the membership change
+    // explicit before choosing the fallback.
+    assert!(scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &HashSet::new(),
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: None,
+            now_ms: 1,
+        })
+        .is_none());
+    assert!(scheduler.invalidate_response_affinity("response"));
+    assert_eq!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
+                now_ms: 1,
+            })
+            .unwrap()
+            .candidate_id,
+        "fallback"
+    );
+}
+
+#[test]
+fn optional_affinity_reports_a_temporarily_unavailable_owner() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    scheduler.upsert(candidate("fallback"));
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    let scope = CandidateScope::default();
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        scheduler.response_affinity_owner_is_eligible(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true)
+    );
+
+    assert!(scheduler.set_candidate_health("owner", CandidateHealth::ReauthRequired));
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true),
+        "reauth is a temporary availability state, not a route-shape change"
+    );
+    assert_eq!(
+        scheduler.response_affinity_owner_is_eligible(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(false)
+    );
+}
+
+#[test]
+fn removed_candidate_keeps_response_owner_only_until_a_replacement_id_is_upserted() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    scheduler.upsert(candidate("fallback"));
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    assert!(scheduler.remove("owner").is_some());
+    assert_eq!(
+        scheduler.response_affinity_candidate("response", 1),
+        Some("owner".into())
+    );
+    assert!(scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: None,
+            now_ms: 1,
+        })
+        .is_none());
+
+    scheduler.upsert(candidate("owner"));
+    assert_eq!(scheduler.response_affinity_candidate("response", 1), None);
 }
 
 #[test]

@@ -3,6 +3,7 @@ import { Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { AccountSummary } from "../api/types";
+import { sanitizeFeedbackError } from "../state/feedback";
 import { useConfirm } from "./Ui";
 
 type ResetCreditsControlProps = {
@@ -18,14 +19,11 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
 
   const availableFromQuota = account.quota.resetCreditsAvailable;
   if (account.remoteLocation || availableFromQuota == null || availableFromQuota <= 0) {
-    return null;
+    return error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null;
   }
 
   const errorMessage = (value: unknown) => {
-    if (typeof value === "object" && value !== null && "message" in value) {
-      return String(value.message);
-    }
-    return String(value ?? t("accounts.resetCreditsLoadFailed"));
+    return sanitizeFeedbackError(value, "reset_credits_failed", t("accounts.resetCreditsLoadFailed")).message;
   };
 
   const consume = async () => {
@@ -40,14 +38,16 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
     setError(null);
     try {
       const result = await relayCommands.consumeResetCredit(account.id);
+      // Set the partial-success diagnostic before refreshing the account. The
+      // refresh can consume the last available credit and temporarily remove
+      // the button from the card; the error must survive that state change.
+      if (result.refreshError) {
+        setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(result.refreshError) }));
+      }
       try {
         await onCompleted?.();
       } catch (value) {
         setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(value) }));
-        return;
-      }
-      if (result.refreshError) {
-        setError(t("accounts.resetCreditsRefreshFailed", { error: result.refreshError }));
         return;
       }
     } catch (value) {
@@ -64,7 +64,7 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
       data-available="true"
       disabled={consuming}
       aria-label={`${t("accounts.resetCreditsAvailable", { count: availableFromQuota })} · ${t("accounts.resetCreditsExecute")}`}
-      title={t("accounts.resetCreditsTitle")}
+      data-relay-tooltip={t("accounts.resetCreditsTitle")}
       onClick={() => void consume()}
     >
       <span className="reset-credits-copy">

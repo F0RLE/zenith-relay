@@ -19,7 +19,10 @@ use crate::local_pool::{
     store::secret_store,
 };
 use std::collections::BTreeMap;
-use zenith_relay_core::{PriceEvidence, PricingContext, SourcePricingMetadata, TokenPrice};
+use zenith_relay_core::{
+    runtime_source_models_with_cache_write_pricing, PriceEvidence, PricingContext,
+    SourcePricingMetadata, TokenPrice,
+};
 
 pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
     secret_store::delete(secret_ref).map_err(|cleanup| {
@@ -61,6 +64,11 @@ pub(super) fn pricing_context(
             SourcePricingMetadata {
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
+                cache_write_models: runtime_source_models_with_cache_write_pricing(
+                    &source.protocol_bindings,
+                    source.wire_api,
+                    &source.models,
+                ),
             },
         );
         let mut evidence = BTreeMap::<String, PriceEvidence>::new();
@@ -96,6 +104,6 @@ pub(in crate::local_pool) use runtime::{
     apply_source_policies_if_running, apply_source_policy_if_running, core_error, current_time_ms,
     fail_closed, record_catalog_refresh_result, refresh_active_codex_catalog_in_background,
     refresh_local_gateway_key_scope_if_running, restart_after_secret_change, restart_or_rollback,
-    runtime_account_policy, runtime_from_store, sync_accounts_or_rollback,
-    sync_gateway_or_rollback, sync_records_or_rollback, sync_refreshed_account_or_rollback,
+    runtime_account_policy, runtime_from_store, sync_account_or_rollback, sync_gateway_or_rollback,
+    sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
 };

@@ -14,6 +14,7 @@ use std::{
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
+    model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
     pricing::{
         CatalogStatus, PriceEvidence, PricingCatalog, PricingCatalogLoader, PricingContext,
         SourcePricingMetadata,
@@ -21,10 +22,10 @@ use zenith_relay_core::{
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
-    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
-    runtime_source_supports_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot,
-    GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    SourceProtocolBinding, WireApi,
+    runtime_source_models_for_wire_api, runtime_source_models_with_cache_write_pricing,
+    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, ApiModelPriceOverride,
+    CandidateRuntimeSnapshot, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord,
+    RuntimeSourcePolicyUpdate, SourceProtocolBinding, WireApi,
 };
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
@@ -100,6 +101,14 @@ impl SourceRecord {
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
         runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
             .map_err(|error| error.to_string())
+    }
+
+    pub fn models_with_cache_write_pricing(&self) -> std::collections::BTreeSet<String> {
+        runtime_source_models_with_cache_write_pricing(
+            &self.protocol_bindings,
+            self.wire_api,
+            &self.models,
+        )
     }
 }
 
@@ -274,6 +283,7 @@ pub struct AppState {
     pub(crate) failed_usage_writes: AtomicU64,
     pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
     pricing: Arc<PricingCatalogLoader>,
+    model_metadata: Arc<ModelMetadataCatalogLoader>,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
 }
 
@@ -286,6 +296,10 @@ impl AppState {
         let fingerprint = identity_fingerprint(&server_id);
         let pricing = Arc::new(
             PricingCatalogLoader::open(config.data_dir.join("litellm-prices.json"))
+                .map_err(|error| error.to_string())?,
+        );
+        let model_metadata = Arc::new(
+            ModelMetadataCatalogLoader::open(config.data_dir.join("models-dev.json"))
                 .map_err(|error| error.to_string())?,
         );
         Ok(Arc::new(Self {
@@ -303,6 +317,7 @@ impl AppState {
             failed_usage_writes: AtomicU64::new(0),
             usage_writer: Mutex::new(None),
             pricing,
+            model_metadata,
             runtime: RwLock::new(None),
         }))
     }
@@ -317,6 +332,14 @@ impl AppState {
 
     pub(crate) fn pricing_status(&self) -> CatalogStatus {
         self.pricing.status()
+    }
+
+    pub(crate) fn model_metadata_loader(&self) -> Arc<ModelMetadataCatalogLoader> {
+        self.model_metadata.clone()
+    }
+
+    pub(crate) fn model_metadata_catalog(&self) -> Arc<ModelMetadataCatalog> {
+        self.model_metadata.snapshot()
     }
 
     /// Build a redacted pricing identity map for usage and snapshot reads.
@@ -348,6 +371,7 @@ impl AppState {
             let metadata = SourcePricingMetadata {
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
+                cache_write_models: source.models_with_cache_write_pricing(),
             };
             let key = identity_hint(&source.id);
             source_metadata.insert(key.clone(), metadata.clone());

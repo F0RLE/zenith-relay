@@ -310,8 +310,12 @@ async fn discover_protocol_bindings_with_client(
             }
             if let Some(existing) = detected_model_prices.get(&model_key) {
                 if existing != price {
-                    detected_model_prices.remove(&model_key);
-                    conflicting_model_prices.insert(model_key);
+                    if let Some(merged) = merge_route_model_price(*existing, *price) {
+                        detected_model_prices.insert(model_key, merged);
+                    } else {
+                        detected_model_prices.remove(&model_key);
+                        conflicting_model_prices.insert(model_key);
+                    }
                 }
             } else {
                 detected_model_prices.insert(model_key, *price);
@@ -336,6 +340,45 @@ async fn discover_protocol_bindings_with_client(
         protocol_bindings: discovered_bindings,
         detected_model_prices,
         resolved_base_url,
+    })
+}
+
+/// A model may be exposed by both a generic OpenAI-compatible route and an
+/// Anthropic Messages route in one source. Generic routes deliberately carry
+/// no cache-creation fields, so those route snapshots can be merged when all
+/// token prices agree and only the Messages route contributes `5m`/`1h`.
+fn merge_route_model_price(
+    left: ApiModelPriceOverride,
+    right: ApiModelPriceOverride,
+) -> Option<ApiModelPriceOverride> {
+    if left.input_micro_usd_per_million != right.input_micro_usd_per_million
+        || left.cached_input_micro_usd_per_million != right.cached_input_micro_usd_per_million
+        || left.output_micro_usd_per_million != right.output_micro_usd_per_million
+    {
+        return None;
+    }
+    let cache_write_5m = match (
+        left.cache_write_5m_micro_usd_per_million,
+        right.cache_write_5m_micro_usd_per_million,
+    ) {
+        (Some(left), Some(right)) if left != right => return None,
+        (Some(value), _) | (_, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    let cache_write_1h = match (
+        left.cache_write_1h_micro_usd_per_million,
+        right.cache_write_1h_micro_usd_per_million,
+    ) {
+        (Some(left), Some(right)) if left != right => return None,
+        (Some(value), _) | (_, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    Some(ApiModelPriceOverride {
+        input_micro_usd_per_million: left.input_micro_usd_per_million,
+        cached_input_micro_usd_per_million: left.cached_input_micro_usd_per_million,
+        cache_write_5m_micro_usd_per_million: cache_write_5m,
+        cache_write_1h_micro_usd_per_million: cache_write_1h,
+        output_micro_usd_per_million: left.output_micro_usd_per_million,
     })
 }
 
@@ -376,8 +419,12 @@ fn parse_upstream_models(
                     | UpstreamProtocol::ChatCompletions
                     | UpstreamProtocol::Messages => model.get("id")?.as_str(),
                 }?;
-                seen.insert(id.to_ascii_lowercase())
-                    .then(|| (id.to_string(), detected_model_price(model)))
+                seen.insert(id.to_ascii_lowercase()).then(|| {
+                    (
+                        id.to_string(),
+                        detected_model_price(model, protocol == UpstreamProtocol::Messages),
+                    )
+                })
             })
             .collect(),
     )
@@ -389,6 +436,31 @@ mod tests {
     use crate::WireApi;
     use axum::{routing::get, Json, Router};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn merges_generic_and_messages_prices_for_one_model() {
+        let generic = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1,
+            cached_input_micro_usd_per_million: Some(2),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 3,
+        };
+        let messages = ApiModelPriceOverride {
+            cache_write_5m_micro_usd_per_million: Some(4),
+            cache_write_1h_micro_usd_per_million: Some(5),
+            ..generic
+        };
+        assert_eq!(merge_route_model_price(generic, messages), Some(messages));
+        assert!(merge_route_model_price(
+            generic,
+            ApiModelPriceOverride {
+                input_micro_usd_per_million: 99,
+                ..messages
+            }
+        )
+        .is_none());
+    }
 
     #[test]
     fn native_gemini_catalog_requires_generate_content_capability() {

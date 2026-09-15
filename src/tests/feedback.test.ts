@@ -27,4 +27,30 @@ describe("feedback diagnostics", () => {
   test("redacts standalone local account identifiers", () => {
     expect(redactFeedbackText("candidate account_local_private failed")).toBe("candidate [redacted identity] failed");
   });
+
+  test("redacts quoted JSON fields including escaped quotes in secret values", () => {
+    const text = redactFeedbackText(JSON.stringify({
+      api_key: 'synthetic-key-"quoted"-tail',
+      password: "synthetic-password",
+      token: "synthetic-token",
+      message: "upstream rejected request",
+    }));
+    expect(text).not.toContain("synthetic");
+    expect(text).not.toContain("quoted");
+    expect(text).not.toContain("tail");
+    expect(text).toContain("upstream rejected request");
+  });
+
+  test("redacts URL credentials without removing the diagnostic host", () => {
+    const text = redactFeedbackText("connect https://synthetic-name:synthetic-password@proxy.example.test:8443/v1 failed");
+    expect(text).not.toContain("synthetic-name");
+    expect(text).not.toContain("synthetic-password");
+    expect(text).toContain("proxy.example.test:8443/v1");
+  });
+
+  test("redacts a JWT before truncating the diagnostic", () => {
+    const text = redactFeedbackText(`${".".repeat(580)} eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.signature`);
+    expect(text).not.toContain("eyJ");
+    expect(text.length).toBeLessThanOrEqual(600);
+  });
 });

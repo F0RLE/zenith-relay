@@ -1,8 +1,7 @@
 use std::{env, time::Instant};
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::{
-    codex_config::ensure_provider_on_launch,
     local_pool, platform,
     tray::{build_tray, close_main_window, AppState},
 };
@@ -209,10 +208,42 @@ pub fn run() {
         .manage(AppState::new())
         .setup(move |app| {
             let handle = app.handle().clone();
-            platform::resolve_codex_home().map_err(std::io::Error::other)?;
-            let relay_state = local_pool::initialize(&handle)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Err(error) = platform::resolve_codex_home() {
+                crate::diagnostics::record_error(
+                    "desktop-startup",
+                    Some("codex_home_unavailable"),
+                    &error,
+                    &[],
+                );
+                return Err(std::io::Error::other(error).into());
+            }
+            let relay_root = match platform::relay_dir(&handle) {
+                Ok(root) => root,
+                Err(error) => {
+                    crate::diagnostics::record_error(
+                        "desktop-startup",
+                        Some("relay_path_unavailable"),
+                        &error,
+                        &[],
+                    );
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
+            crate::diagnostics::initialize(&relay_root);
+            let relay_state = match local_pool::initialize(&handle) {
+                Ok(state) => state,
+                Err(error) => {
+                    crate::diagnostics::record_error(
+                        "desktop-startup",
+                        Some("local_pool_initialize_failed"),
+                        &error.message,
+                        &[],
+                    );
+                    return Err(std::io::Error::other(error.to_string()).into());
+                }
+            };
             app.manage(relay_state);
+            local_pool::start_client_auth_watchdog(handle.clone());
             let native_startup_ms = started.elapsed().as_secs_f64() * 1_000.0;
             let relay_state = app.state::<local_pool::DesktopState>();
             let _ =
@@ -227,18 +258,18 @@ pub fn run() {
                         started.elapsed().as_millis()
                     );
                 }
-            } else {
-                relay_state.set_background_session_active(false);
             }
             local_pool::background::start(handle.clone());
-            let relay_state = app.state::<local_pool::DesktopState>();
-            let _ = ensure_provider_on_launch(&relay_state.ready_api_backup_root());
             let state = app.state::<AppState>();
             build_tray(&handle, &state)?;
             crate::portable_update::acknowledge_startup();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<local_pool::DesktopState>();
                 let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
+                // Auto-start runs after the WebView is created. Notify every
+                // renderer once the runtime exists so an initial snapshot that
+                // raced startup cannot leave the pool UI with an empty order.
+                let _ = handle.emit("zenith-state-changed", ());
                 crate::tray::refresh_tray(&handle).await;
             });
             Ok(())
@@ -306,6 +337,7 @@ pub fn run() {
             local_pool::accounts::mutations::delete_local_account,
             local_pool::accounts::mutations::delete_local_accounts,
             local_pool::accounts::quota_refresh::refresh_local_account_quota,
+            local_pool::accounts::quota_refresh::force_refresh_local_account_credentials,
             local_pool::accounts::quota_refresh::refresh_all_local_account_quotas,
             local_pool::accounts::reset_credits::consume_local_reset_credit,
             local_pool::commands::oauth::start_codex_oauth,
@@ -339,6 +371,7 @@ pub fn run() {
             local_pool::commands::gateway::set_local_common_proxy,
             local_pool::commands::gateway::set_local_account_proxy_required,
             local_pool::commands::gateway::set_local_codex_background_tasks,
+            local_pool::commands::gateway::set_local_chatgpt_retry_until_available,
             local_pool::commands::gateway::set_local_codex_websockets,
             local_pool::commands::gateway::set_codex_profile_websockets,
             local_pool::commands::gateway::diagnose_local_gateway,
@@ -363,6 +396,7 @@ pub fn run() {
             local_pool::commands::opencode::get_opencode_config_status,
             local_pool::commands::opencode::create_opencode_snapshot,
             local_pool::commands::opencode::connect_opencode_to_local_gateway,
+            local_pool::commands::opencode::launch_opencode_source,
             local_pool::commands::opencode::restart_opencode_app,
             local_pool::commands::opencode::restore_opencode_config,
             local_pool::commands::recovery::get_relay_storage_info,
@@ -371,6 +405,10 @@ pub fn run() {
             local_pool::commands::recovery::export_usage,
             local_pool::commands::recovery::export_support_bundle,
             local_pool::commands::recovery::preview_support_bundle,
+            crate::diagnostics::record_frontend_diagnostic,
+            crate::diagnostics::get_diagnostic_paths,
+            crate::diagnostics::get_diagnostic_settings,
+            crate::diagnostics::set_diagnostic_debug_mode,
             local_pool::commands::remote_server::connect_remote_server,
             local_pool::commands::remote_server::get_remote_server_state,
             local_pool::commands::remote_server::get_remote_runtime_order,
@@ -396,12 +434,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Zenith Relay");
 
-    app.run(|app_handle, event| {
-        if let RunEvent::ExitRequested { api, code, .. } = event {
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { api, code, .. } => {
             let state = app_handle.state::<AppState>();
-            if code.is_none() && state.should_prevent_exit() {
+            let prevent = code.is_none() && state.should_prevent_exit();
+            crate::diagnostics::breadcrumb(
+                "desktop",
+                if prevent {
+                    "exit_requested_prevented"
+                } else {
+                    "exit_requested"
+                },
+                &[(
+                    "code",
+                    code.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                )],
+            );
+            if prevent {
                 api.prevent_exit();
             }
         }
+        RunEvent::Exit => crate::diagnostics::shutdown(),
+        _ => {}
     });
 }

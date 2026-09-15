@@ -12,8 +12,10 @@ import {
   ROUTING_REFRESH_INTERVAL_MS,
   RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
   RUNTIME_REFRESH_INTERVAL_MS,
+  STARTUP_RUNTIME_RETRY_DELAYS_MS,
   isRuntimeRefreshPage,
   isUsageRefreshPage,
+  startupSnapshotNeedsRetry,
   usageRefreshDebounceMs,
 } from "./refreshPolicy";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
@@ -43,6 +45,7 @@ export function useRelayRuntime({
   const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivityState>({
     revision: 0,
     lastCandidateId: null,
+    candidates: {},
   });
   const [loading, setLoading] = useState(true);
   const modeRef = useRef(mode);
@@ -55,6 +58,7 @@ export function useRelayRuntime({
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
+  const runtimeSnapshotRef = useRef<RuntimeSnapshot | null>(null);
   // Keep the scheduler order separate from the activity facts. The map also
   // retains the latest zero-count event: a routing poll can finish while a
   // request is in flight, and that stale snapshot must not resurrect the
@@ -77,7 +81,8 @@ export function useRelayRuntime({
     stateRevision.current += 1;
     runtimeActivityOverlay.current.clear();
     runtimeRoutingOrderBase.current = [];
-    setRuntimeActivity({ revision: 0, lastCandidateId: null });
+    runtimeSnapshotRef.current = null;
+    setRuntimeActivity({ revision: 0, lastCandidateId: null, candidates: {} });
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
     resetUsage();
@@ -112,6 +117,7 @@ export function useRelayRuntime({
         },
       }
       : loaded.snapshot;
+    runtimeSnapshotRef.current = snapshot;
     setRuntime(snapshot);
     clearInactiveUsage(requestedMode);
     refreshedRevision.current = requestedRevision;
@@ -162,8 +168,27 @@ export function useRelayRuntime({
 
   useEffect(() => {
     let active = true;
+    let startupRetryTimer: number | undefined;
+    let startupRetryIndex = 0;
+    const scheduleStartupRetry = () => {
+      if (!active || modeRef.current !== mode || !startupSnapshotNeedsRetry(runtimeSnapshotRef.current)) return;
+      const delay = STARTUP_RUNTIME_RETRY_DELAYS_MS[startupRetryIndex];
+      if (delay === undefined) return;
+      startupRetryIndex += 1;
+      startupRetryTimer = window.setTimeout(() => {
+        startupRetryTimer = undefined;
+        void refresh(true)
+          .then(scheduleStartupRetry)
+          .catch(() => {
+            // State/focus events and the regular refresh remain the fallback
+            // if a retry races a transient native startup error.
+            scheduleStartupRetry();
+          });
+      }, delay);
+    };
     setLoading(true);
     refresh()
+      .then(scheduleStartupRetry)
       .catch((error) => active && reportErrorFeedback(error, "feedback.refreshFailed", "refresh_failed"))
       .finally(() => {
         if (!active) return;
@@ -178,8 +203,9 @@ export function useRelayRuntime({
       });
     return () => {
       active = false;
+      if (startupRetryTimer !== undefined) window.clearTimeout(startupRetryTimer);
     };
-  }, [refresh, reportErrorFeedback]);
+  }, [mode, refresh, reportErrorFeedback]);
 
   useEffect(() => {
     if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith" || !runtimeRoutingSupported) return;
@@ -271,7 +297,10 @@ export function useRelayRuntime({
       const pending = pendingRuntimeActivity;
       pendingRuntimeActivity = null;
       if (pending) {
-        setRuntimeActivity((current) => pending.revision > current.revision ? pending : current);
+        const candidates = Object.fromEntries(runtimeActivityOverlay.current);
+        setRuntimeActivity((current) => pending.revision > current.revision
+          ? { ...pending, candidates }
+          : current);
       }
       if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
       setRuntime((snapshot) => {
@@ -345,6 +374,7 @@ export function useRelayRuntime({
         pendingRuntimeActivity = {
           revision: activity.revision,
           lastCandidateId: activity.candidateId,
+          candidates: {},
         };
       }
       scheduleRuntimeActivityFlush();
