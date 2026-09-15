@@ -652,24 +652,19 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 }
                 Err(error) => return upstream_body_error_response(&runtime, event, started, error),
             };
-            if wire_api == WireApi::Responses
-                && adapter_is_passthrough
-                && !legacy_call_id_repair_attempted
-                && status.is_client_error()
-                && responses_call_id_is_missing(&bytes)
-                && repair_legacy_responses_call_ids(&mut request)
-            {
-                legacy_call_id_repair_attempted = true;
-                attempt = attempt.saturating_sub(1);
-                attempts_this_run = attempts_this_run.saturating_sub(1);
-                tried.remove(&route.candidate_id);
-                let output_ids = tool_call_output_ids(&request);
-                let call_ids = response_tool_call_ids(&request);
-                has_unpaired_tool_output = output_ids
-                    .iter()
-                    .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
-                requires_affinity_owner = request_has_previous_response_id(wire_api, &request)
-                    || has_unpaired_tool_output;
+            if try_repair_legacy_responses_call_ids(
+                &mut request,
+                wire_api,
+                adapter_is_passthrough,
+                status.is_client_error() && responses_call_id_is_missing(&bytes),
+                &mut legacy_call_id_repair_attempted,
+                &mut attempt,
+                &mut attempts_this_run,
+                &mut tried,
+                &route.candidate_id,
+                &mut has_unpaired_tool_output,
+                &mut requires_affinity_owner,
+            ) {
                 continue;
             }
             if wire_api == WireApi::Responses
@@ -1213,23 +1208,19 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     started.elapsed().as_millis() as u64,
                     tool_use.clone(),
                 );
-                if wire_api == WireApi::Responses
-                    && adapter_is_passthrough
-                    && !legacy_call_id_repair_attempted
-                    && missing_call_id
-                    && repair_legacy_responses_call_ids(&mut request)
-                {
-                    legacy_call_id_repair_attempted = true;
-                    attempt = attempt.saturating_sub(1);
-                    attempts_this_run = attempts_this_run.saturating_sub(1);
-                    tried.remove(&route.candidate_id);
-                    let output_ids = tool_call_output_ids(&request);
-                    let call_ids = response_tool_call_ids(&request);
-                    has_unpaired_tool_output = output_ids
-                        .iter()
-                        .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
-                    requires_affinity_owner = request_has_previous_response_id(wire_api, &request)
-                        || has_unpaired_tool_output;
+                if try_repair_legacy_responses_call_ids(
+                    &mut request,
+                    wire_api,
+                    adapter_is_passthrough,
+                    missing_call_id,
+                    &mut legacy_call_id_repair_attempted,
+                    &mut attempt,
+                    &mut attempts_this_run,
+                    &mut tried,
+                    &route.candidate_id,
+                    &mut has_unpaired_tool_output,
+                    &mut requires_affinity_owner,
+                ) {
                     continue;
                 }
                 if wire_api == WireApi::Responses
@@ -1440,6 +1431,47 @@ fn request_has_previous_response_id(wire_api: WireApi, request: &Value) -> bool 
             .get("previous_response_id")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Applies the one permitted repair for a strict upstream rejection, then
+/// recomputes route-affinity state from the repaired request before retrying.
+/// The same rejection can arrive as either a buffered error or a terminal
+/// stream bootstrap failure, so both paths share this mutation.
+#[allow(clippy::too_many_arguments)]
+fn try_repair_legacy_responses_call_ids(
+    request: &mut Value,
+    wire_api: WireApi,
+    adapter_is_passthrough: bool,
+    upstream_rejected_missing_call_id: bool,
+    repair_attempted: &mut bool,
+    attempt: &mut u16,
+    attempts_this_run: &mut usize,
+    tried: &mut HashSet<String>,
+    candidate_id: &str,
+    has_unpaired_tool_output: &mut bool,
+    requires_affinity_owner: &mut bool,
+) -> bool {
+    if wire_api != WireApi::Responses
+        || !adapter_is_passthrough
+        || *repair_attempted
+        || !upstream_rejected_missing_call_id
+        || !repair_legacy_responses_call_ids(request)
+    {
+        return false;
+    }
+
+    *repair_attempted = true;
+    *attempt = attempt.saturating_sub(1);
+    *attempts_this_run = attempts_this_run.saturating_sub(1);
+    tried.remove(candidate_id);
+    let output_ids = tool_call_output_ids(request);
+    let call_ids = response_tool_call_ids(request);
+    *has_unpaired_tool_output = output_ids
+        .iter()
+        .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+    *requires_affinity_owner =
+        request_has_previous_response_id(wire_api, request) || *has_unpaired_tool_output;
+    true
 }
 
 fn replay_native_tool_continuation(

@@ -213,29 +213,38 @@ pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: 
     tauri::async_runtime::spawn(async move {
         let state = app.state::<DesktopState>();
         for account_id in account_ids {
-            let result = refresh_account_models_once(&state, &account_id).await;
-            if let Err(error) = result {
-                if let Err(record_error) = record_model_refresh_error(&state, &account_id, &error) {
-                    crate::diagnostics::record_error(
-                        "background-account-models",
-                        Some("persist_refresh_error_failed"),
-                        &record_error.message,
-                        &[("account", crate::diagnostics::hash_identifier(&account_id))],
-                    );
-                }
-                crate::diagnostics::record_error(
-                    "background-account-models",
-                    Some("refresh_failed"),
-                    &error.message,
-                    &[("account", crate::diagnostics::hash_identifier(&account_id))],
-                );
-            }
-            // The model list and any persisted discovery error are both part
-            // of the runtime snapshot, so notify the frontend after each
-            // account rather than waiting for a bulk operation to finish.
-            let _ = app.emit("zenith-state-changed", ());
+            refresh_account_models_and_notify(&state, &app, &account_id).await;
         }
     });
+}
+
+/// Runs one model discovery attempt and publishes both its result and a
+/// redacted diagnostic consistently for manual and scheduled refreshes.
+async fn refresh_account_models_and_notify(
+    state: &DesktopState,
+    app: &AppHandle,
+    account_id: &str,
+) {
+    if let Err(error) = refresh_account_models_once(state, account_id).await {
+        if let Err(record_error) = record_model_refresh_error(state, account_id, &error) {
+            crate::diagnostics::record_error(
+                "background-account-models",
+                Some("persist_refresh_error_failed"),
+                &record_error.message,
+                &[("account", crate::diagnostics::hash_identifier(account_id))],
+            );
+        }
+        crate::diagnostics::record_error(
+            "background-account-models",
+            Some("refresh_failed"),
+            &error.message,
+            &[("account", crate::diagnostics::hash_identifier(account_id))],
+        );
+    }
+    // The model list and any persisted discovery error are both part of the
+    // runtime snapshot, so notify the frontend after each account rather than
+    // waiting for a bulk operation to finish.
+    let _ = app.emit("zenith-state-changed", ());
 }
 
 pub(crate) async fn run_due_confirmation_wakes(
@@ -317,30 +326,7 @@ async fn account_model_loop(app: AppHandle) {
                     if !state.background_session_active() {
                         break;
                     }
-                    let result = super::accounts::quota_refresh::refresh_account_models_once(
-                        &state,
-                        &account_id,
-                    )
-                    .await;
-                    if let Err(error) = result {
-                        if let Err(record_error) =
-                            record_model_refresh_error(&state, &account_id, &error)
-                        {
-                            crate::diagnostics::record_error(
-                                "background-account-models",
-                                Some("persist_refresh_error_failed"),
-                                &record_error.message,
-                                &[("account", crate::diagnostics::hash_identifier(&account_id))],
-                            );
-                        }
-                        crate::diagnostics::record_error(
-                            "background-account-models",
-                            Some("refresh_failed"),
-                            &error.message,
-                            &[("account", crate::diagnostics::hash_identifier(&account_id))],
-                        );
-                    }
-                    let _ = app.emit("zenith-state-changed", ());
+                    refresh_account_models_and_notify(&state, &app, &account_id).await;
                 }
             }
             Err(error) => crate::diagnostics::record_error(
