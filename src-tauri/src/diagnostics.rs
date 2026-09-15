@@ -27,11 +27,14 @@ const ERRORS_DIRECTORY: &str = "errors";
 const CRASHES_DIRECTORY: &str = "crashes";
 const OPERATIONS_DIRECTORY: &str = "operations";
 const DEBUG_MARKER_FILE: &str = "debug.enabled";
+const LAST_STAGE_PREFIX: &str = "last-stage-";
 const MAX_EVENT_BYTES: usize = 16 * 1024;
+const MAX_STAGE_BYTES: usize = 8 * 1024;
 const MAX_LOG_FILE_BYTES: u64 = 1_048_576;
 const MAX_RETAINED_ERROR_FILES: usize = 14;
 const MAX_RETAINED_OPERATION_FILES: usize = 14;
 const MAX_RETAINED_CRASH_FILES: usize = 20;
+const MAX_RETAINED_STAGE_FILES: usize = 2;
 const MAX_TEXT_BYTES: usize = 2_000;
 const MAX_STACK_BYTES: usize = 24_000;
 const REDACTED: &str = "[redacted]";
@@ -40,6 +43,7 @@ const SESSION_MARKER_FILE: &str = "session.active";
 static STATE: OnceLock<DiagnosticState> = OnceLock::new();
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 static CRASH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 // Detailed operation breadcrumbs are opt-in. Errors and crash reports remain
 // enabled regardless of this flag so a normal installation stays quiet while
@@ -52,8 +56,10 @@ struct DiagnosticState {
     breadcrumb: Mutex<Option<Breadcrumb>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Breadcrumb {
+    timestamp: String,
     operation: String,
     stage: String,
     details: BTreeMap<String, String>,
@@ -147,14 +153,24 @@ pub(crate) fn initialize(root: &Path) {
             &[],
         );
     }
+    // Read the previous durable stage before replacing the session marker. A
+    // forced process termination leaves both files behind, which lets the
+    // next launch explain exactly where the interrupted operation stopped.
+    let previous_stage = layout_ready.then(|| read_latest_stage(root)).flatten();
     let marker_state = layout_ready.then(|| begin_session_marker(root)).flatten();
     SESSION_ACTIVE.store(marker_state.is_some(), Ordering::Release);
     if marker_state == Some(true) {
+        let mut details = Vec::new();
+        if let Some(stage) = previous_stage {
+            details.push(("previous_operation", stage.operation));
+            details.push(("previous_stage", stage.stage));
+            details.push(("previous_stage_at", stage.timestamp));
+        }
         record_error(
             "desktop",
             Some("unclean_exit"),
             "previous Relay session ended before a clean shutdown",
-            &[],
+            &details,
         );
     }
     breadcrumb("desktop", "diagnostics_ready", &[]);
@@ -174,6 +190,7 @@ pub(crate) fn shutdown() {
     });
     if removed {
         record_operation("desktop", "clean_shutdown", &[]);
+        clear_last_stages(&root);
     }
 }
 
@@ -261,12 +278,16 @@ pub(crate) fn breadcrumb(operation: &str, stage: &str, details: &[(&str, String)
         values.insert((*key).to_string(), safe_detail(value));
     }
     let value = Breadcrumb {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         operation: safe_text(operation, 120),
         stage: safe_text(stage, 120),
         details: values,
     };
     if let Ok(mut current) = state.breadcrumb.lock() {
-        *current = Some(value);
+        *current = Some(value.clone());
+    }
+    if SESSION_ACTIVE.load(Ordering::Acquire) {
+        persist_last_stage(&value);
     }
 }
 
@@ -437,6 +458,7 @@ fn ensure_layout(root: &Path) -> bool {
             "errors/      redacted native and renderer error events (JSONL)\n",
             "crashes/     panic reports with the last safe operation breadcrumb\n",
             "operations/  short lifecycle records useful for import/runtime debugging (JSONL)\n",
+            "last-stage-* is a bounded marker for the last interrupted operation stage.\n",
             "debug.enabled enables the detailed operation stream and is off by default.\n",
             "session.active is removed on clean exit; its presence marks an interrupted run.\n",
             "\n",
@@ -450,6 +472,117 @@ fn ensure_layout(root: &Path) -> bool {
             .and_then(|mut file| file.write_all(content.as_bytes()));
     }
     true
+}
+
+/// Keep one small, redacted stage marker on disk. Unlike the in-memory
+/// breadcrumb, this survives a hard process termination and is consumed on
+/// the next launch when `session.active` indicates an interrupted run.
+fn persist_last_stage(value: &Breadcrumb) {
+    let state = state();
+    let _guard = state
+        .write_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = root_path();
+    persist_last_stage_at(&root, value);
+}
+
+fn persist_last_stage_at(root: &Path, value: &Breadcrumb) {
+    let Ok(mut line) = serde_json::to_vec(value) else {
+        return;
+    };
+    line.push(b'\n');
+    if line.len() > MAX_STAGE_BYTES {
+        return;
+    }
+    if !ensure_layout(root) {
+        return;
+    }
+    let directory = root.join(LOGS_DIRECTORY).join(OPERATIONS_DIRECTORY);
+    if !ensure_real_directory(&directory) {
+        return;
+    }
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string();
+    let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!("{LAST_STAGE_PREFIX}{timestamp}-{sequence:04}.json"));
+    let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(path) else {
+        return;
+    };
+    // The newline makes manual inspection pleasant while retaining the
+    // strict size bound above.
+    let _ = file.write_all(&line);
+    let _ = file.flush();
+    prune_files(&directory, LAST_STAGE_PREFIX, MAX_RETAINED_STAGE_FILES);
+}
+
+fn read_latest_stage(root: &Path) -> Option<Breadcrumb> {
+    let directory = root.join(LOGS_DIRECTORY).join(OPERATIONS_DIRECTORY);
+    let Ok(entries) = fs::read_dir(directory) else {
+        return None;
+    };
+    let mut paths = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let metadata = entry.file_type().ok()?;
+            if !metadata.is_file() || metadata.is_symlink() || !name.starts_with(LAST_STAGE_PREFIX)
+            {
+                return None;
+            }
+            Some((name.to_string(), path))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by(|left, right| left.0.cmp(&right.0));
+    let (_, path) = paths.pop()?;
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_STAGE_BYTES as u64
+    {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    let value = serde_json::from_slice::<Breadcrumb>(&bytes).ok()?;
+    sanitize_breadcrumb(value)
+}
+
+fn sanitize_breadcrumb(mut value: Breadcrumb) -> Option<Breadcrumb> {
+    if value.timestamp.len() > 64 {
+        return None;
+    }
+    value.timestamp = safe_text(&value.timestamp, 64);
+    value.operation = safe_text(&value.operation, 120);
+    value.stage = safe_text(&value.stage, 120);
+    if value.operation.is_empty() || value.stage.is_empty() {
+        return None;
+    }
+    value.details = value
+        .details
+        .into_iter()
+        .take(64)
+        .map(|(key, detail)| (safe_text(&key, 120), safe_detail(&detail)))
+        .collect();
+    Some(value)
+}
+
+fn clear_last_stages(root: &Path) {
+    let directory = root.join(LOGS_DIRECTORY).join(OPERATIONS_DIRECTORY);
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Ok(metadata) = entry.file_type() else {
+            continue;
+        };
+        if metadata.is_file() && !metadata.is_symlink() && name.starts_with(LAST_STAGE_PREFIX) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn begin_session_marker(root: &Path) -> Option<bool> {
@@ -642,7 +775,8 @@ fn write_panic_report(info: &PanicHookInfo<'_>) {
         Ok(value) => value.clone(),
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
         Err(std::sync::TryLockError::WouldBlock) => None,
-    };
+    }
+    .or_else(|| read_latest_stage(&root));
     let mut report = String::new();
     report.push_str("Zenith Relay crash report\n");
     report.push_str("=========================\n");
@@ -650,6 +784,7 @@ fn write_panic_report(info: &PanicHookInfo<'_>) {
     report.push_str(&format!("location: {location}\n"));
     report.push_str(&format!("panic: {}\n", safe_text(&payload, MAX_TEXT_BYTES)));
     if let Some(value) = breadcrumb {
+        report.push_str(&format!("stage_timestamp: {}\n", value.timestamp));
         report.push_str(&format!("operation: {}\n", value.operation));
         report.push_str(&format!("stage: {}\n", value.stage));
         for (key, detail) in value.details {
@@ -1371,6 +1506,32 @@ mod tests {
         assert!(!read_debug_marker(&root).expect("default marker state"));
         fs::write(root.join(LOGS_DIRECTORY).join(DEBUG_MARKER_FILE), b"").expect("marker");
         assert!(read_debug_marker(&root).expect("enabled marker state"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn interrupted_stage_marker_survives_and_is_cleared_after_clean_shutdown() {
+        let root = env::temp_dir().join(format!(
+            "zenith-relay-stage-marker-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        assert!(ensure_layout(&root));
+        let value = Breadcrumb {
+            timestamp: "2026-09-15T12:34:56.000Z".to_string(),
+            operation: "account-import".to_string(),
+            stage: "runtime_sync_started".to_string(),
+            details: BTreeMap::from([("account".to_string(), "id_synthetic".to_string())]),
+        };
+        persist_last_stage_at(&root, &value);
+        let loaded = read_latest_stage(&root).expect("stage marker");
+        assert_eq!(loaded.operation, value.operation);
+        assert_eq!(loaded.stage, value.stage);
+        assert_eq!(loaded.details, value.details);
+        clear_last_stages(&root);
+        assert!(read_latest_stage(&root).is_none());
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

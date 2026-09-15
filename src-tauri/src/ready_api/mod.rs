@@ -437,7 +437,20 @@ pub fn run() {
     app.run(|app_handle, event| match event {
         RunEvent::ExitRequested { api, code, .. } => {
             let state = app_handle.state::<AppState>();
-            if code.is_none() && state.should_prevent_exit() {
+            let prevent = code.is_none() && state.should_prevent_exit();
+            crate::diagnostics::breadcrumb(
+                "desktop",
+                if prevent {
+                    "exit_requested_prevented"
+                } else {
+                    "exit_requested"
+                },
+                &[(
+                    "code",
+                    code.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                )],
+            );
+            if prevent {
                 api.prevent_exit();
             }
         }

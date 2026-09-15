@@ -289,6 +289,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         protected_account_id.as_deref(),
         settings.chatgpt_interface_quota_reserve_basis_points,
     );
+    crate::diagnostics::breadcrumb("gateway-runtime", "build_completed", &[]);
     Ok(Arc::new(runtime))
 }
 
@@ -649,7 +650,17 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         }
     };
 
+    crate::diagnostics::breadcrumb(
+        "gateway-runtime",
+        "gateway_stop_started",
+        &[("port", address.port().to_string())],
+    );
     state.gateway.stop().await;
+    crate::diagnostics::breadcrumb(
+        "gateway-runtime",
+        "gateway_start_started",
+        &[("port", next_port.to_string())],
+    );
     let restart_error = state.gateway.start(runtime, next_port).await.err();
     if let Some(error) = restart_error {
         crate::diagnostics::record_error(
@@ -686,9 +697,15 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         }
         return Err(error);
     }
+    crate::diagnostics::breadcrumb(
+        "gateway-runtime",
+        "gateway_started",
+        &[("port", next_port.to_string())],
+    );
     if let Some(runtime) = state.gateway.runtime().await {
         runtime.prefetch_source_model_metadata();
     }
+    crate::diagnostics::breadcrumb("gateway-runtime", "catalog_refresh_started", &[]);
     let result = profiles::refresh_active_codex_catalog(state).await;
     record_catalog_refresh_result(state, &result);
     crate::diagnostics::record_operation("gateway-runtime", "restart_completed", &[]);
@@ -751,10 +768,7 @@ pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> Loca
 mod tests {
     use super::*;
     use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
-    use std::{
-        fs,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::fs;
 
     #[test]
     fn persisted_last_used_timestamp_maps_to_epoch_milliseconds() {
@@ -1261,13 +1275,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_failure_rolls_back_once_without_stopping_old_gateway() {
+    async fn invalid_source_start_keeps_the_remaining_pool_route_available() {
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("zenith-relay-command-rollback-{id}"));
-        let source_secret_ref = format!("source:command-rollback-{id}");
-        let key_secret_ref = format!("key:command-rollback-{id}");
+        let root = std::env::temp_dir().join(format!("zenith-relay-source-restart-{id}"));
+        let source_secret_ref = format!("source:source-restart-{id}");
+        let invalid_secret_ref = format!("source:invalid-restart-{id}");
+        let key_secret_ref = format!("key:source-restart-{id}");
         let state = DesktopState::open(root.clone()).unwrap();
         secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
+        secret_store::save(&invalid_secret_ref, "invalid-upstream-secret").unwrap();
         secret_store::save(&key_secret_ref, "old-secret").unwrap();
         let source = ProviderSourceRecord {
             id: "old_source".into(),
@@ -1303,63 +1319,48 @@ mod tests {
             created_at: "2026-08-05T00:00:00Z".into(),
             last_used_at: None,
         };
-        state
-            .store()
-            .unwrap()
-            .replace_records(vec![source.clone()], vec![key])
-            .unwrap();
-        let runtime = runtime_from_store(&state).await.unwrap();
-        let address = state.gateway.start(runtime, 0).await.unwrap();
-        let (old_sources, old_keys) = {
-            let store = state.store().unwrap();
-            (store.sources().to_vec(), store.keys().to_vec())
-        };
-        let secret_refs = old_keys
-            .iter()
-            .map(|key| key.secret_ref.clone())
-            .collect::<Vec<_>>();
-        let mut invalid_source = source;
+        let mut invalid_source = source.clone();
+        invalid_source.id = "invalid_source".into();
+        invalid_source.name = "Invalid".into();
+        invalid_source.secret_ref = invalid_secret_ref.clone();
+        invalid_source.models = vec!["invalid-model".into()];
         invalid_source.protocol_bindings = vec![zenith_relay_core::SourceProtocolBinding {
             wire_api: WireApi::Messages,
             adapter: zenith_relay_core::SourceAdapter::ResponsesToMessages,
             reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
             cache_write_ttl: Default::default(),
-            model_ids: vec!["old-model".into()],
+            model_ids: vec!["invalid-model".into()],
         }];
         state
             .store()
             .unwrap()
-            .replace_records(vec![invalid_source], old_keys.clone())
+            .replace_records(vec![source, invalid_source], vec![key])
             .unwrap();
-        let rollback_calls = Arc::new(AtomicUsize::new(0));
-
-        assert!(restart_or_rollback(&state, || {
-            rollback_calls.fetch_add(1, Ordering::SeqCst);
-            state.store()?.replace_records(old_sources, old_keys)
-        })
-        .await
-        .is_err());
-        assert_eq!(rollback_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(state.gateway.address().await, Some(address));
-        let response = reqwest::Client::new()
+        let runtime = runtime_from_store(&state).await.unwrap();
+        let address = state.gateway.start(runtime, 0).await.unwrap();
+        let client = reqwest::Client::new();
+        let response = client
             .get(format!("http://{address}/v1/models"))
             .bearer_auth("old-secret")
             .send()
             .await
             .unwrap();
-        let status = response.status();
-        let body = response.text().await.unwrap();
-        assert!(
-            status.is_success(),
-            "old listener returned {status}: {body}"
-        );
-        assert!(body.contains("old-model"));
+        assert!(response.status().is_success());
+        let models = response.json::<serde_json::Value>().await.unwrap();
+        let model_ids = models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(model_ids.contains(&"old-model"));
+        assert!(!model_ids.contains(&"invalid-model"));
+        drop(client);
 
         state.gateway.stop().await;
         secret_store::delete(&source_secret_ref).unwrap();
-        for secret_ref in secret_refs {
-            secret_store::delete(&secret_ref).unwrap();
-        }
+        secret_store::delete(&invalid_secret_ref).unwrap();
+        secret_store::delete(&key_secret_ref).unwrap();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
