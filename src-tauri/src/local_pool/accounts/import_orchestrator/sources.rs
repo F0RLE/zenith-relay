@@ -21,6 +21,7 @@ pub(crate) async fn import_source_item(
     discover_models: bool,
     configured_models: &[String],
 ) -> ItemResult<ProviderSourceRecord> {
+    crate::diagnostics::breadcrumb("source-import", "item_started", &[]);
     let api_key = item
         .secrets()
         .api_key()
@@ -108,6 +109,7 @@ pub(crate) async fn import_source_item(
         )
     })?;
     persist_imported_source(state, &record, &api_key, existing.as_ref()).await?;
+    crate::diagnostics::breadcrumb("source-import", "item_completed", &[]);
     Ok(record)
 }
 
@@ -282,6 +284,11 @@ pub(crate) async fn persist_imported_source(
     api_key: &str,
     existing: Option<&ProviderSourceRecord>,
 ) -> ItemResult<()> {
+    crate::diagnostics::breadcrumb(
+        "source-import",
+        "persist_started",
+        &[("in_pool", record.in_pool.to_string())],
+    );
     let (old_sources, old_keys) = current_source_records(state)?;
     let old_secret = existing
         .map(|source| {
@@ -312,25 +319,32 @@ pub(crate) async fn persist_imported_source(
             "failed to save source record",
         ));
     }
-    if sync_records_or_rollback(state, old_sources, old_keys)
-        .await
-        .is_err()
-    {
-        let store = state.store().map_err(|_| {
-            ImportItemError::new("source_store_failed", "source store is unavailable")
-        })?;
-        let rolled_back = match existing {
-            Some(previous) => store.source(&record.id) == Some(previous),
-            None => store.source(&record.id).is_none(),
-        };
-        drop(store);
-        if rolled_back {
-            restore_source_secret(&record.secret_ref, old_secret.as_deref())?;
+    let runtime_sync_required = record.in_pool || existing.is_some_and(|source| source.in_pool);
+    if runtime_sync_required {
+        crate::diagnostics::breadcrumb("source-import", "runtime_sync_started", &[]);
+        if sync_records_or_rollback(state, old_sources, old_keys)
+            .await
+            .is_err()
+        {
+            let store = state.store().map_err(|_| {
+                ImportItemError::new("source_store_failed", "source store is unavailable")
+            })?;
+            let rolled_back = match existing {
+                Some(previous) => store.source(&record.id) == Some(previous),
+                None => store.source(&record.id).is_none(),
+            };
+            drop(store);
+            if rolled_back {
+                restore_source_secret(&record.secret_ref, old_secret.as_deref())?;
+            }
+            return Err(ImportItemError::new(
+                "gateway_sync_failed",
+                "failed to apply source to the local gateway",
+            ));
         }
-        return Err(ImportItemError::new(
-            "gateway_sync_failed",
-            "failed to apply source to the local gateway",
-        ));
+        crate::diagnostics::breadcrumb("source-import", "runtime_sync_completed", &[]);
+    } else {
+        crate::diagnostics::breadcrumb("source-import", "runtime_sync_skipped", &[]);
     }
     Ok(())
 }

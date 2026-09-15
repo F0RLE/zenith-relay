@@ -32,6 +32,17 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
         .map_err(import_session_error)?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "session_resolved",
+        &[
+            (
+                "session",
+                crate::diagnostics::hash_identifier(&input.session_id),
+            ),
+            ("selected_count", selected_item_ids.len().to_string()),
+        ],
+    );
     let selected = selected_item_ids
         .iter()
         .map(String::as_str)
@@ -185,7 +196,21 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
                 }
             }
         }
+        let result_item_hash = crate::diagnostics::hash_identifier(&result.item_id);
         results.push(result);
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "item_finished",
+            &[
+                (
+                    "session",
+                    crate::diagnostics::hash_identifier(&input.session_id),
+                ),
+                ("item", result_item_hash),
+                ("completed", (completed + 1).to_string()),
+                ("failed", failed.to_string()),
+            ],
+        );
         emit_account_import_progress(
             app,
             &input.session_id,
@@ -201,6 +226,14 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         sessions
             .complete(&input.session_id)
             .map_err(import_session_error)?;
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "session_completed",
+            &[(
+                "session",
+                crate::diagnostics::hash_identifier(&input.session_id),
+            )],
+        );
     }
     Ok(ConfirmAccountImportResponse {
         session_id: input.session_id,

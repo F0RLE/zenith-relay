@@ -1,5 +1,7 @@
 use super::*;
+use crate::accounts::{MAX_ACCOUNT_TAGS, MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use url::Url;
 
 pub(super) fn credential_string(
@@ -36,6 +38,16 @@ pub(super) fn credential_value<'a>(
         .and_then(|tokens| value_field(tokens, fields))
         .or_else(|| value_field(credentials, fields))
         .or_else(|| value_field(object, fields))
+}
+
+pub(super) fn credential_bool(
+    object: &Map<String, Value>,
+    credentials: &Map<String, Value>,
+    fields: &[&str],
+) -> Option<bool> {
+    value_field(credentials, fields)
+        .or_else(|| value_field(object, fields))
+        .and_then(Value::as_bool)
 }
 
 pub(super) fn string_field<'a>(object: &'a Map<String, Value>, fields: &[&str]) -> Option<&'a str> {
@@ -120,17 +132,65 @@ pub(super) fn safe_protocol(value: Option<&str>) -> Option<String> {
 }
 
 pub(super) fn metadata_was_rejected(
-    object: &Map<String, Value>,
+    base_url_value: Option<&Value>,
     base_url: Option<&str>,
+    protocol_value: Option<&Value>,
     protocol: Option<&str>,
     plan_value: Option<&Value>,
     plan: Option<&str>,
 ) -> bool {
-    (value_field(object, &["base_url", "baseUrl", "api_base", "apiBase"]).is_some()
-        && base_url.is_none())
-        || (value_field(object, &["protocol", "wire_api", "wireApi"]).is_some()
-            && protocol.is_none())
+    (base_url_value.is_some() && base_url.is_none())
+        || (protocol_value.is_some() && protocol.is_none())
         || (plan_value.is_some() && plan.is_none())
+}
+
+/// Reads optional tags from a portable account item without allowing tags to
+/// become a secret or an unbounded prepared-snapshot payload. Invalid entries
+/// are ignored while valid entries remain importable; the boolean tells the
+/// caller whether a metadata warning should be shown in the preview.
+pub(super) fn safe_import_tags(
+    value: Option<&Value>,
+    sensitive_values: &[Option<&str>],
+) -> (BTreeSet<String>, bool) {
+    let Some(value) = value else {
+        return (BTreeSet::new(), false);
+    };
+    let Some(values) = value.as_array() else {
+        return (BTreeSet::new(), true);
+    };
+
+    let mut tags = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    let mut rejected = values.len() > MAX_ACCOUNT_TAGS;
+    for raw in values.iter().take(MAX_ACCOUNT_TAGS) {
+        let Some(raw) = raw.as_str() else {
+            rejected = true;
+            continue;
+        };
+        let tag = raw.trim();
+        if tag.is_empty()
+            || tag.chars().count() > MAX_ACCOUNT_TAG_CHARS
+            || tag.chars().any(char::is_control)
+            || sensitive_values
+                .iter()
+                .flatten()
+                .filter(|sensitive| sensitive.len() >= 4)
+                .any(|sensitive| tag.contains(sensitive))
+        {
+            rejected = true;
+            continue;
+        }
+        if tags.contains(tag) {
+            continue;
+        }
+        if total_bytes.saturating_add(tag.len()) > MAX_ACCOUNT_TAG_BYTES {
+            rejected = true;
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(tag.len());
+        tags.insert(tag.to_string());
+    }
+    (tags, rejected)
 }
 
 pub(super) fn safe_label(value: Option<&str>) -> Option<String> {

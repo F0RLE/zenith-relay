@@ -17,6 +17,7 @@ struct ImportedAccountCommit {
     previous_account: Option<LocalAccountRecord>,
     attempted_credentials: StoredCodexCredentials,
     attempted_account: LocalAccountRecord,
+    runtime_sync_required: bool,
 }
 
 pub(in crate::local_pool::accounts) async fn persist_imported_account(
@@ -27,6 +28,11 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     account: LocalAccountRecord,
 ) -> ItemResult<()> {
     let account_id = credentials.local_account_id().to_string();
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "persist_started",
+        &[("account", crate::diagnostics::hash_identifier(&account_id))],
+    );
     let locks =
         ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())
             .map_err(|_| ImportItemError::recovery("account credential lock is unavailable"))?;
@@ -53,6 +59,10 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
         .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
         .account(&account_id)
         .cloned();
+    let runtime_sync_required = account.account.in_pool
+        || previous_account
+            .as_ref()
+            .is_some_and(|previous| previous.account.in_pool);
     let mut attempted_account = account;
     // A CDP login observation is presentation-only. It may legitimately arrive
     // while the import is committed and must not be erased by the account row.
@@ -64,6 +74,11 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     credential_store
         .save(credentials)
         .map_err(credential_item_error)?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "credential_saved",
+        &[("account", crate::diagnostics::hash_identifier(&account_id))],
+    );
     if state
         .store()
         .and_then(|mut store| store.upsert_account(attempted_account.clone()))
@@ -83,26 +98,63 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             )
         });
     }
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "account_saved",
+        &[("account", crate::diagnostics::hash_identifier(&account_id))],
+    );
     let commit = ImportedAccountCommit {
         account_id,
         previous_credentials,
         previous_account,
         attempted_credentials: credentials.clone(),
         attempted_account,
+        runtime_sync_required,
     };
     // Runtime construction can wait on TokenAuthority while its automatic
     // adapter waits for this process lock. Release it before restarting the
     // gateway, just like the OAuth and explicit-refresh transactions do.
     drop(commit_guard);
 
-    if sync_imported_account_or_rollback(state, credential_store, &locks, &commit)
-        .await
-        .is_err()
-    {
-        return Err(ImportItemError::new(
-            "gateway_sync_failed",
-            "failed to apply account to the local gateway",
-        ));
+    if commit.runtime_sync_required {
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "runtime_sync_started",
+            &[(
+                "account",
+                crate::diagnostics::hash_identifier(&commit.account_id),
+            )],
+        );
+        if sync_imported_account_or_rollback(state, credential_store, &locks, &commit)
+            .await
+            .is_err()
+        {
+            return Err(ImportItemError::new(
+                "gateway_sync_failed",
+                "failed to apply account to the local gateway",
+            ));
+        }
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "runtime_sync_completed",
+            &[(
+                "account",
+                crate::diagnostics::hash_identifier(&commit.account_id),
+            )],
+        );
+    } else {
+        // Accounts kept outside the local pool do not affect any gateway key
+        // scope. Avoid tearing down a healthy listener just to persist an
+        // inventory record; the runtime will be rebuilt when the user later
+        // adds this account to the pool.
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "runtime_sync_skipped",
+            &[(
+                "account",
+                crate::diagnostics::hash_identifier(&commit.account_id),
+            )],
+        );
     }
 
     if credentials.has_oauth() {
@@ -125,6 +177,17 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
                 ));
             }
         };
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "authority_registered",
+            &[
+                (
+                    "account",
+                    crate::diagnostics::hash_identifier(&commit.account_id),
+                ),
+                ("new", registered.to_string()),
+            ],
+        );
         if !registered {
             reconcile_import_authority(state, credential_store, &locks, &commit, &attempted_tokens)
                 .await?;
@@ -132,11 +195,13 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             // persisted credential and account state now win, so rebuild from
             // that current state rather than rolling it back to this import's
             // snapshot.
-            restart_or_rollback(state, || Ok(())).await.map_err(|_| {
-                ImportItemError::recovery(
-                    "failed to apply newer account credentials to the gateway",
-                )
-            })?;
+            if commit.runtime_sync_required {
+                restart_or_rollback(state, || Ok(())).await.map_err(|_| {
+                    ImportItemError::recovery(
+                        "failed to apply newer account credentials to the gateway",
+                    )
+                })?;
+            }
         }
     }
     if state
@@ -149,6 +214,14 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             "failed to schedule account quota refresh",
         ));
     }
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "quota_refresh_scheduled",
+        &[(
+            "account",
+            crate::diagnostics::hash_identifier(&commit.account_id),
+        )],
+    );
     Ok(())
 }
 
@@ -204,9 +277,12 @@ async fn rollback_after_authority_failure(
     // account. Rebuild the current durable state, but never use a bulk
     // snapshot rollback here: another account can legitimately change while
     // this import waits for TokenAuthority.
-    restart_or_rollback(state, || Ok(())).await.map_err(|_| {
-        ImportItemError::recovery("failed to restore gateway after account registration error")
-    })
+    if commit.runtime_sync_required {
+        restart_or_rollback(state, || Ok(())).await.map_err(|_| {
+            ImportItemError::recovery("failed to restore gateway after account registration error")
+        })?;
+    }
+    Ok(())
 }
 
 fn restore_import_credentials_if_current(
@@ -503,6 +579,8 @@ fn import_token_state_matches(
 mod tests {
     use super::*;
     use crate::local_pool::accounts::records;
+    use crate::local_pool::commands::runtime_from_store;
+    use crate::local_pool::store::secret_store;
     use zenith_relay_core::accounts::AccountAuthMode;
 
     fn credentials(
@@ -538,6 +616,101 @@ mod tests {
             credentials.issued_at_ms(),
         )
         .expect("synthetic account")
+    }
+
+    async fn cleanup_import_test_state(
+        state: DesktopState,
+        credential_store: CredentialStore<NativeSecretBackend>,
+        account_id: &str,
+        root: std::path::PathBuf,
+    ) {
+        state.gateway.stop().await;
+        credential_store
+            .delete(account_id)
+            .expect("cleanup account");
+        let key_refs = {
+            let store = state.store().expect("store");
+            store
+                .keys()
+                .iter()
+                .map(|key| key.secret_ref.clone())
+                .collect::<Vec<_>>()
+        };
+        for secret_ref in key_refs {
+            secret_store::delete(&secret_ref).expect("cleanup key");
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).expect("cleanup state");
+    }
+
+    #[tokio::test]
+    async fn importing_an_account_outside_the_pool_keeps_the_running_gateway() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-no-pool-runtime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = DesktopState::open(root.clone()).expect("state");
+        let runtime = runtime_from_store(&state).await.expect("runtime");
+        let address = state
+            .gateway
+            .start(runtime.clone(), 0)
+            .await
+            .expect("gateway");
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
+        let imported = credentials(&account_id, "outside-pool", 10, 1);
+        let record = account(&imported);
+
+        persist_imported_account(&state, &credential_store, &imported, None, record)
+            .await
+            .expect("import");
+
+        assert_eq!(state.gateway.address().await, Some(address));
+        let running = state.gateway.runtime().await.expect("running runtime");
+        assert!(std::sync::Arc::ptr_eq(&running, &runtime));
+        drop(running);
+        drop(runtime);
+
+        cleanup_import_test_state(state, credential_store, &account_id, root).await;
+    }
+
+    #[tokio::test]
+    async fn importing_a_pool_account_restarts_the_gateway_without_losing_it() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-pool-runtime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = DesktopState::open(root.clone()).expect("state");
+        let runtime = runtime_from_store(&state).await.expect("runtime");
+        let address = state.gateway.start(runtime, 0).await.expect("gateway");
+        let mut gateway = state.store().expect("store").gateway().clone();
+        gateway.port = address.port();
+        state
+            .store()
+            .expect("store")
+            .replace_gateway(gateway)
+            .expect("gateway settings");
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
+        let imported = credentials(&account_id, "pool", 10, 1);
+        let mut record = account(&imported);
+        record.account.in_pool = true;
+
+        persist_imported_account(&state, &credential_store, &imported, None, record)
+            .await
+            .expect("import");
+
+        assert_eq!(
+            state.gateway.address().await.map(|value| value.port()),
+            Some(address.port())
+        );
+        let running = state.gateway.runtime().await.expect("running runtime");
+        assert!(running
+            .candidate_runtime_order()
+            .iter()
+            .any(|candidate| candidate.candidate_id.starts_with("account_")));
+        drop(running);
+        cleanup_import_test_state(state, credential_store, &account_id, root).await;
     }
 
     #[test]
@@ -576,6 +749,7 @@ mod tests {
             previous_account: Some(previous_account.clone()),
             attempted_credentials: attempted_credentials.clone(),
             attempted_account,
+            runtime_sync_required: false,
         };
 
         assert!(
@@ -628,6 +802,7 @@ mod tests {
             previous_account: Some(previous_account),
             attempted_credentials,
             attempted_account,
+            runtime_sync_required: false,
         };
 
         assert!(
@@ -702,6 +877,7 @@ mod tests {
             previous_account: Some(previous_account),
             attempted_credentials: attempted_credentials.clone(),
             attempted_account,
+            runtime_sync_required: false,
         };
         let locks =
             ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())

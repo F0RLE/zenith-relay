@@ -76,6 +76,32 @@ pub(super) use sources::*;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
+fn record_import_command_result<T>(
+    stage: &str,
+    started: Instant,
+    result: CommandResult<T>,
+) -> CommandResult<T> {
+    match result {
+        Ok(value) => {
+            crate::diagnostics::record_operation(
+                "account-import",
+                stage,
+                &[("duration_ms", started.elapsed().as_millis().to_string())],
+            );
+            Ok(value)
+        }
+        Err(error) => {
+            crate::diagnostics::record_error(
+                "account-import",
+                Some(&format!("{:?}", error.code)),
+                &error.message,
+                &[("duration_ms", started.elapsed().as_millis().to_string())],
+            );
+            Err(error)
+        }
+    }
+}
+
 pub(super) const MAX_ACCOUNT_LABEL_BYTES: usize = 128;
 
 pub(super) const MAX_MODELS: usize = 4_096;
@@ -163,18 +189,23 @@ pub async fn start_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
+    let started = Instant::now();
     crate::diagnostics::breadcrumb("account-import", "start", &[]);
-    let (content, source_file) = normalize_import_input(input)?;
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(&state, &credentials)?;
-    let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
-        .start(
-            &content,
-            source_file.as_deref(),
-            &existing.keys().cloned().collect::<Vec<_>>(),
-        )
-        .map_err(import_session_error)?;
-    Ok(session.into())
+    let result = async {
+        let (content, source_file) = normalize_import_input(input)?;
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+        let existing = existing_identity_index(&state, &credentials)?;
+        let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
+            .start(
+                &content,
+                source_file.as_deref(),
+                &existing.keys().cloned().collect::<Vec<_>>(),
+            )
+            .map_err(import_session_error)?;
+        Ok::<ImportSessionResponse, CommandError>(session.into())
+    }
+    .await;
+    record_import_command_result("start_completed", started, result)
 }
 
 #[tauri::command]
@@ -183,26 +214,36 @@ pub async fn preview_local_account_import_files(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<Option<ImportSessionResponse>> {
+    let started = Instant::now();
     crate::diagnostics::breadcrumb("account-import", "preview_files", &[]);
-    let documents = match paths {
-        Some(paths) => Some(read_import_documents(paths)?),
-        None => pick_account_import_documents(&app)?,
-    };
-    let Some(documents) = documents else {
-        return Ok(None);
-    };
-    preview_account_import_documents(documents, &state)
-        .await
-        .map(Some)
+    let result = async {
+        let documents = match paths {
+            Some(paths) => Some(read_import_documents(paths)?),
+            None => pick_account_import_documents(&app)?,
+        };
+        let Some(documents) = documents else {
+            return Ok::<Option<ImportSessionResponse>, CommandError>(None);
+        };
+        preview_account_import_documents(documents, &state)
+            .await
+            .map(Some)
+    }
+    .await;
+    record_import_command_result("preview_files_completed", started, result)
 }
 
 #[tauri::command]
 pub async fn preview_current_codex_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
+    let started = Instant::now();
     crate::diagnostics::breadcrumb("account-import", "preview_current_profile", &[]);
-    let documents = current_profile_documents(&state)?;
-    preview_account_import_documents(documents, &state).await
+    let result = async {
+        let documents = current_profile_documents(&state)?;
+        preview_account_import_documents(documents, &state).await
+    }
+    .await;
+    record_import_command_result("preview_current_completed", started, result)
 }
 
 #[tauri::command]
@@ -237,35 +278,64 @@ pub async fn prepare_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
+    let started = Instant::now();
+    let session_hash = crate::diagnostics::hash_identifier(&input.session_id);
     crate::diagnostics::breadcrumb(
         "account-import",
         "prepare",
-        &[(
-            "session",
-            crate::diagnostics::hash_identifier(&input.session_id),
-        )],
+        &[("session", session_hash.clone())],
     );
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(&state, &credentials)?;
-    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
-    let session = sessions
-        .resume(
-            &input.session_id,
-            &existing.keys().cloned().collect::<Vec<_>>(),
-        )
-        .map_err(import_session_error)?;
-    let probe_quota = should_probe_import_quota(input.probe_quota, session.preview.rows.len());
-    let (content, preview) =
-        prepare_import_preview(&state, &credentials, session, probe_quota).await?;
-    let session = sessions
-        .prepare(
-            &input.session_id,
-            content.as_deref(),
-            preview,
-            &existing.keys().cloned().collect::<Vec<_>>(),
-        )
-        .map_err(import_session_error)?;
-    Ok(session.into())
+    let result = async {
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+        let existing = existing_identity_index(&state, &credentials)?;
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+        let session = sessions
+            .resume(
+                &input.session_id,
+                &existing.keys().cloned().collect::<Vec<_>>(),
+            )
+            .map_err(import_session_error)?;
+        let candidate_count = session.preview.rows.len();
+        let probe_quota = should_probe_import_quota(input.probe_quota, candidate_count);
+        let (content, preview) =
+            prepare_import_preview(&state, &credentials, session, probe_quota).await?;
+        let session = sessions
+            .prepare(
+                &input.session_id,
+                content.as_deref(),
+                preview,
+                &existing.keys().cloned().collect::<Vec<_>>(),
+            )
+            .map_err(import_session_error)?;
+        Ok::<_, CommandError>((session, candidate_count))
+    }
+    .await;
+    match result {
+        Ok((session, candidate_count)) => {
+            crate::diagnostics::record_operation(
+                "account-import",
+                "prepare_completed",
+                &[
+                    ("session", session_hash),
+                    ("candidates", candidate_count.to_string()),
+                    ("duration_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            Ok(session.into())
+        }
+        Err(error) => {
+            crate::diagnostics::record_error(
+                "account-import",
+                Some(&format!("{:?}", error.code)),
+                &error.message,
+                &[
+                    ("session", session_hash),
+                    ("duration_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -286,16 +356,46 @@ pub async fn cancel_local_account_import(
 }
 
 #[tauri::command]
+#[inline(never)]
 pub async fn confirm_local_account_import(
     input: ConfirmAccountImportInput,
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
-    let _mutation = state.setup_guard().await;
-    let started = Instant::now();
+    // Keep the command future itself small.  On Windows the optimized Tauri
+    // dispatcher polls command futures on a bounded stack; embedding the
+    // complete import/serialization workflow here can overflow that stack
+    // before the first breadcrumb is written.  Boxing the implementation
+    // makes the expensive state machine heap-backed while preserving the
+    // typed IPC contract.
+    Box::pin(confirm_local_account_import_impl(input, app, state)).await
+}
+
+#[inline(never)]
+async fn confirm_local_account_import_impl(
+    input: ConfirmAccountImportInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ConfirmAccountImportResponse> {
     let session_hash = crate::diagnostics::hash_identifier(&input.session_id);
     let selected_count = input.selected_item_ids.len();
     let add_to_pool = input.add_to_pool;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "confirm_payload_validated",
+        &[
+            ("session", session_hash.clone()),
+            ("selected_count", selected_count.to_string()),
+            ("add_to_pool", add_to_pool.to_string()),
+        ],
+    );
+    let _mutation = state.setup_guard().await;
+    let started = Instant::now();
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "confirm_lock_acquired",
+        &[("session", session_hash.clone())],
+    );
     crate::diagnostics::breadcrumb(
         "account-import",
         "confirm_started",

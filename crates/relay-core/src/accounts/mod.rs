@@ -9,6 +9,14 @@ mod token_authority;
 /// This is presentation metadata used only for the payback ratio.
 pub const MAX_PURCHASE_COST_MICRO_USD: u64 = 1_000_000_000_000;
 
+/// Bounds for optional account tags carried by portable account exports.
+/// Tags are user metadata, not routing credentials; bounding them keeps a
+/// malformed import from expanding a prepared snapshot without importing
+/// Cockpit-specific folder/group semantics into Relay.
+pub const MAX_ACCOUNT_TAGS: usize = 32;
+pub const MAX_ACCOUNT_TAG_CHARS: usize = 64;
+pub const MAX_ACCOUNT_TAG_BYTES: usize = 2_048;
+
 pub use export::{
     build_account_export, normalize_account_export_description, AccountExportCredential,
     AccountExportDocument, AccountExportFormat, AccountExportRequest, MAX_ACCOUNT_EXPORT_BYTES,

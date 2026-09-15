@@ -6,6 +6,10 @@ import { relayCommands } from "../../api/commands";
 import type { AccountImportProgress, ConfirmAccountImportResponse, ImportSession, RelayMode } from "../../api/types";
 import { AccountPlanBadge, Button, Dialog, StatusIcon } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import {
+  beginAccountImportConfirmation,
+  finishAccountImportConfirmation,
+} from "../../state/relayPreferences";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { useProxyPool } from "./ProxyDialogs";
 
@@ -126,9 +130,15 @@ export function ImportDialog({ initialPaths, initialSession, modeOverride, defau
     try {
       if (mode === "local") {
         const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
-        const ok = await perform("import-confirm", async () => {
-          result.current = await relayCommands.confirmImport(sessionId, selectedIds, addToPool);
-        });
+        beginAccountImportConfirmation();
+        let ok = false;
+        try {
+          ok = await perform("import-confirm", async () => {
+            result.current = await relayCommands.confirmImport(sessionId, selectedIds, addToPool);
+          });
+        } finally {
+          finishAccountImportConfirmation();
+        }
         if (!mounted.current) return;
         if (!ok) {
           setProgress(null);

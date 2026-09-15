@@ -16,7 +16,7 @@ use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
 use crate::local_pool::state::DesktopState;
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zenith_relay_core::accounts::{
     ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview, ImportPreviewStatus,
     ImportQuotaStatus,
@@ -30,39 +30,76 @@ pub(super) async fn preview_account_import_documents(
     state: &DesktopState,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
-    let (content, _) = normalize_import_input(StartAccountImportInput {
-        content: None,
-        documents,
-        source_file: None,
-    })?;
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(state, &credentials)?;
-    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
-    let session = sessions
-        .start(
-            &content,
-            None,
-            &existing.keys().cloned().collect::<Vec<_>>(),
-        )
-        .map_err(import_session_error)?;
-    let session_id = session.session_id.clone();
-    let prepared = async {
-        let (content, preview) =
-            prepare_import_preview(state, &credentials, session, false).await?;
-        sessions
-            .prepare(
-                &session_id,
-                content.as_deref(),
-                preview,
+    let started = Instant::now();
+    let document_count = documents.len();
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "document_preview_started",
+        &[("documents", document_count.to_string())],
+    );
+    let result = async {
+        let (content, _) = normalize_import_input(StartAccountImportInput {
+            content: None,
+            documents,
+            source_file: None,
+        })?;
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+        let existing = existing_identity_index(state, &credentials)?;
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+        let session = sessions
+            .start(
+                &content,
+                None,
                 &existing.keys().cloned().collect::<Vec<_>>(),
             )
-            .map_err(import_session_error)
+            .map_err(import_session_error)?;
+        let session_id = session.session_id.clone();
+        let session_hash = crate::diagnostics::hash_identifier(&session_id);
+        let prepared = async {
+            let (content, preview) =
+                prepare_import_preview(state, &credentials, session, false).await?;
+            sessions
+                .prepare(
+                    &session_id,
+                    content.as_deref(),
+                    preview,
+                    &existing.keys().cloned().collect::<Vec<_>>(),
+                )
+                .map_err(import_session_error)
+        }
+        .await;
+        match prepared {
+            Ok(session) => Ok((session.into(), session_hash)),
+            Err(error) => {
+                let _ = sessions.cancel(&session_id);
+                Err(error)
+            }
+        }
     }
     .await;
-    match prepared {
-        Ok(session) => Ok(session.into()),
+    match result {
+        Ok((session, session_hash)) => {
+            crate::diagnostics::record_operation(
+                "account-import",
+                "document_preview_completed",
+                &[
+                    ("session", session_hash),
+                    ("documents", document_count.to_string()),
+                    ("duration_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            Ok(session)
+        }
         Err(error) => {
-            let _ = sessions.cancel(&session_id);
+            crate::diagnostics::record_error(
+                "account-import",
+                Some(&format!("{:?}", error.code)),
+                &error.message,
+                &[
+                    ("documents", document_count.to_string()),
+                    ("duration_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
             Err(error)
         }
     }
@@ -96,11 +133,34 @@ pub(super) async fn prepare_import_preview(
     let now_ms = current_time_ms();
     let settings = state.store()?.gateway().clone();
     let common_proxy = common_proxy_config(&settings)?;
-    for (item, row) in session
+    let session_hash = crate::diagnostics::hash_identifier(&session.session_id);
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "prepare_preview_started",
+        &[
+            ("session", session_hash.clone()),
+            ("candidates", item_count.to_string()),
+            ("probe_quota", probe_quota.to_string()),
+        ],
+    );
+    for (index, (item, row)) in session
         .items
         .into_iter()
         .zip(preview.rows.iter_mut().filter(|row| row.selectable))
+        .enumerate()
     {
+        let item_hash = crate::diagnostics::hash_identifier(&item.item_id);
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "prepare_item_started",
+            &[
+                ("session", session_hash.clone()),
+                ("item", item_hash.clone()),
+                ("index", index.to_string()),
+                ("total", item_count.to_string()),
+                ("auth_mode", row.auth_mode.as_str().to_string()),
+            ],
+        );
         let original = parsed_item_value(&item, row.auth_mode);
         if row.auth_mode == ImportAuthMode::ApiKey {
             if let (Some(base_url), Some(api_key)) =
@@ -115,6 +175,15 @@ pub(super) async fn prepare_import_preview(
                 }
             }
             prepared_values.push(original);
+            crate::diagnostics::breadcrumb(
+                "account-import",
+                "prepare_item_completed",
+                &[
+                    ("session", session_hash.clone()),
+                    ("item", item_hash),
+                    ("index", index.to_string()),
+                ],
+            );
             continue;
         }
 
@@ -128,12 +197,31 @@ pub(super) async fn prepare_import_preview(
             row.default_selected = false;
             row.error = Some(ImportIssue {
                 code: ImportIssueCode::RefreshExchangeFailed,
-                message: error.message,
+                message: error.message.clone(),
             });
+            crate::diagnostics::record_error(
+                "account-import",
+                Some("proxy_unavailable"),
+                &error.message,
+                &[
+                    ("session", session_hash.clone()),
+                    ("item", item_hash.clone()),
+                    ("index", index.to_string()),
+                ],
+            );
             continue;
         }
         credentials_changed |=
             item.secrets().access_token().is_none() && item.secrets().refresh_token().is_some();
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "identity_lookup_started",
+            &[
+                ("session", session_hash.clone()),
+                ("item", item_hash.clone()),
+                ("index", index.to_string()),
+            ],
+        );
         let material = match build_import_credential_material(
             item,
             now_ms,
@@ -154,11 +242,30 @@ pub(super) async fn prepare_import_preview(
                 row.default_selected = false;
                 row.error = Some(ImportIssue {
                     code: ImportIssueCode::RefreshExchangeFailed,
-                    message: error.message,
+                    message: error.message.clone(),
                 });
+                crate::diagnostics::record_error(
+                    "account-import",
+                    Some(&error.code),
+                    &error.message,
+                    &[
+                        ("session", session_hash.clone()),
+                        ("item", item_hash.clone()),
+                        ("index", index.to_string()),
+                    ],
+                );
                 continue;
             }
         };
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "identity_lookup_completed",
+            &[
+                ("session", session_hash.clone()),
+                ("item", item_hash.clone()),
+                ("index", index.to_string()),
+            ],
+        );
         let Some(provider_account_id) = material.provider_account_id.as_deref() else {
             row.status = ImportPreviewStatus::Invalid;
             row.selectable = false;
@@ -167,6 +274,16 @@ pub(super) async fn prepare_import_preview(
                 code: ImportIssueCode::InvalidCredentials,
                 message: "ChatGPT account identity is missing".into(),
             });
+            crate::diagnostics::record_error(
+                "account-import",
+                Some("provider_account_id_missing"),
+                "ChatGPT account identity is missing",
+                &[
+                    ("session", session_hash.clone()),
+                    ("item", item_hash.clone()),
+                    ("index", index.to_string()),
+                ],
+            );
             continue;
         };
         // Some account exports contain the same credentials more than once,
@@ -190,6 +307,16 @@ pub(super) async fn prepare_import_preview(
                 code: ImportIssueCode::DuplicateItem,
                 message: "duplicate authenticated account identity".into(),
             });
+            crate::diagnostics::record_error(
+                "account-import",
+                Some("duplicate_item"),
+                "duplicate authenticated account identity",
+                &[
+                    ("session", session_hash.clone()),
+                    ("item", item_hash.clone()),
+                    ("index", index.to_string()),
+                ],
+            );
             continue;
         }
         row.identity = masked_account_identity(provider_account_id);
@@ -271,6 +398,15 @@ pub(super) async fn prepare_import_preview(
             }
         }
         prepared_values.push(parsed_item_value_from_material(original, &material));
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "prepare_item_completed",
+            &[
+                ("session", session_hash.clone()),
+                ("item", item_hash),
+                ("index", index.to_string()),
+            ],
+        );
     }
     // Preparation can reject an otherwise parseable item after contacting the
     // provider. In that case the prepared snapshot must retain only the
@@ -285,6 +421,22 @@ pub(super) async fn prepare_import_preview(
                 "failed to encode prepared import credentials",
             )
         })?;
+    crate::diagnostics::record_operation(
+        "account-import",
+        "prepare_preview_completed",
+        &[
+            ("session", session_hash),
+            (
+                "selectable",
+                preview
+                    .rows
+                    .iter()
+                    .filter(|row| row.selectable)
+                    .count()
+                    .to_string(),
+            ),
+        ],
+    );
     Ok((content, preview))
 }
 

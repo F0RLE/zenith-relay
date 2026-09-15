@@ -141,6 +141,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
     let item_account_id = item.account_id.clone();
     let item_user_id = item.chatgpt_user_id.clone();
     let organization_id = item.organization_id.clone();
+    let item_account_is_fedramp = item.account_is_fedramp;
     let secrets = item.into_secrets();
     let original_refresh = secrets.refresh_token().map(str::to_string);
     let imported_identity = super::imported_identity(secrets.id_token(), secrets.access_token());
@@ -193,7 +194,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             subscription_active_until_ms: imported_identity
                 .subscription_active_until_ms
                 .or(subscription_active_until_hint),
-            account_is_fedramp: imported_identity.account_is_fedramp,
+            account_is_fedramp: item_account_is_fedramp || imported_identity.account_is_fedramp,
         };
         return resolve_import_account_identity(material, endpoint, proxy, request_timeout_seconds)
             .await;
@@ -223,7 +224,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             subscription_active_until_ms: imported_identity
                 .subscription_active_until_ms
                 .or(subscription_active_until_hint),
-            account_is_fedramp: imported_identity.account_is_fedramp,
+            account_is_fedramp: item_account_is_fedramp || imported_identity.account_is_fedramp,
         });
     };
     let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
@@ -286,7 +287,9 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             .subscription_active_until_ms
             .or(oauth_subscription_active_until_ms)
             .or(subscription_active_until_hint),
-        account_is_fedramp: account_is_fedramp || imported_identity.account_is_fedramp,
+        account_is_fedramp: item_account_is_fedramp
+            || account_is_fedramp
+            || imported_identity.account_is_fedramp,
     };
     resolve_import_account_identity(material, endpoint, proxy, request_timeout_seconds).await
 }

@@ -6,6 +6,7 @@ import { initI18n } from "./i18n";
 import { getSystemLocale, recordPerformance, revealWindowAfterBackgroundColor } from "./platform/desktop";
 import { relayCommands } from "./features/relay/api/commands";
 import { redactFeedbackText } from "./features/relay/state/feedback";
+import { consumeInterruptedAccountImportConfirmation } from "./features/relay/state/relayPreferences";
 
 const STARTUP_REVEAL_FALLBACK_MS = 10_000;
 let startupFallbackTimer: number | undefined;
@@ -57,6 +58,17 @@ window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
   reportRendererError("unhandled-rejection", reason, reason instanceof Error ? reason.stack : undefined);
 });
+
+function reportInterruptedAccountImportConfirmation() {
+  if (!consumeInterruptedAccountImportConfirmation()) return;
+  void relayCommands.recordFrontendDiagnostic({
+    source: "account-import",
+    operation: "confirm_local_account_import",
+    code: "confirmation_interrupted",
+    message: "account import confirmation did not return before the previous renderer stopped",
+  }).catch(() => undefined);
+}
+
 const initialTheme = document.documentElement.dataset["theme"];
 const initialThemeIsDark = initialTheme === "dark" || (
   initialTheme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches
@@ -66,6 +78,7 @@ void bootstrap();
 
 async function bootstrap() {
   startupFallbackTimer = window.setTimeout(revealStartupShell, STARTUP_REVEAL_FALLBACK_MS);
+  reportInterruptedAccountImportConfirmation();
   const systemLocale = getSystemLocale().catch(() => null);
   await initI18n(navigator.language);
   void systemLocale.then((locale) => {

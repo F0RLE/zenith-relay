@@ -115,6 +115,7 @@ pub async fn export_accounts(
             created_at_ms: credential.issued_at_ms,
             priority: record.priority,
             enabled: record.enabled,
+            tags: BTreeSet::new(),
         });
     }
     let document: AccountExportDocument = build_account_export(
