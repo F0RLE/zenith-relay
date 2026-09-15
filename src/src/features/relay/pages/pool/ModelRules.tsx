@@ -4,13 +4,14 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
 import { Button, Dialog, EmptyState, IconButton, OptionMenu } from "../../components/Ui";
-import { groupModelSummaries, operationalModelSummaries } from "../../poolHelpers";
+import { currentPoolModelSummaries, groupModelSummaries, operationalModelSummaries } from "../../poolHelpers";
 import { formatReasoningEffort } from "../../poolFormatting";
 import {
   initialReasoningLevels,
   toggleReasoningLevel,
 } from "./modelReasoningPolicy";
 import {
+  completeModelDisplayOrder,
   modelSignature,
   normalizeReasoningSelection,
   reorderById,
@@ -42,6 +43,7 @@ export function ModelRulesView() {
   const { mode, runtime, perform, busy } = useRelayState();
   const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
   const models = runtime ? operationalModelSummaries(runtime) : [];
+  const poolModels = runtime ? currentPoolModelSummaries(runtime) : [];
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [dragModelId, setDragModelId] = useState<string | null>(null);
   const [dragGroupId, setDragGroupId] = useState<string | null>(null);
@@ -64,8 +66,11 @@ export function ModelRulesView() {
   const saveModelOrder = (next: ModelSummary[]) => perform(
     "model-order",
     () => mode === "local"
-      ? relayCommands.setModelDisplayOrder(next.map((model) => model.id))
-      : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: next.map((model) => model.id) }),
+      ? relayCommands.setModelDisplayOrder(completeModelDisplayOrder(next, poolModels))
+      : relayCommands.remoteAction(
+        { type: "set_model_order" },
+        { modelIds: completeModelDisplayOrder(next, poolModels) },
+      ),
     "feedback.saved",
   );
   const reorderModels = (sourceId: string, targetId: string) => {

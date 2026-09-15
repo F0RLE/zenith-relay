@@ -3,6 +3,7 @@ import type { AccountSummary, RuntimeSnapshot, SourceSummary } from "../src/feat
 import {
   clampRoutingCount,
   comparePoolMembers,
+  currentPoolModelSummaries,
   groupModelSummaries,
   mergeSubscriptionPlanOrder,
   modelSummaries,
@@ -164,6 +165,17 @@ describe("pool helpers", () => {
     }));
     expect(fallback[0]).toMatchObject({ id: "gpt-test", memberCount: 1, enabled: true });
     expect(groupModelSummaries(fallback, [account({ models: ["GPT-TEST"] })]).map((group) => group.provider)).toEqual(["openai"]);
+  });
+
+  test("keeps a binding-only pooled source model in the saved order inventory", () => {
+    const snapshot = runtime({
+      sources: [source({
+        models: [],
+        protocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: ["binding-only"] }],
+      })],
+    });
+
+    expect(currentPoolModelSummaries(snapshot).map((model) => model.id)).toEqual(["binding-only"]);
   });
 
   test("keeps Model Rules limited to models with an active pool route", () => {

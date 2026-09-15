@@ -157,6 +157,36 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   });
 }
 
+/**
+ * Return the complete model inventory that can be ordered for this pool.
+ *
+ * The rules page deliberately filters unavailable models from its visible
+ * rows. Its save action still needs the complete pool inventory, otherwise a
+ * group drag would look like it removed every unavailable model from the
+ * saved order.
+ */
+export function currentPoolModelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
+  const currentIds = new Set<string>();
+  const add = (id: string) => {
+    const normalized = id.trim().toLowerCase();
+    if (normalized) currentIds.add(normalized);
+  };
+  for (const source of runtime.sources) {
+    if (!source.inPool) continue;
+    for (const id of source.models) add(id);
+    // Keep the complete ordering inventory consistent with modelSummaries:
+    // a partially migrated source can carry an ID only on its route binding.
+    for (const binding of source.protocolBindings ?? []) {
+      for (const id of binding.modelIds) add(id);
+    }
+  }
+  for (const account of runtime.accounts) {
+    if (!account.inPool) continue;
+    for (const id of account.models) add(id);
+  }
+  return modelSummaries(runtime).filter((model) => currentIds.has(model.id.trim().toLowerCase()));
+}
+
 function normalizeModelSummary(model: ModelSummary): ModelSummary {
   return {
     ...model,

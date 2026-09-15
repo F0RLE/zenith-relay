@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelSummary } from "../src/features/relay/api/types";
 import {
+  completeModelDisplayOrder,
   modelSignature,
   normalizeReasoningSelection,
   reorderById,
@@ -48,6 +49,14 @@ describe("model rules model", () => {
     const next = reorderModelGroups(groups, "one", "three");
     expect(next?.map((item) => item.id)).toEqual(["c", "d", "e", "a", "b"]);
     expect(groups[0]?.items.map((item) => item.id)).toEqual(["a", "b"]);
+  });
+
+  test("keeps unavailable catalog models when saving a reordered visible group", () => {
+    const order = completeModelDisplayOrder(
+      [model("gpt-b"), model("gpt-a")],
+      [model("gpt-a"), model("gpt-b"), model("gpt-unavailable")],
+    );
+    expect(order).toEqual(["gpt-b", "gpt-a", "gpt-unavailable"]);
   });
 
   test("normalizes advertised reasoning levels and preserves provider order", () => {

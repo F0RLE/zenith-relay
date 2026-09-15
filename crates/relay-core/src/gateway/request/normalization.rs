@@ -5,15 +5,22 @@ const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
 
 /// Owns the service-tier field for one routed request.
 ///
-/// Managed Codex requests use the pool's speed policy only when the
-/// client did not select an upstream tier. Generic API clients retain their
-/// explicit upstream tier such as `flex`. A request may be retried on several
-/// candidates, so the original client field is retained separately from a
-/// Relay-injected default and reapplied for every attempt.
+/// Managed Codex requests use the pool's speed policy for native speed values
+/// (`fast`, `priority`, and `ultrafast`). Those values are route-local: a retry
+/// can land on a candidate with a different confirmed entitlement, so the
+/// value is recalculated for every attempt. Generic client-owned values such
+/// as `flex` remain opaque and are forwarded unchanged.
 #[derive(Clone, Debug)]
 pub(in crate::gateway) struct ServiceTierPolicy {
     owner: ServiceTierOwner,
     client_tier: Option<Value>,
+    pool_tier: Option<PoolServiceTier>,
+}
+
+#[derive(Clone, Debug)]
+struct PoolServiceTier {
+    requested: DefaultServiceTier,
+    original: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,16 +37,19 @@ impl ServiceTierPolicy {
                 .as_object()
                 .and_then(|object| object.get("service_tier"))
                 .cloned(),
+            pool_tier: None,
         }
     }
 
     pub(in crate::gateway) fn pool_owned(request: &Value) -> Self {
+        let incoming = request
+            .as_object()
+            .and_then(|object| object.get("service_tier"));
+        let pool_tier = incoming.and_then(parse_pool_service_tier);
         Self {
             owner: ServiceTierOwner::Pool,
-            client_tier: request
-                .as_object()
-                .and_then(|object| object.get("service_tier"))
-                .cloned(),
+            client_tier: incoming.filter(|_| pool_tier.is_none()).cloned(),
+            pool_tier,
         }
     }
 
@@ -49,14 +59,19 @@ impl ServiceTierPolicy {
         default: DefaultServiceTier,
         wire_api: WireApi,
     ) {
-        let object = request
+        // Remove the previous attempt's route-local value first. A fallback
+        // from Ultrafast/Fast to Standard must not inherit a stale tier.
+        request
             .as_object_mut()
-            .expect("request object was validated before routing");
-        // Remove a Relay-injected `priority` from the previous attempt first.
-        // A fallback from Fast to Standard must not inherit that stale field.
-        object.remove("service_tier");
-        if let Some(client_tier) = self.client_tier.as_ref() {
-            object.insert("service_tier".to_string(), client_tier.clone());
+            .expect("request object was validated before routing")
+            .remove("service_tier");
+        if let Some(pool_tier) = self.pool_tier.as_ref() {
+            apply_pool_service_tier(request, pool_tier, default);
+        } else if let Some(client_tier) = self.client_tier.as_ref() {
+            request
+                .as_object_mut()
+                .expect("request object was validated before routing")
+                .insert("service_tier".to_string(), client_tier.clone());
         } else if self.owner == ServiceTierOwner::Pool && wire_api != WireApi::Messages {
             apply_default_service_tier_if_missing(request, default);
         }
@@ -76,6 +91,45 @@ impl ServiceTierPolicy {
         } else {
             DefaultServiceTier::Standard
         }
+    }
+}
+
+fn parse_pool_service_tier(value: &Value) -> Option<PoolServiceTier> {
+    let original = value.as_str()?.trim();
+    let requested = if original.eq_ignore_ascii_case("ultrafast") {
+        DefaultServiceTier::Ultrafast
+    } else if original.eq_ignore_ascii_case("priority") || original.eq_ignore_ascii_case("fast") {
+        DefaultServiceTier::Fast
+    } else {
+        return None;
+    };
+    Some(PoolServiceTier {
+        requested,
+        original: original.to_string(),
+    })
+}
+
+fn apply_pool_service_tier(
+    request: &mut Value,
+    pool_tier: &PoolServiceTier,
+    selected: DefaultServiceTier,
+) {
+    let value = match selected {
+        DefaultServiceTier::Standard => return,
+        // Preserve the client's native spelling when the selected route can
+        // satisfy the same tier. A downgrade/upgrade uses the canonical
+        // upstream spelling for the selected route.
+        DefaultServiceTier::Fast if pool_tier.requested == DefaultServiceTier::Fast => {
+            pool_tier.original.as_str()
+        }
+        DefaultServiceTier::Fast => "priority",
+        DefaultServiceTier::Ultrafast if pool_tier.requested == DefaultServiceTier::Ultrafast => {
+            pool_tier.original.as_str()
+        }
+        DefaultServiceTier::Ultrafast => "ultrafast",
+    };
+    if let Some(object) = request.as_object_mut() {
+        object.insert("service_tier".to_string(), Value::String(value.to_string()));
     }
 }
 
@@ -499,6 +553,56 @@ mod tests {
             WireApi::Responses,
         );
         assert_eq!(explicit["service_tier"], "flex");
+    }
+
+    #[test]
+    fn pool_native_service_tier_is_recomputed_for_each_retry_candidate() {
+        let mut request = json!({"service_tier": "ultrafast"});
+        let policy = ServiceTierPolicy::pool_owned(&request);
+
+        // The first candidate has only the confirmed Fast entitlement, so an
+        // Ultrafast request must be downgraded to the native Fast spelling.
+        policy.prepare_for_candidate(&mut request, DefaultServiceTier::Fast, WireApi::Responses);
+        assert_eq!(request["service_tier"], "priority");
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Fast, WireApi::Responses),
+            DefaultServiceTier::Fast
+        );
+
+        // A retry on a Standard-only candidate must remove the previous
+        // candidate's native value entirely.
+        policy.prepare_for_candidate(
+            &mut request,
+            DefaultServiceTier::Standard,
+            WireApi::Responses,
+        );
+        assert!(request.get("service_tier").is_none());
+        assert_eq!(
+            policy.effective_tier(&request, DefaultServiceTier::Standard, WireApi::Responses),
+            DefaultServiceTier::Standard
+        );
+
+        // If a later candidate confirms Ultrafast, restore the requested tier.
+        policy.prepare_for_candidate(
+            &mut request,
+            DefaultServiceTier::Ultrafast,
+            WireApi::Responses,
+        );
+        assert_eq!(request["service_tier"], "ultrafast");
+    }
+
+    #[test]
+    fn pool_native_fast_spelling_is_preserved_when_the_candidate_matches() {
+        for value in ["fast", "priority"] {
+            let mut request = json!({"service_tier": value});
+            let policy = ServiceTierPolicy::pool_owned(&request);
+            policy.prepare_for_candidate(
+                &mut request,
+                DefaultServiceTier::Fast,
+                WireApi::Responses,
+            );
+            assert_eq!(request["service_tier"], value);
+        }
     }
 
     #[test]

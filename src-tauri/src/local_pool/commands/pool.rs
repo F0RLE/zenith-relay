@@ -9,7 +9,9 @@ use crate::{
             credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
+        models::{
+            LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord,
+        },
         profiles::codex,
         state::DesktopState,
         store::secret_store,
@@ -19,12 +21,10 @@ use crate::{
 use chrono::Utc;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
-#[cfg(test)]
-use zenith_relay_core::WireApi;
 use zenith_relay_core::{
     merge_configuration_preset_settings, normalize_configuration_preset,
     protocol::{
@@ -34,7 +34,7 @@ use zenith_relay_core::{
         CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
     validate_resolved_configuration_preset_members, ApiModelPriceOverride, DefaultServiceTier,
-    RoutingStrategy,
+    RoutingStrategy, WireApi,
 };
 
 mod model_policy;
@@ -922,9 +922,10 @@ pub async fn set_local_model_service_tier(
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
     let runtime = state.gateway.runtime().await;
-    if !runtime
-        .as_ref()
-        .is_some_and(|runtime| runtime.model_supports_service_tier(&canonical, input.service_tier))
+    if input.service_tier != DefaultServiceTier::Standard
+        && !runtime.as_ref().is_some_and(|runtime| {
+            runtime.model_supports_service_tier(&canonical, input.service_tier)
+        })
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -962,56 +963,10 @@ pub async fn set_local_model_display_order(
     let _mutation = state.setup_guard().await;
     let snapshot = state.snapshot().await?;
     let inputs = state.runtime_inputs().await?;
-    let mut current = std::collections::BTreeMap::new();
-    for source in inputs.sources.iter().filter(|source| source.in_pool) {
-        for model in &source.models {
-            current
-                .entry(model.to_ascii_lowercase())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    for account in inputs
-        .accounts
-        .iter()
-        .filter(|account| account.account.in_pool)
-    {
-        for model in account.effective_models() {
-            current
-                .entry(model.to_ascii_lowercase())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    if input.model_ids.len() != current.len() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "model order must contain every current pool model exactly once",
-        )
-        .into());
-    }
-    let mut requested = std::collections::BTreeSet::new();
-    let mut order = Vec::with_capacity(input.model_ids.len());
-    for model in input.model_ids {
-        let key = model.trim().to_ascii_lowercase();
-        let Some(canonical) = current.get(&key) else {
-            return Err(LocalPoolError::new(ErrorCode::NotFound, "pool model not found").into());
-        };
-        if !requested.insert(key) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "model order contains duplicates",
-            )
-            .into());
-        }
-        order.push(canonical.clone());
-    }
-    if requested.len() != current.len() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "model order must contain every current pool model exactly once",
-        )
-        .into());
-    }
+    let current = configured_pool_model_inventory(&inputs.sources, &inputs.accounts);
     let old_gateway = state.store()?.gateway().clone();
+    let order =
+        complete_model_display_order(&current, input.model_ids, &old_gateway.model_display_order)?;
     let mut gateway = old_gateway.clone();
     gateway.model_display_order = order;
     if gateway == old_gateway {
@@ -1022,6 +977,86 @@ pub async fn set_local_model_display_order(
         runtime.set_model_display_order(gateway.model_display_order);
     }
     state.snapshot().await.map_err(Into::into)
+}
+
+/// Collect every model configured on an in-pool source or account, including
+/// IDs that only exist on a normalized protocol binding. The live gateway
+/// catalog can omit unavailable members, but Model Rules still needs this
+/// complete inventory when it persists a partial visible order.
+fn configured_pool_model_inventory(
+    sources: &[ProviderSourceRecord],
+    accounts: &[LocalAccountRecord],
+) -> BTreeMap<String, String> {
+    let mut current = BTreeMap::new();
+    for source in sources.iter().filter(|source| source.in_pool) {
+        for wire_api in WireApi::ALL {
+            let Ok(models) = source.models_for_wire_api(wire_api) else {
+                continue;
+            };
+            for model in models {
+                current.entry(model.to_ascii_lowercase()).or_insert(model);
+            }
+        }
+    }
+    for account in accounts.iter().filter(|account| account.account.in_pool) {
+        for model in account.effective_models() {
+            current
+                .entry(model.to_ascii_lowercase())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    current
+}
+
+/// Complete a renderer-provided order against the current pool inventory.
+///
+/// Model Rules intentionally hides models while every route for them is
+/// unavailable. A drag from that view is therefore a partial order, not an
+/// attempt to delete the hidden models. Preserve those entries in their saved
+/// order and append newly discovered inventory deterministically. Unknown and
+/// duplicate IDs are still rejected so a stale client cannot corrupt the
+/// configuration.
+fn complete_model_display_order(
+    current: &BTreeMap<String, String>,
+    requested_ids: Vec<String>,
+    saved_order: &[String],
+) -> LocalResult<Vec<String>> {
+    let mut included = BTreeSet::new();
+    let mut order = Vec::with_capacity(current.len());
+    let mut include = |model: &str, reject_unknown: bool| -> LocalResult<()> {
+        let key = model.trim().to_ascii_lowercase();
+        let Some(canonical) = current.get(&key) else {
+            if reject_unknown {
+                return Err(LocalPoolError::new(
+                    ErrorCode::NotFound,
+                    "pool model not found",
+                ));
+            }
+            return Ok(());
+        };
+        if !included.insert(key) {
+            if reject_unknown {
+                return Err(LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "model order contains duplicates",
+                ));
+            }
+            return Ok(());
+        }
+        order.push(canonical.clone());
+        Ok(())
+    };
+
+    for model in requested_ids {
+        include(&model, true)?;
+    }
+    for model in saved_order {
+        include(model, false)?;
+    }
+    for model in current.values() {
+        include(model, false)?;
+    }
+    Ok(order)
 }
 
 #[tauri::command]
@@ -1220,6 +1255,7 @@ pub async fn update_local_routing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zenith_relay_core::SourceProtocolBinding;
 
     fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
         ProviderSourceRecord {
@@ -1297,5 +1333,39 @@ mod tests {
             BTreeSet::from(["messages".to_string(), "responses".to_string()])
         );
         assert!(account_ids.is_empty());
+    }
+
+    #[test]
+    fn model_display_order_keeps_unavailable_inventory_after_reordering_visible_models() {
+        let current = BTreeMap::from([
+            ("gpt-a".to_string(), "gpt-a".to_string()),
+            ("gpt-b".to_string(), "gpt-b".to_string()),
+            ("gpt-hidden".to_string(), "gpt-hidden".to_string()),
+        ]);
+
+        let order = complete_model_display_order(
+            &current,
+            vec!["gpt-b".into(), "gpt-a".into()],
+            &["gpt-hidden".into(), "gpt-a".into(), "gpt-b".into()],
+        )
+        .unwrap();
+
+        assert_eq!(order, ["gpt-b", "gpt-a", "gpt-hidden"]);
+    }
+
+    #[test]
+    fn pool_model_inventory_includes_ids_only_present_on_source_bindings() {
+        let mut binding_only = source("binding-only", true, WireApi::Responses);
+        binding_only.models.clear();
+        binding_only.protocol_bindings = vec![SourceProtocolBinding::legacy(
+            WireApi::Responses,
+            &["binding-model".to_string()],
+        )];
+
+        let current = configured_pool_model_inventory(&[binding_only], &[]);
+        assert_eq!(
+            current.get("binding-model").map(String::as_str),
+            Some("binding-model")
+        );
     }
 }

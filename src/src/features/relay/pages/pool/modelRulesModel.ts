@@ -64,6 +64,25 @@ export function reorderModelGroups(groups: readonly ModelRuleGroup[], sourceId: 
   return blocks.flat();
 }
 
+/** Keep models omitted from the operational view in the persisted order. */
+export function completeModelDisplayOrder(
+  reordered: readonly ModelSummary[],
+  catalog: readonly ModelSummary[],
+) {
+  const included = new Set<string>();
+  const order: string[] = [];
+  const add = (model: ModelSummary) => {
+    const id = model.id.trim();
+    const key = id.toLowerCase();
+    if (!id || included.has(key)) return;
+    included.add(key);
+    order.push(id);
+  };
+  reordered.forEach(add);
+  catalog.forEach(add);
+  return order;
+}
+
 export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels" | "reasoningManualFallback">) {
   const declaredLevels = model.reasoningSupportedLevels?.length
     ? model.reasoningSupportedLevels
