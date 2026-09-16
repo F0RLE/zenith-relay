@@ -26,9 +26,9 @@ struct RunningGateway {
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct GatewayManager {
-    running: Mutex<Option<RunningGateway>>,
+    running: Arc<Mutex<Option<RunningGateway>>>,
 }
 
 impl GatewayManager {

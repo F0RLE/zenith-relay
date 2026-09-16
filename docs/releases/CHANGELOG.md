@@ -28,7 +28,8 @@ release entries are kept concise and link to the corresponding tag.
   the next compatible healthy account or API source. This works for both
   ordinary and WebSocket Responses requests.
 - An account that needs sign-in, is cooling down, or has an error now disables
-  only that candidate. The rest of the pool and its available models keep
+  only that candidate, including when its status changes while the local gateway
+  is already running. The rest of the pool and its available models keep
   rotating normally.
 - Account import and OAuth cleanup no longer leave stale temporary state that
   can close Relay or block the next import. A JSON account can be added to

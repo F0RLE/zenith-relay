@@ -106,4 +106,5 @@ pub(in crate::local_pool) use runtime::{
     refresh_local_gateway_key_scope_if_running, restart_after_secret_change, restart_or_rollback,
     runtime_account_policy, runtime_from_store, sync_account_or_rollback, sync_gateway_or_rollback,
     sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
+    sync_runtime_account_state,
 };

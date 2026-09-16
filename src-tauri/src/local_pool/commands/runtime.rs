@@ -588,7 +588,7 @@ pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
     sync_account_or_rollback(state, previous_account, attempted_account).await
 }
 
-fn sync_runtime_account_state(
+pub(in crate::local_pool) fn sync_runtime_account_state(
     runtime: &GatewayRuntime,
     account: &LocalAccountRecord,
     observed_at_ms: u64,
@@ -767,7 +767,9 @@ pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> Loca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
+    use crate::local_pool::accounts::{
+        authority::AccountMetadataSink, credentials::StoredCodexCredentials, records,
+    };
     use std::fs;
 
     #[test]
@@ -1070,6 +1072,123 @@ mod tests {
         }
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn persisted_reauth_disables_only_its_running_pool_account() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-persisted-reauth-{id}"));
+        let broken_account_id = format!("account-reauth-{id}");
+        let healthy_account_id = format!("account-healthy-{id}");
+        let now_ms = current_time_ms();
+        let state = DesktopState::open(root.clone()).unwrap();
+        let credentials_store = CredentialStore::from_backend(NativeSecretBackend);
+        let credentials = |account_id: &str, provider_account_id: &str| {
+            StoredCodexCredentials::new(
+                account_id,
+                "synthetic-access".into(),
+                Some("synthetic-refresh".into()),
+                Some("synthetic-id".into()),
+                Some(now_ms.saturating_add(60_000)),
+                now_ms,
+                1,
+                None,
+                Some(provider_account_id.to_string()),
+                None,
+                None,
+                Some("plus".into()),
+                false,
+            )
+            .unwrap()
+        };
+        let broken_credentials = credentials(&broken_account_id, "provider-reauth");
+        let healthy_credentials = credentials(&healthy_account_id, "provider-healthy");
+        credentials_store.save(&broken_credentials).unwrap();
+        credentials_store.save(&healthy_credentials).unwrap();
+
+        let account = |credentials: &StoredCodexCredentials| {
+            let mut account = records::new_account_record(
+                credentials,
+                zenith_relay_core::accounts::AccountAuthMode::OAuth,
+                vec!["gpt-test".into()],
+                0,
+                now_ms,
+            )
+            .unwrap();
+            account.account.in_pool = true;
+            account
+        };
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account(&broken_credentials))
+            .unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account(&healthy_credentials))
+            .unwrap();
+
+        let runtime = runtime_from_store(&state).await.unwrap();
+        state.gateway.start(runtime, 0).await.unwrap();
+        state
+            .account_metadata_sink()
+            .persist_auth_state(
+                &broken_account_id,
+                zenith_relay_core::accounts::AccountAuthState::RequiresReauth(
+                    zenith_relay_core::accounts::ReauthReason::InvalidatedRefreshToken,
+                ),
+            )
+            .await
+            .unwrap();
+        let candidates = state
+            .gateway
+            .runtime()
+            .await
+            .unwrap()
+            .candidate_runtime_order();
+        let broken_available = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_id == broken_account_id)
+            .expect("reauth candidate")
+            .available;
+        let healthy_available = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_id == healthy_account_id)
+            .expect("healthy candidate")
+            .available;
+        let persisted_auth_state = state
+            .store()
+            .unwrap()
+            .account(&broken_account_id)
+            .expect("persisted reauth account")
+            .account
+            .auth_state;
+        let key_secret_ref = state
+            .store()
+            .unwrap()
+            .keys()
+            .iter()
+            .find(|key| key.system)
+            .map(|key| key.secret_ref.clone());
+
+        state.gateway.stop().await;
+        credentials_store.delete(&broken_account_id).unwrap();
+        credentials_store.delete(&healthy_account_id).unwrap();
+        if let Some(secret_ref) = key_secret_ref {
+            secret_store::delete(&secret_ref).unwrap();
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(
+            persisted_auth_state,
+            zenith_relay_core::accounts::AccountAuthState::RequiresReauth(
+                zenith_relay_core::accounts::ReauthReason::InvalidatedRefreshToken,
+            )
+        );
+        assert!(!broken_available);
+        assert!(healthy_available);
     }
 
     #[tokio::test]

@@ -5,6 +5,8 @@ use crate::local_pool::{
         oauth_flow::{OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
         NativeSecretBackend,
     },
+    commands::{current_time_ms, sync_runtime_account_state},
+    host::GatewayManager,
     response_affinity::DesktopResponseAffinityStore,
     store::LocalPoolStore,
     usage_writer::{DesktopUsageWriter, DesktopUsageWriterParts},
@@ -21,6 +23,8 @@ impl DesktopState {
     pub(crate) fn account_metadata_sink(&self) -> Arc<StoreAccountMetadata> {
         Arc::new(StoreAccountMetadata {
             store: self.store.clone(),
+            gateway: self.gateway.clone(),
+            events: self.oauth_events.clone(),
         })
     }
 
@@ -81,6 +85,8 @@ impl DesktopState {
 
 pub(crate) struct StoreAccountMetadata {
     store: Arc<Mutex<LocalPoolStore>>,
+    gateway: GatewayManager,
+    events: DesktopOAuthEvents,
 }
 
 #[derive(Clone, Default)]
@@ -154,13 +160,26 @@ impl AccountMetadataSink for StoreAccountMetadata {
         auth_state: zenith_relay_core::accounts::AccountAuthState,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), MetadataSinkError>> + Send + 'a>> {
         Box::pin(async move {
-            let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
-            let mut account = store
-                .account(local_account_id)
-                .cloned()
-                .ok_or(MetadataSinkError)?;
-            account.account.auth_state = auth_state;
-            store.upsert_account(account).map_err(|_| MetadataSinkError)
+            let (account, changed) = {
+                let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
+                let mut account = store
+                    .account(local_account_id)
+                    .cloned()
+                    .ok_or(MetadataSinkError)?;
+                let changed = account.account.auth_state != auth_state;
+                account.account.auth_state = auth_state;
+                store
+                    .upsert_account(account.clone())
+                    .map_err(|_| MetadataSinkError)?;
+                (account, changed)
+            };
+            if let Some(runtime) = self.gateway.runtime().await {
+                sync_runtime_account_state(&runtime, &account, current_time_ms());
+            }
+            if changed {
+                self.events.emit_state_changed();
+            }
+            Ok(())
         })
     }
 }
