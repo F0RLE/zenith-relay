@@ -4,6 +4,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::{
         apply_model_discovery_failure as apply_account_model_discovery_failure,
@@ -112,7 +113,7 @@ pub async fn refresh_one(
 ) -> Result<(ServerAccountRecord, Vec<QuotaTransition>), String> {
     let result = refresh_data(state, &account, force_subscription_refresh).await;
     let access_only_rejected = result.as_ref().err().is_some_and(|failure| {
-        failure.http_status() == Some(401) || failure.code == "quota_token_prepare"
+        failure.http_status() == Some(401) || failure.code == error_codes::QUOTA_TOKEN_PREPARE
     });
     let update = reduce_account_quota(
         &account.quota,
@@ -151,20 +152,22 @@ async fn refresh_data(
     let secret = state
         .vault
         .load(&account.secret_ref)
-        .map_err(|_| QuotaRefreshFailure::new("quota_secret_load", true))?
-        .ok_or_else(|| QuotaRefreshFailure::new("quota_secret_missing", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_SECRET_LOAD, true))?
+        .ok_or_else(|| QuotaRefreshFailure::new(error_codes::QUOTA_SECRET_MISSING, false))?;
     let credential: AccountCredential = serde_json::from_str(&secret)
-        .map_err(|_| QuotaRefreshFailure::new("quota_secret_invalid", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_SECRET_INVALID, false))?;
     let (mut credential, mut authorization) =
         prepare_server_account_authorization(state, account, credential, None)
             .await
-            .map_err(|_| QuotaRefreshFailure::new("quota_authorization_prepare", true))?;
+            .map_err(|_| {
+                QuotaRefreshFailure::new(error_codes::QUOTA_AUTHORIZATION_PREPARE, true)
+            })?;
     let proxy = account_proxy_config(state, account, &credential)
-        .map_err(|_| QuotaRefreshFailure::new("quota_proxy_unavailable", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_PROXY_UNAVAILABLE, false))?;
     let request_timeout_seconds = state
         .store
         .quota_request_timeout_seconds()
-        .map_err(|_| QuotaRefreshFailure::new("quota_policy_invalid", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_POLICY_INVALID, false))?;
     let observed_at_ms = now_ms();
     let refresh_subscription = force_subscription_refresh
         || subscription_refresh_due(
@@ -199,7 +202,9 @@ async fn refresh_data(
                 Some(&expected_task_id),
             )
             .await
-            .map_err(|_| QuotaRefreshFailure::new("quota_authorization_prepare", true))?;
+            .map_err(|_| {
+                QuotaRefreshFailure::new(error_codes::QUOTA_AUTHORIZATION_PREPARE, true)
+            })?;
             return client
                 .refresh_data_with_subscription_authorized(
                     authorization,
@@ -221,7 +226,7 @@ async fn refresh_data(
         return Err(failure);
     };
     authorization = bearer_authorization(tokens.access_token())
-        .map_err(|_| QuotaRefreshFailure::new("quota_token_prepare", true))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_TOKEN_PREPARE, true))?;
     client
         .refresh_data_with_subscription_authorized(
             authorization,
@@ -265,7 +270,7 @@ fn apply_discovered_models(
 }
 
 fn model_discovery_was_unauthorized(result: &Result<Vec<String>, (String, bool)>) -> bool {
-    matches!(result, Err((code, _)) if code == "models_unauthorized")
+    matches!(result, Err((code, _)) if code == error_codes::MODELS_UNAUTHORIZED)
 }
 
 async fn discover_account_models(
@@ -284,13 +289,13 @@ async fn discover_account_models(
             .await
             .map_err(|_| ("models_authorization_prepare".to_string(), true))?;
     let proxy = account_proxy_config(state, account, &credential)
-        .map_err(|_| ("models_proxy_unavailable".to_string(), false))?;
+        .map_err(|_| (error_codes::MODELS_PROXY_UNAVAILABLE.to_string(), false))?;
     let client = CodexModelsClient::new_with_proxy_and_timeout_and_user_agent(
         proxy.as_ref(),
         Duration::from_secs(20),
         "Zenith Relay Server",
     )
-    .map_err(|_| ("models_client_init".to_string(), false))?;
+    .map_err(|_| (error_codes::MODELS_CLIENT_INIT.to_string(), false))?;
     let client_version = configured_codex_client_version();
     let mut result = client
         .discover_authorized(
@@ -332,10 +337,10 @@ fn model_discovery_error(error: ModelDiscoveryFailure) -> (String, bool) {
     let code = match error.code {
         // The server retries agent task registration once. A second failed
         // attempt used to be handled as its 401 response category.
-        ModelDiscoveryFailureCode::AgentTaskInvalid => "models_unauthorized",
+        ModelDiscoveryFailureCode::AgentTaskInvalid => error_codes::MODELS_UNAUTHORIZED,
         // The server categorizes client construction errors separately from
         // a malformed endpoint response.
-        ModelDiscoveryFailureCode::InvalidEndpoint => "models_client_init",
+        ModelDiscoveryFailureCode::InvalidEndpoint => error_codes::MODELS_CLIENT_INIT,
         code => code.management_code(),
     };
     (code.to_string(), error.retryable)

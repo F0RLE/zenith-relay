@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{sync::watch, task::JoinHandle};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountIdentity, AccountRecord},
     automations::{
@@ -112,7 +113,7 @@ async fn execute_inner(
         .accounts()?
         .into_iter()
         .find(|record| record.id == permit.account_id)
-        .ok_or_else(|| "wake_account_missing".to_string())?;
+        .ok_or_else(|| error_codes::WAKE_ACCOUNT_MISSING.to_string())?;
     if account.last_used_at_ms.is_some_and(|value| {
         value
             >= permit
@@ -136,7 +137,7 @@ async fn execute_inner(
     let identity = CodexIdentityEnvelope::standard(&credential.chatgpt_account_id)
         .map_err(|_| "wake_account_id_invalid".to_string())?;
     let proxy = account_proxy_config(state, &account, &credential)
-        .map_err(|_| "wake_proxy_unavailable".to_string())?;
+        .map_err(|_| error_codes::WAKE_PROXY_UNAVAILABLE.to_string())?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
@@ -182,9 +183,9 @@ async fn execute_inner(
     }
     if !status.is_success() {
         return Err(match status.as_u16() {
-            401 => "wake_unauthorized",
-            403 => "wake_forbidden",
-            429 => "wake_rate_limited",
+            401 => error_codes::WAKE_UNAUTHORIZED,
+            403 => error_codes::WAKE_FORBIDDEN,
+            429 => error_codes::WAKE_RATE_LIMITED,
             _ => "wake_upstream_failed",
         }
         .to_string());
@@ -239,14 +240,14 @@ async fn send_wake_request(
         )
         .send()
         .await
-        .map_err(|_| "wake_transport".to_string())?;
+        .map_err(|_| error_codes::WAKE_TRANSPORT.to_string())?;
     let status = response.status();
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "wake_transport".to_string())?;
+        let chunk = chunk.map_err(|_| error_codes::WAKE_TRANSPORT.to_string())?;
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err("wake_response_too_large".to_string());
+            return Err(error_codes::WAKE_RESPONSE_TOO_LARGE.to_string());
         }
         bytes.extend_from_slice(&chunk);
     }

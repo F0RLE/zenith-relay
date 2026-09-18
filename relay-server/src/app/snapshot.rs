@@ -9,6 +9,7 @@ use crate::{
     store::configuration_revision,
 };
 use std::{collections::HashMap, sync::atomic::Ordering};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     pricing::{PricingCatalog, PricingContext, PricingMetadata},
     protocol::{
@@ -61,10 +62,10 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let running = state.store.gateway_enabled()? && runtime.is_some();
     let routing_order = runtime
         .as_ref()
-        .map(|runtime| runtime.candidate_runtime_order())
+        .map(|runtime| runtime.candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID))
         .unwrap_or_default();
     let mut warnings = usage_warnings(state);
-    let source_summaries = source_summaries(
+    let mut source_summaries = source_summaries(
         state,
         &sources,
         running,
@@ -72,7 +73,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &equivalents,
         &mut warnings,
     )?;
-    let account_summaries = account_summaries(
+    let mut account_summaries = account_summaries(
         state,
         &accounts,
         proxy_settings,
@@ -81,6 +82,16 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &pricing_context,
         &mut warnings,
     )?;
+    for account in &mut account_summaries {
+        let available = (running && account.in_pool).then(|| {
+            routing_order.iter().any(|candidate| {
+                candidate.kind == zenith_relay_core::CandidateKind::OAuthAccount
+                    && candidate.candidate_id == account.id
+                    && candidate.available
+            })
+        });
+        account.operational_status = account.operational_status.with_runtime_available(available);
+    }
     let mut models = pool_model_summaries_with_pricing(
         &source_summaries,
         &account_summaries,
@@ -99,6 +110,12 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         runtime.as_deref(),
     );
     apply_model_display_order_with_catalog(&mut models, &model_display_order, &model_metadata);
+    zenith_relay_core::protocol::apply_member_model_display_order(
+        &mut source_summaries,
+        &mut account_summaries,
+        &model_display_order,
+        &model_metadata,
+    );
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
@@ -130,6 +147,11 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         gateway: GatewaySummary {
+            pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
+                routing_policy.pool_routing.as_ref(),
+                &source_summaries,
+                &account_summaries,
+            )),
             running,
             base_url: format!(
                 "{}/v1",
@@ -145,6 +167,11 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             default_service_tier: routing_policy.default_service_tier,
             image_base_model: routing_policy.image_base_model,
             models,
+            model_catalog: zenith_relay_core::protocol::member_model_catalog(
+                &source_summaries,
+                &account_summaries,
+                &model_metadata,
+            ),
             common_proxy_configured: proxy_settings.common_configured,
             common_proxy_available: proxy_settings.common_available,
             common_proxy_id,
@@ -175,7 +202,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
 
 fn usage_warnings(state: &AppState) -> Vec<String> {
     (state.failed_usage_writes.load(Ordering::Relaxed) > 0)
-        .then(|| "usage_persistence_failed".to_string())
+        .then(|| error_codes::USAGE_PERSISTENCE_FAILED.to_string())
         .into_iter()
         .collect()
 }

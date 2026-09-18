@@ -6,6 +6,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::normalize_proxy_url;
 use zenith_relay_core::protocol::{AccountSummary, RuntimeStateSnapshot};
 
@@ -99,7 +100,7 @@ pub async fn set_account_proxy(
     let mut record = find_account(&state, &id)?;
     if input.proxy_url.is_some() && input.bypass_common_proxy {
         return Err(ManagementError::validation(
-            "proxy_route_ambiguous",
+            error_codes::PROXY_ROUTE_AMBIGUOUS,
             "an account route cannot use and bypass a proxy at the same time",
         ));
     }
@@ -138,7 +139,7 @@ pub async fn assign_account_proxies(
         || input.proxy_urls.len() < input.account_ids.len()
     {
         return Err(ManagementError::validation(
-            "proxy_assignment_invalid",
+            error_codes::PROXY_ASSIGNMENT_INVALID,
             "proxy list must contain one URL per selected account",
         ));
     }
@@ -149,7 +150,7 @@ pub async fn assign_account_proxies(
         .any(|account_id| !seen.insert(account_id.clone()))
     {
         return Err(ManagementError::validation(
-            "proxy_assignment_duplicate",
+            error_codes::PROXY_ASSIGNMENT_DUPLICATE,
             "proxy assignment contains duplicate account ids",
         ));
     }
@@ -164,7 +165,9 @@ pub async fn assign_account_proxies(
             .iter()
             .find(|record| &record.id == account_id)
             .cloned()
-            .ok_or_else(|| ManagementError::not_found("account_not_found", "account not found"))?;
+            .ok_or_else(|| {
+                ManagementError::not_found(error_codes::ACCOUNT_NOT_FOUND, "account not found")
+            })?;
         let proxy = ensure_proxy_record(&state.store, &state.vault, &normalize_proxy(proxy_url)?)
             .map_err(store_error)?;
         record.proxy_id = Some(proxy.id);
@@ -187,5 +190,5 @@ fn normalize_optional_proxy(value: Option<String>) -> Result<Option<String>, Man
 
 fn normalize_proxy(value: &str) -> Result<String, ManagementError> {
     normalize_proxy_url(value)
-        .map_err(|message| ManagementError::validation("proxy_invalid", message))
+        .map_err(|message| ManagementError::validation(error_codes::PROXY_INVALID, message))
 }

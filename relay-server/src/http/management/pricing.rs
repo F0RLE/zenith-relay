@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use std::sync::Arc;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::pricing::CatalogRefreshOutcome;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -22,7 +23,7 @@ async fn refresh(
         .map(Json)
         .map_err(|_| {
             ManagementError::internal(
-                "pricing_catalog_refresh_failed",
+                error_codes::PRICING_CATALOG_REFRESH_FAILED,
                 "pricing catalog could not be refreshed",
             )
         })

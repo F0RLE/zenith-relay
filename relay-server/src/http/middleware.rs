@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use subtle::ConstantTimeEq;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{ApiError, ErrorEnvelope};
 
 const MAX_FAILURES: u8 = 5;
@@ -95,8 +96,14 @@ pub async fn require_management(
         .and_then(|value| value.strip_prefix("Bearer "));
     match auth.authorize(ip, token, crate::state::now_ms()) {
         AuthResult::Allowed => next.run(request).await,
-        AuthResult::Denied => auth_error(StatusCode::UNAUTHORIZED, "management_unauthorized"),
-        AuthResult::Blocked => auth_error(StatusCode::TOO_MANY_REQUESTS, "management_blocked"),
+        AuthResult::Denied => auth_error(
+            StatusCode::UNAUTHORIZED,
+            error_codes::MANAGEMENT_UNAUTHORIZED,
+        ),
+        AuthResult::Blocked => auth_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::MANAGEMENT_BLOCKED,
+        ),
     }
 }
 

@@ -120,6 +120,11 @@ impl Store {
     }
 
     pub fn set_routing_policy(&self, policy: &PresetRoutingPolicy) -> Result<(), String> {
+        if let Some(pool) = &policy.pool_routing {
+            pool.validate().map_err(str::to_string)?;
+        }
+        let pool_routing = serde_json::to_string(&policy.pool_routing)
+            .map_err(|_| "pool routing policy is invalid")?;
         validate_routing_policy(policy.max_retry_candidates, policy.cooldown_after_failures)?;
         let image_base_model = normalize_image_base_model(policy.image_base_model.clone())
             .map_err(|error| error.to_string())?
@@ -134,6 +139,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         for (key, value) in [
+            ("pool_routing", pool_routing),
             (
                 "max_retry_candidates",
                 policy.max_retry_candidates.to_string(),
@@ -364,6 +370,7 @@ fn configuration_settings_from_connection(
     let sources = list_records_from::<SourceRecord>(connection, "sources")?
         .into_iter()
         .map(|record| SourcePresetRule {
+            protocol_mode: record.protocol_config.mode,
             id: record.id,
             name: record.name,
             base_url: record.base_url,
@@ -518,6 +525,7 @@ fn write_configuration(
         record.enabled = rule.enabled;
         record.in_pool = rule.in_pool;
         record.protocol_bindings = rule.protocol_bindings.clone();
+        record.protocol_config.mode = rule.protocol_mode;
         record.pricing_provider = rule.pricing_provider.clone();
         record.official_provider_family = rule.official_provider_family.clone();
         record.allowed_models = rule.allowed_models.clone();
@@ -552,6 +560,10 @@ fn write_configuration(
         DefaultServiceTier::Ultrafast => "ultrafast",
     };
     let metadata = [
+        (
+            "pool_routing",
+            to_json(&settings.routing.pool_routing).map_err(ConfigurationReplaceError::Store)?,
+        ),
         (
             "quota_request_timeout_seconds",
             settings.quota.request_timeout_seconds.to_string(),
@@ -685,6 +697,17 @@ fn routing_policy_from_connection(connection: &Connection) -> Result<PresetRouti
                 .map_err(|_| "max retry candidates is invalid".to_string())
         },
     )?;
+    let pool_routing: Option<zenith_relay_core::PoolRoutingPolicy> =
+        metadata_from(connection, "pool_routing")?
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|_| "pool routing policy is invalid".to_string())
+            })
+            .transpose()?
+            .flatten();
+    if let Some(pool) = &pool_routing {
+        pool.validate().map_err(str::to_string)?;
+    }
     let routing_strategy = match metadata_from(connection, "routing_strategy")?.as_deref() {
         None | Some("adaptive") => RoutingStrategy::Adaptive,
         Some("quota_highest") => RoutingStrategy::QuotaHighest,
@@ -722,6 +745,7 @@ fn routing_policy_from_connection(connection: &Connection) -> Result<PresetRouti
         });
     validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
     Ok(PresetRoutingPolicy {
+        pool_routing,
         max_retry_candidates,
         cooldown_after_failures,
         keep_last_candidate_available,
@@ -778,6 +802,7 @@ mod tests {
         assert_eq!(
             store.routing_policy().unwrap(),
             PresetRoutingPolicy {
+                pool_routing: None,
                 max_retry_candidates: 3,
                 cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
                 keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
@@ -789,6 +814,7 @@ mod tests {
         );
         assert!(store
             .set_routing_policy(&PresetRoutingPolicy {
+                pool_routing: None,
                 max_retry_candidates: 0,
                 cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
                 keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
@@ -800,6 +826,7 @@ mod tests {
             .is_err());
         store
             .set_routing_policy(&PresetRoutingPolicy {
+                pool_routing: None,
                 max_retry_candidates: 5,
                 cooldown_after_failures: 5,
                 keep_last_candidate_available: false,
@@ -815,6 +842,7 @@ mod tests {
         assert_eq!(
             reopened.routing_policy().unwrap(),
             PresetRoutingPolicy {
+                pool_routing: None,
                 max_retry_candidates: 5,
                 cooldown_after_failures: 5,
                 keep_last_candidate_available: false,
@@ -904,6 +932,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: zenith_relay_core::WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["private-model".into()],
             allowed_models: Vec::new(),

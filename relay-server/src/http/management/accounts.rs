@@ -17,6 +17,7 @@ use zenith_relay_core::accounts::{
     build_account_export, AccountExportCredential, AccountExportDocument, AccountExportRequest,
     MAX_PURCHASE_COST_MICRO_USD,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{
     account_candidate_enabled, account_operational_state, AccountOperationalInput, AccountSummary,
     RevealedAccountIdentity, RuntimeStateSnapshot,
@@ -57,13 +58,13 @@ pub async fn reveal_account_identity(
         .map_err(vault_error)?
         .ok_or_else(|| {
             ManagementError::internal(
-                "account_secret_missing",
+                error_codes::ACCOUNT_SECRET_MISSING,
                 "stored account credential is unavailable",
             )
         })?;
     let credential: AccountCredential = serde_json::from_str(&secret).map_err(|_| {
         ManagementError::internal(
-            "account_secret_invalid",
+            error_codes::ACCOUNT_SECRET_INVALID,
             "stored account credential is invalid",
         )
     })?;
@@ -89,13 +90,13 @@ pub async fn export_accounts(
             .map_err(vault_error)?
             .ok_or_else(|| {
                 ManagementError::internal(
-                    "account_secret_missing",
+                    error_codes::ACCOUNT_SECRET_MISSING,
                     "stored account credential is unavailable",
                 )
             })?;
         let credential: AccountCredential = serde_json::from_str(&secret).map_err(|_| {
             ManagementError::internal(
-                "account_secret_invalid",
+                error_codes::ACCOUNT_SECRET_INVALID,
                 "stored account credential is invalid",
             )
         })?;
@@ -126,7 +127,7 @@ pub async fn export_accounts(
     )
     .map_err(|_| {
         ManagementError::internal(
-            "account_export_failed",
+            error_codes::ACCOUNT_EXPORT_FAILED,
             "account export could not be created",
         )
     })?;
@@ -193,7 +194,7 @@ pub async fn update_account(
     if let Some(value) = input.purchase_cost_micro_usd {
         if value > MAX_PURCHASE_COST_MICRO_USD {
             return Err(ManagementError::validation(
-                "account_purchase_cost_invalid",
+                error_codes::ACCOUNT_PURCHASE_COST_INVALID,
                 "account purchase cost is too large",
             ));
         }
@@ -331,13 +332,13 @@ pub async fn set_pool_membership(
     let source_ids = input.source_ids.into_iter().collect::<BTreeSet<_>>();
     if account_ids.is_empty() && source_ids.is_empty() {
         return Err(ManagementError::validation(
-            "pool_members_empty",
+            error_codes::POOL_MEMBERS_EMPTY,
             "at least one pool member is required",
         ));
     }
     if account_ids.len().saturating_add(source_ids.len()) > 2_048 {
         return Err(ManagementError::validation(
-            "pool_members_too_many",
+            error_codes::POOL_MEMBERS_TOO_MANY,
             "too many pool members were requested",
         ));
     }
@@ -351,7 +352,9 @@ pub async fn set_pool_membership(
                 .iter()
                 .find(|record| &record.id == id)
                 .map(|record| (id.clone(), record.in_pool))
-                .ok_or_else(|| ManagementError::not_found("account_not_found", "account not found"))
+                .ok_or_else(|| {
+                    ManagementError::not_found(error_codes::ACCOUNT_NOT_FOUND, "account not found")
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let old_sources = source_ids
@@ -361,7 +364,9 @@ pub async fn set_pool_membership(
                 .iter()
                 .find(|record| &record.id == id)
                 .map(|record| (id.clone(), record.in_pool))
-                .ok_or_else(|| ManagementError::not_found("source_not_found", "source not found"))
+                .ok_or_else(|| {
+                    ManagementError::not_found(error_codes::SOURCE_NOT_FOUND, "source not found")
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
     if input.in_pool {
@@ -371,11 +376,11 @@ pub async fn set_pool_membership(
                 .find(|record| &record.id == source_id)
                 .expect("source was validated above");
             if !source.supports_any_wire_api().map_err(|message| {
-                ManagementError::validation("source_protocol_invalid", message)
+                ManagementError::validation(error_codes::SOURCE_PROTOCOL_INVALID, message)
             })? {
                 return Err(ManagementError::new(
                     StatusCode::CONFLICT,
-                    "source_pool_protocol_unsupported",
+                    error_codes::SOURCE_POOL_PROTOCOL_UNSUPPORTED,
                     "source must expose at least one verified API route before joining the pool",
                     "pool",
                     false,
@@ -441,7 +446,7 @@ pub async fn refresh_account(
         .map_err(|_| {
             ManagementError::new(
                 StatusCode::BAD_GATEWAY,
-                "account_refresh_failed",
+                error_codes::ACCOUNT_REFRESH_FAILED,
                 "account metadata could not be refreshed",
                 "quota",
                 true,
@@ -483,7 +488,10 @@ pub async fn delete_account(
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("account_secret_missing", "account secret missing")
+            ManagementError::not_found(
+                error_codes::ACCOUNT_SECRET_MISSING,
+                "account secret missing",
+            )
         })?;
     state.store.delete_account(&id).map_err(store_error)?;
     state

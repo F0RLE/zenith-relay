@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     is_valid_model_id, normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot,
     reasoning_policy_key, ApiModelPriceOverride, DefaultServiceTier, WireApi,
@@ -105,7 +106,7 @@ pub async fn set_model_price(
         input.cache_write_1h_micro_usd_per_million,
         input.output_micro_usd_per_million,
     )
-    .map_err(|message| ManagementError::validation("model_price_invalid", message))?;
+    .map_err(|message| ManagementError::validation(error_codes::MODEL_PRICE_INVALID, message))?;
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?.to_ascii_lowercase();
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
@@ -158,7 +159,7 @@ pub async fn set_model_service_tier(
         })
     {
         return Err(ManagementError::validation(
-            "model_service_tier_unsupported",
+            error_codes::MODEL_SERVICE_TIER_UNSUPPORTED,
             "requested service tier requires confirmed upstream support for this active model route",
         ));
     }
@@ -221,7 +222,9 @@ pub async fn set_model_reasoning(
             policy_key.clone(),
             input.allowed_levels,
         )]))
-        .map_err(|message| ManagementError::validation("reasoning_levels_invalid", message))?;
+        .map_err(|message| {
+            ManagementError::validation(error_codes::REASONING_LEVELS_INVALID, message)
+        })?;
     let allowed_levels = normalized_allowed_levels
         .remove(&policy_key)
         .unwrap_or_default();
@@ -250,7 +253,7 @@ pub async fn set_model_reasoning(
                 .set_model_reasoning_allowed_levels(previous)
                 .map_err(|rollback| {
                     ManagementError::internal(
-                        "model_reasoning_recovery_failed",
+                        error_codes::MODEL_REASONING_RECOVERY_FAILED,
                         format!("{error}; failed to restore model reasoning levels: {rollback}"),
                     )
                 })?;
@@ -268,7 +271,7 @@ fn canonical_model_id(
     let requested = requested.trim();
     if !is_valid_model_id(requested) {
         return Err(ManagementError::validation(
-            "model_id_invalid",
+            error_codes::MODEL_ID_INVALID,
             "model id is invalid",
         ));
     }
@@ -284,7 +287,9 @@ fn canonical_model_id(
     pool_model_inventory(state, snapshot)?
         .get(&requested.to_ascii_lowercase())
         .cloned()
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::MODEL_NOT_FOUND, "pool model not found")
+        })
 }
 
 /// Build the editable model inventory from configured pool members. The live
@@ -339,7 +344,7 @@ fn complete_model_display_order(
         let Some(canonical) = current.get(&key) else {
             if reject {
                 return Err(ManagementError::not_found(
-                    "model_not_found",
+                    error_codes::MODEL_NOT_FOUND,
                     "pool model not found",
                 ));
             }
@@ -348,7 +353,7 @@ fn complete_model_display_order(
         if !included.insert(key) {
             if reject {
                 return Err(ManagementError::validation(
-                    "model_order_invalid",
+                    error_codes::MODEL_ORDER_INVALID,
                     "model order contains duplicates",
                 ));
             }

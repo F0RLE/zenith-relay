@@ -44,6 +44,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),

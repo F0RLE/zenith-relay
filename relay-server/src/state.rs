@@ -22,15 +22,14 @@ use zenith_relay_core::{
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
-    runtime_source_models_for_wire_api, runtime_source_models_with_cache_write_pricing,
-    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, ApiModelPriceOverride,
-    CandidateRuntimeSnapshot, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord,
-    RuntimeSourcePolicyUpdate, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, RuntimeCandidatePolicy,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding,
+    SourceProtocolConfig, WireApi,
 };
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 35;
+pub const SERVER_SCHEMA_VERSION: u32 = 36;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -63,6 +62,8 @@ pub struct SourceRecord {
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    pub protocol_config: SourceProtocolConfig,
     pub models: Vec<String>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
@@ -78,37 +79,62 @@ pub struct SourceRecord {
 }
 
 impl SourceRecord {
+    pub fn effective_protocol_bindings(&self) -> Result<Vec<SourceProtocolBinding>, String> {
+        self.protocol_config
+            .resolve(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+            )
+            .map_err(|error| error.to_string())
+    }
+
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        runtime_source_models_for_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .map_err(|error| error.to_string())
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                Some(wire_api),
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
-        runtime_source_supports_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .map_err(|error| error.to_string())
+        self.models_for_wire_api(wire_api)
+            .map(|models| !models.is_empty())
     }
 
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                None,
+            )
+            .map(|models| !models.is_empty())
             .map_err(|error| error.to_string())
     }
 
     pub fn models_with_cache_write_pricing(&self) -> std::collections::BTreeSet<String> {
-        runtime_source_models_with_cache_write_pricing(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-        )
+        self.effective_protocol_bindings()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|route| {
+                route.adapter.upstream_protocol(route.wire_api)
+                    == zenith_relay_core::UpstreamProtocol::Messages
+            })
+            .flat_map(|route| {
+                route
+                    .model_ids
+                    .into_iter()
+                    .map(|model| model.to_ascii_lowercase())
+            })
+            .collect()
     }
 }
 
@@ -429,7 +455,7 @@ impl AppState {
     pub fn runtime_order(&self) -> Result<Vec<CandidateRuntimeSnapshot>, String> {
         Ok(self
             .runtime()?
-            .map(|runtime| runtime.candidate_runtime_order())
+            .map(|runtime| runtime.candidate_runtime_order_for_key(SYSTEM_GATEWAY_KEY_ID))
             .unwrap_or_default())
     }
 }

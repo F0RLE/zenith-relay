@@ -23,6 +23,7 @@ use zenith_relay_core::accounts::{
     ImportPreviewStatus, ImportQuotaStatus, ImportWarning, ImportWarningCode, ParsedImport,
     ParsedImportItem, MAX_IMPORT_ITEMS,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{valid_generated_id, AccountSummary};
 use zenith_relay_core::providers::chatgpt::{
     parse_subscription_timestamp_ms, resolve_account_check_account_id,
@@ -134,7 +135,7 @@ async fn prepare_account_import(
         }
         .map_err(|_| {
             ManagementError::validation(
-                "agent_identity_invalid",
+                error_codes::AGENT_IDENTITY_INVALID,
                 "Agent Identity credential is invalid",
             )
         })?;
@@ -208,7 +209,10 @@ async fn prepare_account_import(
         Some(record) => match state.vault.load(&record.secret_ref).map_err(vault_error)? {
             Some(value) => Some(serde_json::from_str::<AccountCredential>(&value).map_err(
                 |_| {
-                    ManagementError::internal("account_secret_invalid", "account secret is invalid")
+                    ManagementError::internal(
+                        error_codes::ACCOUNT_SECRET_INVALID,
+                        "account secret is invalid",
+                    )
                 },
             )?),
             None => None,
@@ -274,14 +278,17 @@ async fn prepare_account_import(
         .save(
             &secret_ref,
             &serde_json::to_string(&credential).map_err(|_| {
-                ManagementError::internal("import_serialize", "import could not be prepared")
+                ManagementError::internal(
+                    error_codes::IMPORT_SERIALIZE,
+                    "import could not be prepared",
+                )
             })?,
         )
         .map_err(vault_error)?;
     let pending = PendingImport {
         id: session_id,
         preview_json: serde_json::to_string(&preview).map_err(|_| {
-            ManagementError::internal("preview_serialize", "preview could not be saved")
+            ManagementError::internal(error_codes::PREVIEW_SERIALIZE, "preview could not be saved")
         })?,
         secret_ref,
         created_at_ms: now_ms(),
@@ -442,7 +449,7 @@ fn parse_batch_import_input(
         content.unwrap_or_default()
     } else if content.is_some() {
         return Err(ManagementError::validation(
-            "import_input_conflict",
+            error_codes::IMPORT_INPUT_CONFLICT,
             "paste content and file documents cannot be imported together",
         ));
     } else if input.documents.len() == 1 {
@@ -459,7 +466,7 @@ fn parsed_account_import_input(
 ) -> Result<AccountImportInput, ManagementError> {
     if preview.auth_mode == ImportAuthMode::ApiKey {
         return Err(ManagementError::validation(
-            "unsupported_value",
+            error_codes::UNSUPPORTED_VALUE,
             "API keys must be imported as API sources, not pool accounts",
         ));
     }
@@ -553,7 +560,7 @@ fn import_error(error: ImportError) -> ManagementError {
         ImportErrorCode::JsonTooDeep => "import_too_deep",
         ImportErrorCode::MalformedJson => "import_malformed",
         ImportErrorCode::TooManyItems => "import_item_count",
-        ImportErrorCode::UnsupportedBundleVersion => "unsupported_bundle_version",
+        ImportErrorCode::UnsupportedBundleVersion => error_codes::UNSUPPORTED_BUNDLE_VERSION,
     };
     ManagementError::validation(code, error.message)
 }
@@ -593,20 +600,20 @@ fn import_warning_code_name(value: ImportWarningCode) -> &'static str {
         ImportWarningCode::ProxiesIgnored => "proxies_ignored",
         ImportWarningCode::RefreshExchangeRequired => "refresh_exchange_required",
         ImportWarningCode::UnusedCredentialsIgnored => "unused_credentials_ignored",
-        ImportWarningCode::UnknownAuthMode => "unknown_auth_mode",
+        ImportWarningCode::UnknownAuthMode => error_codes::UNKNOWN_AUTH_MODE,
     }
 }
 
 fn import_issue_code_name(value: ImportIssueCode) -> &'static str {
     match value {
-        ImportIssueCode::AmbiguousCredentials => "ambiguous_credentials",
-        ImportIssueCode::DuplicateItem => "duplicate_item",
-        ImportIssueCode::InvalidCredentials => "invalid_credentials",
-        ImportIssueCode::MalformedJson => "malformed_json",
-        ImportIssueCode::MissingCredentials => "missing_credentials",
-        ImportIssueCode::QuotaProbeFailed => "quota_probe_failed",
-        ImportIssueCode::RefreshExchangeFailed => "refresh_exchange_failed",
-        ImportIssueCode::UnsupportedValue => "unsupported_value",
+        ImportIssueCode::AmbiguousCredentials => error_codes::AMBIGUOUS_CREDENTIALS,
+        ImportIssueCode::DuplicateItem => error_codes::DUPLICATE_ITEM,
+        ImportIssueCode::InvalidCredentials => error_codes::INVALID_CREDENTIALS,
+        ImportIssueCode::MalformedJson => error_codes::MALFORMED_JSON,
+        ImportIssueCode::MissingCredentials => error_codes::MISSING_CREDENTIALS,
+        ImportIssueCode::QuotaProbeFailed => error_codes::QUOTA_PROBE_FAILED,
+        ImportIssueCode::RefreshExchangeFailed => error_codes::REFRESH_EXCHANGE_FAILED,
+        ImportIssueCode::UnsupportedValue => error_codes::UNSUPPORTED_VALUE,
     }
 }
 
@@ -651,13 +658,13 @@ pub async fn confirm_account_batch_import(
 ) -> Result<Json<BatchImportConfirmResponse>, ManagementError> {
     if !valid_generated_id(&input.session_id, "batch_") {
         return Err(ManagementError::validation(
-            "import_session_invalid",
+            error_codes::IMPORT_SESSION_INVALID,
             "batch import session is invalid",
         ));
     }
     if input.selected_item_ids.is_empty() || input.selected_item_ids.len() > MAX_IMPORT_ITEMS {
         return Err(ManagementError::validation(
-            "import_selection_invalid",
+            error_codes::IMPORT_SELECTION_INVALID,
             format!("import selection must contain between 1 and {MAX_IMPORT_ITEMS} items"),
         ));
     }
@@ -738,7 +745,7 @@ async fn confirm_one_account_import(
 ) -> Result<ConfirmedAccountImport, ManagementError> {
     if !valid_generated_id(session_id, "import_") {
         return Err(ManagementError::validation(
-            "import_session_invalid",
+            error_codes::IMPORT_SESSION_INVALID,
             "account import session is invalid",
         ));
     }
@@ -747,23 +754,26 @@ async fn confirm_one_account_import(
         .pending_import(session_id)
         .map_err(store_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("import_not_found", "import session not found")
+            ManagementError::not_found(error_codes::IMPORT_NOT_FOUND, "import session not found")
         })?;
     if now_ms().saturating_sub(pending.created_at_ms) > 30 * 60 * 1_000 {
         let _ = state.store.delete_pending_import(session_id);
         let _ = state.vault.delete(&pending.secret_ref);
         return Err(ManagementError::validation(
-            "import_expired",
+            error_codes::IMPORT_EXPIRED,
             "import session expired",
         ));
     }
     let preview: AccountImportPreview =
         serde_json::from_str(&pending.preview_json).map_err(|_| {
-            ManagementError::internal("preview_invalid", "stored import preview is invalid")
+            ManagementError::internal(
+                error_codes::PREVIEW_INVALID,
+                "stored import preview is invalid",
+            )
         })?;
     if preview.batch_session_id.as_deref() != batch_session_id {
         return Err(ManagementError::not_found(
-            "import_not_found",
+            error_codes::IMPORT_NOT_FOUND,
             "import session not found",
         ));
     }
@@ -914,7 +924,7 @@ fn imported_account_id_hints(
     }
     if hints.len() > 1 {
         return Err(ManagementError::validation(
-            "account_identity_claim_conflict",
+            error_codes::ACCOUNT_IDENTITY_CLAIM_CONFLICT,
             "imported account identity claims do not agree",
         ));
     }
@@ -939,7 +949,10 @@ async fn authenticate_import_account(
 ) -> Result<String, ManagementError> {
     let authorization = zenith_relay_core::providers::chatgpt::bearer_authorization(access_token)
         .map_err(|_| {
-        ManagementError::validation("access_token_rejected", "access token is invalid")
+        ManagementError::validation(
+            error_codes::ACCESS_TOKEN_REJECTED,
+            "access token is invalid",
+        )
     })?;
     let http = reqwest::Client::builder()
         .redirect(Policy::none())
@@ -948,7 +961,7 @@ async fn authenticate_import_account(
         .build()
         .map_err(|_| {
             ManagementError::validation(
-                "account_check_unavailable",
+                error_codes::ACCOUNT_CHECK_UNAVAILABLE,
                 "ChatGPT account lookup client could not be created",
             )
         })?;
@@ -960,27 +973,27 @@ async fn authenticate_import_account(
         .await
         .map_err(|_| {
             ManagementError::validation(
-                "account_check_failed",
+                error_codes::ACCOUNT_CHECK_FAILED,
                 "ChatGPT account lookup request failed",
             )
         })?;
     let status = response.status();
     let body = response.bytes().await.map_err(|_| {
         ManagementError::validation(
-            "account_check_failed",
+            error_codes::ACCOUNT_CHECK_FAILED,
             "ChatGPT account lookup response could not be read",
         )
     })?;
     if body.len() > MAX_ACCOUNT_CHECK_RESPONSE_BYTES {
         return Err(ManagementError::validation(
-            "account_check_response_too_large",
+            error_codes::ACCOUNT_CHECK_RESPONSE_TOO_LARGE,
             "ChatGPT account lookup response was too large",
         ));
     }
     if !status.is_success() {
         let (code, message) = match status.as_u16() {
             401 | 403 => (
-                "access_token_rejected",
+                error_codes::ACCESS_TOKEN_REJECTED,
                 "ChatGPT rejected the imported access token",
             ),
             429 => (
@@ -988,7 +1001,7 @@ async fn authenticate_import_account(
                 "ChatGPT rate limited the account lookup request",
             ),
             _ => (
-                "account_check_failed",
+                error_codes::ACCOUNT_CHECK_FAILED,
                 "ChatGPT account lookup returned an unexpected status",
             ),
         };
@@ -996,7 +1009,7 @@ async fn authenticate_import_account(
     }
     let payload: Value = serde_json::from_slice(&body).map_err(|_| {
         ManagementError::validation(
-            "account_check_failed",
+            error_codes::ACCOUNT_CHECK_FAILED,
             "ChatGPT account lookup returned invalid JSON",
         )
     })?;
@@ -1008,11 +1021,11 @@ async fn authenticate_import_account(
         resolve_account_check_account_id(&payload, &claimed_account_ids).map_err(|error| {
             match error {
                 AccountCheckIdentityError::Missing => ManagementError::validation(
-                    "provider_account_id_missing",
+                    error_codes::PROVIDER_ACCOUNT_ID_MISSING,
                     "ChatGPT account lookup did not return an account id",
                 ),
                 AccountCheckIdentityError::Mismatch => ManagementError::validation(
-                    "account_identity_mismatch",
+                    error_codes::ACCOUNT_IDENTITY_MISMATCH,
                     "imported account identity does not match the authenticated account",
                 ),
             }

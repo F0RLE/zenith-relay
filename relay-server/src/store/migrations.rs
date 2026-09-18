@@ -184,6 +184,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "035_cache_write_ttl",
         sql: include_str!("../../migrations/035_cache_write_ttl.sql"),
     },
+    Migration {
+        version: 36,
+        name: "036_upstream_error_details",
+        sql: include_str!("../../migrations/036_upstream_error_details.sql"),
+    },
 ];
 
 struct Migration {
@@ -731,7 +736,8 @@ mod tests {
                 (32, "032_error_origin".to_string()),
                 (33, "033_reasoning_effort".to_string()),
                 (34, "034_account_purchase_cost".to_string()),
-                (35, "035_cache_write_ttl".to_string())
+                (35, "035_cache_write_ttl".to_string()),
+                (36, "036_upstream_error_details".to_string())
             ]
         );
         drop(store);

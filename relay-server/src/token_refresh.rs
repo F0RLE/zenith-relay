@@ -10,6 +10,7 @@ use zenith_relay_core::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code,
 };
@@ -36,9 +37,9 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
                 .vault
                 .load(&record.secret_ref)
                 .map_err(persistence_error)?
-                .ok_or_else(|| TokenPersistenceFailure::new("secret_missing"))?;
+                .ok_or_else(|| TokenPersistenceFailure::new(error_codes::SECRET_MISSING))?;
             let mut credential: AccountCredential = serde_json::from_str(&secret)
-                .map_err(|_| TokenPersistenceFailure::new("secret_invalid"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::SECRET_INVALID))?;
             credential.access_token = tokens.access_token().to_string();
             credential.refresh_token = tokens.refresh_token().map(str::to_string);
             credential.id_token = tokens.id_token().map(str::to_string);
@@ -46,7 +47,7 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
             credential.issued_at_ms = tokens.issued_at_ms();
             credential.generation = tokens.generation();
             let encoded = serde_json::to_string(&credential)
-                .map_err(|_| TokenPersistenceFailure::new("secret_serialize"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::SECRET_SERIALIZE))?;
             self.state
                 .vault
                 .save(&record.secret_ref, &encoded)
@@ -67,7 +68,7 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
                     Ok(())
                 })
                 .map_err(persistence_error)?
-                .ok_or_else(|| TokenPersistenceFailure::new("account_missing"))
+                .ok_or_else(|| TokenPersistenceFailure::new(error_codes::ACCOUNT_MISSING))
         })
     }
 
@@ -84,11 +85,13 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
                 .vault
                 .load(&record.secret_ref)
                 .map_err(persistence_error)?
-                .ok_or_else(|| TokenPersistenceFailure::new("secret_missing"))?;
+                .ok_or_else(|| TokenPersistenceFailure::new(error_codes::SECRET_MISSING))?;
             let mut credential: AccountCredential = serde_json::from_str(&secret)
-                .map_err(|_| TokenPersistenceFailure::new("secret_invalid"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::SECRET_INVALID))?;
             if !credential.is_agent_identity() {
-                return Err(TokenPersistenceFailure::new("not_agent_identity"));
+                return Err(TokenPersistenceFailure::new(
+                    error_codes::NOT_AGENT_IDENTITY,
+                ));
             }
             if let Some(current_task_id) = credential
                 .agent_task_id
@@ -99,7 +102,7 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
             }
             credential.agent_task_id = Some(task_id.to_string());
             let encoded = serde_json::to_string(&credential)
-                .map_err(|_| TokenPersistenceFailure::new("secret_serialize"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::SECRET_SERIALIZE))?;
             self.state
                 .vault
                 .save(&record.secret_ref, &encoded)
@@ -120,7 +123,7 @@ pub(crate) fn find_account(state: &AppState, id: &str) -> Result<ServerAccountRe
 
 fn persistence_error(error: String) -> TokenPersistenceFailure {
     let _ = error;
-    TokenPersistenceFailure::new("persistence_failed")
+    TokenPersistenceFailure::new(error_codes::PERSISTENCE_FAILED)
 }
 
 pub(crate) struct CodexRefreshClient {
@@ -186,7 +189,7 @@ impl TokenRefreshAdapter for CodexRefreshClient {
             {
                 return Err(TokenRefreshFailure::new(
                     TokenRefreshFailureKind::InvalidatedRefreshToken,
-                    "invalid_refresh_token",
+                    error_codes::INVALID_REFRESH_TOKEN,
                 ));
             }
             let response = self

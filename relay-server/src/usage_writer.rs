@@ -330,6 +330,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(1),
             total_tokens: Some(2),
+            upstream_error: None,
             quota_snapshot: None,
         }
     }
