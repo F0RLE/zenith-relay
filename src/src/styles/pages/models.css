@@ -1102,15 +1102,6 @@
   display: none;
 }
 
-.member-price-section .source-price-input {
-  grid-template-columns: 16px minmax(0, 1fr);
-}
-
-.member-price-section .source-price-input input {
-  padding-right: 3px;
-  text-align: center;
-}
-
 .member-price-section .source-price-model > code {
   overflow-wrap: anywhere;
   white-space: normal;

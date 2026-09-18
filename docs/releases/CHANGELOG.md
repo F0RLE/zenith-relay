@@ -108,8 +108,9 @@ release entries are kept concise and link to the corresponding tag.
   conflicting saves retry without restoring removed members. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Model rule actions share one aligned group with consistently sized format,
   reasoning, speed and enable controls. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-- Provider price fields keep currency symbols and values vertically centered,
-  including while editing, without an overflowing inner input. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Provider price fields use one rounded outline, a separated currency marker
+  and numbers aligned to the right. Focus and invalid values highlight the
+  whole field consistently in both themes. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Pool speed labels and connection summaries fit wider system fonts without
   clipping or unnecessary line breaks on desktop screens. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Multiple routes for one member share rotation weight and request capacity.

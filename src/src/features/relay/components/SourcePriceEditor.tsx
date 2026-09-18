@@ -106,5 +106,11 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
 }
 
 function PriceInput({ label, caption, value, placeholder, invalid, onChange }: { label: string; caption: string | undefined; value: string; placeholder: string; invalid: boolean; onChange: (value: string) => void }) {
-  return <label className="source-price-field">{caption ? <span className="source-price-caption">{caption}</span> : null}<span className="source-price-input"><span aria-hidden>$</span><input aria-label={label} aria-invalid={invalid || undefined} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} /></span></label>;
+  return <label className="source-price-field">
+    {caption ? <span className="source-price-caption">{caption}</span> : null}
+    <span className="source-price-input">
+      <span className="source-price-currency" aria-hidden>$</span>
+      <input aria-label={label} aria-invalid={invalid || undefined} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+    </span>
+  </label>;
 }

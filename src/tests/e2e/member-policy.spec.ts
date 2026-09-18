@@ -187,9 +187,18 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           await expect(input).toBeFocused();
           await expect(input).toHaveValue("12.75");
           await expectPriceInputsFit(dialog);
+          await expect(input).toHaveCSS("text-align", "right");
           await expect(input).toHaveCSS("outline-style", "none");
+          await expect(input).toHaveCSS("border-width", "0px");
+          await expect(input).toHaveCSS("box-shadow", "none");
           await expect(dialog.locator(".source-price-input").first()).not.toHaveCSS("box-shadow", "none");
           await dialog.screenshot({ path: `output/playwright/member-prices-focused-${theme}-${width}.png` });
+          const focusedBorder = await input.evaluate((element) => getComputedStyle(element.parentElement!).borderColor);
+          await input.fill("1324134314");
+          await expect(input).toHaveAttribute("aria-invalid", "true");
+          await expectPriceInputsFit(dialog);
+          await expect(dialog.locator(".source-price-input").first()).not.toHaveCSS("border-color", focusedBorder);
+          await dialog.screenshot({ path: `output/playwright/member-prices-invalid-${theme}-${width}.png` });
         }
         await dialog.getByRole("tab", { name: "Настройки", exact: true }).click();
         await expectDialogFits(dialog);
