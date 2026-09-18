@@ -66,11 +66,11 @@
   --pool-speed-fill: var(--relay-surface);
   --pool-speed-border: var(--relay-border-strong);
   position: relative;
-  width: 180px;
+  width: 200px;
   min-width: 0;
   max-width: 100%;
   height: 34px;
-  flex: 0 0 180px;
+  flex: 0 0 200px;
   display: flex;
   align-items: center;
   gap: 6px;

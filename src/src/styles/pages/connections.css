@@ -186,7 +186,7 @@
 
 .connection-status-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(4, auto);
   margin: 0 -12px;
   padding: 8px 12px;
   border-top: 1px solid var(--relay-border);
@@ -195,7 +195,7 @@
 }
 
 .connection-status-summary[data-has-provider-credits="true"] {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(5, auto);
 }
 
 .connection-status-summary > div {

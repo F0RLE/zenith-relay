@@ -146,7 +146,7 @@ for (const theme of ["light", "dark"] as const) {
           const rect = element.getBoundingClientRect();
           const label = element.querySelector(".pool-speed-current")!.getBoundingClientRect();
           const slider = element.querySelector(".pool-speed-switch")!.getBoundingClientRect();
-          return rect.width === 180 && rect.height === 34 && label.right <= slider.left && slider.right <= rect.right;
+          return rect.width === 200 && rect.height === 34 && label.right <= slider.left && slider.right <= rect.right;
         })).toBe(true);
         expect(await page.locator(".pool-speed-control").evaluate((element) => {
           const rect = element.getBoundingClientRect();
