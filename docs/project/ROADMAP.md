@@ -18,14 +18,21 @@ with permitted accounts. Test the local path before the user-managed server.
   native metadata preservation, image input, and a failed catalog refresh.
   Previous verified config must remain usable; running-client deferrals and
   background failures must be visible.
-- Test real Responses/Messages/Gemini bindings per claimed provider: initial
+- Test real Responses/Chat Completions/Messages/Gemini bindings per claimed provider: initial
   function/namespace/custom call, actual tool execution, result continuation,
   JSON/SSE, cache/reasoning usage, pre-output fallback, and fresh turn on restart.
 - Verify source prices, manual fallback, metadata provenance, and unknown cache
   counters remain distinct through refresh. Catalog reachability does not prove
   inference, and missing prices cannot suppress account inventory.
+- Verify key-balance adapters against permitted live Sub2API, New API, One API,
+  OpenRouter, DeepSeek and SiliconFlow sources, including dashboard restrictions, quota
+  conversion and subscription allowance. Mocked format tests do not prove a
+  particular reseller has enabled the endpoint for its inference keys.
 - Verify OpenCode desktop/CLI reload, model/image/reasoning refresh, failed-write
-  rollback, and JSON/JSONC restore on supported platforms.
+  rollback, and JSON/JSONC restore on supported platforms. Exercise all four SDK
+  groups, preserved model IDs, and Codex HTTP/SSE selection for converted routes.
+- Verify upgrades from manual source records and older servers with installed
+  clients, explicit probes during key/address changes, and preset rollback.
 - Exercise two healthy permitted personal accounts, rotation, proxy, quota
   refresh, cooldown/recovery, removed-member admission, and redacted usage.
 
@@ -48,41 +55,19 @@ Instrumentation alone is not a measured result. Prove policy-only hot updates
 preserve the listener, active leases, affinity, and runtime state. Add a focused
 regression check for a demonstrated bottleneck rather than speculative caches.
 
-### Unified routing contract still to implement
+### Smart routing refinements and live acceptance
 
-Replace API-first/stabilizer/reserve roles with one versioned policy shared by
-accounts and sources. Protocol-specific candidates remain internal details.
+The shared three-mode policy is implemented; current behavior is documented in
+PLANNING. Live-provider and installed-client acceptance above remains required.
 
-- Modes: default **Smart**, **In order**, **Round robin**. Store one atomic
-  tagged member order; new members append, temporarily unhealthy members keep
-  position, and reordering does not interrupt requests or move owned responses.
-- Pipeline: mandatory response/connection ownership; eligibility by model,
-  binding, lane, health, quota/capacity; guarded soft affinity; ranking; bounded
-  pre-output fallback. Scope affinity by client/model/lane/protocol as required.
-  Bind soft affinity only after verified success.
-- Smart factors: manual preference, quota/capacity, bounded reliability/TTFT
-  observations with decay/hysteresis, reset urgency, and optionally confirmed
-  cost. Unknown evidence is neutral. Profiles: Cache default, Balanced, Speed,
-  Economy, Custom. Purchase cost/payback never become scheduling inputs;
-  current prices-do-not-route behavior stays until cost-aware work is complete.
-- Distribute within bounded Top-K (proposed default three): stable session
-  assignment, smooth weighted rotation for unscoped traffic, validated weights
-  and safe rotation-credit updates. Avoid a single noisy sample monopolizing work.
-- Failure feedback: request errors do not penalize members; model/credential
-  failures affect the narrowest proven identity. Persist bounded cooldown/health
-  with expiry, closed/open/half-open circuits, and bounded recovery probes.
-- Keep hot policy application, redacted routing traces, revision IDs, factual
-  activity, and model-scoped route preview. Preview is not a dispatch promise.
-- UI: one draggable mixed-member list and distribution dialog; advanced
-  coefficients/weights stay optional. Local/server use the same negotiated DTO.
-- Migrate legacy roles/imports with preview, CAS, backup/restore, and rollback;
-  failed conversion keeps the previous policy. Remove old roles and scheduler
-  branches only after compatibility; never maintain two active schedulers.
-
-Acceptance: deterministic local/server decisions from identical state, score/
-weight/unknown-evidence tests, bounded fallback/partial-stream tests, affinity
-and concurrency tests, old-import/interrupted-upgrade tests, and evidence that
-policy changes preserve live state. Design/version types before implementation.
+- Add bounded, model/lane-scoped reliability and TTFT observations with decay,
+  minimum sample counts, and hysteresis. Unknown observations must stay neutral.
+- Evaluate reset urgency and optional confirmed cost profiles only with evidence.
+  Purchase cost/payback must never become scheduling inputs.
+- Persist bounded cooldown/health state with expiry and verify restart recovery.
+- Verify real local/server policy changes during streaming, busy-limit waits,
+  preset migration and rollback, and concurrent membership edits.
+- Retire legacy import fields only after a documented compatibility window.
 
 ## P2 — Recovery and persistence acceptance
 

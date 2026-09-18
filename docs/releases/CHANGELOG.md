@@ -6,8 +6,89 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+### Changed
+
+- Pool recovery is automatic: all compatible members are considered, temporary
+  failures pause for at least five seconds, and repeated failures increase the
+  cooldown. Unavailable models, rejected credentials, and opaque gateway
+  rejections no longer prevent fallback to another eligible API or account.
+  Removed the manual retry-count and last-candidate cooldown controls.
+
+- Rewrote English and Russian Help around the current connection workflow,
+  operating modes, pool rotation, quotas, balances, and recovery. Added a linked
+  contents list and corrected obsolete settings paths and behavior descriptions.
+  Help now has a reading column, a sticky section index with the current section,
+  numbered setup steps, and error rows that fit narrow windows. The index becomes
+  a compact menu on small screens.
+  The error reference now groups exact codes with causes and concrete recovery
+  steps, with expandable categories and search by code or symptom.
+
+- Weekly quota reset uses a compact action row with a separate credit count
+  in account and pool cards.
+
+- Pool member rules open with a compact model list and one switch per model.
+  Expandable provider groups retain disabled models; long lists support search.
+  API prices share aligned columns beside each model, including 5-minute and
+  1-hour cache writes; narrow windows use labeled price rows. Secondary settings use aligned rows
+  on their own tab. Account and API model order now follows metadata and saved manual order
+  without moving disabled models or prioritizing price overrides.
+
+- Accounts and API providers now share three pool rotation modes: Smart,
+  In order, and Round robin. One reorderable list replaces separate API roles,
+  with member weights and shared request limits. Settings apply without
+  interrupting active requests; unavailable members do not block the rest.
+  Concurrent edits are detected before saving, and presets retain the mixed order.
+  The editor uses one scrollbar, short status labels and mode-specific controls;
+  centered fields use Request share and Concurrent requests, with Unlimited
+  shown for an unset concurrency cap. Detailed explanations are in Help.
+  Automatic modes show ready members first,
+  while In order preserves your manual queue. Modes support keyboard selection.
+  Smart ignores manual order, includes all similarly suitable members instead
+  of limiting selection to three, and stops preferring stale quota readings.
+  Recent failures lose their scheduling penalty within a minute, so recovered
+  members can return automatically. Finishing an older request cannot release
+  another recovery probe; occupied probes allow a bounded wait. Server pool
+  membership changes immediately apply saved order and request limits.
+  The next-candidate hint follows the scheduler and is omitted when the choice
+  depends on the model or format. Stale activity events cannot overwrite a
+  newer runtime's state.
+
+- Pool controls now use a compact toolbar, a separate current/next route line,
+  and a framed panel with a shaded status strip and dividers between counters.
+  Connections uses the same panel styling for search, filters, and account actions.
+  Both summaries keep the total provider credits when available. Full route
+  and model names wrap on narrow screens; icon actions retain their tooltips.
+- Pool request speed is now a single draggable, three-position control for
+  Standard, Fast, and Ultrafast instead of a menu and a separate switch.
+  Its compact label shows only the selected mode, with smooth transitions
+  that respect reduced-motion preferences. Keyboard and touch selection are
+  supported; dragging saves on release.
+
 ### Added
 
+- Pools serve Responses, Chat Completions, Messages and Gemini concurrently,
+  with native paths and supported conversions for JSON and streaming requests.
+  Chat Completions supports function tools and their result history.
+- New API sources determine formats automatically from provider declarations
+  and endpoint settings. Unknown catalogs stay available for manual setup;
+  generation is tested only with the explicit check button. Existing sources
+  retain their manual routes. Model compatibility shows formats, capabilities
+  and reasoning levels, distinguishing declared, verified and unknown support.
+- OpenCode uses protocol-specific SDK groups and retains working model IDs and
+  user options during catalog refresh. Codex uses HTTP streaming when a model
+  needs conversion, while native WebSocket connections remain supported.
+
+- API cards recognize Sub2API, New API, compatible One API billing, DeepSeek
+  and SiliconFlow balances. OpenRouter statistics work with ordinary inference keys. Cards
+  distinguish wallets, key allowances, subscriptions, currencies and Relay's
+  own usage estimate, omit internal adapter labels and missing request counts, and mark failed refreshes
+  without discarding the last known balance. Refresh progress uses the button
+  animation without adding a duplicate status line below the counters.
+
+- Failed request details now show the provider's original error code, type,
+  message, and HTTP status separately from Relay's category. Messages can be
+  copied; sensitive content is hidden and long messages are bounded. Older
+  records explicitly show when no provider message was saved.
 - **Diagnostics** in Settings. Relay keeps separate, size-limited and
   redacted logs for errors, crashes, and important operation stages; each
   folder can be opened directly from the app. Detailed operation logging is
@@ -18,6 +99,60 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Multiple routes for one member share rotation weight and request capacity.
+  An unsupported endpoint does not disable the member's other formats; quota
+  and authentication failures remain shared. Continuation retries preserve
+  complete history, tool results and opaque ownership.
+- Converted requests reject unsupported parameters instead of dropping them.
+  Schemas keep their constraints, per-turn instructions do not persist into
+  later turns, and reasoning levels are offered only where they can be mapped.
+  Streamed tools retain their IDs and order, and usage reflects the actual
+  upstream format without inventing missing counters.
+
+- Smart cache affinity no longer selects a member outside the best available
+  group or bypasses its rotation accounting.
+- Provider retry delays are respected for overloaded and unavailable models
+  and other service errors, including when a shorter recovery delay is configured.
+
+- Updated TLS handling to rustls 0.23.45 to address RUSTSEC-2026-0285.
+
+- Pool no longer reports that every member is unavailable when routing telemetry
+  is missing or stale but ready members remain. When none are ready, the warning
+  separates quota waits, unavailable members, and disabled members, with readable
+  error reasons. Pool and Connections group accounts by availability while
+  preserving routing order within each group.
+- Provider failures inside HTTP 200 JSON or streaming responses remain failures
+  in usage history. Rate limiting and spend-limit errors stay distinct, and
+  explicit request-validation errors do not put an account into cooldown.
+- A provider's generic request rejection or disabled model no longer blocks
+  fallback to another compatible member. Service errors on account routes keep
+  their account attribution without marking the account unhealthy.
+- Tool continuations validate the whole history, including calls beyond the
+  first sixteen. Completed historic calls no longer select the owner of a new
+  tool result, and outputs from different owners cannot be mixed implicitly.
+  Examples in tool schemas and nested result data no longer affect routing.
+- Account model refreshes no longer erase an independent block, sign-in, or
+  verification failure, or downgrade a terminal catalog error after a temporary
+  network failure. Quota-monitoring errors no longer hide the reason an account
+  is unavailable in Connections and Pool.
+- Pool activity matches the last-used account or API source by identity, so
+  requests with identical timestamps cannot highlight the wrong member.
+- Recovery preserves the original response binding for other chat branches
+  and retries, and uses the current request options without reviving old
+  instructions or transport settings. Provider-side
+  conversation and item references, or tool results without their calls, no
+  longer count as a complete local replay.
+- Chats with a supplied compacted context can continue without a stale response
+  reference over HTTP or WebSocket. The compacted window and retained tool
+  results stay intact; unreadable compaction is no longer silently discarded.
+- Chat recovery now requires a saved conversation chain before removing an
+  earlier response reference unless a complete compacted window is supplied,
+  preventing silent loss of prior context.
+- Manual credential refresh and observed client logins restore account routing
+  health. Remote account cards now reflect runtime cooldowns and unavailable routes.
+- Recovered pool accounts remain available without removing another member.
+  Delayed authentication updates no longer undo a newer account disable, and
+  account cards reflect temporary runtime unavailability during cooldowns.
 - Importing an account or API source without adding it to the pool no longer
   restarts the live local gateway. This prevents an unrelated listener restart
   from interrupting Relay during inventory-only imports.
@@ -27,6 +162,13 @@ release entries are kept concise and link to the corresponding tag.
 - A chat whose original account has run out of quota can now continue through
   the next compatible healthy account or API source. This works for both
   ordinary and WebSocket Responses requests.
+- Chats can recover from an expired response reference using Relay's locally
+  retained history, including on an already-open WebSocket. Complete tool
+  history can rotate with the pool; incomplete tool state is no longer silently
+  removed during recovery.
+- Unknown response references are rejected before reaching an unrelated
+  account. Clients can resend complete history without the old reference;
+  otherwise Relay reports that the continuation context is unavailable.
 - An account that needs sign-in, is cooling down, or has an error now disables
   only that candidate, including when its status changes while the local gateway
   is already running. The rest of the pool and its available models keep
