@@ -19,7 +19,7 @@ impl TelemetryDb {
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
                     requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                    client_context_id
+                    client_context_id, upstream_error_json
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -205,7 +205,7 @@ impl TelemetryDb {
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
                     requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                    client_context_id
+                    client_context_id, upstream_error_json
                  FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
             );
             let mut statement = connection.prepare(&sql).map_err(db_error)?;

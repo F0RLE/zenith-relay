@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, State};
 use zenith_relay_core::accounts::{AccountAuthState, AccountExportFormat, AccountExportRequest};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{Feature, RemoteAccountLocation, RuntimeStateSnapshot};
 
 mod transfer;
@@ -31,7 +32,7 @@ use transfer::{delete_remote_accounts, transfer_local_account_batch};
 
 const REMOTE_TRANSFER_VALIDATION_BATCH_SIZE: usize = 5;
 const ACCOUNT_TRANSFER_PROGRESS_EVENT: &str = "relay-account-transfer-progress";
-const REMOTE_MISSING_ERROR: &str = "remote_missing";
+const REMOTE_MISSING_ERROR: &str = error_codes::REMOTE_MISSING;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveLocalAccountsToRemoteInput {

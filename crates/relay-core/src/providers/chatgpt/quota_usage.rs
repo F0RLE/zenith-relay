@@ -4,6 +4,7 @@ use super::{
     quota_subscription::{merge_subscription_metadata_at, CodexSubscriptionClient},
     valid_access_token, ResponseBodyError,
 };
+use crate::error_codes;
 use crate::quota::{
     QuotaAdapter, QuotaAdapterCapabilities, QuotaAdapterContext, QuotaRefreshData,
     QuotaRefreshFailure, QuotaRefreshResult, QuotaWindowInput, QuotaWindowKind, ResetTime,
@@ -25,6 +26,9 @@ const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_QUOTA_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ADDITIONAL_LIMITS: usize = 15;
+const CREDIT_MICRO_UNITS: f64 = 1_000_000.0;
+// Keep the serialized micro-unit value exactly representable by JavaScript.
+const MAX_AVAILABLE_CREDITS: f64 = 9_000_000_000.0;
 
 #[derive(Clone)]
 pub struct CodexQuotaClient {
@@ -47,7 +51,7 @@ impl CodexQuotaClient {
         request_timeout: Duration,
     ) -> Result<Self, QuotaRefreshFailure> {
         let usage_endpoint = Url::parse(CODEX_QUOTA_ENDPOINT)
-            .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+            .map_err(|_| QuotaRefreshFailure::new(error_codes::INVALID_CONFIGURATION, false))?;
         Self::with_endpoint_proxy_and_timeout(usage_endpoint, proxy, request_timeout)
     }
 
@@ -70,7 +74,7 @@ impl CodexQuotaClient {
             None => builder,
         }
         .build()
-        .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::INVALID_CONFIGURATION, false))?;
         let subscription = CodexSubscriptionClient::new(http.clone())?;
         Ok(Self {
             http,
@@ -155,7 +159,7 @@ impl CodexQuotaClient {
             )
             .await
         {
-            Ok(data) => QuotaRefreshOutcome::Updated(data),
+            Ok(data) => QuotaRefreshOutcome::Updated(Box::new(data)),
             Err(failure) => QuotaRefreshOutcome::Failed {
                 failure,
                 subscription: previous_subscription.clone(),
@@ -182,12 +186,13 @@ impl CodexQuotaClient {
     ) -> Result<QuotaRefreshResult, QuotaRefreshFailure> {
         if chatgpt_account_id.is_empty() || chatgpt_account_id.len() > MAX_ACCOUNT_ID_BYTES {
             return Err(QuotaRefreshFailure::new(
-                "invalid_chatgpt_account_id",
+                error_codes::INVALID_CHATGPT_ACCOUNT_ID,
                 false,
             ));
         }
-        let identity = CodexIdentityEnvelope::standard(chatgpt_account_id)
-            .map_err(|_| QuotaRefreshFailure::new("invalid_chatgpt_account_id", false))?;
+        let identity = CodexIdentityEnvelope::standard(chatgpt_account_id).map_err(|_| {
+            QuotaRefreshFailure::new(error_codes::INVALID_CHATGPT_ACCOUNT_ID, false)
+        })?;
         let response = identity
             .apply(
                 self.http
@@ -197,14 +202,16 @@ impl CodexQuotaClient {
             )
             .send()
             .await
-            .map_err(|_| QuotaRefreshFailure::new("quota_transport", true))?;
+            .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true))?;
         let status = response.status();
         let body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
-                ResponseBodyError::Transport => QuotaRefreshFailure::new("quota_transport", true),
+                ResponseBodyError::Transport => {
+                    QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true)
+                }
                 ResponseBodyError::TooLarge => {
-                    QuotaRefreshFailure::new("quota_response_too_large", false)
+                    QuotaRefreshFailure::new(error_codes::QUOTA_RESPONSE_TOO_LARGE, false)
                 }
             })?;
         if !status.is_success() {
@@ -327,28 +334,32 @@ pub fn is_agent_identity_task_invalid_failure(failure: &QuotaRefreshFailure) -> 
     failure.http_status() == Some(401)
         && matches!(
             failure.code.as_str(),
-            "invalid_task_id" | "task_not_found" | "task_expired"
+            error_codes::INVALID_TASK_ID | "task_not_found" | "task_expired"
         )
 }
 
 fn classify_quota_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
     if is_agent_identity_task_invalid_response(status, body) {
-        return QuotaRefreshFailure::new("invalid_task_id", false).with_http_status(status);
+        return QuotaRefreshFailure::new(error_codes::INVALID_TASK_ID, false)
+            .with_http_status(status);
     }
     crate::quota::classify_quota_http_failure(status, body)
 }
 
 fn bearer_authorization(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {
     if !valid_access_token(access_token) {
-        return Err(QuotaRefreshFailure::new("invalid_access_token", false));
+        return Err(QuotaRefreshFailure::new(
+            error_codes::INVALID_ACCESS_TOKEN,
+            false,
+        ));
     }
     shared_bearer_authorization(access_token)
-        .map_err(|_| QuotaRefreshFailure::new("invalid_access_token", false))
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::INVALID_ACCESS_TOKEN, false))
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum QuotaRefreshOutcome {
-    Updated(QuotaRefreshResult),
+    Updated(Box<QuotaRefreshResult>),
     Failed {
         failure: QuotaRefreshFailure,
         subscription: Subscription,
@@ -367,6 +378,10 @@ struct UsagePayload {
     additional_rate_limits: Option<Vec<AdditionalRateLimitStatus>>,
     #[serde(default)]
     rate_limit_reset_credits: Option<ResetCreditsSummary>,
+    /// Provider ledgers are intentionally parsed from their explicit fields
+    /// below. Malformed optional credit data must not fail a quota refresh.
+    #[serde(default)]
+    credits: serde_json::Value,
     #[serde(default)]
     rate_limit_reached_type: Option<serde_json::Value>,
 }
@@ -440,8 +455,9 @@ pub fn parse_codex_usage(
     observed_at_ms: u64,
 ) -> Result<QuotaRefreshResult, QuotaRefreshFailure> {
     let payload: UsagePayload = serde_json::from_slice(body)
-        .map_err(|_| QuotaRefreshFailure::new("quota_invalid_response", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false))?;
     let supplemental = collect_supplemental_windows(&payload, observed_at_ms);
+    let provider_credits = provider_credits(&payload);
     let explicit_limit_reached = payload.rate_limit_reached_type.is_some();
     let (primary, secondary, allowed, limit_reached) = match payload.rate_limit {
         Some(rate_limit) => (
@@ -480,12 +496,102 @@ pub fn parse_codex_usage(
                 .rate_limit_reset_credits
                 .and_then(|credits| credits.available_count)
                 .and_then(ResetCreditCount::into_u32),
+            available_credits_micro_units: provider_credits.micro_units,
+            provider_credits_available: provider_credits.available,
+            provider_credits_unlimited: provider_credits.unlimited,
             direct_balance_micro_usd: None,
             observed_at_ms,
         },
         allowed,
         reported_limit_reached: limit_reached,
     })
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProviderCredits {
+    micro_units: Option<u64>,
+    available: bool,
+    unlimited: bool,
+}
+
+/// Extracts only documented provider credit ledgers. A positive or unlimited
+/// ledger is fresh evidence that the account can run despite exhausted rate
+/// windows; an absent or malformed ledger makes no routing claim.
+fn provider_credits(payload: &UsagePayload) -> ProviderCredits {
+    let mut result = ProviderCredits::default();
+    // `spend_control.individual_limit` is a separate spending-control
+    // configuration. It is not a credit ledger and may remain at a static
+    // ceiling while `credits.remaining` decreases. Do not display, aggregate,
+    // or use it as credit availability.
+    match &payload.credits {
+        serde_json::Value::Object(credits) => {
+            result.record_unlimited(json_bool(credits.get("unlimited")));
+            result.record_amount(
+                json_number(credits.get("remaining"))
+                    .or_else(|| json_number(credits.get("balance"))),
+            );
+        }
+        serde_json::Value::Array(credits) => {
+            let (total, found) = credits.iter().fold((0.0, false), |(total, found), credit| {
+                let amount = credit
+                    .as_object()
+                    // This legacy array shape is numeric in the provider
+                    // contract. Do not coerce arbitrary strings here: an
+                    // invalid legacy entry must not make an account eligible.
+                    .and_then(|credit| credit.get("credit_amount"))
+                    .and_then(serde_json::Value::as_f64);
+                match amount {
+                    Some(amount) if valid_credit_amount(amount) => (total + amount, true),
+                    _ => (total, found),
+                }
+            });
+            if found && valid_credit_amount(total) {
+                result.record_amount(Some(total));
+            }
+        }
+        _ => {}
+    }
+    result
+}
+
+impl ProviderCredits {
+    fn record_unlimited(&mut self, unlimited: Option<bool>) {
+        if unlimited == Some(true) {
+            self.available = true;
+            self.unlimited = true;
+        }
+    }
+
+    fn record_amount(&mut self, amount: Option<f64>) {
+        let Some(amount) = amount.filter(|amount| valid_credit_amount(*amount)) else {
+            return;
+        };
+        let micro_units = (amount * CREDIT_MICRO_UNITS).round() as u64;
+        self.micro_units = Some(micro_units);
+        self.available |= amount > 0.0;
+    }
+}
+
+fn valid_credit_amount(amount: f64) -> bool {
+    amount.is_finite() && (0.0..=MAX_AVAILABLE_CREDITS).contains(&amount)
+}
+
+fn json_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value? {
+        serde_json::Value::Number(value) => value.as_f64(),
+        serde_json::Value::String(value) => value.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|value| value.is_finite())
+}
+
+fn json_bool(value: Option<&serde_json::Value>) -> Option<bool> {
+    match value? {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("true") => Some(true),
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
 }
 
 fn collect_supplemental_windows(
@@ -582,8 +688,15 @@ fn append_supplemental_windows(
 fn supplemental_service_tier(label: &str) -> Option<DefaultServiceTier> {
     label
         .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|word| word.eq_ignore_ascii_case("priority") || word.eq_ignore_ascii_case("fast"))
-        .then_some(DefaultServiceTier::Fast)
+        .find_map(|word| {
+            if word.eq_ignore_ascii_case("ultrafast") {
+                Some(DefaultServiceTier::Ultrafast)
+            } else if word.eq_ignore_ascii_case("priority") || word.eq_ignore_ascii_case("fast") {
+                Some(DefaultServiceTier::Fast)
+            } else {
+                None
+            }
+        })
 }
 
 fn map_window(
@@ -594,7 +707,7 @@ fn map_window(
     let used_percent = window
         .used_percent
         .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-        .ok_or_else(|| QuotaRefreshFailure::new("quota_invalid_percentage", false))?;
+        .ok_or_else(|| QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_PERCENTAGE, false))?;
     let reset = window
         .reset_at
         .filter(|value| *value > 0)
@@ -693,8 +806,12 @@ mod tests {
                 },{
                     "limit_name":"GPT-5.3 Codex Spark",
                     "rate_limit":{"primary_window":{"used_percent":50}}
+                },{
+                    "limit_name":"GPT-5 Ultrafast",
+                    "rate_limit":{"primary_window":{"used_percent":5}}
                 }],
-                "rate_limit_reset_credits":{"available_count":2}
+                "rate_limit_reset_credits":{"available_count":2},
+                "spend_control":{"individual_limit":{"remaining":"222.75"}}
             }"#,
             1_000,
         )
@@ -707,15 +824,78 @@ mod tests {
             quota.secondary.unwrap().available_basis_points,
             Some(10_000)
         );
-        assert_eq!(quota.supplemental.len(), 2);
+        assert_eq!(quota.supplemental.len(), 3);
         assert_eq!(quota.supplemental[0].service_tier, None);
         assert_eq!(quota.supplemental[1].label, "GPT-5 Priority");
         assert_eq!(
             quota.supplemental[1].service_tier,
             Some(DefaultServiceTier::Fast)
         );
+        assert_eq!(quota.supplemental[2].label, "GPT-5 Ultrafast");
+        assert_eq!(
+            quota.supplemental[2].service_tier,
+            Some(DefaultServiceTier::Ultrafast)
+        );
         assert_eq!(quota.reset_credits_available, Some(2));
+        assert_eq!(quota.available_credits_micro_units, None);
+        assert!(!quota.provider_credits_available);
+        assert!(!quota.provider_credits_unlimited);
         assert_eq!(subscription.unwrap().plan_type.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn provider_credits_follow_the_explicit_cockpit_ledger_shapes() {
+        for (body, micro_units, available, unlimited) in [
+            (r#"{}"#, None, false, false),
+            (r#"{"credits":{"balance":"0"}}"#, Some(0), false, false),
+            (
+                r#"{"credits":{"remaining":1.25}}"#,
+                Some(1_250_000),
+                true,
+                false,
+            ),
+            (
+                r#"{"spend_control":{"individual_limit":{"limit":"400","used":"48.98"}}}"#,
+                None,
+                false,
+                false,
+            ),
+            (r#"{"credits":{"unlimited":true}}"#, None, true, true),
+            (
+                r#"{"credits":[{"credit_amount":1.25},{"credit_amount":"2"}]}"#,
+                Some(1_250_000),
+                true,
+                false,
+            ),
+            (r#"{"credits":[{"credit_amount":-1}]}"#, None, false, false),
+            (
+                r#"{"credits":[{"credit_amount":1000000000001}]}"#,
+                None,
+                false,
+                false,
+            ),
+        ] {
+            let quota = parse_codex_usage(body.as_bytes(), 1_000).unwrap().quota;
+            assert_eq!(quota.available_credits_micro_units, micro_units);
+            assert_eq!(quota.provider_credits_available, available);
+            assert_eq!(quota.provider_credits_unlimited, unlimited);
+        }
+    }
+
+    #[test]
+    fn provider_credits_do_not_mistake_a_static_spend_limit_for_the_ledger() {
+        let quota = parse_codex_usage(
+            br#"{
+                "spend_control":{"individual_limit":{"remaining":1000}},
+                "credits":{"remaining":927.8}
+            }"#,
+            1_000,
+        )
+        .unwrap()
+        .quota;
+
+        assert_eq!(quota.available_credits_micro_units, Some(927_800_000));
+        assert!(quota.provider_credits_available);
     }
 
     #[test]

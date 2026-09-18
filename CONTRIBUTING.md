@@ -102,9 +102,16 @@ Stable release tags must have a matching dated section in
 release workflow fails when that section is missing instead of publishing an
 automatically generated pull-request list as user-facing notes.
 
+Define stable error codes in `crates/relay-core/src/error_codes.rs` and reuse its
+constants in emitters and classifiers. Add causes and recovery steps to both
+localized Help error tables, including public aliases. The catalog test rejects
+undocumented codes; classification and recovery policy remain in their owning
+modules. Preserve unknown external provider codes instead of forcing them into
+a Relay enum.
+
 To add a locale, add one sequential guide at
 <code>docs/help/&lt;locale&gt;/README.md</code>, register its translation
-resources, and update the raw Markdown registry in
+resources, and update the bundled Markdown registry in
 <code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep the guide
 accurate for the UI's current labels and section order.
 

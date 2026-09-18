@@ -2,14 +2,18 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 use zenith_relay_core::automations::{
     WakeCompletion, WakeCompletionOutcome, WakeExecutionRequest, WakeVerificationOutcome,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{is_loopback_url, providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
 
 use super::{collect_limited, LimitedBodyError};
+use zenith_relay_core::gateway::{execute_account_wake, AccountWakeRequest};
+use zenith_relay_core::GatewayRuntime;
 
 pub const DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT: &str = super::records::CODEX_RESPONSES_URL;
 
@@ -124,8 +128,11 @@ impl CodexWakeClient {
         }
 
         let started = Instant::now();
-        let response = self
+        let identity = self
             .identity
+            .with_configured_client_version()
+            .map_err(|_| WakeExecutionFailure::configuration())?;
+        let response = identity
             .apply(
                 self.http
                     .post(self.responses_endpoint.clone())
@@ -185,6 +192,112 @@ impl CodexWakeClient {
     }
 }
 
+/// Executes a wake through the already-running shared GatewayRuntime.  The
+/// runtime owns account selection, token refresh, scheduler leases, cooldowns,
+/// and usage emission; this adapter only converts its sanitized HTTP response
+/// into the desktop wake metrics contract.
+pub async fn execute_with_runtime(
+    runtime: Arc<GatewayRuntime>,
+    local_key_id: &str,
+    request: &WakeExecutionRequest,
+) -> Result<WakeExecutionMetrics, WakeExecutionFailure> {
+    let started = Instant::now();
+    let response = execute_account_wake(
+        runtime,
+        AccountWakeRequest {
+            local_key_id: local_key_id.to_string(),
+            account_id: request.account_id.clone(),
+            model_id: request.model_id.clone(),
+            output_token_cap: request.output_token_cap,
+        },
+    )
+    .await;
+    let status = response.status();
+    let category = response
+        .headers()
+        .get("x-zenith-relay-error-category")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let response_body = axum::body::to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| {
+            WakeExecutionFailure::runtime(
+                WakeExecutionErrorCode::ResponseTooLarge,
+                false,
+                Some(status.as_u16()),
+                elapsed_ms(started),
+            )
+        })?;
+    if !status.is_success() {
+        return Err(runtime_status_failure(
+            status,
+            category.as_deref(),
+            elapsed_ms(started),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&response_body).map_err(|_| {
+        WakeExecutionFailure::runtime(
+            WakeExecutionErrorCode::InvalidResponse,
+            false,
+            Some(status.as_u16()),
+            elapsed_ms(started),
+        )
+    })?;
+    let usage = wake_usage(&value);
+    Ok(WakeExecutionMetrics {
+        http_status: status.as_u16(),
+        latency_ms: elapsed_ms(started),
+        input_tokens: usage
+            .and_then(|usage| usage_token(usage, &["input_tokens", "prompt_tokens"])),
+        output_tokens: usage
+            .and_then(|usage| usage_token(usage, &["output_tokens", "completion_tokens"])),
+        total_tokens: usage.and_then(|usage| usage_token(usage, &["total_tokens"])),
+    })
+}
+
+fn runtime_status_failure(
+    status: reqwest::StatusCode,
+    category: Option<&str>,
+    latency_ms: u64,
+) -> WakeExecutionFailure {
+    let (code, retryable) = match category {
+        Some(
+            error_codes::ALL_SOURCES_COOLING_DOWN
+            | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE
+            | error_codes::NO_ELIGIBLE_SOURCE,
+        ) => (WakeExecutionErrorCode::Upstream, true),
+        Some(error_codes::MODEL_NOT_FOUND | error_codes::INVALID_REQUEST) => {
+            (WakeExecutionErrorCode::InvalidRequest, false)
+        }
+        Some(error_codes::UPSTREAM_BODY_TOO_LARGE) => {
+            (WakeExecutionErrorCode::ResponseTooLarge, false)
+        }
+        _ => match status {
+            reqwest::StatusCode::UNAUTHORIZED => (WakeExecutionErrorCode::Unauthorized, false),
+            reqwest::StatusCode::FORBIDDEN => (WakeExecutionErrorCode::Forbidden, false),
+            reqwest::StatusCode::TOO_MANY_REQUESTS => (WakeExecutionErrorCode::RateLimited, true),
+            status if status.is_server_error() => (WakeExecutionErrorCode::Upstream, true),
+            reqwest::StatusCode::BAD_REQUEST => (WakeExecutionErrorCode::InvalidRequest, false),
+            _ => (WakeExecutionErrorCode::HttpStatus, false),
+        },
+    };
+    WakeExecutionFailure::runtime(code, retryable, Some(status.as_u16()), latency_ms)
+}
+
+fn wake_usage(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    value
+        .get("usage")
+        .or_else(|| value.pointer("/response/usage"))
+        .or_else(|| value.pointer("/response/response/usage"))
+        .or_else(|| value.get("usageMetadata"))
+}
+
+fn usage_token(usage: &serde_json::Value, names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| usage.get(*name).and_then(serde_json::Value::as_u64))
+}
+
 impl fmt::Debug for CodexWakeClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -232,21 +345,21 @@ pub enum WakeExecutionErrorCode {
 impl WakeExecutionErrorCode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::InvalidConfiguration => "wake_invalid_configuration",
-            Self::InvalidEndpoint => "wake_invalid_endpoint",
-            Self::InvalidAccessToken => "wake_invalid_access_token",
-            Self::InvalidProviderAccountId => "wake_invalid_provider_account_id",
-            Self::InvalidRequest => "wake_invalid_request",
-            Self::RequestTooLarge => "wake_request_too_large",
-            Self::Transport => "wake_transport",
-            Self::Timeout => "wake_timeout",
-            Self::Unauthorized => "wake_unauthorized",
-            Self::Forbidden => "wake_forbidden",
-            Self::RateLimited => "wake_rate_limited",
-            Self::Upstream => "wake_upstream",
-            Self::HttpStatus => "wake_http_status",
-            Self::ResponseTooLarge => "wake_response_too_large",
-            Self::InvalidResponse => "wake_invalid_response",
+            Self::InvalidConfiguration => error_codes::WAKE_INVALID_CONFIGURATION,
+            Self::InvalidEndpoint => error_codes::WAKE_INVALID_ENDPOINT,
+            Self::InvalidAccessToken => error_codes::WAKE_INVALID_ACCESS_TOKEN,
+            Self::InvalidProviderAccountId => error_codes::WAKE_INVALID_PROVIDER_ACCOUNT_ID,
+            Self::InvalidRequest => error_codes::WAKE_INVALID_REQUEST,
+            Self::RequestTooLarge => error_codes::WAKE_REQUEST_TOO_LARGE,
+            Self::Transport => error_codes::WAKE_TRANSPORT,
+            Self::Timeout => error_codes::WAKE_TIMEOUT,
+            Self::Unauthorized => error_codes::WAKE_UNAUTHORIZED,
+            Self::Forbidden => error_codes::WAKE_FORBIDDEN,
+            Self::RateLimited => error_codes::WAKE_RATE_LIMITED,
+            Self::Upstream => error_codes::WAKE_UPSTREAM,
+            Self::HttpStatus => error_codes::WAKE_HTTP_STATUS,
+            Self::ResponseTooLarge => error_codes::WAKE_RESPONSE_TOO_LARGE,
+            Self::InvalidResponse => error_codes::WAKE_INVALID_RESPONSE,
         }
     }
 }

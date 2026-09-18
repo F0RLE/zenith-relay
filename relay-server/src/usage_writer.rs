@@ -303,6 +303,7 @@ mod tests {
             source_id: "openai_codex".to_string(),
             candidate_id: Some(account_id.to_string()),
             account_id: Some(account_id.to_string()),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".to_string()),
@@ -329,6 +330,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(1),
             total_tokens: Some(2),
+            upstream_error: None,
             quota_snapshot: None,
         }
     }

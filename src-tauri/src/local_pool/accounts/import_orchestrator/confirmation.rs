@@ -13,6 +13,7 @@ use crate::local_pool::state::DesktopState;
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter};
 use zenith_relay_core::accounts::{ImportAuthMode, ImportQuotaStatus};
+use zenith_relay_core::error_codes;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -32,6 +33,17 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
         .map_err(import_session_error)?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "session_resolved",
+        &[
+            (
+                "session",
+                crate::diagnostics::hash_identifier(&input.session_id),
+            ),
+            ("selected_count", selected_item_ids.len().to_string()),
+        ],
+    );
     let selected = selected_item_ids
         .iter()
         .map(String::as_str)
@@ -87,6 +99,19 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
     emit_account_import_progress(app, &input.session_id, 0, total, succeeded, failed, None);
 
     for (completed, item_id) in selected_item_ids.into_iter().enumerate() {
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "item_started",
+            &[
+                (
+                    "session",
+                    crate::diagnostics::hash_identifier(&input.session_id),
+                ),
+                ("item", crate::diagnostics::hash_identifier(&item_id)),
+                ("index", completed.to_string()),
+                ("total", total.to_string()),
+            ],
+        );
         let label = row_context
             .get(&item_id)
             .map(|context| context.label.clone())
@@ -103,17 +128,20 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         let result = match row_context.get(&item_id) {
             None => ImportItemResult::failure(
                 item_id,
-                ImportItemError::new("item_not_found", "import item was not found"),
+                ImportItemError::new(error_codes::ITEM_NOT_FOUND, "import item was not found"),
             ),
             Some(context) if !context.selectable => ImportItemResult::failure(
                 item_id,
-                ImportItemError::new("item_not_selectable", "import item cannot be selected"),
+                ImportItemError::new(
+                    error_codes::ITEM_NOT_SELECTABLE,
+                    "import item cannot be selected",
+                ),
             ),
             Some(context) => match items.remove(&item_id) {
                 None => ImportItemResult::failure(
                     item_id,
                     ImportItemError::new(
-                        "item_not_selectable",
+                        error_codes::ITEM_NOT_SELECTABLE,
                         "import item has no usable credentials",
                     ),
                 ),
@@ -140,6 +168,7 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
                     input.discover_models,
                     probe_quota,
                     &configured_models,
+                    state.account_check_url(),
                 )
                 .await
                 {
@@ -152,9 +181,40 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         };
         match result.status {
             ImportItemStatus::Succeeded => succeeded += 1,
-            ImportItemStatus::Failed => failed += 1,
+            ImportItemStatus::Failed => {
+                failed += 1;
+                if let Some(error) = result.error.as_ref() {
+                    crate::diagnostics::record_error(
+                        "account-import",
+                        Some(&error.code),
+                        &error.message,
+                        &[
+                            (
+                                "session",
+                                crate::diagnostics::hash_identifier(&input.session_id),
+                            ),
+                            ("item", crate::diagnostics::hash_identifier(&result.item_id)),
+                            ("index", completed.to_string()),
+                        ],
+                    );
+                }
+            }
         }
+        let result_item_hash = crate::diagnostics::hash_identifier(&result.item_id);
         results.push(result);
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "item_finished",
+            &[
+                (
+                    "session",
+                    crate::diagnostics::hash_identifier(&input.session_id),
+                ),
+                ("item", result_item_hash),
+                ("completed", (completed + 1).to_string()),
+                ("failed", failed.to_string()),
+            ],
+        );
         emit_account_import_progress(
             app,
             &input.session_id,
@@ -170,6 +230,14 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         sessions
             .complete(&input.session_id)
             .map_err(import_session_error)?;
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "session_completed",
+            &[(
+                "session",
+                crate::diagnostics::hash_identifier(&input.session_id),
+            )],
+        );
     }
     Ok(ConfirmAccountImportResponse {
         session_id: input.session_id,

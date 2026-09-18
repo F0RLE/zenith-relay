@@ -25,12 +25,14 @@ pub enum PresetError {
 }
 
 pub fn document(state: &AppState) -> Result<ConfigurationPresetDocument, PresetError> {
-    let settings = state
+    let mut settings = state
         .store
         .configuration_settings()
         .map_err(PresetError::Store)?;
+    let revision = configuration_revision(&settings).map_err(PresetError::Store)?;
+    settings.routing.pool_routing = Some(settings.resolved_pool_routing());
     Ok(ConfigurationPresetDocument {
-        revision: configuration_revision(&settings).map_err(PresetError::Store)?,
+        revision,
         preset: ConfigurationPreset {
             format: CONFIGURATION_PRESET_FORMAT.to_string(),
             schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
@@ -99,6 +101,7 @@ fn resolve_references(
     settings: &mut ConfigurationPresetSettings,
 ) -> Result<(), PresetError> {
     let sources = state.store.sources().map_err(PresetError::Store)?;
+    let mut member_ids = std::collections::BTreeMap::new();
     for rule in &mut settings.sources {
         let record = sources
             .iter()
@@ -130,6 +133,10 @@ fn resolve_references(
                     rule.name
                 ))
             })?;
+        member_ids.insert(
+            (zenith_relay_core::PoolMemberKind::Source, rule.id.clone()),
+            record.id.clone(),
+        );
         rule.id = record.id.clone();
         rule.name = record.name.clone();
         rule.base_url = record.base_url.trim_end_matches('/').to_string();
@@ -157,12 +164,21 @@ fn resolve_references(
                     rule.identity_hint
                 ))
             })?;
+        member_ids.insert(
+            (zenith_relay_core::PoolMemberKind::Account, rule.id.clone()),
+            record.id.clone(),
+        );
         rule.id = record.id.clone();
         rule.identity_hint = record.identity_hint.clone();
     }
     settings
         .accounts
         .sort_by(|left, right| left.id.cmp(&right.id));
+    if let Some(policy) = &mut settings.routing.pool_routing {
+        policy
+            .remap_member_ids(&member_ids)
+            .map_err(|message| PresetError::Invalid(message.into()))?;
+    }
     validate_resolved_configuration_preset_members(settings).map_err(PresetError::Invalid)?;
     Ok(())
 }
@@ -331,6 +347,7 @@ mod tests {
             sources: Vec::new(),
             accounts: Vec::new(),
             routing: PresetRoutingPolicy {
+                pool_routing: None,
                 max_retry_candidates: 3,
                 cooldown_after_failures: 3,
                 keep_last_candidate_available: true,

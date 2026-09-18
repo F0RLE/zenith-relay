@@ -2,8 +2,11 @@ use super::{
     apply_candidate_policy, declared_source_reasoning_levels, model_rules, runtime_now_ms,
     ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
 };
+use crate::error_codes;
 use crate::quota::QuotaSnapshot;
-use crate::{CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, UsageEvent};
+use crate::{
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateScope, UsageEvent,
+};
 use reqwest::{header::HeaderMap, StatusCode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,12 +131,103 @@ impl GatewayRuntime {
             );
         state.snapshot = merged;
         state.dirty = true;
-        self.lock_scheduler().update_candidate_quota_at(
+        let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
             quota,
             state.snapshot.updated_at_ms,
             state.snapshot.limiting_reset_at_ms(),
-        )
+            state.snapshot.available_credits_micro_units,
+            state.snapshot.provider_credits_unlimited,
+        );
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
+    }
+
+    /// Publishes a complete quota refresh to both the passive header cache and
+    /// the scheduler. Keeping the two views on one monotonic snapshot prevents
+    /// a later response header merge from resurrecting stale quota or credits.
+    pub(crate) fn sync_account_quota_snapshot(
+        &self,
+        candidate_id: &str,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+    ) -> bool {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
+            return false;
+        }
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let effective = quotas
+            .get_mut(candidate_id)
+            .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
+            .unwrap_or_else(|| snapshot.clone());
+        let quota =
+            CandidateQuota::from_snapshot(&effective, observed_at_ms, self.quota_stale_after_ms);
+        let updated = self.lock_scheduler().update_candidate_quota_at(
+            candidate_id,
+            quota,
+            effective.updated_at_ms,
+            effective.limiting_reset_at_ms(),
+            effective.available_credits_micro_units,
+            effective.provider_credits_unlimited,
+        );
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
+    }
+
+    /// Applies account policy and a complete refreshed quota snapshot while
+    /// retaining the same passive-cache ordering as header observations.
+    pub fn sync_account_availability_with_quota(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+    ) -> bool {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
+            return false;
+        }
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let effective = quotas
+            .get_mut(candidate_id)
+            .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
+            .unwrap_or_else(|| snapshot.clone());
+        let quota_state = CandidateQuotaState {
+            quota: CandidateQuota::from_snapshot(
+                &effective,
+                observed_at_ms,
+                self.quota_stale_after_ms,
+            ),
+            updated_at_ms: effective.updated_at_ms,
+            reset_at_ms: effective.limiting_reset_at_ms(),
+            provider_credits_micro_units: effective.available_credits_micro_units,
+            provider_credits_unlimited: effective.provider_credits_unlimited,
+        };
+        let updated = self
+            .lock_scheduler()
+            .update_candidate_availability_with_quota_at(
+                candidate_id,
+                enabled,
+                health,
+                quota_state,
+            );
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub(crate) fn take_passive_quota_snapshot(
@@ -164,12 +258,7 @@ impl GatewayRuntime {
             return;
         };
         if let Some(snapshot) = event.quota_snapshot.as_ref() {
-            self.lock_scheduler().update_candidate_quota_at(
-                candidate_id,
-                CandidateQuota::from_snapshot(snapshot, observed_at_ms, self.quota_stale_after_ms),
-                snapshot.updated_at_ms,
-                snapshot.limiting_reset_at_ms(),
-            );
+            self.sync_account_quota_snapshot(candidate_id, snapshot, observed_at_ms);
         }
         if event.success {
             self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
@@ -177,7 +266,7 @@ impl GatewayRuntime {
         }
 
         let category = event.error_category.as_deref().unwrap_or_default();
-        let model = if category == "image_generation_not_enabled" {
+        let model = if category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
             event.requested_model.as_deref()
         } else {
             event
@@ -209,14 +298,14 @@ impl GatewayRuntime {
             // treating it as `Exhausted` keeps an otherwise healthy slot out
             // of rotation until a separate refresh happens to run. Only an
             // actual quota snapshot above may mark the candidate exhausted.
-            "upstream_quota_exhausted" => {}
-            "upstream_unauthorized" | "account_auth" => {
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED => {}
+            error_codes::UPSTREAM_UNAUTHORIZED | error_codes::ACCOUNT_AUTH => {
                 self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
             }
-            "upstream_account_disabled" => {
+            error_codes::UPSTREAM_ACCOUNT_DISABLED => {
                 self.set_candidate_health(candidate_id, CandidateHealth::Blocked);
             }
-            "upstream_account_verification_required" => {
+            error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED => {
                 self.set_candidate_health(candidate_id, CandidateHealth::Checkpoint);
             }
             _ => {}
@@ -230,8 +319,16 @@ impl GatewayRuntime {
         health: CandidateHealth,
         quota: CandidateQuota,
     ) -> bool {
-        self.lock_scheduler()
-            .update_candidate_availability(candidate_id, enabled, health, quota)
+        let updated = self.lock_scheduler().update_candidate_availability(
+            candidate_id,
+            enabled,
+            health,
+            quota,
+        );
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn update_candidate_availability_at(
@@ -242,13 +339,41 @@ impl GatewayRuntime {
         quota: CandidateQuota,
         quota_updated_at_ms: Option<u64>,
     ) -> bool {
-        self.lock_scheduler().update_candidate_availability_at(
+        let updated = self.lock_scheduler().update_candidate_availability_at(
             candidate_id,
             enabled,
             health,
             quota,
             quota_updated_at_ms,
-        )
+        );
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
+    }
+
+    /// Applies the complete refreshed account state without rebuilding the
+    /// gateway. Quota windows and provider credits originate from one provider
+    /// response and must reach the scheduler together.
+    pub fn update_candidate_availability_with_quota_at(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota_state: CandidateQuotaState,
+    ) -> bool {
+        let updated = self
+            .lock_scheduler()
+            .update_candidate_availability_with_quota_at(
+                candidate_id,
+                enabled,
+                health,
+                quota_state,
+            );
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     /// Applies source routing rules without rebuilding its HTTP executor.
@@ -426,8 +551,13 @@ impl GatewayRuntime {
     }
 
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
-        self.lock_scheduler()
-            .set_candidate_health(candidate_id, health)
+        let updated = self
+            .lock_scheduler()
+            .set_candidate_health(candidate_id, health);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
@@ -490,7 +620,51 @@ impl GatewayRuntime {
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
-        self.lock_scheduler().runtime_order(runtime_now_ms())
+        let scheduler = self.lock_scheduler();
+        let mut order = scheduler.runtime_order(runtime_now_ms());
+        let revision = self.activity_revision.load(Ordering::Acquire);
+        for candidate in &mut order {
+            candidate.runtime_id = self.activity_runtime_id;
+            candidate.activity_revision = revision;
+        }
+        order
+    }
+
+    pub fn candidate_runtime_order_for_key(
+        &self,
+        key_id: &str,
+    ) -> Vec<crate::CandidateRuntimeSnapshot> {
+        let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == key_id) else {
+            let mut order = self.candidate_runtime_order();
+            for candidate in &mut order {
+                candidate.next_for_new_request = false;
+            }
+            return order;
+        };
+        let scope = key
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let protocols = key.client_wire_apis.as_deref().map_or_else(
+            super::all_native_wire_apis,
+            super::client_wire_apis_to_native,
+        );
+        let scheduler = self.lock_scheduler();
+        let mut models = key.model_rules.clone();
+        models.excluded.extend(
+            scheduler
+                .candidates()
+                .flat_map(|candidate| &candidate.models)
+                .filter(|model| super::is_image_model_id(model))
+                .cloned(),
+        );
+        let mut order = scheduler.runtime_order_for(&scope, &models, &protocols, runtime_now_ms());
+        let revision = self.activity_revision.load(Ordering::Acquire);
+        for candidate in &mut order {
+            candidate.runtime_id = self.activity_runtime_id;
+            candidate.activity_revision = revision;
+        }
+        order
     }
 
     pub(crate) fn account_candidate_is_active(&self, candidate_id: &str) -> bool {
@@ -509,7 +683,11 @@ impl GatewayRuntime {
     }
 
     pub fn clear_candidate_cooldown(&self, candidate_id: &str, model: &str) -> bool {
-        self.lock_scheduler().clear_cooldown(candidate_id, model)
+        let updated = self.lock_scheduler().clear_cooldown(candidate_id, model);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn set_candidate_cooldown(
@@ -518,21 +696,56 @@ impl GatewayRuntime {
         model: &str,
         retry_at_ms: u64,
     ) -> bool {
-        self.lock_scheduler()
-            .set_cooldown(candidate_id, model, retry_at_ms)
+        let updated = self
+            .lock_scheduler()
+            .set_cooldown(candidate_id, model, retry_at_ms);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn reset_candidate_failures(&self, candidate_id: &str) -> bool {
-        self.lock_scheduler().reset_failures(candidate_id)
+        let updated = self.lock_scheduler().reset_failures(candidate_id);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 }
 
 fn is_model_capability_failure(category: &str) -> bool {
     matches!(
         category,
-        "upstream_model_not_found"
-            | "upstream_model_unsupported"
-            | "upstream_usage_not_included"
-            | "image_generation_not_enabled"
+        error_codes::UPSTREAM_MODEL_NOT_FOUND
+            | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+            | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+            | error_codes::IMAGE_GENERATION_NOT_ENABLED
     )
+}
+
+/// Merge a persisted refresh into the passive in-memory snapshot without
+/// allowing an older in-flight observation to win. A dirty snapshot with the
+/// same timestamp is retained because it may contain response headers that
+/// have not reached durable storage yet.
+fn reconcile_passive_quota_snapshot(
+    state: &mut super::PassiveQuotaState,
+    incoming: &QuotaSnapshot,
+    observed_at_ms: u64,
+) -> QuotaSnapshot {
+    let incoming_at = incoming.updated_at_ms.unwrap_or(observed_at_ms);
+    let current_at = state.snapshot.updated_at_ms.unwrap_or_default();
+    let incoming_wins = match (incoming.updated_at_ms, state.snapshot.updated_at_ms) {
+        (Some(incoming_at), Some(current_at)) if incoming_at < current_at => false,
+        (Some(incoming_at), Some(current_at)) if incoming_at == current_at => !state.dirty,
+        (None, Some(_)) => false,
+        _ => incoming_at >= current_at,
+    };
+    if incoming_wins {
+        state.snapshot = incoming.clone();
+        state.dirty = false;
+        state.force_persist = false;
+        state.last_persist_hint_ms = incoming.updated_at_ms.unwrap_or(observed_at_ms);
+    }
+    state.snapshot.clone()
 }

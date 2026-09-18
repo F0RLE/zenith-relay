@@ -483,6 +483,8 @@ mod tests {
             weight: 1,
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
+            client_auth_status: None,
+            last_client_login_redirect_at_ms: None,
         }
     }
 }

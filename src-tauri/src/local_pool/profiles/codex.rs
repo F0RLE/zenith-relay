@@ -17,7 +17,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use toml_edit::{value, DocumentMut, Item, Table};
-use zenith_relay_core::{accounts::TokenSet, DefaultServiceTier, CODEX_RELAY_CATALOG_HASH};
+use zenith_relay_core::{
+    accounts::TokenSet, model_metadata::ModelMetadataCatalog, DefaultServiceTier,
+    CODEX_RELAY_CATALOG_HASH,
+};
 #[cfg(test)]
 use zenith_relay_core::{codex_catalog_entry_is_compatible, routed_codex_catalog_entry};
 
@@ -26,6 +29,8 @@ mod catalog;
 mod catalog_state;
 mod config;
 mod local;
+mod projection;
+mod switch_transaction;
 mod transaction;
 
 use catalog_state::{
@@ -42,12 +47,30 @@ use transaction::{
 };
 
 const PROVIDER_ID: &str = "zenith_relay_local";
+const READY_API_PROVIDER_ID: &str = "codex_local_access";
+const READY_API_PROVIDER_NAME: &str = "OpenAI";
+const LEGACY_READY_API_PROVIDER_NAME: &str = "Zenith";
+
+fn default_managed_provider() -> String {
+    PROVIDER_ID.to_owned()
+}
+
+impl ProfileBackup {
+    fn credential_kind(&self) -> ProfileCredentialKind {
+        if self.managed_provider_id == READY_API_PROVIDER_ID {
+            ProfileCredentialKind::ApiKey
+        } else {
+            ProfileCredentialKind::LocalGateway
+        }
+    }
+}
 const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
 const MODEL_CATALOG_FILE: &str = "codex-model-catalog.json";
 const MODELS_CACHE_FILE: &str = "models_cache.json";
 const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const DESKTOP_DEFAULT_SERVICE_TIER_KEY: &str = "default-service-tier";
+const TOP_LEVEL_SERVICE_TIER_KEY: &str = "service_tier";
 const PERSISTED_ATOM_STATE_KEY: &str = "electron-persisted-atom-state";
 const SERVICE_TIER_CHANGED_KEY: &str = "has-user-changed-service-tier";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
@@ -73,6 +96,10 @@ pub(super) fn portable_path_value(value: &str) -> String {
 #[serde(rename_all = "camelCase")]
 struct ProfileBackup {
     version: u32,
+    #[serde(default = "default_managed_provider")]
+    managed_provider_id: String,
+    #[serde(default)]
+    projection_secret_ref: Option<String>,
     previous_model_provider: Option<String>,
     #[serde(default)]
     previous_model_catalog_json: Option<String>,
@@ -115,6 +142,8 @@ struct ProfileBackup {
 #[serde(rename_all = "camelCase")]
 struct AccountProfileBackup {
     version: u32,
+    #[serde(default)]
+    projection_secret_ref: Option<String>,
     profile_dir: String,
     previous_model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +185,7 @@ pub(crate) struct BoundOAuthProfile<'a> {
 }
 
 struct LocalAttachOptions<'a> {
+    provider_id: &'a str,
     bound_oauth: Option<BoundOAuthProfile<'a>>,
     catalog_json: Option<&'a str>,
     supports_websockets: bool,
@@ -164,11 +194,40 @@ struct LocalAttachOptions<'a> {
 impl<'a> Default for LocalAttachOptions<'a> {
     fn default() -> Self {
         Self {
+            provider_id: PROVIDER_ID,
             bound_oauth: None,
             catalog_json: None,
             supports_websockets: true,
         }
     }
+}
+
+pub(crate) fn attach_ready_api(codex_home: &Path, backup_root: &Path, api_key: &str) -> Result<()> {
+    switch_to_local_with(
+        codex_home,
+        backup_root,
+        "ready_api",
+        "https://api.zenithmarket.dev/v1",
+        api_key,
+        LocalAttachOptions {
+            provider_id: READY_API_PROVIDER_ID,
+            ..LocalAttachOptions::default()
+        },
+        &OsSecretBackend,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn restore_ready_api(codex_home: &Path, backup_root: &Path) -> Result<bool> {
+    let _profile_guard = lock_codex_profile();
+    let Some(backup) = local_backup(codex_home, backup_root)? else {
+        return Ok(false);
+    };
+    if backup.managed_provider_id != READY_API_PROVIDER_ID {
+        return Ok(false);
+    }
+    local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)?;
+    Ok(true)
 }
 
 pub(crate) struct ManagedAccountTokenUpdate {
@@ -260,6 +319,15 @@ pub(crate) fn direct_source_model_catalog(
     catalog::direct_source_model_catalog_with_manifest(codex_home, source_models, None)
 }
 
+pub(crate) fn direct_source_model_catalog_with_capabilities(
+    codex_home: &Path,
+    source_models: &[String],
+    metadata: &ModelMetadataCatalog,
+) -> Result<Option<String>> {
+    catalog::direct_source_model_catalog_with_capabilities(codex_home, source_models, metadata)
+}
+
+#[cfg(test)]
 pub(crate) fn direct_source_model_catalog_with_manifest(
     codex_home: &Path,
     source_models: &[String],
@@ -292,6 +360,7 @@ pub(crate) fn attach_with_oauth_and_options(
             bound_oauth: Some(options.bound_oauth),
             catalog_json: Some(options.catalog_json),
             supports_websockets: options.supports_websockets,
+            ..LocalAttachOptions::default()
         },
         &OsSecretBackend,
     )
@@ -307,14 +376,6 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
     local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
 }
 
-pub fn set_local_gateway_websockets(
-    codex_home: &Path,
-    backup_root: &Path,
-    enabled: bool,
-) -> Result<()> {
-    set_local_gateway_websockets_with_previous(codex_home, backup_root, enabled).map(|_| ())
-}
-
 /// Updates the managed profile and returns the previous provider setting when
 /// the profile was managed. Callers that persist a second copy of this state
 /// can use the returned value to restore the profile if that later write fails.
@@ -322,62 +383,98 @@ pub fn set_local_gateway_websockets_with_previous(
     codex_home: &Path,
     backup_root: &Path,
     enabled: bool,
+    expected_credential_id: Option<&str>,
+) -> Result<Option<bool>> {
+    set_local_gateway_websockets_with_backend(
+        codex_home,
+        backup_root,
+        enabled,
+        expected_credential_id,
+        &OsSecretBackend,
+    )
+}
+
+fn set_local_gateway_websockets_with_backend(
+    codex_home: &Path,
+    backup_root: &Path,
+    enabled: bool,
+    expected_credential_id: Option<&str>,
+    secrets: &impl SecretBackend,
 ) -> Result<Option<bool>> {
     let _profile_guard = lock_codex_profile();
+    // A setting-only request must be a no-op when Codex has never created a
+    // profile. `switch_transaction::run` correctly journals mutations, but it
+    // also creates its target directory before calling this closure.
     if !codex_home.exists() {
         return Ok(None);
     }
-    let profile_dir = canonical_profile_dir(codex_home)?;
-    let config_path = profile_dir.join(CONFIG_FILE);
-    let backup_path = backup_path(backup_root);
-    let original_config = read_optional_bytes(&config_path)?;
-    let Some(config_text) = snapshot_text(&original_config, &config_path)? else {
-        return Ok(None);
-    };
-    let original_backup = read_optional_bytes(&backup_path)?;
-    let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
-        return Ok(None);
-    };
-    let mut document = parse_config(config_text)?;
-    if !managed_config_matches(&document, &backup) {
-        return Ok(None);
-    }
-    let previous_enabled = document
-        .get("model_providers")
-        .and_then(Item::as_table_like)
-        .and_then(|providers| providers.get(PROVIDER_ID))
-        .and_then(Item::as_table_like)
-        .and_then(|provider| provider.get("supports_websockets"))
-        .and_then(Item::as_bool)
-        // A managed provider predates this field in some profiles. The
-        // current Codex contract treats the omitted field as enabled.
-        .or(Some(true));
-    if document
-        .get("model_providers")
-        .and_then(Item::as_table_like)
-        .and_then(|providers| providers.get(PROVIDER_ID))
-        .and_then(Item::as_table_like)
-        .and_then(|provider| provider.get("supports_websockets"))
-        .and_then(Item::as_bool)
-        == Some(enabled)
-        && backup.managed_supports_websockets == Some(enabled)
-    {
-        return Ok(previous_enabled);
-    }
-    if !set_managed_websockets(&mut document, enabled) {
-        return Ok(previous_enabled);
-    }
-    let next_config = document.to_string();
-    backup.managed_supports_websockets = Some(enabled);
-    let next_backup = serialize_backup(&backup)?;
-    if next_config != config_text {
-        replace_if_unchanged(&config_path, &original_config, &next_config)?;
-    }
-    if let Err(error) = replace_if_unchanged(&backup_path, &original_backup, &next_backup) {
-        let rollback = rollback_file(&config_path, &next_config, &original_config);
-        return Err(with_rollback(error, rollback));
-    }
-    Ok(previous_enabled)
+    switch_transaction::run(codex_home, secrets, |secrets| {
+        let profile_dir = canonical_profile_dir(codex_home)?;
+        let config_path = profile_dir.join(CONFIG_FILE);
+        let backup_path = backup_path(backup_root);
+        let original_config = read_optional_bytes(&config_path)?;
+        let Some(config_text) = snapshot_text(&original_config, &config_path)? else {
+            return Ok(None);
+        };
+        let original_backup = read_optional_bytes(&backup_path)?;
+        let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
+            return Ok(None);
+        };
+        if expected_credential_id.is_some_and(|id| {
+            backup.credential_kind() != ProfileCredentialKind::LocalGateway
+                || backup.managed_key_id != id
+        }) {
+            return Ok(None);
+        }
+        let mut document = parse_config(config_text)?;
+        if !managed_config_matches(&document, &backup) {
+            return Ok(None);
+        }
+        let previous_enabled = document
+            .get("model_providers")
+            .and_then(Item::as_table_like)
+            .and_then(|providers| providers.get(&backup.managed_provider_id))
+            .and_then(Item::as_table_like)
+            .and_then(|provider| provider.get("supports_websockets"))
+            .and_then(Item::as_bool)
+            // A managed provider predates this field in some profiles. The
+            // current Codex contract treats the omitted field as enabled.
+            .or(Some(true));
+        if document
+            .get("model_providers")
+            .and_then(Item::as_table_like)
+            .and_then(|providers| providers.get(&backup.managed_provider_id))
+            .and_then(Item::as_table_like)
+            .and_then(|provider| provider.get("supports_websockets"))
+            .and_then(Item::as_bool)
+            == Some(enabled)
+            && backup.managed_supports_websockets == Some(enabled)
+        {
+            return Ok(previous_enabled);
+        }
+        if !set_managed_websockets(&mut document, &backup.managed_provider_id, enabled) {
+            return Ok(previous_enabled);
+        }
+        let next_config = document.to_string();
+        if let Some(secret_ref) = backup.projection_secret_ref.as_deref() {
+            projection::update_websockets(
+                secret_ref,
+                &backup.managed_provider_id,
+                enabled,
+                secrets,
+            )?;
+        }
+        backup.managed_supports_websockets = Some(enabled);
+        let next_backup = serialize_backup(&backup)?;
+        if next_config != config_text {
+            replace_if_unchanged(&config_path, &original_config, &next_config)?;
+        }
+        if let Err(error) = replace_if_unchanged(&backup_path, &original_backup, &next_backup) {
+            let rollback = rollback_file(&config_path, &next_config, &original_config);
+            return Err(with_rollback(error, rollback));
+        }
+        Ok(previous_enabled)
+    })
 }
 
 pub fn sync_default_service_tier(
@@ -393,7 +490,7 @@ pub fn sync_default_service_tier(
 
     let mut document =
         parse_config(snapshot_text(&original_config, &config_path)?.unwrap_or_default())?;
-    match default_service_tier {
+    let (desktop_service_tier, top_level_service_tier) = match default_service_tier {
         DefaultServiceTier::Standard => {
             if let Some(desktop) = document.get_mut("desktop") {
                 desktop
@@ -406,6 +503,7 @@ pub fn sync_default_service_tier(
                     })?
                     .remove(DESKTOP_DEFAULT_SERVICE_TIER_KEY);
             }
+            (None, "default")
         }
         DefaultServiceTier::Fast => {
             if document.get("desktop").is_none() {
@@ -418,8 +516,23 @@ pub fn sync_default_service_tier(
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("priority");
+            (Some("priority"), "priority")
         }
-    }
+        DefaultServiceTier::Ultrafast => {
+            if document.get("desktop").is_none() {
+                document["desktop"] = Item::Table(Table::new());
+            }
+            let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "Codex desktop settings must be a table",
+                )
+            })?;
+            desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("ultrafast");
+            (Some("ultrafast"), "ultrafast")
+        }
+    };
+    document[TOP_LEVEL_SERVICE_TIER_KEY] = value(top_level_service_tier);
     let next_config = document.to_string();
 
     let mut state = match snapshot_text(&original_state, &state_path)? {
@@ -448,10 +561,7 @@ pub fn sync_default_service_tier(
         .expect("persisted atom state was normalized to an object");
     persisted.insert(
         DESKTOP_DEFAULT_SERVICE_TIER_KEY.to_string(),
-        match default_service_tier {
-            DefaultServiceTier::Standard => Value::Null,
-            DefaultServiceTier::Fast => Value::String("priority".to_string()),
-        },
+        desktop_service_tier.map_or(Value::Null, |tier| Value::String(tier.to_string())),
     );
     persisted.insert(SERVICE_TIER_CHANGED_KEY.to_string(), Value::Bool(true));
     let next_state = serde_json::to_string(state).map_err(|error| {
@@ -540,6 +650,18 @@ fn snapshot_user_profile_with(
             )
         })?;
         if account_managed_config_matches(&document) {
+            if let Some(secret_ref) = backup.projection_secret_ref.as_deref() {
+                let mut restored = projection::restore(
+                    secret_ref,
+                    snapshot_text(&config, &config_path)?,
+                    snapshot_text(&auth, &auth_path)?,
+                    secrets,
+                )?;
+                if !account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)? {
+                    restored.auth = snapshot_text(&auth, &auth_path)?.map(str::to_owned);
+                }
+                return Ok(restored);
+            }
             restore_account_config(&mut document, &backup);
             let auth =
                 if account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)? {
@@ -554,6 +676,18 @@ fn snapshot_user_profile_with(
         }
     } else if let Some(backup) = local_backup(codex_home, backup_root)? {
         if managed_config_matches(&document, &backup) {
+            if let Some(secret_ref) = backup.projection_secret_ref.as_deref() {
+                let mut restored = projection::restore(
+                    secret_ref,
+                    snapshot_text(&config, &config_path)?,
+                    snapshot_text(&auth, &auth_path)?,
+                    secrets,
+                )?;
+                if !managed_auth_matches_snapshot(&auth, &auth_path, &backup)? {
+                    restored.auth = snapshot_text(&auth, &auth_path)?.map(str::to_owned);
+                }
+                return Ok(restored);
+            }
             let model_catalog = model_catalog_to_restore(&document, &backup);
             let current_model_reasoning_effort = root_model_reasoning_effort(&document);
             restore_local_config(
@@ -573,7 +707,7 @@ fn snapshot_user_profile_with(
             });
         }
         if external_provider_took_over(&document, &backup) {
-            remove_managed_provider(&mut document);
+            remove_managed_provider(&mut document, &backup.managed_provider_id);
             return Ok(UserProfileSnapshot {
                 config: Some(document.to_string()),
                 auth: snapshot_text(&auth, &auth_path)?.map(str::to_string),
@@ -689,7 +823,7 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
             && managed_auth_matches_snapshot(&auth, &auth_path, &backup)?;
         bindings.push(ProfileBinding {
             profile_dir: profile_dir.to_string_lossy().into_owned(),
-            credential_kind: ProfileCredentialKind::LocalGateway,
+            credential_kind: backup.credential_kind(),
             credential_id: if backup.managed_key_id.is_empty() {
                 "local_gateway".to_string()
             } else {
@@ -704,10 +838,13 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
         let config = read_optional_bytes(&config_path)?;
         let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
         if document_has_provider(&document) {
-            return Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "managed ChatGPT provider exists without an automatic backup",
-            ));
+            bindings.push(ProfileBinding {
+                profile_dir: profile_dir.to_string_lossy().into_owned(),
+                credential_kind: ProfileCredentialKind::LocalGateway,
+                credential_id: "local_gateway".to_string(),
+                bound_oauth_account_id: None,
+                active: false,
+            });
         }
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
@@ -739,7 +876,7 @@ pub(crate) fn managed_account_token_update(
     codex_home: &Path,
     backup_root: &Path,
     account_id: &str,
-    current_access_token: &str,
+    current_tokens: &TokenSet,
     provider_account_id: &str,
 ) -> Result<Option<ManagedAccountTokenUpdate>> {
     let _profile_guard = lock_codex_profile();
@@ -764,7 +901,7 @@ pub(crate) fn managed_account_token_update(
                 &mut update,
                 read_managed_account_token_update(
                     Path::new(&backup.profile_dir),
-                    current_access_token,
+                    current_tokens,
                     provider_account_id,
                 )?,
             )?;
@@ -775,11 +912,7 @@ pub(crate) fn managed_account_token_update(
         if backup.bound_oauth_account_id.as_deref() == Some(account_id) {
             merge_managed_token_update(
                 &mut update,
-                read_managed_account_token_update(
-                    codex_home,
-                    current_access_token,
-                    provider_account_id,
-                )?,
+                read_managed_account_token_update(codex_home, current_tokens, provider_account_id)?,
             )?;
         }
     }
@@ -789,7 +922,7 @@ pub(crate) fn managed_account_token_update(
 
 fn read_managed_account_token_update(
     profile_dir: &Path,
-    current_access_token: &str,
+    current_tokens: &TokenSet,
     provider_account_id: &str,
 ) -> Result<Option<ManagedAccountTokenUpdate>> {
     if !profile_dir.exists() {
@@ -821,18 +954,30 @@ fn read_managed_account_token_update(
     let Some(access_token) = managed_token(tokens, "access_token") else {
         return Ok(None);
     };
-    if access_token == current_access_token {
-        return Ok(None);
-    }
     let Some(refresh_token) = managed_token(tokens, "refresh_token") else {
         return Ok(None);
     };
     let id_token = managed_token(tokens, "id_token").map(str::to_string);
-    Ok(Some(ManagedAccountTokenUpdate {
+    let update = ManagedAccountTokenUpdate {
         access_token: access_token.to_string(),
         refresh_token: refresh_token.to_string(),
         id_token,
-    }))
+    };
+    // A desktop client can rotate a refresh or ID token without changing the
+    // access token. Treat every supplied credential component as a generation
+    // change, while preserving a stored ID token when the profile simply omits
+    // that optional field.
+    let id_token_changed = update
+        .id_token
+        .as_deref()
+        .is_some_and(|value| Some(value) != current_tokens.id_token());
+    if update.access_token == current_tokens.access_token()
+        && update.refresh_token == current_tokens.refresh_token().unwrap_or_default()
+        && !id_token_changed
+    {
+        return Ok(None);
+    }
+    Ok(Some(update))
 }
 
 fn managed_token<'a>(
@@ -918,9 +1063,6 @@ pub fn sync_local_gateway_binding(
         return Ok(false);
     }
     let next_hash = key_hash(tokens.access_token());
-    if backup.managed_oauth_access_hash.as_deref() == Some(next_hash.as_str()) {
-        return Ok(false);
-    }
 
     let profile_dir = canonical_profile_dir(codex_home)?;
     let config_path = profile_dir.join(CONFIG_FILE);
@@ -929,8 +1071,13 @@ pub fn sync_local_gateway_binding(
     let auth = read_optional_bytes(&auth_path)?;
     let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
     let auth_matches_previous = managed_auth_matches_snapshot(&auth, &auth_path, &backup)?;
-    let auth_matches_next = account_auth_matches_snapshot(&auth, &auth_path, &next_hash)?;
+    let auth_matches_next =
+        account_auth_matches_tokens(&auth, &auth_path, tokens, provider_account_id)?;
     if !managed_config_matches(&document, &backup) || (!auth_matches_previous && !auth_matches_next)
+    {
+        return Ok(false);
+    }
+    if auth_matches_next && backup.managed_oauth_access_hash.as_deref() == Some(next_hash.as_str())
     {
         return Ok(false);
     }
@@ -941,14 +1088,13 @@ pub fn sync_local_gateway_binding(
     if auth_matches_next {
         return Ok(true);
     }
-    let updated_auth = account_auth_content(tokens, provider_account_id)?;
-    if let Err(error) = replace_if_unchanged(&auth_path, &auth, &updated_auth) {
-        return Err(with_rollback(
-            error,
-            rollback_file(&backup_path, &updated_backup, &backup_bytes),
-        ));
-    }
-    Ok(true)
+    let credential = account_auth_content(tokens, provider_account_id)?;
+    projection::update_auth_with_rollback(
+        &auth_path,
+        &auth,
+        &credential,
+        (&backup_path, &updated_backup, &backup_bytes),
+    )
 }
 
 pub(crate) fn refresh_managed_model_catalog(
@@ -1032,64 +1178,61 @@ fn switch_to_local_with(
 ) -> Result<ProfileBinding> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
-    let detached_account_backup = match account_backup_for_profile(codex_home, backup_root)? {
-        Some(path) if external_account_provider_took_over(codex_home)? => {
-            let bytes = read_optional_bytes(&path)?;
-            let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
-                LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    "ChatGPT account profile backup disappeared during the switch",
-                )
-            })?;
-            remove_if_unchanged(&path, &bytes)?;
-            Some((path, bytes, backup.previous_auth_secret_ref))
+    switch_transaction::run(codex_home, secrets, |secrets| {
+        let detached_account_backup = match account_backup_for_profile(codex_home, backup_root)? {
+            Some(path) if external_account_provider_took_over(codex_home)? => {
+                let bytes = read_optional_bytes(&path)?;
+                let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
+                    LocalPoolError::new(
+                        ErrorCode::RecoveryRequired,
+                        "ChatGPT account profile backup disappeared during the switch",
+                    )
+                })?;
+                remove_if_unchanged(&path, &bytes)?;
+                Some(backup)
+            }
+            Some(_) => {
+                account::restore_account_locked(codex_home, backup_root, secrets)?;
+                None
+            }
+            None => None,
+        };
+        local::prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
+        local::attach_local_locked(
+            codex_home,
+            backup_root,
+            key_id,
+            base_url,
+            local_key,
+            options,
+            secrets,
+        )?;
+        if let Some(backup) = detached_account_backup {
+            for secret_ref in [
+                backup.previous_auth_secret_ref,
+                backup.projection_secret_ref,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                secrets.delete(&secret_ref)?;
+            }
         }
-        Some(_) => {
-            account::restore_account_locked(codex_home, backup_root, secrets)?;
-            None
-        }
-        None => None,
-    };
-    local::prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
-    if let Err(error) = local::attach_local_locked(
-        codex_home,
-        backup_root,
-        key_id,
-        base_url,
-        local_key,
-        options,
-        secrets,
-    ) {
-        let rollback = detached_account_backup
-            .as_ref()
-            .map(|(path, bytes, _)| restore_snapshot_if_unchanged(path, &None, bytes))
-            .unwrap_or(Ok(()));
-        return Err(with_rollback(error, rollback));
-    }
-    if let Some((path, bytes, Some(secret_ref))) = detached_account_backup {
-        if let Err(error) = secrets.delete(&secret_ref) {
-            let profile_rollback = local::restore_local_locked(codex_home, backup_root, secrets);
-            let backup_rollback = restore_snapshot_if_unchanged(&path, &None, &bytes);
-            return Err(with_rollback(
-                error,
-                merge_rollbacks(profile_rollback, backup_rollback),
-            ));
-        }
-    }
-    let backup = local_backup(codex_home, backup_root)?.ok_or_else(|| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT local gateway profile backup is missing after attach",
-        )
-    })?;
-    Ok(ProfileBinding {
-        profile_dir: canonical_profile_dir(codex_home)?
-            .to_string_lossy()
-            .into_owned(),
-        credential_kind: ProfileCredentialKind::LocalGateway,
-        credential_id: key_id.to_string(),
-        bound_oauth_account_id: backup.bound_oauth_account_id,
-        active: true,
+        let backup = local_backup(codex_home, backup_root)?.ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT local gateway profile backup is missing after attach",
+            )
+        })?;
+        Ok(ProfileBinding {
+            profile_dir: canonical_profile_dir(codex_home)?
+                .to_string_lossy()
+                .into_owned(),
+            credential_kind: backup.credential_kind(),
+            credential_id: key_id.to_string(),
+            bound_oauth_account_id: backup.bound_oauth_account_id,
+            active: true,
+        })
     })
 }
 
@@ -1103,17 +1246,19 @@ fn switch_to_account_with(
 ) -> Result<ProfileBinding> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
-    if backup_path(backup_root).exists() {
-        local::restore_local_locked(codex_home, backup_root, secrets)?;
-    }
-    account::attach_account_locked(
-        codex_home,
-        backup_root,
-        account_id,
-        tokens,
-        provider_account_id,
-        secrets,
-    )
+    switch_transaction::run(codex_home, secrets, |secrets| {
+        if backup_path(backup_root).exists() {
+            local::restore_local_locked(codex_home, backup_root, secrets)?;
+        }
+        account::attach_account_locked(
+            codex_home,
+            backup_root,
+            account_id,
+            tokens,
+            provider_account_id,
+            secrets,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1233,8 +1378,11 @@ fn restore_account_with(
 }
 
 fn attach_account_config(document: &mut DocumentMut) {
-    let model_catalog = root_model_catalog_json(document);
-    restore_config(document, None, model_catalog.as_deref());
+    // A direct OAuth account must use Codex's native catalog. A catalog path
+    // left by Relay or another integration makes the official picker show
+    // routed/user-defined models after an account switch. The projection
+    // snapshot restores the user's previous path when switching away.
+    restore_config(document, PROVIDER_ID, None, None);
     document.remove("openai_base_url");
 }
 
@@ -1242,6 +1390,7 @@ fn restore_account_config(document: &mut DocumentMut, backup: &AccountProfileBac
     let model_catalog = root_model_catalog_json(document);
     restore_config(
         document,
+        PROVIDER_ID,
         backup.previous_model_provider.as_deref(),
         model_catalog.as_deref(),
     );
@@ -1313,6 +1462,37 @@ fn account_auth_matches_snapshot(
     )
 }
 
+fn account_auth_matches_tokens(
+    snapshot: &Option<Vec<u8>>,
+    path: &Path,
+    expected_tokens: &TokenSet,
+    provider_account_id: &str,
+) -> Result<bool> {
+    let Some(content) = snapshot_text(snapshot, path)? else {
+        return Ok(false);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Ok(false);
+    };
+    let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object) else {
+        return Ok(false);
+    };
+    Ok(
+        auth_credential_kind(&value) == Some(ProfileCredentialKind::OAuthAccount)
+            && tokens
+                .get("account_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                == Some(provider_account_id.trim())
+            && managed_token(tokens, "access_token") == Some(expected_tokens.access_token())
+            && managed_token(tokens, "refresh_token") == expected_tokens.refresh_token()
+            && match expected_tokens.id_token() {
+                Some(expected) => managed_token(tokens, "id_token") == Some(expected),
+                None => managed_token(tokens, "id_token").is_none(),
+            },
+    )
+}
+
 fn account_backup_for_profile(codex_home: &Path, backup_root: &Path) -> Result<Option<PathBuf>> {
     if !codex_home.exists() {
         return Ok(None);
@@ -1342,8 +1522,7 @@ fn credential_kind_locked(
         return Ok(Some(ProfileCredentialKind::OAuthAccount));
     }
     if backup_path(backup_root).exists() {
-        local_backup(codex_home, backup_root)?;
-        return Ok(Some(ProfileCredentialKind::LocalGateway));
+        return Ok(local_backup(codex_home, backup_root)?.map(|backup| backup.credential_kind()));
     }
     let auth_path = codex_home.join(AUTH_FILE);
     let auth = read_optional_bytes(&auth_path)?;
@@ -1472,10 +1651,11 @@ fn cleanup_created_account_backup_secret(
     if !created {
         return Ok(());
     }
-    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-        secrets.delete(secret_ref)?;
-    }
-    Ok(())
+    delete_backup_secrets(
+        backup.previous_auth_secret_ref.as_deref(),
+        backup.projection_secret_ref.as_deref(),
+        secrets,
+    )
 }
 
 fn parse_backup_snapshot(snapshot: &Option<Vec<u8>>, path: &Path) -> Result<Option<ProfileBackup>> {
@@ -1515,10 +1695,11 @@ fn cleanup_created_backup_secret(
     if !created {
         return Ok(());
     }
-    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-        secrets.delete(secret_ref)?;
-    }
-    Ok(())
+    delete_backup_secrets(
+        backup.previous_auth_secret_ref.as_deref(),
+        backup.projection_secret_ref.as_deref(),
+        secrets,
+    )
 }
 
 fn restore_secret_snapshot(
@@ -1567,6 +1748,7 @@ fn discard_managed_binding_locked(
             &path,
             &bytes,
             backup.previous_auth_secret_ref.as_deref(),
+            backup.projection_secret_ref.as_deref(),
             secrets,
         );
     }
@@ -1575,29 +1757,57 @@ fn discard_managed_binding_locked(
     let Some(backup) = parse_backup_snapshot(&bytes, &path)? else {
         return Ok(());
     };
+    discard_backup(
+        &path,
+        &bytes,
+        backup.previous_auth_secret_ref.as_deref(),
+        backup.projection_secret_ref.as_deref(),
+        secrets,
+    )?;
     remove_managed_model_catalog_if_unchanged(&backup);
-    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-        secrets.delete(secret_ref)?;
-    }
-    remove_if_unchanged(&path, &bytes)?;
     Ok(())
 }
 
 fn discard_backup(
     path: &Path,
     bytes: &Option<Vec<u8>>,
-    secret_ref: Option<&str>,
+    previous_auth_secret_ref: Option<&str>,
+    projection_secret_ref: Option<&str>,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     remove_if_unchanged(path, bytes)?;
-    let Some(secret_ref) = secret_ref else {
-        return Ok(());
-    };
-    if let Err(error) = secrets.delete(secret_ref) {
+    if let Err(error) =
+        delete_backup_secrets(previous_auth_secret_ref, projection_secret_ref, secrets)
+    {
         return Err(with_rollback(
             error,
             restore_snapshot_if_unchanged(path, &None, bytes),
         ));
+    }
+    Ok(())
+}
+
+/// Keep a retryable pair when deletion of either encrypted payload fails.
+fn delete_backup_secrets(
+    previous_auth_secret_ref: Option<&str>,
+    projection_secret_ref: Option<&str>,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let snapshots = [previous_auth_secret_ref, projection_secret_ref]
+        .into_iter()
+        .flatten()
+        .map(|secret_ref| secrets.load(secret_ref).map(|value| (secret_ref, value)))
+        .collect::<Result<Vec<_>>>()?;
+    for (index, (secret_ref, _)) in snapshots.iter().enumerate() {
+        if let Err(error) = secrets.delete(secret_ref) {
+            let mut rollback = Ok(());
+            for (deleted_ref, value) in &snapshots[..index] {
+                if let Some(value) = value {
+                    rollback = merge_rollbacks(rollback, secrets.save(deleted_ref, value));
+                }
+            }
+            return Err(with_rollback(error, rollback));
+        }
     }
     Ok(())
 }

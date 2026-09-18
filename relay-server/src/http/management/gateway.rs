@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tower::ServiceExt;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     is_valid_model_token,
     protocol::{GatewayDiagnostic, RuntimeStateSnapshot},
@@ -23,6 +24,10 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route(
             "/gateway/codex-background-tasks",
             post(set_codex_background_tasks),
+        )
+        .route(
+            "/gateway/chatgpt-retry-until-available",
+            post(set_chatgpt_retry_until_available),
         )
         .route("/gateway/codex-websockets", post(set_codex_websockets))
 }
@@ -41,7 +46,7 @@ pub async fn diagnose_gateway(
     if !state.store.gateway_enabled().map_err(store_error)? {
         return Err(ManagementError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "gateway_stopped",
+            error_codes::GATEWAY_STOPPED,
             "personal pool gateway is stopped",
             "diagnostics",
             true,
@@ -50,7 +55,7 @@ pub async fn diagnose_gateway(
     let runtime = state.runtime().map_err(runtime_error)?.ok_or_else(|| {
         ManagementError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "runtime_unavailable",
+            error_codes::RUNTIME_UNAVAILABLE,
             "personal pool runtime is unavailable",
             "diagnostics",
             true,
@@ -68,7 +73,7 @@ pub async fn diagnose_gateway(
         })
         .ok_or_else(|| {
             ManagementError::validation(
-                "diagnostic_key_unavailable",
+                error_codes::DIAGNOSTIC_KEY_UNAVAILABLE,
                 "internal profile credential is unavailable",
             )
         })?;
@@ -85,7 +90,7 @@ pub async fn diagnose_gateway(
         .find(|id| is_valid_model_token(id))
         .ok_or_else(|| {
             ManagementError::validation(
-                "diagnostic_model_unavailable",
+                error_codes::DIAGNOSTIC_MODEL_UNAVAILABLE,
                 "managed profile exposes no usable model",
             )
         })?;
@@ -96,18 +101,23 @@ pub async fn diagnose_gateway(
         "max_output_tokens": 8,
         "tools": []
     }))
-    .map_err(|_| ManagementError::internal("diagnostic_failed", "diagnostic request failed"))?;
+    .map_err(|_| {
+        ManagementError::internal(error_codes::DIAGNOSTIC_FAILED, "diagnostic request failed")
+    })?;
     let started = Instant::now();
     let response =
         internal_gateway_request(runtime, "POST", "/v1/responses", &secret, Body::from(body))
             .await?;
     if input.stream {
         let text = std::str::from_utf8(&response).map_err(|_| {
-            ManagementError::internal("diagnostic_invalid", "stream diagnostic was invalid")
+            ManagementError::internal(
+                error_codes::DIAGNOSTIC_INVALID,
+                "stream diagnostic was invalid",
+            )
         })?;
         if !text.contains("response.completed") && !text.contains("[DONE]") {
             return Err(ManagementError::internal(
-                "diagnostic_incomplete",
+                error_codes::DIAGNOSTIC_INCOMPLETE,
                 "stream diagnostic did not reach a terminal event",
             ));
         }
@@ -115,7 +125,7 @@ pub async fn diagnose_gateway(
         .is_ok_and(|value| value.is_object() && value.get("error").is_none_or(Value::is_null))
     {
         return Err(ManagementError::internal(
-            "diagnostic_invalid",
+            error_codes::DIAGNOSTIC_INVALID,
             "non-stream diagnostic was invalid",
         ));
     }
@@ -143,15 +153,19 @@ async fn internal_gateway_request(
         .header(header::AUTHORIZATION, format!("Bearer {secret}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(body)
-        .map_err(|_| ManagementError::internal("diagnostic_failed", "diagnostic request failed"))?;
+        .map_err(|_| {
+            ManagementError::internal(error_codes::DIAGNOSTIC_FAILED, "diagnostic request failed")
+        })?;
     let response = zenith_relay_core::gateway::router(runtime)
         .oneshot(request)
         .await
-        .map_err(|_| ManagementError::internal("diagnostic_failed", "diagnostic request failed"))?;
+        .map_err(|_| {
+            ManagementError::internal(error_codes::DIAGNOSTIC_FAILED, "diagnostic request failed")
+        })?;
     if !response.status().is_success() {
         return Err(ManagementError::new(
             StatusCode::BAD_GATEWAY,
-            "diagnostic_upstream_failed",
+            error_codes::DIAGNOSTIC_UPSTREAM_FAILED,
             format!("diagnostic failed with HTTP {}", response.status().as_u16()),
             "diagnostics",
             true,
@@ -162,7 +176,7 @@ async fn internal_gateway_request(
         .map(|bytes| bytes.to_vec())
         .map_err(|_| {
             ManagementError::internal(
-                "diagnostic_too_large",
+                error_codes::DIAGNOSTIC_TOO_LARGE,
                 "diagnostic response exceeded the limit",
             )
         })
@@ -222,6 +236,44 @@ pub async fn set_codex_background_tasks(
         let _ = state.store.set_codex_background_tasks_enabled(previous);
         if let Some(runtime) = state.runtime().ok().flatten() {
             runtime.set_codex_background_tasks_enabled(previous);
+        }
+        return Err(runtime_error(error));
+    }
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatgptRetryUntilAvailableInput {
+    enabled: bool,
+}
+
+pub async fn set_chatgpt_retry_until_available(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<ChatgptRetryUntilAvailableInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let previous = state
+        .store
+        .chatgpt_retry_until_available()
+        .map_err(store_error)?;
+    state
+        .store
+        .set_chatgpt_retry_until_available(input.enabled)
+        .map_err(store_error)?;
+    let runtime = match state.runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = state.store.set_chatgpt_retry_until_available(previous);
+            return Err(runtime_error(error));
+        }
+    };
+    if let Some(runtime) = runtime {
+        runtime.set_chatgpt_retry_until_available(input.enabled);
+    }
+    if let Err(error) = state.snapshot() {
+        let _ = state.store.set_chatgpt_retry_until_available(previous);
+        if let Some(runtime) = state.runtime().ok().flatten() {
+            runtime.set_chatgpt_retry_until_available(previous);
         }
         return Err(runtime_error(error));
     }

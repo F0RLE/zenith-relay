@@ -1,6 +1,6 @@
-use super::sync_accounts_or_rollback;
 use crate::local_pool::{
     accounts::{
+        authority::{ProcessAccountLocks, ProcessLockConfig},
         credentials::{
             credential_local_error as credential_error, CredentialError, CredentialStore,
             StoredCodexCredentials,
@@ -20,7 +20,7 @@ use crate::local_pool::{
         NativeSecretBackend,
     },
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-    models::{LocalAccountRecord, LocalGatewayKeyRecord},
+    models::LocalAccountRecord,
     state::DesktopState,
 };
 use reqwest::redirect::Policy;
@@ -30,8 +30,9 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use uuid::Uuid;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
-    accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
+    accounts::{AccountAuthMode, AccountAuthState, AccountHealthState, TokenSet},
     providers::chatgpt::{
         AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
     },
@@ -62,6 +63,17 @@ pub async fn start_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "start",
+        &[(
+            "account",
+            account_id
+                .as_deref()
+                .map(crate::diagnostics::hash_identifier)
+                .unwrap_or_else(|| "none".to_string()),
+        )],
+    );
     let target_account_id = validate_oauth_target(&state, account_id.as_deref())?;
     let settings = state.store()?.gateway().clone();
     let proxy = common_proxy_config(&settings)?;
@@ -87,6 +99,11 @@ pub async fn resume_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "resume",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     let start = state
         .oauth_flow()
         .resume(&login_id)
@@ -102,6 +119,11 @@ pub fn get_codex_oauth_status(
     login_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "status",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     let start = state.oauth_flow().status(&login_id).map_err(flow_error)?;
     validated_authorization_url(&start)?;
     Ok(start)
@@ -114,6 +136,11 @@ pub async fn submit_codex_oauth_callback(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "callback",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     state
         .oauth_flow()
         .submit_manual_callback(&login_id, &callback_url)
@@ -128,6 +155,11 @@ pub async fn cancel_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "cancel",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     state
         .oauth_flow()
         .cancel(&login_id)
@@ -142,10 +174,20 @@ pub async fn complete_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalAccountRecord> {
     let _mutation = state.setup_guard().await;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "complete",
+        &[("login", crate::diagnostics::hash_identifier(&login_id))],
+    );
     complete_oauth(&login_id, &state).await.map_err(Into::into)
 }
 
 async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<LocalAccountRecord> {
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "completion_checkpoint",
+        &[("login", crate::diagnostics::hash_identifier(login_id))],
+    );
     let flow = state.oauth_flow();
     let now_ms = super::current_time_ms();
     let settings = state.store()?.gateway().clone();
@@ -153,7 +195,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     ensure_account_proxy(&settings, common_proxy.as_ref())?;
     let (checkpoint, encoded_checkpoint, target_account_id) =
         completion_checkpoint(&flow, login_id, now_ms, common_proxy.as_ref()).await?;
-    let (old_accounts, old_keys) = current_accounts(state)?;
+    let old_accounts = current_accounts(state)?;
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let existing = if let Some(target_account_id) = target_account_id.as_deref() {
         let target = old_accounts
@@ -249,6 +291,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     let previous_models = existing
         .map(|account| account.effective_models().to_vec())
         .unwrap_or_default();
+    let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
     let (models, model_issue) = match CodexModelsClient::new_with_proxy(proxy.as_ref()) {
         Ok(client) => match client
             .discover_authorized(
@@ -256,7 +299,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
                     .authorization(now_ms)
                     .map_err(credential_error)?,
                 &checkpoint.provider_account_id,
-                zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
+                &client_version,
             )
             .await
         {
@@ -265,7 +308,15 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         },
         Err(error) => (previous_models, Some(initial_model_issue(&error))),
     };
-    let authority_tokens = credentials.to_token_set().map_err(credential_error)?;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "initial_probes_complete",
+        &[
+            ("login", crate::diagnostics::hash_identifier(login_id)),
+            ("models_found", models.len().to_string()),
+            ("model_issue", model_issue.is_some().to_string()),
+        ],
+    );
     let mut record = new_account_record(
         &credentials,
         AccountAuthMode::OAuth,
@@ -316,7 +367,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
                 exhaustion_transitions: applied.exhaustion_transitions,
             },
             Err(_) => {
-                let failure = QuotaRefreshFailure::new("quota_invalid_response", false);
+                let failure = QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false);
                 apply_quota_failure(&mut record, &failure, now_ms);
                 AccountQuotaOutcome::Failed {
                     code: failure.code,
@@ -344,79 +395,159 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         now_ms,
     );
 
-    let runtime_port = state.gateway.address().await.map(|address| address.port());
-    credential_store
-        .save(&credentials)
+    // OAuth exchange and initial probes can take long enough for a background
+    // refresh or a desktop-profile synchronization to rotate the same
+    // account. Serialize only the final durable credential write, then derive
+    // its generation from the fresh snapshot while holding the shared lock.
+    // Do not await TokenAuthority while holding this lock: its refresh adapter
+    // deliberately acquires the locks in the opposite order.
+    let locks =
+        ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())
+            .map_err(|_| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "OAuth credential lock is unavailable",
+                )
+            })?;
+    let commit_guard = locks.acquire(&local_account_id).await.map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::Conflict,
+            "account credentials are being refreshed",
+        )
+    })?;
+    let commit_previous_credentials = credential_store
+        .load(&local_account_id)
         .map_err(credential_error)?;
-    let account_write = { state.store()?.upsert_account(record.clone()) };
+    if commit_previous_credentials
+        .as_ref()
+        .and_then(StoredCodexCredentials::provider_account_id)
+        .is_some_and(|provider_id| provider_id != checkpoint.provider_account_id)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth account changed while completing sign-in",
+        ));
+    }
+    let commit_previous_account = state.store()?.account(&local_account_id).cloned();
+    if existing.is_some() && commit_previous_account.is_none() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth target account changed while completing sign-in",
+        ));
+    }
+    let generation = next_completion_generation(
+        commit_previous_account.as_ref(),
+        commit_previous_credentials.as_ref(),
+    );
+    let template = commit_previous_credentials.as_ref().unwrap_or(&credentials);
+    let mut committed_credentials = checkpoint
+        .to_credentials(&local_account_id, generation)
+        .map_err(credential_error)?;
+    if let Some(proxy_url) = template.proxy_url() {
+        committed_credentials = committed_credentials
+            .with_proxy_url(Some(proxy_url.to_string()))
+            .map_err(credential_error)?;
+    }
+    if let Some(agent_identity) = template.agent_identity() {
+        committed_credentials = committed_credentials.with_agent_identity(agent_identity.clone());
+    }
+    if let Some(current) = commit_previous_account.as_ref() {
+        preserve_existing_settings(&mut record, current);
+    }
+    record.account.token_generation = committed_credentials.generation();
+    record.account.token_updated_at_ms = Some(committed_credentials.issued_at_ms());
+    let authority_tokens = committed_credentials
+        .to_token_set()
+        .map_err(credential_error)?;
+    credential_store
+        .save(&committed_credentials)
+        .map_err(credential_error)?;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "credentials_committed",
+        &[(
+            "account",
+            crate::diagnostics::hash_identifier(&local_account_id),
+        )],
+    );
+    let account_write = state.store()?.upsert_account(record.clone());
     if let Err(error) = account_write {
-        return Err(rollback_completion(
+        let rollback = rollback_completion_before_authority(
             state,
             &credential_store,
             &local_account_id,
-            previous_credentials.as_ref(),
-            &old_accounts,
-            &old_keys,
-            None,
-            error,
-        )
-        .await);
+            commit_previous_credentials.as_ref(),
+            commit_previous_account.as_ref(),
+            &committed_credentials,
+            &record,
+        );
+        drop(commit_guard);
+        return Err(match rollback {
+            Ok(true) => error,
+            Ok(false) => LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "OAuth completion was superseded by newer account state",
+            ),
+            Err(_) => LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "OAuth completion could not restore the previous account state",
+            ),
+        });
     }
-    if state
-        .token_authority()
-        .register(
+    drop(commit_guard);
+
+    let authority = state.token_authority();
+    if let Err(error) = authority
+        .register_if_newer(
             &local_account_id,
-            authority_tokens,
+            authority_tokens.clone(),
             record.account.auth_state,
         )
         .await
+    {
+        return Err(super::fail_closed(
+            state,
+            format!("failed to register OAuth account credentials: {error}"),
+        )
+        .await);
+    }
+    let Some(authoritative_tokens) = authority.tokens(&local_account_id).await else {
+        return Err(
+            super::fail_closed(state, "OAuth account token state disappeared".to_string()).await,
+        );
+    };
+    let Some(authoritative_auth_state) = authority.auth_state(&local_account_id).await else {
+        return Err(super::fail_closed(
+            state,
+            "OAuth account authentication state disappeared".to_string(),
+        )
+        .await);
+    };
+    let authority_state_changed = authoritative_tokens != authority_tokens
+        || authoritative_auth_state != record.account.auth_state;
+    if authority_state_changed
+        && reconcile_completion_authority(
+            state,
+            &local_account_id,
+            &record,
+            &authoritative_tokens,
+            authoritative_auth_state,
+        )
         .is_err()
     {
-        return Err(rollback_completion(
+        return Err(super::fail_closed(
             state,
-            &credential_store,
-            &local_account_id,
-            previous_credentials.as_ref(),
-            &old_accounts,
-            &old_keys,
-            None,
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "ChatGPT token authority rejected the account",
-            ),
+            "newer OAuth account state could not be persisted".to_string(),
         )
         .await);
     }
-    if let Err(error) =
-        sync_accounts_or_rollback(state, old_accounts.clone(), old_keys.clone()).await
-    {
-        return Err(rollback_completion(
-            state,
-            &credential_store,
-            &local_account_id,
-            previous_credentials.as_ref(),
-            &old_accounts,
-            &old_keys,
-            None,
-            error,
-        )
-        .await);
-    }
+    // The OAuth credentials are committed at this point. Runtime failures must
+    // not restore a stale account snapshot over a later refresh/login; retry
+    // the current state without a data rollback instead.
+    super::restart_or_rollback(state, || Ok(())).await?;
     let previous_quota_refresh = match state.quota_refresh_snapshot() {
         Ok(previous) => previous,
-        Err(error) => {
-            return Err(rollback_completion(
-                state,
-                &credential_store,
-                &local_account_id,
-                previous_credentials.as_ref(),
-                &old_accounts,
-                &old_keys,
-                runtime_port,
-                error,
-            )
-            .await)
-        }
+        Err(error) => return Err(error),
     };
     let schedule_result = match quota_refresh_at {
         Some(due_at_ms) => state
@@ -424,19 +555,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             .map(|_| ()),
         None => state.remove_quota_refresh(&local_account_id).map(|_| ()),
     };
-    if let Err(error) = schedule_result {
-        return Err(rollback_completion(
-            state,
-            &credential_store,
-            &local_account_id,
-            previous_credentials.as_ref(),
-            &old_accounts,
-            &old_keys,
-            runtime_port,
-            error,
-        )
-        .await);
-    }
+    schedule_result?;
     if let Err(error) = flow.complete(login_id).await.map_err(flow_error) {
         let queue_restored = state.restore_quota_refresh(previous_quota_refresh).is_ok();
         let checkpoint_restored =
@@ -449,94 +568,195 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
                 "OAuth completion rollback could not restore pending state",
             )
         };
-        return Err(rollback_completion(
-            state,
-            &credential_store,
-            &local_account_id,
-            previous_credentials.as_ref(),
-            &old_accounts,
-            &old_keys,
-            runtime_port,
-            error,
-        )
-        .await);
+        return Err(error);
     }
+    crate::diagnostics::record_operation(
+        "oauth",
+        "completed",
+        &[(
+            "account",
+            crate::diagnostics::hash_identifier(&local_account_id),
+        )],
+    );
     Ok(record)
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn rollback_completion(
+fn rollback_completion_before_authority(
     state: &DesktopState,
     credentials: &CredentialStore<NativeSecretBackend>,
     local_account_id: &str,
     previous_credentials: Option<&StoredCodexCredentials>,
-    old_accounts: &[LocalAccountRecord],
-    old_keys: &[LocalGatewayKeyRecord],
-    restart_port: Option<u16>,
-    cause: LocalPoolError,
-) -> LocalPoolError {
-    if restart_port.is_some() {
-        state.gateway.stop().await;
-    }
-    let credentials_restored = match previous_credentials {
-        Some(previous) => credentials.save(previous),
-        None => credentials.delete(local_account_id),
-    }
-    .is_ok();
-    let records_restored = state
-        .store()
-        .and_then(|mut store| {
-            store.replace_accounts_and_keys(old_accounts.to_vec(), old_keys.to_vec())
-        })
-        .is_ok();
-    let previous_account = old_accounts
-        .iter()
-        .find(|account| account.account.id == local_account_id);
-    let authority = state.token_authority();
-    let authority_restored = match (previous_credentials, previous_account) {
-        (Some(previous), Some(account)) => match previous.to_token_set() {
-            Ok(tokens) => authority
-                .register(local_account_id, tokens, account.account.auth_state)
-                .await
-                .is_ok(),
-            Err(_) => false,
-        },
-        _ => {
-            authority.remove(local_account_id);
-            true
-        }
+    previous_account: Option<&LocalAccountRecord>,
+    attempted_credentials: &StoredCodexCredentials,
+    attempted_account: &LocalAccountRecord,
+) -> LocalResult<bool> {
+    let current_credentials = credentials
+        .load(local_account_id)
+        .map_err(credential_error)?;
+    let current_account = state.store()?.account(local_account_id).cloned();
+    let record_requires_restore = current_account
+        .as_ref()
+        .is_some_and(|current| completion_record_matches(current, attempted_account));
+    let record_already_previous = match (previous_account, current_account.as_ref()) {
+        (Some(previous), Some(current)) => completion_record_matches(current, previous),
+        (None, None) => true,
+        _ => false,
     };
-    if !credentials_restored || !records_restored || !authority_restored {
-        return super::fail_closed(
-            state,
-            "OAuth completion rollback could not restore local account state".to_string(),
-        )
-        .await;
+    if !completion_rollback_owns_state(
+        current_credentials.as_ref(),
+        attempted_credentials,
+        record_requires_restore,
+        record_already_previous,
+    ) {
+        return Ok(false);
     }
-    if let Some(port) = restart_port {
-        let Ok(runtime) = super::runtime_from_store(state).await else {
-            return super::fail_closed(
-                state,
-                "OAuth completion rollback could not rebuild the previous runtime".to_string(),
-            )
-            .await;
-        };
-        if state.gateway.start(runtime, port).await.is_err() {
-            return super::fail_closed(
-                state,
-                "OAuth completion rollback could not restart the previous runtime".to_string(),
-            )
-            .await;
+
+    match previous_credentials {
+        Some(previous) => credentials.save(previous).map_err(credential_error)?,
+        None => credentials
+            .delete(local_account_id)
+            .map_err(credential_error)?,
+    }
+    if record_requires_restore {
+        let restore_record = (|| -> LocalResult<()> {
+            let mut store = state.store()?;
+            match previous_account {
+                Some(previous) => {
+                    let mut restored = previous.clone();
+                    // The watchdog is informational and can update while the OAuth
+                    // command runs. It is unrelated to the failed token write.
+                    if let Some(current) = current_account {
+                        restored.client_auth_status = current.client_auth_status;
+                        restored.last_client_login_redirect_at_ms =
+                            current.last_client_login_redirect_at_ms;
+                    }
+                    store.upsert_account(restored)?;
+                }
+                None => {
+                    let accounts = store
+                        .accounts()
+                        .iter()
+                        .filter(|account| account.account.id != local_account_id)
+                        .cloned()
+                        .collect();
+                    let keys = store.keys().to_vec();
+                    let automations = store.automations().clone();
+                    store.delete_account_state(local_account_id, accounts, keys, automations)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = restore_record {
+            // The credential rollback precedes the record write. If that write
+            // fails, put the attempted secret back only while this transaction
+            // still owns the restored credential snapshot; otherwise a newer
+            // login would be overwritten and the account would be split across
+            // two token generations.
+            let compensated = restore_attempted_completion_credentials_if_current(
+                credentials,
+                local_account_id,
+                previous_credentials,
+                attempted_credentials,
+            )?;
+            return if compensated {
+                Err(error)
+            } else {
+                Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "OAuth completion could not compensate a failed account rollback",
+                ))
+            };
         }
     }
-    cause
+    Ok(true)
 }
 
-fn current_accounts(
+fn restore_attempted_completion_credentials_if_current(
+    credentials: &CredentialStore<NativeSecretBackend>,
+    local_account_id: &str,
+    previous_credentials: Option<&StoredCodexCredentials>,
+    attempted_credentials: &StoredCodexCredentials,
+) -> LocalResult<bool> {
+    let current = credentials
+        .load(local_account_id)
+        .map_err(credential_error)?;
+    if !credential_snapshots_match(current.as_ref(), previous_credentials) {
+        return Ok(false);
+    }
+    credentials
+        .save(attempted_credentials)
+        .map_err(credential_error)?;
+    Ok(true)
+}
+
+fn current_accounts(state: &DesktopState) -> LocalResult<Vec<LocalAccountRecord>> {
+    Ok(state.store()?.accounts().to_vec())
+}
+
+fn next_completion_generation(
+    account: Option<&LocalAccountRecord>,
+    credentials: Option<&StoredCodexCredentials>,
+) -> u64 {
+    account
+        .map(|record| record.account.token_generation)
+        .into_iter()
+        .chain(credentials.map(StoredCodexCredentials::generation))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn completion_rollback_owns_state(
+    current_credentials: Option<&StoredCodexCredentials>,
+    attempted_credentials: &StoredCodexCredentials,
+    record_requires_restore: bool,
+    record_already_previous: bool,
+) -> bool {
+    current_credentials.is_some_and(|current| current.matches_snapshot(attempted_credentials))
+        && (record_requires_restore || record_already_previous)
+}
+
+fn credential_snapshots_match(
+    current: Option<&StoredCodexCredentials>,
+    expected: Option<&StoredCodexCredentials>,
+) -> bool {
+    match (current, expected) {
+        (Some(current), Some(expected)) => current.matches_snapshot(expected),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn completion_record_matches(current: &LocalAccountRecord, attempted: &LocalAccountRecord) -> bool {
+    let mut comparable = current.clone();
+    // CDP observations are presentation-only and intentionally allowed to be
+    // recorded while a credential transaction is in progress.
+    comparable.client_auth_status = attempted.client_auth_status.clone();
+    comparable.last_client_login_redirect_at_ms = attempted.last_client_login_redirect_at_ms;
+    comparable == *attempted
+}
+
+fn reconcile_completion_authority(
     state: &DesktopState,
-) -> LocalResult<(Vec<LocalAccountRecord>, Vec<LocalGatewayKeyRecord>)> {
-    let store = state.store()?;
-    Ok((store.accounts().to_vec(), store.keys().to_vec()))
+    account_id: &str,
+    attempted_account: &LocalAccountRecord,
+    authoritative_tokens: &TokenSet,
+    authoritative_auth_state: AccountAuthState,
+) -> LocalResult<bool> {
+    let mut store = state.store()?;
+    let mut current = store
+        .account(account_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    if !completion_record_matches(&current, attempted_account) {
+        return Ok(false);
+    }
+    current.account.token_generation = authoritative_tokens.generation();
+    current.account.token_updated_at_ms = Some(authoritative_tokens.issued_at_ms());
+    current.account.auth_state = authoritative_auth_state;
+    store.upsert_account(current)?;
+    Ok(true)
 }
 
 fn validate_oauth_target(
@@ -1284,6 +1504,186 @@ mod tests {
         let error = find_existing_account(&accounts, &credentials, &identity_hash).unwrap_err();
         assert!(matches!(error.code, ErrorCode::RecoveryRequired));
         assert!(!format!("{error:?} {error}").contains(provider_account_id));
+    }
+
+    #[test]
+    fn oauth_commit_uses_the_freshest_durable_token_generation() {
+        let mut account = account("account_commit", "provider-account", "old-refresh");
+        account.account.token_generation = 7;
+        let credentials = StoredCodexCredentials::new(
+            "account_commit",
+            "newer-access-secret".into(),
+            Some("newer-refresh-secret".into()),
+            Some("newer-id-secret".into()),
+            Some(80_000),
+            80,
+            9,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            next_completion_generation(Some(&account), Some(&credentials)),
+            10
+        );
+    }
+
+    #[test]
+    fn stale_oauth_rollback_never_claims_a_newer_account_snapshot() {
+        let attempted = StoredCodexCredentials::new(
+            "account_rollback",
+            "attempted-access-secret".into(),
+            Some("attempted-refresh-secret".into()),
+            Some("attempted-id-secret".into()),
+            Some(20_000),
+            20,
+            2,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+        let newer = StoredCodexCredentials::new(
+            "account_rollback",
+            "newer-access-secret".into(),
+            Some("newer-refresh-secret".into()),
+            Some("newer-id-secret".into()),
+            Some(30_000),
+            30,
+            3,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+        let attempted_record = new_account_record(
+            &attempted,
+            AccountAuthMode::OAuth,
+            vec!["gpt-test".into()],
+            0,
+            20,
+        )
+        .unwrap();
+        let newer_record = new_account_record(
+            &newer,
+            AccountAuthMode::OAuth,
+            vec!["gpt-test".into()],
+            0,
+            30,
+        )
+        .unwrap();
+
+        assert!(!completion_rollback_owns_state(
+            Some(&newer),
+            &attempted,
+            completion_record_matches(&newer_record, &attempted_record),
+            false,
+        ));
+    }
+
+    #[test]
+    fn completion_ownership_allows_a_watchdog_observation_but_not_token_change() {
+        let attempted = account("account_observation", "provider-account", "refresh-token");
+        let mut observed = attempted.clone();
+        observed.client_auth_status = Some("login_required".into());
+        observed.last_client_login_redirect_at_ms = Some(99);
+        assert!(completion_record_matches(&observed, &attempted));
+
+        observed.account.token_generation = attempted.account.token_generation.saturating_add(1);
+        assert!(!completion_record_matches(&observed, &attempted));
+    }
+
+    #[test]
+    fn completion_credential_compensation_never_overwrites_a_newer_snapshot() {
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let account_id = format!("account_{}", Uuid::new_v4().simple());
+        let previous = StoredCodexCredentials::new(
+            &account_id,
+            "previous-access-secret".into(),
+            Some("previous-refresh-secret".into()),
+            Some("previous-id-secret".into()),
+            Some(10_000),
+            10,
+            1,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+        let attempted = StoredCodexCredentials::new(
+            &account_id,
+            "attempted-access-secret".into(),
+            Some("attempted-refresh-secret".into()),
+            Some("attempted-id-secret".into()),
+            Some(20_000),
+            20,
+            2,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+        let newer = StoredCodexCredentials::new(
+            &account_id,
+            "newer-access-secret".into(),
+            Some("newer-refresh-secret".into()),
+            Some("newer-id-secret".into()),
+            Some(30_000),
+            30,
+            3,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap();
+
+        credential_store.save(&previous).unwrap();
+        assert!(restore_attempted_completion_credentials_if_current(
+            &credential_store,
+            &account_id,
+            Some(&previous),
+            &attempted,
+        )
+        .unwrap());
+        assert!(credential_store
+            .require(&account_id)
+            .unwrap()
+            .matches_snapshot(&attempted));
+
+        credential_store.save(&newer).unwrap();
+        assert!(!restore_attempted_completion_credentials_if_current(
+            &credential_store,
+            &account_id,
+            Some(&previous),
+            &attempted,
+        )
+        .unwrap());
+        assert!(credential_store
+            .require(&account_id)
+            .unwrap()
+            .matches_snapshot(&newer));
+
+        credential_store.delete(&account_id).unwrap();
     }
 
     fn account(id: &str, provider_account_id: &str, refresh_token: &str) -> LocalAccountRecord {

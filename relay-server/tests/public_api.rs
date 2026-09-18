@@ -3,7 +3,7 @@ use axum::{
     extract::{Request, State},
     http::{
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST},
-        StatusCode,
+        HeaderMap, StatusCode,
     },
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -50,6 +50,7 @@ fn add_rebuild_failing_source(state: &AppState) {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["broken-model".into()],
             allowed_models: Vec::new(),
@@ -85,10 +86,9 @@ async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
 }
 
 #[tokio::test]
-async fn routing_policy_reload_failure_has_runtime_error_code() {
+async fn routing_policy_hot_update_does_not_rebuild_unrelated_invalid_source() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
-    let previous = server.state.store.routing_policy().unwrap();
     add_rebuild_failing_source(&server.state);
 
     let response = reqwest::Client::new()
@@ -99,10 +99,18 @@ async fn routing_policy_reload_failure_has_runtime_error_code() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "runtime_reload_failed");
-    assert_eq!(server.state.store.routing_policy().unwrap(), previous);
+    assert_eq!(body["gateway"]["maxRetryCandidates"], 5);
+    assert_eq!(
+        server
+            .state
+            .store
+            .routing_policy()
+            .unwrap()
+            .max_retry_candidates,
+        5
+    );
     server.task.abort();
 }
 
@@ -1429,6 +1437,10 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
         public_base_url: url::Url::parse("http://127.0.0.1:1").unwrap(),
         management_token: "synthetic-management-token-value".to_string(),
         vault_key: [9; 32],
+        account_check_url: url::Url::parse(
+            zenith_relay_server::config::DEFAULT_CODEX_ACCOUNT_CHECK_URL,
+        )
+        .unwrap(),
     };
     let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
     let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
@@ -1469,7 +1481,7 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
-async fn model_reasoning_modes_are_manual_and_hot_applied() {
+async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
     let root = TempDir::new().unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
@@ -1525,7 +1537,7 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .find(|model| model["slug"] == "gpt-test")
         .unwrap();
     assert_eq!(
         catalog_model["supported_reasoning_levels"]
@@ -1534,9 +1546,9 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
             .iter()
             .map(|level| level["effort"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["low", "medium", "high"]
+        Vec::<&str>::new()
     );
-    assert_eq!(catalog_model["default_reasoning_level"], "medium");
+    assert!(catalog_model.get("default_reasoning_level").is_none());
 
     let runtime = server.state.runtime().unwrap().unwrap();
     let configured_response = client
@@ -1554,7 +1566,7 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
         .iter()
         .find(|model| model["id"] == "gpt-test")
         .unwrap();
-    assert_eq!(configured_model["reasoningAllowedLevels"], json!(["high"]));
+    assert_eq!(configured_model["reasoningAllowedLevels"], json!([]));
     assert!(Arc::ptr_eq(
         &runtime,
         &server.state.runtime().unwrap().unwrap()
@@ -1582,13 +1594,10 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .find(|model| model["slug"] == "gpt-test")
         .unwrap();
-    assert_eq!(
-        filtered_model["supported_reasoning_levels"],
-        json!([{"effort": "high", "description": "high"}])
-    );
-    assert_eq!(filtered_model["default_reasoning_level"], "high");
+    assert_eq!(filtered_model["supported_reasoning_levels"], json!([]));
+    assert!(filtered_model.get("default_reasoning_level").is_none());
 
     let manual = client
         .post(format!("{}/models/reasoning", server.origin))
@@ -1605,7 +1614,7 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
             .iter()
             .find(|model| model["id"] == "gpt-test")
             .unwrap()["reasoningAllowedLevels"],
-        json!(["ultra"])
+        json!([])
     );
 
     let reset: Value = client
@@ -1643,7 +1652,7 @@ async fn model_reasoning_modes_are_manual_and_hot_applied() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .find(|model| model["slug"] == "gpt-test")
         .unwrap();
     assert!(cleared_model.get("default_reasoning_level").is_none());
     assert_eq!(cleared_model["supported_reasoning_levels"], json!([]));
@@ -1840,6 +1849,108 @@ async fn un_draining_source_hot_updates_the_internal_key_scope() {
 
     server.task.abort();
     upstream_task.abort();
+}
+
+#[tokio::test]
+async fn rejoining_source_immediately_uses_saved_order_and_shared_capacity_limit() {
+    use zenith_relay_core::{
+        PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+    };
+    let root = TempDir::new().unwrap();
+    let (primary_url, primary_state, primary_task) = spawn_load_upstream(2).await;
+    let (fallback_url, fallback_task) = spawn_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let mut ids = Vec::new();
+    for (name, upstream) in [("Primary", primary_url), ("Fallback", fallback_url)] {
+        let response = client.post(format!("{}/sources", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({ "name": name, "baseUrl": format!("{upstream}/v1"),
+                "apiKey": "synthetic-upstream-api-key", "wireApi": "responses", "models": ["gpt-test"] }))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let source: Value = response.json().await.unwrap();
+        ids.push(source["id"].as_str().unwrap().to_owned());
+    }
+    let update_membership = |id: &str| {
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({ "sourceIds": [id], "inPool": true }))
+            .send()
+    };
+    assert_eq!(
+        update_membership(&ids[1]).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let mut routing = server.state.store.routing_policy().unwrap();
+    routing.pool_routing = Some(PoolRoutingPolicy {
+        mode: PoolRoutingMode::InOrder,
+        members: ids
+            .iter()
+            .map(|id| PoolRoutingMember {
+                kind: PoolMemberKind::Source,
+                id: id.clone(),
+                weight: 1,
+                max_concurrency: 1,
+            })
+            .collect(),
+        ..Default::default()
+    });
+    server.state.store.set_routing_policy(&routing).unwrap();
+    server.state.rebuild_runtime().await.unwrap();
+    let runtime = server.state.runtime().unwrap().unwrap();
+    let response = update_membership(&ids[0]).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    let order = runtime.candidate_runtime_order_for_key("key_system");
+    assert_eq!(
+        order
+            .iter()
+            .find(|candidate| candidate.next_for_new_request)
+            .unwrap()
+            .candidate_id,
+        ids[0]
+    );
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request = || {
+        client
+            .post(format!("{}/v1/responses", server.origin))
+            .bearer_auth(profile["secret"].as_str().unwrap())
+            .json(&json!({ "model": "gpt-test", "input": "synthetic rotation test" }))
+            .send()
+    };
+    let first = tokio::spawn(request());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while primary_state.total.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("first request must use the newly joined primary");
+    let second = tokio::time::timeout(Duration::from_secs(5), request())
+        .await
+        .expect("busy primary must fall back immediately")
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(primary_state.total.load(Ordering::Relaxed), 1);
+    primary_state.barrier.wait().await;
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    server.state.shutdown_runtime().await.unwrap();
+    server.task.abort();
+    primary_task.abort();
+    fallback_task.abort();
 }
 
 #[tokio::test]
@@ -2219,7 +2330,11 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
             "balanceMicroUsd": null,
             "spentMicroUsd": null,
             "requests": null,
-            "totalTokens": null
+            "totalTokens": null,
+            "status": "unsupported",
+            "balanceKind": "wallet",
+            "balanceUnlimited": false,
+            "amounts": []
         })
     );
 
@@ -2269,11 +2384,13 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
         Some("Bearer synthetic-source-key-v2")
     );
 
+    // Route through the source whose key changed. Smart can otherwise select
+    // the equally healthy backup regardless of the legacy source priorities.
     assert_eq!(
         client
             .post(format!("{}/pool/members", server.origin))
             .bearer_auth(management_key)
-            .json(&json!({"sourceIds":[source_id],"inPool":true}))
+            .json(&json!({"sourceIds":[second_source_id],"inPool":false}))
             .send()
             .await
             .unwrap()
@@ -3560,7 +3677,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     }
     let document: Value = serde_json::from_str(&document_text).unwrap();
     assert_eq!(document["preset"]["format"], "zenith-relay-configuration");
-    assert_eq!(document["preset"]["schemaVersion"], 3);
+    assert_eq!(document["preset"]["schemaVersion"], 4);
     assert!(document["revision"]
         .as_str()
         .is_some_and(|revision| revision.starts_with("cfg_")));
@@ -3587,6 +3704,14 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     account_rule["inPool"] = json!(true);
     account_rule["priority"] = json!(9);
     preset["settings"]["routing"]["maxRetryCandidates"] = json!(4);
+    preset["settings"]["routing"]["poolRouting"] = json!({
+        "version": 1,
+        "mode": "round_robin",
+        "members": [
+            {"kind": "source", "id": "source_local_record", "weight": 3, "maxConcurrency": 2},
+            {"kind": "account", "id": "account_local_record", "weight": 1, "maxConcurrency": 1}
+        ]
+    });
     preset["settings"]["hiddenModels"] = json!(["gpt-test"]);
 
     let preview: Value = client
@@ -3694,6 +3819,35 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
         .unwrap();
     assert_eq!(applied_state["configurationRevision"], applied["revision"]);
     assert_eq!(applied_state["gateway"]["maxRetryCandidates"], 4);
+    let expected_pool_routing = json!({
+        "version": 1,
+        "mode": "round_robin",
+        "members": [
+            {"kind": "source", "id": source_id, "weight": 3, "maxConcurrency": 2},
+            {"kind": "account", "id": account_id, "weight": 1, "maxConcurrency": 1}
+        ]
+    });
+    assert_eq!(
+        applied_state["gateway"]["poolRouting"],
+        expected_pool_routing
+    );
+    let mut stale_expected_pool_routing =
+        document["preset"]["settings"]["routing"]["poolRouting"].clone();
+    stale_expected_pool_routing["mode"] = json!("smart");
+    let stale_routing = client
+        .post(format!("{}/routing/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "poolRouting": expected_pool_routing,
+            "expectedPoolRouting": stale_expected_pool_routing,
+            "maxRetryCandidates": 8
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_routing.status(), StatusCode::BAD_REQUEST);
+    let rejected: Value = stale_routing.json().await.unwrap();
+    assert_eq!(rejected["error"]["code"], "pool_routing_conflict");
     assert_eq!(applied_state["sources"][0]["priority"], 7);
     assert_eq!(applied_state["sources"][0]["inPool"], true);
     assert_eq!(applied_state["accounts"][0]["priority"], 9);
@@ -3705,7 +3859,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     assert_eq!(applied_state["gateway"]["visibleModelIds"], json!([]));
 
     let mut unsupported_schema = fresh_preview["preset"].clone();
-    unsupported_schema["schemaVersion"] = json!(4);
+    unsupported_schema["schemaVersion"] = json!(5);
     let unsupported = client
         .post(format!("{}/configuration/preset/preview", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -3771,6 +3925,10 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
         applied["revision"]
     );
     assert_eq!(restarted_state["gateway"]["maxRetryCandidates"], 4);
+    assert_eq!(
+        restarted_state["gateway"]["poolRouting"],
+        expected_pool_routing
+    );
     assert_eq!(restarted_state["sources"][0]["priority"], 7);
     assert_eq!(restarted_state["accounts"][0]["priority"], 9);
     assert_eq!(restarted_state["accounts"][0]["inPool"], true);
@@ -3819,6 +3977,7 @@ async fn spawn_server(root: &Path) -> RunningServer {
 }
 
 async fn spawn_server_with_token(root: &Path, management_token: &str) -> RunningServer {
+    let (account_check_url, _account_check_task) = spawn_import_account_check_upstream().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let config = Config {
@@ -3827,6 +3986,7 @@ async fn spawn_server_with_token(root: &Path, management_token: &str) -> Running
         public_base_url: url::Url::parse(&format!("http://{address}")).unwrap(),
         management_token: management_token.to_string(),
         vault_key: [9; 32],
+        account_check_url,
     };
     let store = Arc::new(Store::open(root.join("relay.sqlite")).unwrap());
     let vault = Arc::new(Vault::open(&root.join("vault"), config.vault_key).unwrap());
@@ -3846,6 +4006,51 @@ async fn spawn_server_with_token(root: &Path, management_token: &str) -> Running
         state,
         task,
     }
+}
+
+async fn spawn_import_account_check_upstream() -> (url::Url, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route("/accounts/check", get(test_import_account_check));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (
+        url::Url::parse(&format!("http://{address}/accounts/check")).unwrap(),
+        task,
+    )
+}
+
+async fn test_import_account_check(headers: HeaderMap) -> Json<Value> {
+    assert!(headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Bearer ")));
+    let account_ids = [
+        "synthetic-chatgpt-account-id",
+        "synthetic-zenith-account",
+        "synthetic-batch-account-one",
+        "synthetic-batch-account-two",
+        "synthetic-document-account-1",
+        "synthetic-document-account-2",
+        "synthetic-document-account-3",
+        "synthetic-array-account",
+        "synthetic-label-account",
+        "synthetic-line-account-one",
+        "synthetic-line-account-two",
+        "synthetic-owned-account-one",
+        "synthetic-owned-account-two",
+        "synthetic-abandoned-account",
+        "synthetic-cleanup-trigger-account",
+        "synthetic-proxy-account-id",
+        "synthetic-preset-account-id",
+    ];
+    Json(json!({
+        "account_ordering": account_ids,
+        "accounts": account_ids.into_iter().map(|id| {
+            (id.to_string(), json!({"account": {"id": id}}))
+        }).collect::<serde_json::Map<_, _>>(),
+    }))
 }
 
 async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {

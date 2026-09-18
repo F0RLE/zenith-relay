@@ -26,7 +26,13 @@ const MAX_EXPORT_TEXT: usize = 512;
 #[serde(rename_all = "snake_case")]
 pub enum RelayFolder {
     Data,
+    Logs,
+    ErrorLogs,
+    CrashLogs,
+    OperationLogs,
     ProfileBackups,
+    #[serde(rename = "opencode_backups")]
+    OpenCodeBackups,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -109,12 +115,20 @@ pub struct SupportBundlePreview {
 #[serde(rename_all = "camelCase")]
 pub struct RelayStorageInfo {
     data_path: String,
+    logs_path: String,
+    error_logs_path: String,
+    crash_logs_path: String,
+    operation_logs_path: String,
 }
 
 #[tauri::command]
 pub fn get_relay_storage_info(state: State<'_, DesktopState>) -> RelayStorageInfo {
     RelayStorageInfo {
         data_path: state.data_root().to_string_lossy().into_owned(),
+        logs_path: state.logs_root().to_string_lossy().into_owned(),
+        error_logs_path: state.error_logs_root().to_string_lossy().into_owned(),
+        crash_logs_path: state.crash_logs_root().to_string_lossy().into_owned(),
+        operation_logs_path: state.operation_logs_root().to_string_lossy().into_owned(),
     }
 }
 
@@ -126,7 +140,12 @@ pub fn open_relay_folder(
 ) -> Result<(), CommandError> {
     let path = match folder {
         RelayFolder::Data => state.data_root(),
+        RelayFolder::Logs => state.logs_root(),
+        RelayFolder::ErrorLogs => state.error_logs_root(),
+        RelayFolder::CrashLogs => state.crash_logs_root(),
+        RelayFolder::OperationLogs => state.operation_logs_root(),
         RelayFolder::ProfileBackups => state.profile_backup_root(),
+        RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
     };
     fs::create_dir_all(&path).map_err(io_error)?;
     app.opener()
@@ -342,6 +361,32 @@ fn io_error(error: impl ToString) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_folder_serializes_open_code_backup_directory_name() {
+        let folder: RelayFolder = serde_json::from_str("\"opencode_backups\"").unwrap();
+        assert!(matches!(folder, RelayFolder::OpenCodeBackups));
+    }
+
+    #[test]
+    fn relay_folder_serializes_diagnostic_directories() {
+        for (value, expected) in [
+            ("logs", RelayFolder::Logs),
+            ("error_logs", RelayFolder::ErrorLogs),
+            ("crash_logs", RelayFolder::CrashLogs),
+            ("operation_logs", RelayFolder::OperationLogs),
+        ] {
+            let parsed: RelayFolder =
+                serde_json::from_str(&format!("\"{value}\"")).expect("diagnostic folder");
+            assert!(matches!(
+                (parsed, expected),
+                (RelayFolder::Logs, RelayFolder::Logs)
+                    | (RelayFolder::ErrorLogs, RelayFolder::ErrorLogs)
+                    | (RelayFolder::CrashLogs, RelayFolder::CrashLogs)
+                    | (RelayFolder::OperationLogs, RelayFolder::OperationLogs)
+            ));
+        }
+    }
 
     #[test]
     fn export_validation_rejects_control_text_and_oversized_fields() {

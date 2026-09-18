@@ -154,6 +154,91 @@
   background: var(--relay-subtle);
 }
 
+.settings-debug-section {
+  min-width: 0;
+  border-top: 1px solid var(--relay-border);
+}
+
+.settings-debug-toggle {
+  min-height: 60px;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.settings-debug-toggle:hover,
+.settings-debug-toggle:has(input:checked) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--relay-accent) 7%, var(--relay-subtle));
+}
+
+.settings-debug-details {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 11px 14px 14px;
+  border-top: 1px solid var(--relay-border);
+  background: color-mix(in srgb, var(--relay-surface) 72%, var(--relay-subtle));
+}
+
+.settings-debug-details-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-debug-details-copy strong {
+  color: var(--relay-text);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.settings-debug-details-copy small {
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.settings-debug-details-action {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-debug-details-action code {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--relay-muted);
+  font-size: 10px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-debug-details-action .relay-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .settings-debug-details-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-debug-details-action code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .settings-debug-details-action .relay-button {
+    align-self: flex-start;
+  }
+}
+
 .profile-recovery-page {
   min-height: 100%;
   display: flex;
@@ -166,10 +251,14 @@
 
 .profile-recovery {
   width: min(100%, 1040px);
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
+  align-content: center;
   gap: 20px;
-  margin: auto;
+  margin: 0 auto;
   padding: 28px 0;
+  box-sizing: border-box;
 }
 
 .profile-recovery.is-empty {

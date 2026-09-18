@@ -21,6 +21,8 @@ macro_rules! define_usage_request_contract {
             pub success: bool,
             pub http_status: u16,
             pub error_category: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub upstream_error: Option<crate::usage::UpstreamErrorDetails>,
             $($fields)*
         }
     };
@@ -29,8 +31,11 @@ macro_rules! define_usage_request_contract {
 pub mod accounts;
 pub mod automations;
 pub mod catalog;
+mod catalog_io;
 mod error;
+pub mod error_codes;
 pub mod gateway;
+pub mod model_metadata;
 pub mod pricing;
 pub mod protocol;
 pub mod providers;
@@ -47,15 +52,14 @@ pub const DEFAULT_COOLDOWN_AFTER_FAILURES: u8 = 3;
 pub const DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE: bool = true;
 
 pub use catalog::{
-    anthropic_max_implies_ultra, canonicalize_model_ids, canonicalize_reasoning_levels,
-    codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias,
-    deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
-    known_model_reasoning_levels, model_supports_fast_service_tier,
-    normalize_codex_catalog_priorities, normalize_model_ids,
-    normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, reasoning_policy_key, reasoning_policy_levels,
-    routed_codex_catalog_entry, source_model_declares_image_input, ModelRegistry, ModelRules,
+    canonicalize_model_ids, canonicalize_reasoning_levels, codex_catalog_entry_is_compatible,
+    codex_model_alias, codex_model_display_name, codex_model_is_picker_eligible,
+    decode_codex_model_alias, deserialize_model_reasoning_allowed_levels, is_valid_model_id,
+    is_valid_model_token, merge_model_display_order, normalize_codex_catalog_priorities,
+    normalize_model_ids, normalize_model_reasoning_allowed_levels,
+    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
+    reasoning_policy_key, reasoning_policy_levels, routed_codex_catalog_entry,
+    source_model_declares_image_input, source_row_declares_reasoning, ModelRegistry, ModelRules,
     CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
@@ -87,21 +91,27 @@ pub use runtime::{
     RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
 };
 pub use scheduler::{
-    account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
-    ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
-    RESPONSE_AFFINITY_TTL_MS,
+    account_candidate_health, normalize_subscription_plan_order, resolve_pool_routing,
+    ActiveModelRuntime, CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState,
+    CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PoolMemberKind, PoolRoutingMember,
+    PoolRoutingMode, PoolRoutingPolicy, PoolScheduler, RoutingDiagnostics, RoutingStrategy,
+    RuntimeCandidate, Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS,
+    QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, fetch_source_provider_stats, is_loopback_url,
-    normalize_source_protocol_bindings, runtime_source_models_for_any_wire_api,
-    runtime_source_models_for_wire_api, runtime_source_protocol_bindings,
-    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api,
-    source_models_for_wire_api, source_points_to_gateway, CacheWriteTtl, LocalGatewayKey,
-    ProviderSource, SourceConnector, SourceDiscovery, SourceProtocolBinding,
-    SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    endpoint_url_protocol, fetch_source_provider_stats, is_loopback_url,
+    normalize_source_protocol_bindings, probe_source_generation,
+    runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
+    runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
+    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, service_protocol,
+    source_models_for_wire_api, source_points_to_gateway, CacheWriteTtl, CapabilityOrigin,
+    CapabilityStatus, LocalGatewayKey, ModelEndpointCapability, ProtocolFeature,
+    ProtocolSelectionMode, ProviderSource, SourceBalanceKind, SourceConnector, SourceDiscovery,
+    SourceProbeInput, SourceProbeResult, SourceProtocolBinding, SourceProtocolBindingKey,
+    SourceProtocolConfig, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
+    SourceStatsProvider, SourceStatsStatus, WireApi,
 };
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{

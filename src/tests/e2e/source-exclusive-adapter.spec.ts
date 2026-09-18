@@ -14,13 +14,14 @@ test("source setup keeps one exclusive adapter for all manual models", async ({ 
   await dialog.getByLabel("Model identifier").fill("gpt-5.4");
   await dialog.getByLabel("Model identifier").press("Enter");
   await dialog.locator(".source-add-adapters > summary").click();
+  await dialog.getByRole("tab", { name: "Manual routing", exact: true }).click();
   await expect(dialog.locator(".source-route-simple-options")).toBeVisible();
   await expect(dialog.locator(".source-route-matrix")).toHaveCount(0);
   const adapterPicker = dialog.getByRole("radiogroup", { name: "Protocol" });
-  await expect(adapterPicker.getByRole("radio")).toHaveCount(3);
+  await expect(adapterPicker.getByRole("radio")).toHaveCount(4);
   const messages = adapterPicker.getByRole("radio", { name: /Messages/ });
   const responses = adapterPicker.getByRole("radio", { name: /Responses/ });
-  const gemini = adapterPicker.getByRole("radio", { name: /Google/ });
+  const gemini = adapterPicker.getByRole("radio", { name: /Gemini/ });
   await messages.click();
   await expect(messages).toHaveAttribute("aria-checked", "true");
   await expect(responses).toHaveAttribute("aria-checked", "false");
@@ -65,17 +66,15 @@ test("source editor exposes native Gemini separately from the Responses bridge",
   await sourceRow.getByRole("button", { name: "Edit", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: "Edit source" });
-  await dialog.getByRole("tab", { name: "Models and formats", exact: true }).click();
+  await dialog.locator(".source-add-adapters > summary").click();
+  await dialog.getByRole("tab", { name: "Gemini", exact: true }).click();
   const matrix = dialog.locator(".source-route-matrix");
   await expect(matrix.locator('[data-wire-api="gemini"]')).toHaveCount(1);
   await expect(matrix.locator('[data-wire-api="gemini"] strong')).toHaveText("Gemini");
-  await expect(matrix.locator('[data-wire-api="gemini"] input')).toBeChecked();
-  await expect(matrix.locator(".source-route-bridge-heading")).toHaveCount(0);
+  await expect(matrix.getByRole("checkbox", { name: "Gemini → Gemini for gpt-5.4", exact: true })).toBeChecked();
   await page.screenshot({ path: "output/playwright/native-gemini-route-en-1160x760.png" });
 
-  await dialog.getByRole("tab", { name: "Adapters", exact: true }).click();
-  await expect(matrix.locator('[data-wire-api="gemini"]')).toHaveCount(0);
-  await expect(matrix.locator(".source-route-bridge-heading")).toHaveCount(2);
-  await expect(matrix.locator(".source-route-bridge-heading").nth(1)).toContainText("Responses → Gemini");
+  await dialog.getByRole("tab", { name: "Responses", exact: true }).click();
+  await expect(matrix.getByRole("checkbox", { name: "Responses → Gemini for gpt-5.4", exact: true })).not.toBeChecked();
   await page.screenshot({ path: "output/playwright/native-gemini-adapters-en-1160x760.png" });
 });

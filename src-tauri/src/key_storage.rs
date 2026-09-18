@@ -43,10 +43,6 @@ pub fn delete_saved_app_key() -> Result<(), String> {
     delete_named_secret_result(KEYRING_USER)
 }
 
-pub fn save_previous_codex_auth(content: &str) -> Result<(), String> {
-    save_named_secret(PREVIOUS_AUTH_USER, content)
-}
-
 pub fn load_previous_codex_auth() -> Option<String> {
     load_named_secret(PREVIOUS_AUTH_USER)
 }
@@ -95,8 +91,9 @@ fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
 }
 
 #[cfg(not(test))]
-fn keyring_entry_for_service(service: &str, user: &str) -> keyring::Entry {
-    keyring::Entry::new(service, user).expect("valid keyring service and user")
+fn keyring_entry_for_service(service: &str, user: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(service, user)
+        .map_err(|error| format!("Не удалось открыть хранилище секретов ОС: {error}"))
 }
 
 fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String> {
@@ -221,7 +218,7 @@ fn delete_secret_from_service(service: &str, user: &str) -> Result<(), String> {
 
 #[cfg(not(test))]
 fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
-    keyring_entry_for_service(service, user)
+    keyring_entry_for_service(service, user)?
         .set_password(value)
         .map_err(|err| format!("Не удалось сохранить секрет в хранилище ОС: {err}"))
 }
@@ -234,7 +231,7 @@ fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
 
 #[cfg(not(test))]
 fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, String> {
-    match keyring_entry_for_service(service, user).get_password() {
+    match keyring_entry_for_service(service, user)?.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!(
@@ -252,7 +249,7 @@ fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, St
 
 #[cfg(not(test))]
 fn delete_from_service(service: &str, user: &str) -> Result<(), String> {
-    match keyring_entry_for_service(service, user).delete_credential() {
+    match keyring_entry_for_service(service, user)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(format!(
             "Не удалось удалить секрет из хранилища ОС: {error}"

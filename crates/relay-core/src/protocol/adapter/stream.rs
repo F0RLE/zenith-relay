@@ -14,6 +14,52 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub enum AdapterStreamBridge {
     Messages(Box<MessagesStreamBridge>),
     Gemini(Box<GeminiStreamBridge>),
+    Translated(Box<super::translation::TranslationStream>),
+}
+
+impl AdapterStreamBridge {
+    pub fn push(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Messages(bridge) => bridge.push(bytes),
+            Self::Gemini(bridge) => bridge.push(bytes),
+            Self::Translated(bridge) => bridge.push(bytes),
+        }
+    }
+    pub fn finish(&mut self) {
+        match self {
+            Self::Messages(bridge) => bridge.finish(),
+            Self::Gemini(bridge) => bridge.finish(),
+            Self::Translated(bridge) => bridge.finish(),
+        }
+    }
+    pub fn pop_output(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Self::Messages(bridge) => bridge.pop_output(),
+            Self::Gemini(bridge) => bridge.pop_output(),
+            Self::Translated(bridge) => bridge.pop_output(),
+        }
+    }
+    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+        match self {
+            Self::Messages(bridge) => bridge.completed(),
+            Self::Gemini(bridge) => bridge.completed(),
+            Self::Translated(bridge) => bridge.completed(),
+        }
+    }
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Messages(bridge) => bridge.is_terminal(),
+            Self::Gemini(bridge) => bridge.is_terminal(),
+            Self::Translated(bridge) => bridge.is_terminal(),
+        }
+    }
+    pub fn take_upstream_error(&mut self) -> Option<Value> {
+        match self {
+            Self::Messages(bridge) => bridge.take_upstream_error(),
+            Self::Gemini(bridge) => bridge.take_upstream_error(),
+            Self::Translated(bridge) => bridge.take_upstream_error(),
+        }
+    }
 }
 
 /// Incremental Messages-to-Responses state machine. It owns no network
@@ -164,7 +210,7 @@ impl MessagesStreamBridge {
             "content_block_stop" => self.handle_block_stop(&value),
             "message_delta" => {
                 if let Some(usage) = value.get("usage") {
-                    self.usage = Some(usage.clone());
+                    merge_usage(&mut self.usage, usage);
                 }
             }
             "message_stop" => self.complete(),
@@ -207,7 +253,7 @@ impl MessagesStreamBridge {
         self.upstream_id = Some(upstream_id.to_string());
         self.response_id = Some(response_id.clone());
         if let Some(usage) = message.get("usage") {
-            self.usage = Some(usage.clone());
+            merge_usage(&mut self.usage, usage);
         }
         self.frame(
             "response.created",
@@ -1015,18 +1061,47 @@ impl MessagesStreamBridge {
     }
 
     fn frame(&mut self, event: &str, payload: Value) {
-        let Ok(payload) = serde_json::to_vec(&payload) else {
+        if !push_sse_frame(&mut self.output, event, &payload) {
             self.terminal = true;
-            return;
-        };
-        let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
-        frame.extend_from_slice(b"event: ");
-        frame.extend_from_slice(event.as_bytes());
-        frame.extend_from_slice(b"\ndata: ");
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(b"\n\n");
-        self.output.push_back(frame);
+        }
     }
+}
+
+fn merge_usage(target: &mut Option<Value>, next: &Value) {
+    let Some(next_object) = next.as_object() else {
+        *target = Some(next.clone());
+        return;
+    };
+    let Some(previous) = target.as_mut().and_then(Value::as_object_mut) else {
+        *target = Some(next.clone());
+        return;
+    };
+    for (key, value) in next_object {
+        if let (Some(previous_object), Some(next_object)) = (
+            previous.get_mut(key).and_then(Value::as_object_mut),
+            value.as_object(),
+        ) {
+            for (nested_key, nested_value) in next_object {
+                previous_object.insert(nested_key.clone(), nested_value.clone());
+            }
+        } else {
+            previous.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn push_sse_frame(output: &mut VecDeque<Vec<u8>>, event: &str, payload: &Value) -> bool {
+    let Ok(payload) = serde_json::to_vec(payload) else {
+        return false;
+    };
+    let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
+    frame.extend_from_slice(b"event: ");
+    frame.extend_from_slice(event.as_bytes());
+    frame.extend_from_slice(b"\ndata: ");
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(b"\n\n");
+    output.push_back(frame);
+    true
 }
 
 /// Incrementally converts Gemini's native `streamGenerateContent` SSE frames
@@ -1636,17 +1711,9 @@ impl GeminiStreamBridge {
     }
 
     fn frame(&mut self, event: &str, payload: Value) {
-        let Ok(payload) = serde_json::to_vec(&payload) else {
+        if !push_sse_frame(&mut self.output, event, &payload) {
             self.terminal = true;
-            return;
-        };
-        let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
-        frame.extend_from_slice(b"event: ");
-        frame.extend_from_slice(event.as_bytes());
-        frame.extend_from_slice(b"\ndata: ");
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(b"\n\n");
-        self.output.push_back(frame);
+        }
     }
 }
 

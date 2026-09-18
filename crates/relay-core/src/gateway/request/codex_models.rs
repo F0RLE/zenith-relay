@@ -1,16 +1,14 @@
 use super::super::auth::{invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::now_ms;
-use crate::catalog::{
-    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry,
-};
+use crate::catalog::{normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry};
+use crate::error_codes;
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::{valid_codex_client_version, CODEX_MODELS_CLIENT_VERSION};
+use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
 use crate::runtime::AuthenticatedKey;
 use crate::{
-    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, is_valid_model_id,
-    routed_codex_catalog_entry, GatewayRuntime, WireApi,
+    codex_model_is_picker_eligible, is_valid_model_id, routed_codex_catalog_entry, GatewayRuntime,
+    WireApi,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -18,8 +16,12 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::{json, Value};
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +32,9 @@ pub(in crate::gateway) async fn models(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response<Body> {
+    if let Some(protocol) = crate::gateway::catalog::catalog_protocol(&headers) {
+        return crate::gateway::catalog::native_catalog(&runtime, &headers, protocol, None);
+    }
     if !valid_local_host(&headers) {
         return invalid_host();
     }
@@ -58,7 +63,7 @@ pub(in crate::gateway) async fn models(
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "client_version is invalid",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             );
         }
         if let Some(catalog) =
@@ -81,23 +86,21 @@ pub(in crate::gateway) async fn models(
 async fn codex_models_response(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
-    allowed_protocols: &[WireApi],
+    _allowed_protocols: &[WireApi],
     visible_models: &[String],
     client_version: &str,
 ) -> Option<Value> {
     let now_ms = now_ms();
-    let source_metadata = runtime
-        .codex_source_model_metadata(key, allowed_protocols, now_ms)
-        .await;
     let routes = runtime.codex_models_routes(key, now_ms).await;
     let candidate_ids = routes
         .iter()
         .map(|(candidate_id, _)| candidate_id.clone())
         .collect::<Vec<_>>();
-    let client_versions = if client_version == CODEX_MODELS_CLIENT_VERSION {
-        vec![client_version]
+    let fallback_client_version = configured_codex_client_version();
+    let client_versions = if client_version == fallback_client_version {
+        vec![client_version.to_string()]
     } else {
-        vec![client_version, CODEX_MODELS_CLIENT_VERSION]
+        vec![client_version.to_string(), fallback_client_version]
     };
     let mut live_manifests = Vec::<(String, Value)>::new();
     let mut live_candidate_ids = HashSet::new();
@@ -112,11 +115,12 @@ async fn codex_models_response(
                 .get(url.clone())
                 .timeout(Duration::from_secs(10));
             let Ok(response) = runtime
-                .send_authorized_request(&candidate_id, request, Some(client_version))
+                .send_authorized_request(&candidate_id, request, Some(client_version.as_str()))
                 .await
             else {
                 continue;
             };
+            let response = response.response;
             if !response.status().is_success() {
                 continue;
             }
@@ -155,9 +159,6 @@ async fn codex_models_response(
         runtime,
         key,
         visible_models,
-        &source_metadata.context_windows,
-        &source_metadata.image_models,
-        &source_metadata.reasoning_catalog_templates,
         live_manifests.into_iter().chain(stale),
     )
 }
@@ -167,16 +168,13 @@ pub(in crate::gateway) fn build_codex_models_response(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
-    source_context_windows: &BTreeMap<String, u64>,
+    _source_context_windows: &BTreeMap<String, u64>,
     upstream: Option<&Value>,
 ) -> Option<Value> {
     build_codex_models_response_from_manifests(
         runtime,
         key,
         visible_models,
-        source_context_windows,
-        &Default::default(),
-        &Default::default(),
         upstream
             .cloned()
             .into_iter()
@@ -189,17 +187,14 @@ pub(in crate::gateway) fn build_codex_models_response_with_source_reasoning(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
-    source_context_windows: &BTreeMap<String, u64>,
-    source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
+    _source_context_windows: &BTreeMap<String, u64>,
+    _source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
     upstream: Option<&Value>,
 ) -> Option<Value> {
     build_codex_models_response_from_manifests(
         runtime,
         key,
         visible_models,
-        source_context_windows,
-        &Default::default(),
-        source_reasoning_templates,
         upstream
             .cloned()
             .into_iter()
@@ -212,18 +207,15 @@ pub(in crate::gateway) fn build_codex_models_response_with_source_capabilities(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
-    source_context_windows: &BTreeMap<String, u64>,
-    source_image_models: &BTreeSet<String>,
-    source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
+    _source_context_windows: &BTreeMap<String, u64>,
+    _source_image_models: &BTreeSet<String>,
+    _source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
     upstream: Option<&Value>,
 ) -> Option<Value> {
     build_codex_models_response_from_manifests(
         runtime,
         key,
         visible_models,
-        source_context_windows,
-        source_image_models,
-        source_reasoning_templates,
         upstream
             .cloned()
             .into_iter()
@@ -235,9 +227,6 @@ fn build_codex_models_response_from_manifests(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
-    source_context_windows: &BTreeMap<String, u64>,
-    source_image_models: &BTreeSet<String>,
-    source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
     upstreams: impl IntoIterator<Item = (String, Value)>,
 ) -> Option<Value> {
     let upstream_manifests = upstreams.into_iter().collect::<Vec<_>>();
@@ -272,7 +261,6 @@ fn build_codex_models_response_from_manifests(
             };
             if !is_valid_model_id(slug)
                 || !codex_model_is_picker_eligible(slug)
-                || object.get("supported_in_api") == Some(&Value::Bool(false))
                 || object
                     .get("visibility")
                     .and_then(Value::as_str)
@@ -293,20 +281,17 @@ fn build_codex_models_response_from_manifests(
         }
     }
 
-    let template = upstream_manifests
-        .iter()
-        .filter_map(|(_, manifest)| upstream_codex_models(manifest))
-        .flatten()
-        .find(|model| codex_catalog_entry_is_compatible(model))
-        .and_then(Value::as_object);
     let mut models = Vec::with_capacity(visible.len());
     for (index, (normalized, (upstream_id, display_id))) in visible.into_iter().enumerate() {
         if !codex_model_is_picker_eligible(&upstream_id) {
             continue;
         }
         let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
-        let native_account_model = runtime.codex_model_has_chatgpt_account(key, &upstream_id);
-        let native_account_ids = runtime.codex_model_chatgpt_account_ids(key, &upstream_id);
+        // These helpers accept the client-facing model spelling because they
+        // resolve the key prefix internally. Passing the already-resolved
+        // upstream id would make prefixed keys look like API-only routes.
+        let has_native_account_route = runtime.codex_model_has_chatgpt_account(key, &display_id);
+        let native_account_ids = runtime.codex_model_chatgpt_account_ids(key, &display_id);
         let native_entry = upstream_by_model.get(&normalized).and_then(|entries| {
             entries.iter().find(|(candidate_id, _)| {
                 candidate_id.is_empty()
@@ -315,58 +300,38 @@ fn build_codex_models_response_from_manifests(
                         .any(|account_id| account_id == candidate_id)
             })
         });
-        let source_context_window = source_context_windows
-            .get(&upstream_id.to_ascii_lowercase())
-            .copied();
-        let mut model = if native_account_model {
-            let native_model_id = native_entry
-                .and_then(|(_, entry)| entry.get("slug"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|slug| is_valid_model_id(slug))
-                .unwrap_or(&display_id);
-            native_entry
-                .and_then(|(_, entry)| {
+        // Only the exact owning account's card can supply native capabilities.
+        // Model identity is independent: a missing card must not rename a GPT
+        // model or copy another account/model's client capabilities.
+        let native_catalog_model = has_native_account_route
+            .then(|| {
+                native_entry.and_then(|(_, entry)| {
                     entry.as_object().and_then(|entry| {
-                        normalize_native_codex_catalog_entry(entry, native_model_id, priority, None)
+                        normalize_native_codex_catalog_entry(entry, &upstream_id, priority, None)
                     })
                 })
-                .unwrap_or_else(|| {
-                    // A missing/invalid account manifest must not borrow
-                    // another account's native capabilities. Keep only the
-                    // exact configured/upstream ID until a fresh manifest is
-                    // available.
-                    let mut fallback =
-                        routed_codex_catalog_entry(None, native_model_id, priority, None);
-                    fallback["slug"] = Value::String(native_model_id.to_string());
-                    fallback
-                })
-        } else {
-            source_reasoning_templates
+            })
+            .flatten();
+        let native_account_model = native_catalog_model.is_some();
+        let mut model = native_catalog_model
+            .unwrap_or_else(|| routed_codex_catalog_entry(None, &display_id, priority, None));
+        // Account models and unqualified GPT IDs retain their public spelling,
+        // including an explicitly configured key prefix. Qualified provider
+        // IDs keep reversible aliases; a similar leaf is not the same model.
+        // The GPT family rule changes only picker identity, never inventory,
+        // route eligibility, or capability evidence.
+        if has_native_account_route
+            || (normalized.starts_with("gpt-") && !upstream_id.contains('/'))
+        {
+            model["slug"] = Value::String(display_id.clone());
+        }
+        for candidate_id in &native_account_ids {
+            let uses_responses_lite = upstream_by_model
                 .get(&normalized)
-                .and_then(|capabilities| {
-                    normalize_upstream_codex_catalog_entry(
-                        capabilities,
-                        &display_id,
-                        priority,
-                        source_context_window,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    routed_codex_catalog_entry(
-                        template,
-                        &display_id,
-                        priority,
-                        source_context_window,
-                    )
-                })
-        };
-        let uses_responses_lite = native_account_model
-            && native_entry
+                .and_then(|entries| entries.iter().find(|(owner, _)| owner == candidate_id))
                 .and_then(|(_, entry)| entry.get("use_responses_lite"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-        for candidate_id in &native_account_ids {
             runtime.set_codex_model_uses_responses_lite(
                 candidate_id,
                 &upstream_id,
@@ -374,42 +339,26 @@ fn build_codex_models_response_from_manifests(
             );
         }
         if !native_account_model {
-            if let Some(context_window) = source_context_window {
-                model["context_window"] = context_window.into();
-                model["max_context_window"] = context_window.into();
-                model
-                    .as_object_mut()
-                    .expect("normalized catalog entry is an object")
-                    .remove("auto_compact_token_limit");
-                model["effective_context_window_percent"] = 95.into();
-            }
-            if source_image_models.contains(&normalized) {
-                model["input_modalities"] = json!(["text", "image"]);
-            }
-            apply_anthropic_ultra_alias(&mut model, &upstream_id);
+            runtime
+                .model_capabilities(&upstream_id)
+                .apply_to_codex(&mut model);
         }
-        let provider_declared_reasoning = source_reasoning_templates
-            .get(&normalized)
-            .and_then(|template| template.get("supported_reasoning_levels"))
-            .is_some()
-            || upstream_by_model
-                .get(&normalized)
-                .and_then(|entries| entries.first())
-                .and_then(|(_, entry)| entry.get("supported_reasoning_levels"))
-                .is_some();
-        if !native_account_model && !provider_declared_reasoning {
-            apply_known_reasoning_fallback(&mut model, &upstream_id);
-        }
-        // Manual reasoning settings belong to pooled API routes. A native
-        // OAuth account owns its upstream Codex catalog and must not be
-        // rewritten by the API/pool policy.
+        // A saved override may narrow known capabilities, never manufacture
+        // modes for an unknown model or copy them from an upstream manifest.
         if !native_account_model {
-            apply_model_reasoning_allowed_levels(
-                &mut model,
-                runtime
-                    .model_reasoning_policy_levels(&upstream_id)
-                    .as_deref(),
-            );
+            if let Some(allowed) = runtime.model_reasoning_policy_levels(&upstream_id) {
+                let supported = runtime
+                    .model_capabilities(&upstream_id)
+                    .reasoning_effort_levels;
+                let allowed = allowed
+                    .into_iter()
+                    .filter(|level| supported.contains(level))
+                    .collect::<Vec<_>>();
+                apply_model_reasoning_allowed_levels(&mut model, Some(&allowed));
+            }
+            if runtime.model_has_translated_ultra_route(key, &display_id) {
+                add_translated_ultra_after_max(&mut model);
+            }
         }
         sort_supported_reasoning_levels(&mut model);
         models.push(model);
@@ -423,36 +372,7 @@ fn build_codex_models_response_from_manifests(
     }
 }
 
-fn apply_known_reasoning_fallback(model: &mut Value, model_id: &str) {
-    let Some(levels) = crate::known_model_reasoning_levels(model_id) else {
-        return;
-    };
-    if levels.is_empty()
-        || model
-            .get("supported_reasoning_levels")
-            .and_then(Value::as_array)
-            .is_some_and(|levels| !levels.is_empty())
-    {
-        return;
-    }
-    model["supported_reasoning_levels"] = Value::Array(
-        levels
-            .iter()
-            .map(|effort| json!({"effort": effort, "description": effort}))
-            .collect(),
-    );
-    if levels
-        .iter()
-        .any(|effort| effort.eq_ignore_ascii_case("medium"))
-    {
-        model["default_reasoning_level"] = Value::String("medium".into());
-    }
-}
-
-fn apply_anthropic_ultra_alias(model: &mut Value, model_id: &str) {
-    if !crate::anthropic_max_implies_ultra(model_id) {
-        return;
-    }
+fn add_translated_ultra_after_max(model: &mut Value) {
     let Some(levels) = model
         .get_mut("supported_reasoning_levels")
         .and_then(Value::as_array_mut)
@@ -472,7 +392,10 @@ fn apply_anthropic_ultra_alias(model: &mut Value, model_id: &str) {
             .is_some_and(|effort| effort.eq_ignore_ascii_case("ultra"))
     });
     if has_max && !has_ultra {
-        levels.push(json!({"effort": "ultra", "description": "ultra"}));
+        levels.push(json!({
+            "effort": "ultra",
+            "description": "ultra"
+        }));
     }
 }
 
@@ -610,7 +533,125 @@ fn allowed_codex_model_protocols(runtime: &GatewayRuntime, key: &AuthenticatedKe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::{
+        AccountAuthState, TokenAuthority, TokenPersistenceAdapter, TokenPersistenceFailure,
+        TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
+    };
+    use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
+    use crate::{
+        CandidateHealth, CandidateQuota, GatewayRuntimeOptions, LocalGatewayKey,
+        RuntimeMixedLocalKey, WireApi,
+    };
+    use futures_util::future::BoxFuture;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct NoopRefresh;
+
+    impl TokenRefreshAdapter for NoopRefresh {
+        fn refresh<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _refresh_token: &'a str,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, std::result::Result<TokenRefresh, TokenRefreshFailure>> {
+            Box::pin(async {
+                Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "not_called",
+                ))
+            })
+        }
+    }
+
+    struct NoopPersistence;
+
+    impl TokenPersistenceAdapter for NoopPersistence {
+        fn persist<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _tokens: &'a TokenSet,
+        ) -> BoxFuture<'a, std::result::Result<(), TokenPersistenceFailure>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn persist_auth_state<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _auth_state: AccountAuthState,
+        ) -> BoxFuture<'a, std::result::Result<(), TokenPersistenceFailure>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn persist_agent_task_id<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _expected_task_id: Option<&'a str>,
+            task_id: &'a str,
+        ) -> BoxFuture<'a, std::result::Result<String, TokenPersistenceFailure>> {
+            Box::pin(async move { Ok(task_id.to_string()) })
+        }
+    }
+
+    fn native_catalog_test_runtime(
+        model_prefix: Option<&str>,
+        model_metadata_catalog: Option<crate::model_metadata::ModelMetadataCatalogHandle>,
+    ) -> GatewayRuntime {
+        let account_id = "native-account";
+        GatewayRuntime::from_mixed_pool_allow_unroutable(
+            Vec::new(),
+            vec![RuntimeChatGptAccount {
+                id: account_id.into(),
+                source_id: "chatgpt".into(),
+                chatgpt_account_id: "chatgpt-account".into(),
+                responses_url: "https://example.test/v1/responses".into(),
+                models: vec!["gpt-native".into()],
+                enabled: true,
+                draining: false,
+                priority: 0,
+                weight: 1,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                health: CandidateHealth::Healthy,
+                quota: CandidateQuota::Unknown,
+                quota_updated_at_ms: None,
+                quota_snapshot: Default::default(),
+                subscription_plan_type: None,
+                subscription_expires_at_ms: None,
+                last_used_at_ms: None,
+                cooldowns: Default::default(),
+                consecutive_failures: 0,
+                proxy: None,
+            }],
+            vec![RuntimeMixedLocalKey {
+                key: LocalGatewayKey {
+                    id: "key".into(),
+                    secret: "secret".into(),
+                },
+                enabled: true,
+                source_ids: None,
+                account_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: model_prefix.map(str::to_owned),
+                wire_apis: None,
+            }],
+            RuntimeChatGptAuth {
+                token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
+                refresh_adapter: Arc::new(NoopRefresh),
+                persistence_adapter: Arc::new(NoopPersistence),
+                refresh_skew_ms: 60_000,
+                agent_identities: HashMap::new(),
+            },
+            GatewayRuntimeOptions {
+                model_metadata_catalog,
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn manual_reasoning_modes_prefer_medium_over_provider_ultra_default() {
@@ -696,55 +737,167 @@ mod tests {
     }
 
     #[test]
-    fn known_reasoning_fallback_reaches_codex_when_provider_omits_metadata() {
-        let mut model = json!({"supported_reasoning_levels": []});
-
-        apply_known_reasoning_fallback(&mut model, "vendor/gpt-5.6-terra");
-
-        assert_eq!(
-            model["supported_reasoning_levels"],
-            json!([
-                {"effort": "none", "description": "none"},
-                {"effort": "low", "description": "low"},
-                {"effort": "medium", "description": "medium"},
-                {"effort": "high", "description": "high"},
-                {"effort": "xhigh", "description": "xhigh"},
-                {"effort": "max", "description": "max"}
-            ])
-        );
-        assert_eq!(model["default_reasoning_level"], "medium");
-    }
-
-    #[test]
-    fn anthropic_max_catalog_mode_adds_ultra_for_codex() {
-        let mut model = json!({
-            "supported_reasoning_levels": [
-                {"effort": "low"},
-                {"effort": "max"}
-            ]
-        });
-
-        apply_anthropic_ultra_alias(&mut model, "vendor/claude-opus-4-8");
-        sort_supported_reasoning_levels(&mut model);
-
-        assert_eq!(
-            model["supported_reasoning_levels"],
-            json!([
-                {"effort": "low"},
-                {"effort": "max"},
-                {"effort": "ultra", "description": "ultra"}
-            ])
-        );
+    fn missing_reasoning_metadata_stays_empty_until_catalog_evidence_exists() {
+        let model = json!({"supported_reasoning_levels": []});
+        assert_eq!(model["supported_reasoning_levels"], json!([]));
+        assert!(model.get("default_reasoning_level").is_none());
     }
 
     #[test]
     fn provider_empty_reasoning_metadata_is_not_replaced_by_known_defaults() {
-        let mut model = json!({"supported_reasoning_levels": []});
+        let model = json!({"supported_reasoning_levels": []});
 
         // The caller skips this fallback when the provider explicitly sent an
         // empty field; the helper itself remains a no-op for unknown models.
-        apply_known_reasoning_fallback(&mut model, "vendor/unknown-model");
 
         assert_eq!(model["supported_reasoning_levels"], json!([]));
+    }
+
+    #[test]
+    fn native_account_catalog_keeps_native_capabilities_over_external_metadata() {
+        use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+        let catalog = ModelMetadataCatalog::from_models_dev_json(
+            r#"{
+                "gpt-native": {
+                    "reasoning": true,
+                    "reasoning_effort_levels": ["low"],
+                    "default_reasoning_effort": "low",
+                    "tool_call": true,
+                    "modalities": {"input": ["text"], "output": ["text"]}
+                }
+            }"#,
+        )
+        .unwrap();
+        let runtime =
+            native_catalog_test_runtime(None, Some(ModelMetadataCatalogHandle::new(catalog)));
+        let key = runtime
+            .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        assert!(runtime.codex_model_has_chatgpt_account(&key, "gpt-native"));
+        let mut native_entry = routed_codex_catalog_entry(None, "gpt-native", 1_000, None)
+            .as_object()
+            .unwrap()
+            .clone();
+        native_entry.extend([
+            ("slug".into(), json!("gpt-native")),
+            ("display_name".into(), json!("Native GPT")),
+            ("input_modalities".into(), json!(["text", "audio"])),
+            ("output_modalities".into(), json!(["text", "audio"])),
+            ("supports_parallel_tool_calls".into(), json!(true)),
+            ("supports_search_tool".into(), json!(true)),
+            (
+                "supported_reasoning_levels".into(),
+                json!([{ "effort": "high", "description": "Native high" }]),
+            ),
+            ("default_reasoning_level".into(), json!("high")),
+        ]);
+        let upstream = json!({"models": [Value::Object(native_entry)]});
+        assert!(normalize_native_codex_catalog_entry(
+            upstream["models"][0].as_object().unwrap(),
+            "gpt-native",
+            1_000,
+            None,
+        )
+        .is_some());
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("native catalog");
+        let model = &response["models"][0];
+        assert_eq!(model["slug"], "gpt-native");
+        assert_eq!(model["input_modalities"], json!(["text", "audio"]));
+        assert_eq!(model["output_modalities"], json!(["text", "audio"]));
+        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert_eq!(model["supports_search_tool"], true);
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([{"effort": "high", "description": "Native high"}])
+        );
+        assert_eq!(model["default_reasoning_level"], "high");
+    }
+
+    #[test]
+    fn missing_native_card_keeps_identity_without_inheriting_capabilities() {
+        for prefix in [None, Some("local")] {
+            let runtime = native_catalog_test_runtime(prefix, None);
+            let key = runtime
+                .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+                .unwrap();
+            let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+            let display_id = prefix.map_or_else(
+                || "gpt-native".to_string(),
+                |prefix| format!("{prefix}/gpt-native"),
+            );
+            let mut foreign = routed_codex_catalog_entry(None, "gpt-native", 1_000, None);
+            foreign["slug"] = json!("gpt-native");
+            foreign["supports_parallel_tool_calls"] = json!(true);
+            foreign["use_responses_lite"] = json!(true);
+            foreign["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
+            foreign["future_native_capability"] = json!(true);
+            for manifests in [
+                Vec::new(),
+                vec![(
+                    "unrelated-account".into(),
+                    json!({"models": [foreign.clone()]}),
+                )],
+            ] {
+                let response =
+                    build_codex_models_response_from_manifests(&runtime, &key, &visible, manifests)
+                        .expect("native catalog");
+                let model = &response["models"][0];
+                assert_eq!(model["slug"], display_id);
+                assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
+                assert_eq!(model["supports_parallel_tool_calls"], false);
+                assert_eq!(model["supported_reasoning_levels"], json!([]));
+                for field in [
+                    "use_responses_lite",
+                    "context_window",
+                    "future_native_capability",
+                ] {
+                    assert!(model.get(field).is_none(), "unexpected capability: {field}");
+                }
+                assert!(crate::codex_catalog_entry_is_compatible(model));
+            }
+            let alias = crate::codex_model_alias(&display_id);
+            for requested in [&display_id, &alias] {
+                assert_eq!(
+                    runtime.resolve_configured_account_model(&key, requested),
+                    Some("gpt-native".into()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_card_preserves_the_key_model_prefix() {
+        let runtime = native_catalog_test_runtime(Some("local"), None);
+        let key = runtime
+            .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        let mut native = routed_codex_catalog_entry(None, "gpt-native", 1_000, None);
+        native["slug"] = json!("gpt-native");
+        native["supports_parallel_tool_calls"] = json!(true);
+        let response = build_codex_models_response_from_manifests(
+            &runtime,
+            &key,
+            &visible,
+            [("native-account".into(), json!({"models": [native]}))],
+        )
+        .unwrap();
+        let model = &response["models"][0];
+        assert_eq!(model["slug"], "local/gpt-native");
+        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert_eq!(
+            runtime.resolve_configured_account_model(&key, model["slug"].as_str().unwrap()),
+            Some("gpt-native".into()),
+        );
     }
 }

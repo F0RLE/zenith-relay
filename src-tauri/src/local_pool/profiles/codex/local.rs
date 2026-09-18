@@ -1,5 +1,5 @@
 use super::*;
-use std::{fs, path::Path};
+use std::{fs, path::Path, thread, time::Duration};
 
 pub(super) fn prepare_existing_local_binding_locked(
     codex_home: &Path,
@@ -15,9 +15,14 @@ pub(super) fn prepare_existing_local_binding_locked(
     let profile_dir = canonical_profile_dir(codex_home)?;
     let config_path = profile_dir.join(CONFIG_FILE);
     let config = read_optional_bytes(&config_path)?;
-    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    let mut document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
     if external_provider_took_over(&document, &backup) {
         return Ok(());
+    }
+    if managed_config_matches(&document, &backup)
+        && normalize_managed_provider_name(&mut document, &backup)
+    {
+        replace_if_unchanged(&config_path, &config, &document.to_string())?;
     }
     if backup.previous_model_catalog_json.is_none()
         && backup.managed_model_catalog_path.is_none()
@@ -85,20 +90,19 @@ pub(super) fn attach_local_locked(
         .as_ref()
         .and_then(|backup| backup.managed_model_catalog_path.as_deref())
         .is_some();
+    let orphaned_managed_provider = existing_backup.is_none() && document_has_provider(&document);
 
-    if catalog_json.is_some() && !had_managed_catalog && original_catalog_bytes.is_some() {
+    if catalog_json.is_some()
+        && !had_managed_catalog
+        && original_catalog_bytes.is_some()
+        && !orphaned_managed_provider
+    {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "managed ChatGPT model catalog exists without a profile backup",
         ));
     }
 
-    if existing_backup.is_none() && document_has_provider(&document) {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "managed ChatGPT provider exists without a profile backup",
-        ));
-    }
     let external_takeover = existing_backup
         .as_ref()
         .is_some_and(|backup| external_provider_took_over(&document, backup));
@@ -150,8 +154,14 @@ pub(super) fn attach_local_locked(
     let created_backup = existing_backup.is_none();
     let mut backup = existing_backup.unwrap_or(ProfileBackup {
         version: 1,
-        previous_model_provider: root_model_provider(&document),
-        previous_model_catalog_json: root_model_catalog_json(&document),
+        managed_provider_id: options.provider_id.to_owned(),
+        projection_secret_ref: None,
+        previous_model_provider: (!orphaned_managed_provider)
+            .then(|| root_model_provider(&document))
+            .flatten(),
+        previous_model_catalog_json: (!orphaned_managed_provider)
+            .then(|| root_model_catalog_json(&document))
+            .flatten(),
         previous_model_reasoning_effort: root_model_reasoning_effort(&document),
         previous_auth_hash: original_auth_bytes.as_deref().map(bytes_hash),
         previous_auth_secret_ref: None,
@@ -241,6 +251,65 @@ pub(super) fn attach_local_locked(
         catalog.is_none() && backup.managed_model_catalog_path.is_some();
     backup.attach_pending = true;
     backup.restore_pending = false;
+    attach_config(
+        &mut document,
+        base_url,
+        local_key,
+        catalog
+            .as_ref()
+            .map(|_| portable_path_string(&catalog_path))
+            .as_deref(),
+        backup.previous_model_catalog_json.as_deref(),
+        managed_model_reasoning_effort.as_deref(),
+        options.supports_websockets,
+    );
+    if options.provider_id != PROVIDER_ID {
+        let providers = document["model_providers"]
+            .as_table_mut()
+            .expect("attach creates providers");
+        let mut provider = providers
+            .remove(PROVIDER_ID)
+            .expect("attach creates provider");
+        provider["name"] = value(READY_API_PROVIDER_NAME);
+        providers.insert(options.provider_id, provider);
+        document["model_provider"] = value(options.provider_id);
+    }
+    backup.managed_provider_id = options.provider_id.to_owned();
+    let managed_config = document.to_string();
+    let credential = match bound_oauth.as_ref() {
+        Some(oauth) if project_bound_oauth => {
+            account_auth_content(oauth.tokens, oauth.provider_account_id)?
+        }
+        _ => auth_content(local_key),
+    };
+    let managed_auth = projection::merge_auth(original_auth, Some(&credential))?
+        .expect("an attached credential is present");
+    if created_backup || external_takeover {
+        let baseline = if external_takeover {
+            let mut baseline = parse_config(original_config)?;
+            remove_managed_provider(&mut baseline, &backup.managed_provider_id);
+            restore_root_string(
+                &mut baseline,
+                "model_catalog_json",
+                backup.previous_model_catalog_json.as_deref(),
+            );
+            Some(baseline.to_string())
+        } else {
+            snapshot_text(&original_config_bytes, &config_path)?.map(str::to_owned)
+        };
+        backup.projection_secret_ref = Some(
+            match projection::save(baseline.as_deref(), &managed_config, original_auth, secrets) {
+                Ok(secret_ref) => secret_ref,
+                Err(error) => {
+                    let cleanup = merge_rollbacks(
+                        cleanup_created_backup_secret(created_backup, &backup, secrets),
+                        restore_secret_snapshot(&rebased_secret, secrets),
+                    );
+                    return Err(with_rollback(error, cleanup));
+                }
+            },
+        );
+    }
     let backup_content = match serialize_backup(&backup) {
         Ok(content) => content,
         Err(error) => {
@@ -286,19 +355,6 @@ pub(super) fn attach_local_locked(
         ));
     }
 
-    attach_config(
-        &mut document,
-        base_url,
-        local_key,
-        catalog
-            .as_ref()
-            .map(|_| portable_path_string(&catalog_path))
-            .as_deref(),
-        backup.previous_model_catalog_json.as_deref(),
-        managed_model_reasoning_effort.as_deref(),
-        options.supports_websockets,
-    );
-    let managed_config = document.to_string();
     if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)
     {
         return Err(with_rollback(
@@ -324,12 +380,6 @@ pub(super) fn attach_local_locked(
             ),
         ));
     }
-    let managed_auth = match bound_oauth {
-        Some(oauth) if project_bound_oauth => {
-            account_auth_content(oauth.tokens, oauth.provider_account_id)?
-        }
-        Some(_) | None => auth_content(local_key),
-    };
     if let Err(error) = replace_if_unchanged(&auth_path, &original_auth_bytes, &managed_auth) {
         let config_rollback = rollback_file(&config_path, &managed_config, &original_config_bytes);
         let backup_rollback = merge_rollbacks(
@@ -410,19 +460,24 @@ pub(super) fn restore_local_locked(
 ) -> Result<()> {
     let _ = local_backup(codex_home, backup_root)?;
     let backup_path = backup_path(backup_root);
-    let mut backup_bytes = read_optional_bytes(&backup_path)?;
+    // Codex can refresh auth/config immediately after its process is stopped.
+    // Reading one file while that refresh is in progress used to make the
+    // restore path report a permanent profile conflict. Require a short,
+    // stable snapshot before comparing the managed profile; a real external
+    // takeover still fails closed below.
+    let mut backup_bytes = read_stable_optional_bytes(&backup_path)?;
     let Some(mut backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
         return Ok(());
     };
     let catalog_path = managed_model_catalog_path(backup_root)?;
-    let catalog_bytes = read_optional_bytes(&catalog_path)?;
+    let catalog_bytes = read_stable_optional_bytes(&catalog_path)?;
     if !valid_managed_model_catalog(&backup, &catalog_path, &catalog_bytes) {
         return Err(profile_restore_blocked());
     }
     let config_path = codex_home.join(CONFIG_FILE);
     let auth_path = codex_home.join(AUTH_FILE);
-    let original_config_bytes = read_optional_bytes(&config_path)?;
-    let original_auth_bytes = read_optional_bytes(&auth_path)?;
+    let mut original_config_bytes = read_stable_optional_bytes(&config_path)?;
+    let original_auth_bytes = read_stable_optional_bytes(&auth_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
     validate_config_shape(&document)?;
@@ -430,6 +485,11 @@ pub(super) fn restore_local_locked(
     let config_matches_previous = previous_config_matches(&document, &backup);
     if !config_matches_managed && !config_matches_previous {
         return Err(profile_restore_blocked());
+    }
+    if config_matches_managed && normalize_managed_provider_name(&mut document, &backup) {
+        let normalized = document.to_string();
+        replace_if_unchanged(&config_path, &original_config_bytes, &normalized)?;
+        original_config_bytes = Some(normalized.into_bytes());
     }
     let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
         Some(secret_ref) => secrets.load(secret_ref)?,
@@ -464,7 +524,7 @@ pub(super) fn restore_local_locked(
             "ChatGPT profile backup secret is missing",
         ));
     }
-    if read_optional_bytes(&backup_path)? != backup_bytes {
+    if read_stable_optional_bytes(&backup_path)? != backup_bytes {
         return Err(profile_changed_at(&backup_path));
     }
     if !backup.restore_pending {
@@ -482,29 +542,79 @@ pub(super) fn restore_local_locked(
         model_catalog.as_deref(),
         current_model_reasoning_effort.as_deref(),
     );
-    let restored_config = document.to_string();
-    if original_config_bytes.as_deref() != Some(restored_config.as_bytes()) {
-        replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
-    }
+    let restored = match backup.projection_secret_ref.as_deref() {
+        Some(secret_ref) => projection::restore(
+            secret_ref,
+            snapshot_text(&original_config_bytes, &config_path)?,
+            snapshot_text(&original_auth_bytes, &auth_path)?,
+            secrets,
+        )?,
+        None => UserProfileSnapshot {
+            config: Some(document.to_string()),
+            auth: projection::merge_auth(
+                snapshot_text(&original_auth_bytes, &auth_path)?,
+                previous_auth.as_deref(),
+            )?,
+        },
+    };
+    replace_with_snapshot(
+        &config_path,
+        &original_config_bytes,
+        restored.config.as_deref(),
+    )?;
 
     if !auth_matches_previous {
-        match previous_auth.as_deref() {
+        let auth_result = match restored.auth.as_deref() {
             Some(previous_auth) => {
-                replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)?;
+                replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
             }
-            None => remove_if_unchanged(&auth_path, &original_auth_bytes)?,
+            None => remove_if_unchanged(&auth_path, &original_auth_bytes),
+        };
+        if let Err(error) = auth_result {
+            let restored_config_bytes = restored
+                .config
+                .as_ref()
+                .map(|text| text.as_bytes().to_vec());
+            return Err(with_rollback(
+                error,
+                restore_snapshot_if_unchanged(
+                    &config_path,
+                    &restored_config_bytes,
+                    &original_config_bytes,
+                ),
+            ));
         }
     }
 
     if catalog_bytes.is_some() {
         remove_if_unchanged(&catalog_path, &catalog_bytes)?;
     }
-    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-        secrets.delete(secret_ref)?;
-    }
+    discard_backup(
+        &backup_path,
+        &backup_bytes,
+        backup.previous_auth_secret_ref.as_deref(),
+        backup.projection_secret_ref.as_deref(),
+        secrets,
+    )?;
     if backup.managed_model_catalog_path.is_some() {
         let _ = invalidate_models_cache(codex_home);
     }
-    remove_if_unchanged(&backup_path, &backup_bytes)?;
     Ok(())
+}
+
+/// Read a profile file only after two consecutive reads agree. Codex writes
+/// auth/config atomically but may perform a second refresh immediately after
+/// the first rename. Treat that short write window as transient rather than
+/// turning it into `profile_restore_blocked`.
+fn read_stable_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    let mut previous = read_optional_bytes(path)?;
+    for _ in 0..3 {
+        thread::sleep(Duration::from_millis(20));
+        let current = read_optional_bytes(path)?;
+        if current == previous {
+            return Ok(current);
+        }
+        previous = current;
+    }
+    Ok(previous)
 }

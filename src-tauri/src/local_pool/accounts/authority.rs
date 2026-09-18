@@ -19,6 +19,7 @@ use zenith_relay_core::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
@@ -132,6 +133,44 @@ impl ProcessAccountLocks {
             }
         }
     }
+
+    /// Attempts to acquire a credential lock without waiting for its current
+    /// owner. Compensating transactions use this after an asynchronous
+    /// operation has failed: if a newer login or refresh owns the lock, the
+    /// old transaction must leave its state alone instead of waiting and then
+    /// restoring a stale snapshot.
+    pub fn try_acquire(
+        &self,
+        local_account_id: &str,
+    ) -> Result<Option<ProcessAccountGuard>, ProcessLockError> {
+        validate_local_account_id(local_account_id)?;
+        let lock_dir = self.root.join("locks");
+        ensure_lock_dir(&lock_dir)?;
+        let path = lock_path(&lock_dir, local_account_id);
+        for _ in 0..2 {
+            let owner = LockOwner {
+                owner_token: Uuid::new_v4().hyphenated().to_string(),
+                created_at_ms: now_ms(),
+                process_id: std::process::id(),
+            };
+            match create_lock(&path, &owner) {
+                Ok(()) => {
+                    return Ok(Some(ProcessAccountGuard {
+                        path,
+                        owner_token: owner.owner_token,
+                    }));
+                }
+                Err(CreateLockError::Exists) => {
+                    if !recover_stale_lock(&path, self.config.stale_after_ms)? {
+                        return Ok(None);
+                    }
+                }
+                Err(CreateLockError::Unsafe) => return Err(ProcessLockError::UnsafePath),
+                Err(CreateLockError::Io) => return Err(ProcessLockError::Io),
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub struct ProcessAccountGuard {
@@ -221,7 +260,7 @@ where
             let current = self.credentials.require(local_account_id).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
-                    "credential_load_failed",
+                    error_codes::CREDENTIAL_LOAD_FAILED,
                 )
             })?;
             if current.is_access_usable(now_ms, self.refresh_skew_ms) {
@@ -235,7 +274,7 @@ where
             let refresh_token = current.refresh_token().ok_or_else(|| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::ExpiredRefreshToken,
-                    "refresh_token_missing",
+                    error_codes::REFRESH_TOKEN_MISSING,
                 )
             })?;
             let refreshed = self
@@ -256,7 +295,7 @@ where
             self.credentials.save(&updated).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
-                    "credential_persist_failed",
+                    error_codes::CREDENTIAL_PERSIST_FAILED,
                 )
             })?;
             updated.to_token_refresh().map_err(|_| {
@@ -315,7 +354,7 @@ where
             let current = self
                 .credentials
                 .require(local_account_id)
-                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
             let stored = if current.generation() > tokens.generation()
                 || (current.generation() == tokens.generation()
                     && current.issued_at_ms() >= tokens.issued_at_ms())
@@ -324,16 +363,16 @@ where
             } else {
                 let updated = current
                     .with_token_set(tokens)
-                    .map_err(|_| TokenPersistenceFailure::new("invalid_token_set"))?;
-                self.credentials
-                    .save(&updated)
-                    .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
+                    .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_TOKEN_SET))?;
+                self.credentials.save(&updated).map_err(|_| {
+                    TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED)
+                })?;
                 updated
             };
             self.metadata
                 .persist_generation(local_account_id, stored.generation(), stored.issued_at_ms())
                 .await
-                .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::METADATA_PERSIST_FAILED))
         })
     }
 
@@ -346,7 +385,7 @@ where
             self.metadata
                 .persist_auth_state(local_account_id, auth_state)
                 .await
-                .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::METADATA_PERSIST_FAILED))
         })
     }
 
@@ -360,7 +399,7 @@ where
             let current = self
                 .credentials
                 .require(local_account_id)
-                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
             if let Some(current_task_id) = current
                 .agent_identity()
                 .and_then(AgentIdentityCredential::task_id)
@@ -370,10 +409,10 @@ where
             }
             let updated = current
                 .with_agent_task_id(task_id.to_string())
-                .map_err(|_| TokenPersistenceFailure::new("invalid_agent_task_id"))?;
-            self.credentials
-                .save(&updated)
-                .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_AGENT_TASK_ID))?;
+            self.credentials.save(&updated).map_err(|_| {
+                TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED)
+            })?;
             Ok(task_id.to_string())
         })
     }
@@ -482,10 +521,12 @@ fn validate_local_account_id(value: &str) -> Result<(), ProcessLockError> {
 
 fn lock_refresh_failure(error: ProcessLockError) -> TokenRefreshFailure {
     let code = match error {
-        ProcessLockError::Timeout => "refresh_lock_timeout",
-        ProcessLockError::InvalidIdentity => "invalid_account_id",
-        ProcessLockError::InvalidConfiguration => "refresh_lock_configuration",
-        ProcessLockError::Io | ProcessLockError::UnsafePath => "refresh_lock_unavailable",
+        ProcessLockError::Timeout => error_codes::REFRESH_LOCK_TIMEOUT,
+        ProcessLockError::InvalidIdentity => error_codes::INVALID_ACCOUNT_ID,
+        ProcessLockError::InvalidConfiguration => error_codes::REFRESH_LOCK_CONFIGURATION,
+        ProcessLockError::Io | ProcessLockError::UnsafePath => {
+            error_codes::REFRESH_LOCK_UNAVAILABLE
+        }
     };
     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, code)
 }
@@ -666,6 +707,20 @@ mod tests {
         assert!(path.exists());
         drop(guard);
         assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nonblocking_lock_acquire_leaves_a_live_refresh_owner_undisturbed() {
+        let root = temp_root("try-acquire");
+        let locks = ProcessAccountLocks::with_config(root.clone(), fast_lock_config()).unwrap();
+        let guard = locks.acquire("relay_account_1").await.unwrap();
+        let started = Instant::now();
+
+        assert!(locks.try_acquire("relay_account_1").unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        drop(guard);
         fs::remove_dir_all(root).unwrap();
     }
 

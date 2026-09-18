@@ -1,10 +1,10 @@
 use super::contracts::{
-    custom_tool_item_id, request_tool_catalog, AdapterError, AdapterResult, ClientToolTarget,
-    MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
+    bridged_namespace_tool_name, custom_tool_item_id, prepare_bridge_state, request_tool_catalog,
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, MessagesReasoningMode,
+    ResponsesToolKind,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
@@ -71,36 +71,13 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
     response_scope: &str,
     response_id_seed: &str,
 ) -> AdapterResult<GeminiBridgeRequest> {
-    let object = request
-        .as_object()
-        .ok_or_else(AdapterError::invalid_request)?;
-    for key in ["background", "include"] {
-        if object.get(key).is_some_and(|value| !value.is_null()) {
-            return Err(AdapterError::unsupported_binding());
-        }
-    }
-    let previous_response_id = object
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let mut state = match (previous_response_id, previous) {
-        (Some(_), Some(state)) if state.model == model => state,
-        (Some(_), Some(_)) => return Err(AdapterError::continuation_mismatch()),
-        (Some(_), None) => return Err(AdapterError::continuation_missing()),
-        (None, _) => MessagesBridgeState::new(model, reasoning_mode),
-    };
-    if state.reasoning_mode != reasoning_mode {
-        return Err(AdapterError::continuation_mismatch());
-    }
-    if previous_response_id.is_none() {
-        if let Some(instructions) = object.get("instructions") {
-            let parts = content_parts(instructions)?;
-            append_system_parts(&mut state, parts)?;
-        }
-    } else if object.contains_key("instructions") {
-        return Err(AdapterError::continuation_mismatch());
-    }
+    let (object, mut state) = prepare_bridge_state(
+        request,
+        model,
+        reasoning_mode,
+        previous,
+        crate::WireApi::Gemini,
+    )?;
     if let Some(tools) = request_tool_catalog(object)? {
         let (declarations, targets) = translate_tools(&tools)?;
         state.tools = (!declarations.is_empty()).then_some(declarations);
@@ -121,6 +98,10 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
     )?;
     if state.messages.is_empty() {
         return Err(AdapterError::invalid_request());
+    }
+    state.historical_system = state.system.clone();
+    if let Some(instructions) = object.get("instructions").filter(|value| !value.is_null()) {
+        append_system_parts(&mut state, content_parts(instructions)?)?;
     }
 
     let mut body = Map::from_iter([("contents".to_string(), Value::Array(state.messages.clone()))]);
@@ -330,7 +311,7 @@ fn translate_tools(
             Some("function" | "custom") | None if tool.get("name").is_some() => {
                 translate_gemini_tool(&mut declarations, &mut targets, tool, None)?;
             }
-            _ => {}
+            _ => return Err(AdapterError::unsupported_tool()),
         }
     }
     Ok((declarations, targets))
@@ -391,10 +372,10 @@ fn translate_gemini_tool(
     if !parameters.is_object() {
         return Err(AdapterError::invalid_request());
     }
-    declaration.insert(
-        "parameters".to_string(),
-        sanitize_gemini_schema(&parameters),
-    );
+    if tool.get("strict").and_then(Value::as_bool) == Some(true) {
+        return Err(AdapterError::parameter_unsupported());
+    }
+    declaration.insert("parametersJsonSchema".to_string(), parameters);
     declarations.push(Value::Object(declaration));
     targets.insert(
         upstream_name,
@@ -405,16 +386,6 @@ fn translate_gemini_tool(
         },
     );
     Ok(())
-}
-
-fn bridged_namespace_tool_name(namespace: &str, name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((namespace.len() as u64).to_le_bytes());
-    hasher.update(namespace.as_bytes());
-    hasher.update((name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-    format!("relay_ns_{}", hex::encode(&digest[..12]))
 }
 
 fn translate_tool_choice(
@@ -827,6 +798,13 @@ fn apply_response_format(
             generation.insert("responseMimeType".to_string(), json!("application/json"));
         }
         "json_schema" => {
+            if format
+                .get("strict")
+                .or_else(|| format.pointer("/json_schema/strict"))
+                == Some(&Value::Bool(true))
+            {
+                return Err(AdapterError::parameter_unsupported());
+            }
             generation.insert("responseMimeType".to_string(), json!("application/json"));
             let schema = format
                 .get("schema")
@@ -836,53 +814,12 @@ fn apply_response_format(
                         .and_then(|value| value.get("schema"))
                 })
                 .ok_or_else(AdapterError::invalid_request)?;
-            generation.insert("responseSchema".to_string(), sanitize_gemini_schema(schema));
+            generation.insert("responseJsonSchema".to_string(), schema.clone());
         }
         "text" => {}
         _ => return Err(AdapterError::unsupported_binding()),
     }
     Ok(())
-}
-
-/// Gemini's structured-output schema is a deliberately small subset of JSON
-/// Schema. Bridge requests must remove draft keywords before they reach the
-/// provider; native Gemini requests are never passed through this function.
-fn sanitize_gemini_schema(schema: &Value) -> Value {
-    const SUPPORTED_FIELDS: [&str; 8] = [
-        "type",
-        "description",
-        "properties",
-        "required",
-        "items",
-        "enum",
-        "title",
-        "nullable",
-    ];
-
-    let Value::Object(object) = schema else {
-        return schema.clone();
-    };
-    let mut sanitized = Map::new();
-    for field in SUPPORTED_FIELDS {
-        let Some(value) = object.get(field) else {
-            continue;
-        };
-        let value = match field {
-            "properties" => match value.as_object() {
-                Some(properties) => Value::Object(
-                    properties
-                        .iter()
-                        .map(|(name, property)| (name.clone(), sanitize_gemini_schema(property)))
-                        .collect(),
-                ),
-                None => value.clone(),
-            },
-            "items" => sanitize_gemini_schema(value),
-            _ => value.clone(),
-        };
-        sanitized.insert(field.to_string(), value);
-    }
-    Value::Object(sanitized)
 }
 
 fn apply_reasoning(
@@ -894,15 +831,27 @@ fn apply_reasoning(
         .and_then(Value::as_object)
         .and_then(|value| value.get("effort"))
         .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| value != "none");
+        .map(|value| value.trim().to_ascii_lowercase());
     let Some(effort) = effort else {
         return Ok(());
     };
     if mode == MessagesReasoningMode::Disabled {
         return Err(AdapterError::reasoning_unsupported());
     }
+    if mode == MessagesReasoningMode::Adaptive {
+        if !super::contracts::SourceAdapter::ResponsesToGemini
+            .supports_reasoning_effort(mode, &effort)
+        {
+            return Err(AdapterError::reasoning_unsupported());
+        }
+        generation.insert(
+            "thinkingConfig".to_string(),
+            json!({"thinkingLevel":effort,"includeThoughts":true}),
+        );
+        return Ok(());
+    }
     let budget = match effort.as_str() {
+        "none" => 0,
         "minimal" => 1_024,
         "low" => 4_096,
         "medium" => 8_192,
@@ -1395,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_sanitizes_json_schema_for_gemini_without_touching_nested_shape() {
+    fn bridge_preserves_json_schema_constraints_for_gemini() {
         let prepared = prepare_responses_to_gemini_with_reasoning(
             &json!({
                 "input": "structured",
@@ -1454,27 +1403,24 @@ mod tests {
         )
         .unwrap();
 
-        let schema = &prepared.upstream_body["generationConfig"]["responseSchema"];
+        let schema = &prepared.upstream_body["generationConfig"]["responseJsonSchema"];
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["title"], "Answer");
         assert_eq!(schema["description"], "Structured answer");
         assert_eq!(schema["properties"]["answer"]["type"], "string");
-        assert!(schema.get("$defs").is_none());
-        assert!(schema.get("$schema").is_none());
-        assert!(schema.get("additionalProperties").is_none());
-        assert!(schema["properties"]["answer"].get("$ref").is_none());
-        assert!(schema["properties"]["answer"].get("minLength").is_none());
+        assert_eq!(schema["$defs"], json!({"unused":{"type":"string"}}));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["answer"]["$ref"], "#/defs/answer");
+        assert_eq!(schema["properties"]["answer"]["minLength"], 1);
         assert_eq!(schema["properties"]["scores"]["items"]["type"], "number");
-        assert!(schema["properties"]["scores"]["items"]
-            .get("minimum")
-            .is_none());
+        assert_eq!(schema["properties"]["scores"]["items"]["minimum"], 0);
 
         let parameters =
-            &prepared.upstream_body["tools"][0]["functionDeclarations"][0]["parameters"];
+            &prepared.upstream_body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
         assert_eq!(parameters["properties"]["query"]["type"], "string");
-        assert!(parameters["properties"]["query"].get("pattern").is_none());
-        assert!(parameters["properties"]["query"].get("$ref").is_none());
-        assert!(parameters.get("additionalProperties").is_none());
+        assert_eq!(parameters["properties"]["query"]["pattern"], ".+");
+        assert_eq!(parameters["properties"]["query"]["$ref"], "#/defs/query");
+        assert_eq!(parameters["additionalProperties"], false);
     }
 
     #[test]

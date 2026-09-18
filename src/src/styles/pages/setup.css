@@ -1607,42 +1607,81 @@
   color: var(--relay-muted);
 }
 
-.source-price-input {
+.source-price-field {
   min-width: 0;
-  height: 34px;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  align-items: center;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
+  gap: 5px;
+}
+
+.source-price-fields {
+  display: contents;
+}
+
+.source-price-caption {
   color: var(--relay-muted);
-}
-
-.source-price-input:focus-within {
-  border-color: var(--relay-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-accent) 16%, transparent);
-}
-
-.source-price-input > span:not(.sr-only) {
-  text-align: center;
   font-size: 11px;
 }
 
-.source-price-input input {
+.source-price-input {
+  --price-field-focus: var(--relay-focus);
+  min-width: 0;
+  height: 36px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: var(--relay-surface);
+  cursor: text;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+}
+
+.source-price-input:hover {
+  border-color: var(--relay-border-strong);
+}
+
+.source-price-input:focus-within {
+  border-color: var(--price-field-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--price-field-focus) 18%, transparent);
+}
+
+.source-price-currency {
+  border-right: 1px solid var(--relay-border);
+  color: var(--relay-muted);
+  text-align: center;
+  font-size: 12px;
+  line-height: 16px;
+  user-select: none;
+}
+
+.source-price-input > input,
+.source-price-input > input:focus-visible {
   width: 100%;
   min-width: 0;
-  height: 32px;
-  padding: 0 7px 0 0;
+  min-height: 0;
+  height: 34px;
+  margin: 0;
+  padding: 0 10px 0 6px;
   border: 0;
+  border-radius: 0 7px 7px 0;
   outline: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--relay-text);
   font: inherit;
+  text-align: right;
+}
+
+.source-price-input > input::placeholder {
+  color: var(--relay-muted);
+  opacity: 1;
 }
 
 .source-price-input:has(input[aria-invalid="true"]) {
-  border-color: var(--relay-danger);
+  --price-field-focus: var(--relay-error);
+  border-color: var(--relay-error);
 }
 
 .source-price-row .icon-button,
@@ -1982,38 +2021,6 @@
   color: var(--relay-muted);
   font-size: 10px;
   line-height: 15px;
-}
-
-.relay-dialog.source-policy-dialog {
-  width: min(840px, 100%);
-}
-
-.source-policy-dialog .relay-dialog-body {
-  padding: 20px 24px 22px;
-}
-
-.source-policy-dialog .member-editor {
-  gap: 18px;
-}
-
-.source-policy-dialog .source-model-configuration {
-  border: 0;
-  border-top: 1px solid var(--relay-border);
-  border-radius: 0;
-  background: transparent;
-}
-
-.source-policy-dialog .source-model-configuration .source-editor-panel-summary {
-  min-height: 48px;
-  padding: 8px 0;
-}
-
-.source-policy-dialog .source-model-configuration .source-editor-panel-summary > span > small {
-  display: none;
-}
-
-.source-policy-dialog .source-model-configuration .source-price-content {
-  padding: 12px 0 0;
 }
 
 .relay-dialog .api-provider-options {

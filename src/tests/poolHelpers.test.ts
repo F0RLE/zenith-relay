@@ -3,9 +3,11 @@ import type { AccountSummary, RuntimeSnapshot, SourceSummary } from "../src/feat
 import {
   clampRoutingCount,
   comparePoolMembers,
-  groupModelSummariesForLauncher,
+  currentPoolModelSummaries,
+  groupModelSummaries,
   mergeSubscriptionPlanOrder,
   modelSummaries,
+  operationalModelSummaries,
   sourceOrderForRole,
   sourceRoutingStages,
   subscriptionPlanGroups,
@@ -144,7 +146,7 @@ describe("pool helpers", () => {
         maxRetryCandidates: 3,
         routingStrategy: "adaptive",
         defaultServiceTier: "standard",
-        models: [{ id: "gpt-test", enabled: false, memberCount: 2, codexVisible: true, codexDisplayName: "", catalogRank: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
+        models: [{ id: "gpt-test", enabled: false, memberCount: 2, codexVisible: true, codexDisplayName: "", catalogProvider: "openai", catalogFamily: "gpt", inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
       },
     });
     expect(modelSummaries(explicit)[0]).toMatchObject({ codexDisplayName: "gpt-test", reasoningLevels: [], reasoningSupportedLevels: [], reasoningAllowedLevels: [], reasoningConfigurable: false });
@@ -162,7 +164,247 @@ describe("pool helpers", () => {
       accounts: [account({ models: ["GPT-TEST"] })],
     }));
     expect(fallback[0]).toMatchObject({ id: "gpt-test", memberCount: 1, enabled: true });
-    expect(groupModelSummariesForLauncher(fallback, []).map((group) => group.id)).toEqual(["openai"]);
+    expect(groupModelSummaries(fallback, [account({ models: ["GPT-TEST"] })]).map((group) => group.provider)).toEqual(["openai"]);
+  });
+
+  test("keeps a binding-only pooled source model in the saved order inventory", () => {
+    const snapshot = runtime({
+      sources: [source({
+        models: [],
+        protocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: ["binding-only"] }],
+      })],
+    });
+
+    expect(currentPoolModelSummaries(snapshot).map((model) => model.id)).toEqual(["binding-only"]);
+  });
+
+  test("keeps Model Rules limited to models with an active pool route", () => {
+    const nowMs = Date.now();
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: [],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [
+          { id: "gpt-live", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-live", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "gpt-cooled", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-cooled", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "gpt-unavailable", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-unavailable", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "gpt-excluded", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-excluded", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "gpt-disabled-rule", enabled: false, memberCount: 1, codexVisible: false, codexDisplayName: "gpt-disabled-rule", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+        ],
+        routingOrder: [
+          { candidateId: "live-source", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0, modelRetries: [] },
+          { candidateId: "cooled-account", kind: "oauth_account", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: nowMs + 60_000, halfOpen: false, dispatches: 0, modelRetries: [{ model: "gpt-cooled", retryAtMs: nowMs + 60_000 }] },
+          { candidateId: "unavailable-account", kind: "oauth_account", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: nowMs + 60_000, halfOpen: false, dispatches: 0, modelRetries: [] },
+          { candidateId: "excluded-account", kind: "oauth_account", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0, modelRetries: [] },
+        ],
+      },
+      sources: [source({
+        id: "live-source",
+        models: ["gpt-live", "gpt-unbound", "gpt-disabled-rule"],
+        protocolBindings: [{ wireApi: "responses", modelIds: ["gpt-live", "gpt-disabled-rule"] }],
+      })],
+      accounts: [
+        account({ id: "cooled-account", models: ["gpt-cooled"] }),
+        account({ id: "unavailable-account", models: ["gpt-unavailable"], operationalStatus: "unavailable" }),
+        account({ id: "excluded-account", models: ["gpt-excluded"], excludedModels: ["gpt-*"] }),
+      ],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual([
+      "gpt-live",
+      "gpt-disabled-rule",
+    ]);
+  });
+
+  test("keeps a pooled API source model visible when the runtime order is not reported", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: ["provider-model"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [{ id: "provider-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Provider model", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
+        routingOrder: [],
+      },
+      sources: [source({ id: "provider", models: ["provider-model"], protocolBindings: [{ wireApi: "responses", modelIds: ["provider-model"] }] })],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual(["provider-model"]);
+  });
+
+  test("merges a lagging gateway catalog and keeps rotation members visible", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 2,
+        visibleModelIds: ["shared-model"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        // The derived catalog has not caught up with the account/source
+        // refresh yet, so both member-only models are intentionally absent.
+        models: [{ id: "shared-model", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Shared", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
+        // A transient snapshot can mark both candidates unavailable while
+        // their management status is already back in rotation.
+        routingOrder: [
+          { candidateId: "provider", kind: "api_source", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+          { candidateId: "account-a", kind: "oauth_account", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+        ],
+      },
+      sources: [source({
+        id: "provider",
+        models: ["shared-model", "source-only"],
+        protocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: [] }],
+      })],
+      accounts: [account({ id: "account-a", models: ["shared-model", "account-only"] })],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual([
+      "shared-model",
+      "source-only",
+      "account-only",
+    ]);
+  });
+
+  test("hides an unavailable account while retaining an exact model cooldown boundary", () => {
+    const nowMs = Date.now();
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: ["cooling", "healthy"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [
+          { id: "cooling", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Cooling", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "healthy", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Healthy", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "unavailable", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Unavailable", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+        ],
+        routingOrder: [
+          { candidateId: "account-a", kind: "oauth_account", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0, modelRetries: [{ model: "cooling", retryAtMs: nowMs + 60_000 }] },
+          { candidateId: "account-unavailable", kind: "oauth_account", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0, modelRetries: [] },
+        ],
+      },
+      accounts: [
+        account({ id: "account-a", models: ["cooling", "healthy"] }),
+        account({ id: "account-unavailable", models: ["unavailable"], operationalStatus: "unavailable" }),
+      ],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual(["healthy"]);
+  });
+
+  test("hides every model during a future whole-candidate cooldown", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: ["temporarily-unavailable"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [{ id: "temporarily-unavailable", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Temporary", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
+        routingOrder: [{ candidateId: "account-a", kind: "oauth_account", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: Date.now() + 60_000, halfOpen: false, dispatches: 0, modelRetries: [] }],
+      },
+      accounts: [account({ id: "account-a", models: ["temporarily-unavailable"] })],
+    });
+
+    expect(operationalModelSummaries(snapshot)).toEqual([]);
+  });
+
+  test("falls back to the API source catalog while the derived gateway catalog is empty", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: [],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [],
+        routingOrder: [],
+      },
+      sources: [source({ id: "provider", models: ["provider-model"], protocolBindings: [{ wireApi: "responses", modelIds: ["provider-model"] }] })],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual(["provider-model"]);
+  });
+
+  test("expands a sole empty native source binding and tolerates a partial route snapshot", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 2,
+        visibleModelIds: ["provider-model", "account-model"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [
+          { id: "provider-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Provider model", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "account-model", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Account model", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+        ],
+        // The account route is omitted from this older/partial snapshot. The
+        // account status is still rotation, so its model must remain visible.
+        routingOrder: [{ candidateId: "provider", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 }],
+      },
+      sources: [source({
+        id: "provider",
+        models: ["provider-model"],
+        protocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: [] }],
+      })],
+      accounts: [account({ id: "account-a", models: ["account-model"] })],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual([
+      "provider-model",
+      "account-model",
+    ]);
+  });
+
+  test("does not expand an empty native binding when another route is configured", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: ["unconfirmed-model", "confirmed-model"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [
+          { id: "unconfirmed-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Unconfirmed", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "confirmed-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Confirmed", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+        ],
+        routingOrder: [
+          { candidateId: "provider::messages", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+          { candidateId: "provider::responses", kind: "api_source", available: true, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 0 },
+        ],
+      },
+      sources: [source({
+        id: "provider",
+        models: ["unconfirmed-model", "confirmed-model"],
+        protocolBindings: [
+          { wireApi: "responses", adapter: "native", modelIds: [] },
+          { wireApi: "messages", adapter: "native", modelIds: ["confirmed-model"] },
+        ],
+      })],
+    });
+
+    expect(operationalModelSummaries(snapshot).map((model) => model.id)).toEqual(["confirmed-model"]);
   });
 
   test("keeps selection and numeric policy inputs bounded", () => {
@@ -173,11 +415,11 @@ describe("pool helpers", () => {
     expect(clampRoutingCount("bad")).toBe(1);
   });
 
-  test("keeps backend routing order even when a member is unavailable", () => {
+  test("shows ready members before unavailable ones even with an older runtime order", () => {
     const healthy = { ...account({ id: "healthy", label: "Z" }), kind: "account" as const };
     const unavailable = { ...account({ id: "unavailable", label: "A", operationalStatus: "unavailable" }), kind: "account" as const };
     const order = new Map([["unavailable", 0], ["healthy", 1]]);
-    expect(comparePoolMembers(unavailable, healthy, order)).toBeLessThan(0);
+    expect(comparePoolMembers(unavailable, healthy, order)).toBeGreaterThan(0);
   });
 
   test("sorts a multi-protocol source by its first protocol candidate", () => {

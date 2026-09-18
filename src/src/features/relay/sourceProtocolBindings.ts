@@ -25,10 +25,17 @@ function normalizedCacheWriteTtl(value: SourceProtocolBinding): CacheWriteTtl {
 }
 
 export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter {
-  return (binding.adapter === "responses_to_messages" || binding.adapter === "responses_to_gemini")
-    && binding.wireApi === "responses"
-    ? binding.adapter
-    : "native";
+  return binding.adapter && sourceWireApis.some((upstream) => adapterBetween(binding.wireApi, upstream) === binding.adapter)
+    ? binding.adapter : "native";
+}
+
+export function adapterBetween(client: SourceWireApi, upstream: SourceWireApi): SourceAdapter {
+  return client === upstream ? "native" : `${client}_to_${upstream}` as SourceAdapter;
+}
+
+export function upstreamWireApi(binding: SourceProtocolBinding): SourceWireApi {
+  const adapter = normalizedAdapter(binding);
+  return sourceWireApis.find((upstream) => adapterBetween(binding.wireApi, upstream) === adapter) ?? binding.wireApi;
 }
 
 export function normalizedReasoningMode(
@@ -40,7 +47,7 @@ export function normalizedReasoningMode(
   // always uses the current upstream translation path for the requested
   // effort. Keep accepting the legacy field on read, but do not expose it as
   // a source-level policy.
-  return adapter === "responses_to_messages" ? "adaptive" : "disabled";
+  return adapter === "native" ? "disabled" : "adaptive";
 }
 
 export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
@@ -80,7 +87,7 @@ export function normalizedBindings(
   });
 }
 
-type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">;
+type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" | "models" | "protocolConfig" | "resolvedProtocolBindings">;
 
 /**
  * Legacy source records keep a single `wireApi`. Treat them as one virtual
@@ -90,6 +97,8 @@ type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" 
 export function effectiveSourceProtocolBindings(
   source: ProtocolBindingSource,
 ): SourceProtocolBinding[] {
+  if (source.resolvedProtocolBindings) return normalizedBindings(source.resolvedProtocolBindings, source.models);
+  if (source.protocolConfig?.mode === "auto") return normalizedBindings(source.protocolBindings ?? [], source.models);
   const configured = source.protocolBindings?.length
     ? normalizedBindings(source.protocolBindings, source.models)
     : [];
@@ -138,6 +147,25 @@ export function sourceModelsForWireApi(
   });
 }
 
+/**
+ * Cache writes are an upstream Messages capability. Include both native
+ * Messages routes and Responses routes translated by the Messages adapter.
+ */
+export function sourceModelsWithCacheWritePricing(source: ProtocolBindingSource) {
+  const bindings = runtimeSourceProtocolBindings(source);
+  const seen = new Set<string>();
+  return bindings.flatMap((binding) => {
+    const messagesUpstream = upstreamWireApi(binding) === "messages";
+    if (!messagesUpstream) return [];
+    return sourceBindingModels(source, bindings, binding).filter((model) => {
+      const normalized = model.toLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+  });
+}
+
 export function sourceSupportsWireApi(
   source: ProtocolBindingSource,
   wireApi: SourceWireApi,
@@ -153,12 +181,16 @@ export function sourceSupportsAnyWireApi(source: ProtocolBindingSource) {
  * A direct ChatGPT profile bypasses Relay entirely. It can use a real
  * Responses endpoint, but it cannot execute a Relay-owned bridge.
  */
-export function sourceSupportsNativeResponses(source: ProtocolBindingSource) {
+export function sourceSupportsNativeProtocol(source: ProtocolBindingSource, protocol?: SourceWireApi) {
   const bindings = effectiveSourceProtocolBindings(source);
   return bindings.some(
     (binding) =>
-      binding.wireApi === "responses"
+      (protocol === undefined || binding.wireApi === protocol)
       && normalizedAdapter(binding) === "native"
       && sourceBindingModels(source, bindings, binding).length > 0,
   );
+}
+
+export function sourceSupportsNativeResponses(source: ProtocolBindingSource) {
+  return sourceSupportsNativeProtocol(source, "responses");
 }

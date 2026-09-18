@@ -109,6 +109,15 @@ impl AppState {
     ) -> Result<bool, String> {
         let sources = self.store.sources()?;
         let accounts = self.store.accounts()?;
+        let routing = self.store.routing_policy()?;
+        runtime
+            .set_pool_routing_policy(
+                runtime_build::resolve_pool_routing(&routing, &sources, &accounts),
+                routing.max_retry_candidates,
+                routing.cooldown_after_failures,
+                routing.keep_last_candidate_available,
+            )
+            .map_err(|error| error.to_string())?;
         let keys = self
             .store
             .keys()?
@@ -214,6 +223,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec![model.into()],
             allowed_models: Vec::new(),
@@ -315,8 +325,10 @@ mod tests {
         assert!(model.custom_price);
         assert_eq!(model.input_micro_usd_per_million, Some(1_000));
         assert_eq!(model.cached_input_micro_usd_per_million, Some(100));
-        assert_eq!(model.cache_write_5m_micro_usd_per_million, Some(1_500));
-        assert_eq!(model.cache_write_1h_micro_usd_per_million, Some(2_000));
+        // Cache creation prices are meaningful only for a confirmed native
+        // Messages route, never for this Responses source.
+        assert_eq!(model.cache_write_5m_micro_usd_per_million, None);
+        assert_eq!(model.cache_write_1h_micro_usd_per_million, None);
         assert_eq!(model.output_micro_usd_per_million, Some(3_000));
     }
 
@@ -345,6 +357,131 @@ mod tests {
             OperationalStatus::Rotation
         );
 
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn membership_refresh_applies_saved_routing_without_losing_runtime_state() {
+        use zenith_relay_core::{
+            PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+        };
+
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let mut primary = snapshot_test_source("primary", "gpt-test");
+        primary.in_pool = false;
+        let fallback = snapshot_test_source("fallback", "gpt-test");
+        for source in [&primary, &fallback] {
+            state.store.save_source(source).unwrap();
+            state
+                .vault
+                .save(&source.secret_ref, "synthetic-source-key")
+                .unwrap();
+        }
+        let mut routing = state.store.routing_policy().unwrap();
+        let policy = PoolRoutingPolicy {
+            mode: PoolRoutingMode::InOrder,
+            members: [(&primary, 1), (&fallback, 0)]
+                .into_iter()
+                .map(|(source, max_concurrency)| PoolRoutingMember {
+                    kind: PoolMemberKind::Source,
+                    id: source.id.clone(),
+                    weight: 3,
+                    max_concurrency,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        routing.pool_routing = Some(policy.clone());
+        state.store.set_routing_policy(&routing).unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let runtime = state.runtime().unwrap().unwrap();
+        let next = || {
+            runtime
+                .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
+                .into_iter()
+                .find(|candidate| candidate.next_for_new_request)
+                .map(|candidate| candidate.candidate_id)
+        };
+        assert_eq!(next().as_deref(), Some("fallback"));
+
+        let retry_at = now_ms() + 60_000;
+        runtime.set_candidate_cooldown(&fallback.id, "gpt-test", retry_at);
+        primary.in_pool = true;
+        state.store.save_source(&primary).unwrap();
+        assert!(state.refresh_internal_gateway_key_scopes(&runtime).unwrap());
+
+        assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
+        assert_eq!(next().as_deref(), Some("primary"));
+        let snapshot = state.snapshot().unwrap();
+        assert_eq!(snapshot.gateway.pool_routing, Some(policy));
+        assert_eq!(
+            snapshot
+                .gateway
+                .routing_order
+                .iter()
+                .find(|candidate| candidate.candidate_id == fallback.id)
+                .unwrap()
+                .next_retry_at_ms,
+            Some(retry_at)
+        );
+        primary.in_pool = false;
+        state.store.save_source(&primary).unwrap();
+        assert!(state.refresh_internal_gateway_key_scopes(&runtime).unwrap());
+        assert!(next().is_none());
+        runtime.clear_candidate_cooldown(&fallback.id, "gpt-test");
+        assert_eq!(next().as_deref(), Some("fallback"));
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_snapshot_tracks_cooldown_recovery_and_missing_candidate() {
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let account = snapshot_test_account("snapshot-account", "gpt-test");
+        let credential = AccountCredential {
+            access_token: "synthetic-access".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: None,
+            issued_at_ms: 1,
+            generation: 0,
+            chatgpt_account_id: "synthetic-provider".into(),
+            responses_url: "http://127.0.0.1:9/v1/responses".into(),
+            proxy_url: None,
+            agent_private_key: None,
+            agent_runtime_id: None,
+            agent_task_id: None,
+        };
+        state.store.save_account(&account).unwrap();
+        state
+            .vault
+            .save(
+                &account.secret_ref,
+                &serde_json::to_string(&credential).unwrap(),
+            )
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let runtime = state.runtime().unwrap().unwrap();
+        assert_eq!(
+            state.snapshot().unwrap().accounts[0].operational_status,
+            OperationalStatus::Rotation
+        );
+        assert!(runtime.set_candidate_cooldown(&account.id, "gpt-test", now_ms() + 60_000));
+        assert_eq!(
+            state.snapshot().unwrap().accounts[0].operational_status,
+            OperationalStatus::Unavailable
+        );
+        assert!(runtime.clear_candidate_cooldown(&account.id, "gpt-test"));
+        assert_eq!(
+            state.snapshot().unwrap().accounts[0].operational_status,
+            OperationalStatus::Rotation
+        );
+        assert!(runtime.remove_candidate(&account.id));
+        assert_eq!(
+            state.snapshot().unwrap().accounts[0].operational_status,
+            OperationalStatus::Unavailable
+        );
         state.shutdown_runtime().await.unwrap();
     }
 
@@ -403,6 +540,7 @@ mod tests {
             source_id: "source_test".into(),
             candidate_id: Some("source_test".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -429,6 +567,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(3),
             total_tokens: Some(5),
+            upstream_error: None,
             quota_snapshot: None,
         });
         state.shutdown_runtime().await.unwrap();

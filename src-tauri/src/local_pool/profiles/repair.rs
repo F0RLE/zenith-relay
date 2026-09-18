@@ -11,7 +11,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use zenith_relay_core::unix_time_ms as now_ms;
 
@@ -22,6 +22,7 @@ const MAX_ROLLOUT_FILES: usize = 4_096;
 const MAX_ROLLOUT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_DATABASE_FILES: usize = 64;
 const MAX_REPAIR_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_HISTORY_REPAIR_BACKUPS: usize = 1;
 const HISTORY_REPAIR_BACKUP_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
@@ -81,17 +82,29 @@ struct RepairSnapshot {
     target_provider: String,
     profile_roots: Vec<String>,
     rollout_files: Vec<RolloutSnapshot>,
+    #[serde(default)]
+    history_rollouts: Vec<RolloutSnapshot>,
     databases: Vec<DatabaseSnapshot>,
     created_at_ms: u64,
     expires_at_ms: u64,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RolloutSnapshot {
     path: String,
     hash: String,
     records: usize,
+    #[serde(default)]
+    session_ids: Vec<String>,
+    #[serde(default)]
+    session_meta_count: usize,
+}
+
+#[derive(Default)]
+struct RolloutCollection {
+    rewrites: Vec<RolloutSnapshot>,
+    history: Vec<RolloutSnapshot>,
 }
 
 #[derive(Clone)]
@@ -115,6 +128,8 @@ struct DatabaseSnapshot {
     rows: usize,
     #[serde(default)]
     threads: Vec<DatabaseThreadSnapshot>,
+    #[serde(default)]
+    catalog_threads: Vec<DatabaseCatalogThreadSnapshot>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -122,6 +137,13 @@ struct DatabaseSnapshot {
 struct DatabaseThreadSnapshot {
     id: String,
     rollout_path: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseCatalogThreadSnapshot {
+    host_id: String,
+    thread_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -162,10 +184,12 @@ pub fn preview(
     let roots = canonical_profile_roots(profile_roots)?;
     let target = target_provider.as_str();
     let mut rollout_files = Vec::new();
+    let mut history_rollouts = Vec::new();
     let mut databases = Vec::new();
     let mut seen = HashSet::new();
     let mut total_bytes = 0_u64;
     for root in &roots {
+        let mut collected_rollouts = RolloutCollection::default();
         for directory in [root.join("sessions"), root.join("archived_sessions")] {
             collect_rollouts(
                 &directory,
@@ -173,30 +197,46 @@ pub fn preview(
                 target,
                 0,
                 &mut seen,
-                &mut rollout_files,
+                &mut collected_rollouts,
                 &mut total_bytes,
             )?;
         }
-        let eligible_rollout_paths = rollout_files
+        let profile_rollouts = collected_rollouts.rewrites;
+        let profile_history_rollouts = collected_rollouts.history;
+        let eligible_rollout_paths = profile_history_rollouts
             .iter()
             .map(|item| item.path.clone())
             .collect::<HashSet<_>>();
-        for path in [
-            root.join("state_5.sqlite"),
-            root.join("sqlite").join("state_5.sqlite"),
-        ] {
-            if !path.is_file() {
-                continue;
-            }
-            let path = canonical_child(root, &path)?;
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            let snapshot = scan_database(&path, target, &eligible_rollout_paths)?;
+        let mut eligible_thread_ids = session_ids_from_rollouts(profile_history_rollouts.iter());
+        let database_paths = collect_history_databases(root, &mut seen)?;
+        for path in &database_paths {
+            let snapshot = scan_database(
+                root,
+                path,
+                target,
+                &eligible_rollout_paths,
+                &eligible_thread_ids,
+            )?;
+            eligible_thread_ids.extend(snapshot.threads.into_iter().map(|thread| thread.id));
+        }
+        for path in database_paths {
+            let snapshot = scan_database(
+                root,
+                &path,
+                target,
+                &eligible_rollout_paths,
+                &eligible_thread_ids,
+            )?;
             if snapshot.rows > 0 {
                 databases.push(snapshot);
             }
         }
+        rollout_files.extend(profile_rollouts);
+        history_rollouts.extend(
+            profile_history_rollouts
+                .into_iter()
+                .filter(|rollout| rollout.records == 0),
+        );
     }
     let created_at_ms = now_ms();
     let session_id = format!("repair_{}", uuid::Uuid::new_v4().simple());
@@ -206,6 +246,7 @@ pub fn preview(
         target_provider: target.to_string(),
         profile_roots: roots.iter().map(|path| path_string(path)).collect(),
         rollout_files,
+        history_rollouts,
         databases,
         created_at_ms,
         expires_at_ms: created_at_ms.saturating_add(PREVIEW_TTL_MS),
@@ -229,22 +270,34 @@ pub fn apply(
         return Err("repair preview expired".to_string());
     }
     validate_snapshot_paths(&snapshot)?;
-    for expected in &snapshot.rollout_files {
+    let history_rollouts = snapshot
+        .rollout_files
+        .iter()
+        .chain(snapshot.history_rollouts.iter())
+        .collect::<Vec<_>>();
+    for expected in &history_rollouts {
         let current = scan_rollout(Path::new(&expected.path), &snapshot.target_provider)?;
         if current.hash != expected.hash || current.records != expected.records {
             return Err("ChatGPT rollout files changed after repair preview".to_string());
         }
     }
+    let eligible_rollout_paths = history_rollouts
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<HashSet<_>>();
+    let mut eligible_thread_ids = session_ids_from_rollouts(history_rollouts.iter().copied());
+    for database in &snapshot.databases {
+        eligible_thread_ids.extend(database.threads.iter().map(|thread| thread.id.clone()));
+    }
     for expected in &snapshot.databases {
-        let eligible_rollout_paths = snapshot
-            .rollout_files
-            .iter()
-            .map(|item| item.path.clone())
-            .collect::<HashSet<_>>();
+        let profile_root =
+            profile_root_for_path(&snapshot.profile_roots, Path::new(&expected.path))?;
         let current = scan_database(
+            &profile_root,
             Path::new(&expected.path),
             &snapshot.target_provider,
             &eligible_rollout_paths,
+            &eligible_thread_ids,
         )?;
         if current.hash != expected.hash || current.rows != expected.rows {
             return Err("ChatGPT history database changed after repair preview".to_string());
@@ -469,7 +522,7 @@ fn collect_rollouts(
     target: &str,
     depth: usize,
     seen: &mut HashSet<PathBuf>,
-    snapshots: &mut Vec<RolloutSnapshot>,
+    collection: &mut RolloutCollection,
     total_bytes: &mut u64,
 ) -> Result<(), String> {
     if !directory.exists() {
@@ -491,7 +544,7 @@ fn collect_rollouts(
                 target,
                 depth + 1,
                 seen,
-                snapshots,
+                collection,
                 total_bytes,
             )?;
             continue;
@@ -514,8 +567,11 @@ fn collect_rollouts(
             continue;
         }
         let snapshot = scan_rollout(&path, target)?;
+        if snapshot.session_meta_count > 0 {
+            collection.history.push(snapshot.clone());
+        }
         if snapshot.records > 0 {
-            snapshots.push(snapshot);
+            collection.rewrites.push(snapshot);
         }
     }
     Ok(())
@@ -528,6 +584,14 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     }
     let metadata = read_session_metadata(path)?;
     let records = session_meta_replacements(&metadata, target).len();
+    let mut session_ids = metadata
+        .records
+        .iter()
+        .filter_map(|record| session_meta_thread_id(&record.value))
+        .collect::<Vec<_>>();
+    session_ids.sort();
+    session_ids.dedup();
+    let session_meta_count = metadata.records.len();
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -542,6 +606,8 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
         path: path_string(path),
         hash: hex::encode(hasher.finalize()),
         records,
+        session_ids,
+        session_meta_count,
     })
 }
 
@@ -640,71 +706,230 @@ fn session_meta_provider(value: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+fn session_meta_thread_id(value: &Value) -> Option<String> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("id").or_else(|| payload.get("session_id")))
+        .or_else(|| value.get("id").or_else(|| value.get("session_id")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn session_ids_from_rollouts<'a>(
+    rollouts: impl IntoIterator<Item = &'a RolloutSnapshot>,
+) -> HashSet<String> {
+    rollouts
+        .into_iter()
+        .flat_map(|rollout| rollout.session_ids.iter().cloned())
+        .collect()
+}
+
+fn collect_history_databases(
+    root: &Path,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    let sqlite_directory = root.join("sqlite");
+    let mut candidates = vec![
+        root.join("state_5.sqlite"),
+        sqlite_directory.join("state_5.sqlite"),
+    ];
+    if sqlite_directory.is_dir() {
+        let mut discovered = Vec::new();
+        for entry in fs::read_dir(&sqlite_directory).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && is_sqlite_database_path(&path)
+            {
+                discovered.push(path);
+            }
+        }
+        discovered.sort();
+        candidates.extend(discovered);
+    }
+
+    let mut databases = Vec::new();
+    for path in candidates {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(error)),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let path = canonical_child(root, &path)?;
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if databases.len() >= MAX_DATABASE_FILES {
+            return Err("repair history database limit exceeded".to_string());
+        }
+        databases.push(path);
+    }
+    Ok(databases)
+}
+
+fn is_sqlite_database_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some(extension)
+            if extension.eq_ignore_ascii_case("db")
+                || extension.eq_ignore_ascii_case("sqlite")
+                || extension.eq_ignore_ascii_case("sqlite3")
+    )
+}
+
+fn table_columns(connection: &Connection, table: &str) -> Result<HashSet<String>, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(db_error)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_error)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(db_error)?;
+    Ok(columns)
+}
+
+fn profile_root_for_path(profile_roots: &[String], path: &Path) -> Result<PathBuf, String> {
+    let path = portable_canonicalize(path)?;
+    profile_roots
+        .iter()
+        .map(|root| PathBuf::from(portable_path_value(root)))
+        .find(|root| path.starts_with(root))
+        .ok_or_else(|| "repair preview path escaped its profile".to_string())
+}
+
+fn canonical_rollout_path(profile_root: &Path, rollout_path: &str) -> Option<String> {
+    let path = PathBuf::from(portable_path_value(rollout_path));
+    let path = if path.is_absolute() {
+        path
+    } else {
+        profile_root.join(path)
+    };
+    fs::canonicalize(path).ok().map(|path| path_string(&path))
+}
+
 fn scan_database(
+    profile_root: &Path,
     path: &Path,
     target: &str,
     eligible_rollout_paths: &HashSet<String>,
+    eligible_thread_ids: &HashSet<String>,
 ) -> Result<DatabaseSnapshot, String> {
     let connection =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(db_error)?;
-    let exists = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(db_error)?;
-    if !exists {
-        return Ok(DatabaseSnapshot {
-            path: path_string(path),
-            hash: hex_hash(&[]),
-            rows: 0,
-            threads: Vec::new(),
-        });
+    let thread_columns = table_columns(&connection, "threads")?;
+    let mut rows = Vec::new();
+    if ["id", "model_provider", "rollout_path"]
+        .iter()
+        .all(|column| thread_columns.contains(*column))
+    {
+        let mut statement = connection
+            .prepare(
+                "SELECT id, COALESCE(model_provider, ''), rollout_path \
+                 FROM threads \
+                 WHERE COALESCE(model_provider, '') <> ?1 \
+                 ORDER BY id",
+            )
+            .map_err(db_error)?;
+        let candidates = statement
+            .query_map([target], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        rows = candidates
+            .into_iter()
+            .filter_map(|(id, provider, rollout_path)| {
+                canonical_rollout_path(profile_root, &rollout_path)
+                    .filter(|canonical| eligible_rollout_paths.contains(canonical))
+                    .map(|canonical| (id, provider, rollout_path, canonical))
+            })
+            .collect();
     }
-    let mut statement = connection
-        .prepare("SELECT id, model_provider, rollout_path FROM threads WHERE model_provider <> ?1 ORDER BY id")
-        .map_err(db_error)?;
-    let rows = statement
-        .query_map([target], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(db_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_error)?;
-    let rows = rows
-        .into_iter()
-        .filter_map(|(id, provider, rollout_path)| {
-            let canonical = fs::canonicalize(portable_path_value(&rollout_path)).ok()?;
-            let canonical = path_string(&canonical);
-            eligible_rollout_paths.contains(&canonical).then_some((
-                id,
-                provider,
-                rollout_path,
-                canonical,
-            ))
-        })
-        .collect::<Vec<_>>();
+
+    let catalog_columns = table_columns(&connection, "local_thread_catalog")?;
+    let mut catalog_rows = Vec::new();
+    if ["host_id", "thread_id", "model_provider"]
+        .iter()
+        .all(|column| catalog_columns.contains(*column))
+    {
+        let missing_candidate = if catalog_columns.contains("missing_candidate") {
+            "COALESCE(missing_candidate, 0)"
+        } else {
+            "0"
+        };
+        let query = format!(
+            "SELECT COALESCE(host_id, ''), thread_id, COALESCE(model_provider, ''), {missing_candidate} \
+             FROM local_thread_catalog \
+             WHERE COALESCE(thread_id, '') <> '' \
+             ORDER BY host_id, thread_id"
+        );
+        let mut statement = connection.prepare(&query).map_err(db_error)?;
+        let candidates = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        catalog_rows = candidates
+            .into_iter()
+            .filter(|(_, thread_id, provider, missing_candidate)| {
+                eligible_thread_ids.contains(thread_id)
+                    && (provider != target || *missing_candidate != 0)
+            })
+            .collect();
+    }
+
     let mut hasher = Sha256::new();
     for (id, provider, rollout_path, _) in &rows {
+        hasher.update(b"threads");
         for value in [id, provider, rollout_path] {
             hasher.update((value.len() as u64).to_le_bytes());
             hasher.update(value.as_bytes());
         }
     }
+    for (host_id, thread_id, provider, missing_candidate) in &catalog_rows {
+        hasher.update(b"local_thread_catalog");
+        for value in [host_id, thread_id, provider] {
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update(missing_candidate.to_le_bytes());
+    }
     Ok(DatabaseSnapshot {
         path: path_string(path),
         hash: hex::encode(hasher.finalize()),
-        rows: rows.len(),
+        rows: rows.len().saturating_add(catalog_rows.len()),
         threads: rows
             .iter()
             .map(|(id, _, rollout_path, _)| DatabaseThreadSnapshot {
                 id: id.clone(),
                 rollout_path: rollout_path.clone(),
+            })
+            .collect(),
+        catalog_threads: catalog_rows
+            .iter()
+            .map(|(host_id, thread_id, _, _)| DatabaseCatalogThreadSnapshot {
+                host_id: host_id.clone(),
+                thread_id: thread_id.clone(),
             })
             .collect(),
     })
@@ -751,6 +976,7 @@ fn validate_snapshot_paths(snapshot: &RepairSnapshot) -> Result<(), String> {
         .rollout_files
         .iter()
         .map(|item| &item.path)
+        .chain(snapshot.history_rollouts.iter().map(|item| &item.path))
         .chain(snapshot.databases.iter().map(|item| &item.path))
     {
         let canonical = portable_canonicalize(Path::new(path))?;
@@ -826,23 +1052,114 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db_error)?;
+        let thread_columns = table_columns(&connection, "threads")?;
+        let catalog_columns = table_columns(&connection, "local_thread_catalog")?;
+        let catalog_metadata_columns = table_columns(&connection, "local_thread_catalog_metadata")?;
+        if !item.threads.is_empty()
+            && !["id", "model_provider", "rollout_path"]
+                .iter()
+                .all(|column| thread_columns.contains(*column))
+        {
+            return Err("ChatGPT history database schema changed during repair".to_string());
+        }
+        if !item.catalog_threads.is_empty()
+            && !["host_id", "thread_id", "model_provider"]
+                .iter()
+                .all(|column| catalog_columns.contains(*column))
+        {
+            return Err("ChatGPT history database schema changed during repair".to_string());
+        }
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
+
         let mut changed = 0_usize;
         for thread in &item.threads {
             let count = transaction
                 .execute(
-                    "UPDATE threads SET model_provider = ?1 WHERE id = ?2 AND rollout_path = ?3 AND model_provider <> ?1",
+                    "UPDATE threads \
+                     SET model_provider = ?1 \
+                     WHERE id = ?2 \
+                       AND rollout_path = ?3 \
+                       AND COALESCE(model_provider, '') <> ?1",
                     rusqlite::params![snapshot.target_provider, thread.id, thread.rollout_path],
                 )
                 .map_err(db_error)?;
             changed = changed.saturating_add(count);
         }
-        if changed != item.rows || item.threads.len() != item.rows {
+        let mut catalog_changed = 0_usize;
+        if !item.catalog_threads.is_empty() {
+            let changed_predicate = if catalog_columns.contains("missing_candidate") {
+                "(COALESCE(model_provider, '') <> ?1 OR COALESCE(missing_candidate, 0) <> 0)"
+            } else {
+                "COALESCE(model_provider, '') <> ?1"
+            };
+            let query = format!(
+                "UPDATE local_thread_catalog \
+                 SET model_provider = ?1{} \
+                 WHERE COALESCE(host_id, '') = ?2 \
+                   AND thread_id = ?3 \
+                   AND {changed_predicate}",
+                if catalog_columns.contains("missing_candidate") {
+                    ", missing_candidate = 0"
+                } else {
+                    ""
+                }
+            );
+            for thread in &item.catalog_threads {
+                let count = transaction
+                    .execute(
+                        &query,
+                        rusqlite::params![
+                            snapshot.target_provider,
+                            thread.host_id,
+                            thread.thread_id
+                        ],
+                    )
+                    .map_err(db_error)?;
+                catalog_changed = catalog_changed.saturating_add(count);
+            }
+            changed = changed.saturating_add(catalog_changed);
+            bump_local_thread_catalog_revision(
+                &transaction,
+                &catalog_metadata_columns,
+                catalog_changed,
+            )?;
+        }
+        let expected = item
+            .threads
+            .len()
+            .saturating_add(item.catalog_threads.len());
+        if changed != expected || expected != item.rows {
             return Err("ChatGPT history database changed during repair".to_string());
         }
         transaction.commit().map_err(db_error)?;
+    }
+    Ok(())
+}
+
+fn bump_local_thread_catalog_revision(
+    transaction: &rusqlite::Transaction<'_>,
+    metadata_columns: &HashSet<String>,
+    changed_rows: usize,
+) -> Result<(), String> {
+    if changed_rows == 0 || !metadata_columns.contains("catalog_revision") {
+        return Ok(());
+    }
+    let updated = transaction
+        .execute(
+            "UPDATE local_thread_catalog_metadata \
+             SET catalog_revision = COALESCE(catalog_revision, 0) + ?1",
+            [changed_rows as i64],
+        )
+        .map_err(db_error)?;
+    if updated == 0 && metadata_columns.contains("id") {
+        transaction
+            .execute(
+                "INSERT INTO local_thread_catalog_metadata (id, catalog_revision) VALUES (1, ?1)",
+                [changed_rows as i64],
+            )
+            .map_err(db_error)?;
     }
     Ok(())
 }
@@ -853,6 +1170,9 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
     if replacements.is_empty() || replacements.len() != expected {
         return Err("ChatGPT rollout changed during repair".to_string());
     }
+    let modified_at = fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
     replace_file_with(path, false, move |output| {
         let mut input = File::open(path).map_err(io_error)?;
         let mut position = 0_u64;
@@ -892,7 +1212,19 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
         }
         std::io::copy(&mut input, output).map_err(io_error)?;
         Ok(())
-    })
+    })?;
+    restore_modified_time(path, modified_at);
+    Ok(())
+}
+
+fn restore_modified_time(path: &Path, modified_at: Option<SystemTime>) {
+    let Some(modified_at) = modified_at else {
+        return;
+    };
+    let _ = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(modified_at)));
 }
 
 fn session_meta_replacements(metadata: &SessionMetadata, target: &str) -> Vec<SessionMeta> {
@@ -1064,10 +1396,6 @@ fn portable_path_value(value: &str) -> String {
     }
 }
 
-fn hex_hash(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
 fn db_error(error: rusqlite::Error) -> String {
     format!("ChatGPT history database operation failed: {error}")
 }
@@ -1201,6 +1529,38 @@ mod tests {
     }
 
     #[test]
+    fn repair_keeps_rollout_chronology_when_rewriting_provider_metadata() {
+        let (root, state, backups, profile, rollout, _database) = fixture("preserve-rollout-time");
+        let expected_modified = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        OpenOptions::new()
+            .write(true)
+            .open(&rollout)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(expected_modified))
+            .unwrap();
+
+        let preview = preview(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+        )
+        .unwrap();
+        apply(&state, &backups, &preview.session_id).unwrap();
+
+        assert_eq!(
+            fs::metadata(&rollout)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap(),
+            expected_modified.duration_since(UNIX_EPOCH).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn repair_does_not_update_threads_without_a_processed_rollout() {
         let (root, state, backups, profile, rollout, database) = fixture("linked-threads");
         let missing = profile.join("sessions/missing-rollout.jsonl");
@@ -1235,6 +1595,193 @@ mod tests {
         assert_eq!(database_provider(&database), "zenith_relay_local");
         assert_eq!(missing_provider, "openai");
         assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_reconciles_the_current_desktop_catalog_for_the_transferred_chat_only() {
+        let (root, state, backups, profile, _rollout, database) = fixture("current-catalog");
+        let catalog = profile.join("sqlite").join("codex-dev.db");
+        fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let connection = Connection::open(&catalog).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE local_thread_catalog(\
+                     host_id TEXT NOT NULL,\
+                     thread_id TEXT NOT NULL,\
+                     model_provider TEXT,\
+                     missing_candidate INTEGER NOT NULL DEFAULT 0,\
+                     PRIMARY KEY(host_id, thread_id)\
+                 );\
+                 CREATE TABLE local_thread_catalog_metadata(\
+                     id INTEGER PRIMARY KEY,\
+                     catalog_revision INTEGER\
+                 );\
+                 INSERT INTO local_thread_catalog_metadata(id, catalog_revision) VALUES (1, 7);\
+                 INSERT INTO local_thread_catalog(host_id, thread_id, model_provider, missing_candidate)\
+                     VALUES ('local', 'thread-test', '', 1);\
+                 INSERT INTO local_thread_catalog(host_id, thread_id, model_provider, missing_candidate)\
+                     VALUES ('local', 'thread-unrelated', 'openai', 1);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let preview = preview(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview.sqlite_row_count, 2);
+
+        let applied = apply(&state, &backups, &preview.session_id).unwrap();
+        assert_eq!(applied.sqlite_rows_changed, 2);
+        assert_eq!(database_provider(&database), "zenith_relay_local");
+        assert_eq!(
+            catalog_thread_provider(&catalog, "thread-test"),
+            "zenith_relay_local"
+        );
+        assert_eq!(catalog_missing_candidate(&catalog, "thread-test"), 0);
+        assert_eq!(catalog_revision(&catalog), 8);
+        assert_eq!(
+            catalog_thread_provider(&catalog, "thread-unrelated"),
+            "openai"
+        );
+        assert_eq!(catalog_missing_candidate(&catalog, "thread-unrelated"), 1);
+
+        rollback(&backups, &applied.backup_id).unwrap();
+        assert_eq!(catalog_thread_provider(&catalog, "thread-test"), "");
+        assert_eq!(catalog_missing_candidate(&catalog, "thread-test"), 1);
+        assert_eq!(catalog_revision(&catalog), 7);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_reconciles_catalog_rows_with_a_legacy_null_host_id() {
+        let (root, state, backups, profile, _rollout, _database) = fixture("null-catalog-host");
+        let catalog = profile.join("sqlite").join("codex-dev.db");
+        fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let connection = Connection::open(&catalog).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE local_thread_catalog(\
+                     host_id TEXT,\
+                     thread_id TEXT NOT NULL,\
+                     model_provider TEXT,\
+                     missing_candidate INTEGER NOT NULL DEFAULT 0,\
+                     PRIMARY KEY(host_id, thread_id)\
+                 );\
+                 CREATE TABLE local_thread_catalog_metadata(\
+                     id INTEGER PRIMARY KEY,\
+                     catalog_revision INTEGER\
+                 );\
+                 INSERT INTO local_thread_catalog_metadata(id, catalog_revision) VALUES (1, 4);\
+                 INSERT INTO local_thread_catalog(host_id, thread_id, model_provider, missing_candidate)\
+                     VALUES (NULL, 'thread-test', 'openai', 1);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let preview = preview(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview.sqlite_row_count, 2);
+
+        let applied = apply(&state, &backups, &preview.session_id).unwrap();
+        assert_eq!(applied.sqlite_rows_changed, 2);
+
+        let connection = Connection::open(&catalog).unwrap();
+        let provider: String = connection
+            .query_row(
+                "SELECT model_provider FROM local_thread_catalog \
+                 WHERE host_id IS NULL AND thread_id = 'thread-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let missing_candidate: i64 = connection
+            .query_row(
+                "SELECT missing_candidate FROM local_thread_catalog \
+                 WHERE host_id IS NULL AND thread_id = 'thread-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(provider, "zenith_relay_local");
+        assert_eq!(missing_candidate, 0);
+        assert_eq!(catalog_revision(&catalog), 5);
+
+        rollback(&backups, &applied.backup_id).unwrap();
+        let connection = Connection::open(&catalog).unwrap();
+        let restored_provider: String = connection
+            .query_row(
+                "SELECT model_provider FROM local_thread_catalog \
+                 WHERE host_id IS NULL AND thread_id = 'thread-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        assert_eq!(restored_provider, "openai");
+        assert_eq!(catalog_revision(&catalog), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_completes_a_partial_transfer_when_rollouts_already_match_the_target() {
+        let (root, state, backups, profile, rollout, database) = fixture("partial-catalog");
+        let content = fs::read_to_string(&rollout).unwrap();
+        fs::write(
+            &rollout,
+            content.replace(
+                "\"model_provider\":\"openai\"",
+                "\"model_provider\":\"zenith_relay_local\"",
+            ),
+        )
+        .unwrap();
+        let catalog = profile.join("sqlite").join("codex-dev.db");
+        fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        let connection = Connection::open(&catalog).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE local_thread_catalog(\
+                     host_id TEXT NOT NULL,\
+                     thread_id TEXT NOT NULL,\
+                     model_provider TEXT,\
+                     missing_candidate INTEGER NOT NULL DEFAULT 0,\
+                     PRIMARY KEY(host_id, thread_id)\
+                 );\
+                 INSERT INTO local_thread_catalog(host_id, thread_id, model_provider, missing_candidate)\
+                     VALUES ('local', 'thread-test', 'openai', 1);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let preview = preview(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+        )
+        .unwrap();
+        assert_eq!(preview.rollout_record_count, 0);
+        assert_eq!(preview.sqlite_row_count, 2);
+
+        let applied = apply(&state, &backups, &preview.session_id).unwrap();
+        assert_eq!(applied.rollout_records_changed, 0);
+        assert_eq!(applied.sqlite_rows_changed, 2);
+        assert_eq!(database_provider(&database), "zenith_relay_local");
+        assert_eq!(
+            catalog_thread_provider(&catalog, "thread-test"),
+            "zenith_relay_local"
+        );
+        assert_eq!(catalog_missing_candidate(&catalog, "thread-test"), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1376,6 +1923,7 @@ mod tests {
                 target_provider: "openai".into(),
                 profile_roots: Vec::new(),
                 rollout_files: Vec::new(),
+                history_rollouts: Vec::new(),
                 databases: Vec::new(),
                 created_at_ms: 1,
                 expires_at_ms,
@@ -1464,6 +2012,43 @@ mod tests {
             .unwrap()
             .query_row(
                 "SELECT model_provider FROM threads WHERE id='thread-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn catalog_thread_provider(path: &Path, thread_id: &str) -> String {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(model_provider, '') \
+                 FROM local_thread_catalog \
+                 WHERE host_id = 'local' AND thread_id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn catalog_missing_candidate(path: &Path, thread_id: &str) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT missing_candidate \
+                 FROM local_thread_catalog \
+                 WHERE host_id = 'local' AND thread_id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn catalog_revision(path: &Path) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT catalog_revision FROM local_thread_catalog_metadata WHERE id = 1",
                 [],
                 |row| row.get(0),
             )

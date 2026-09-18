@@ -25,15 +25,23 @@ impl PoolScheduler {
         left: &RuntimeCandidate,
         right: &RuntimeCandidate,
         lane: InFlightLane,
+        now_ms: u64,
     ) -> Ordering {
+        if self.pool_routing.is_some() {
+            return self.compare_unified_preference(left, right, lane, now_ms);
+        }
         let left_in_flight = self.in_flight_count(&left.id, lane);
         let right_in_flight = self.in_flight_count(&right.id, lane);
         let left_dispatches = self.rotation_dispatch_count(left, lane);
         let right_dispatches = self.rotation_dispatch_count(right, lane);
-        let common = routing_tier(left)
-            .cmp(&routing_tier(right))
-            .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
-            .then_with(|| compare_api_source_priority(left, right));
+        let common = self.compare_member_routes(left, right).then_with(|| {
+            routing_tier(left)
+                .cmp(&routing_tier(right))
+                .then_with(|| {
+                    candidate_kind_preference(left).cmp(&candidate_kind_preference(right))
+                })
+                .then_with(|| compare_api_source_priority(left, right))
+        });
         // Parallel-load balancing protects OAuth accounts from being selected by
         // every concurrent chat. API sources are connection-based providers:
         // an active request must not make a different API source win selection.
@@ -59,6 +67,10 @@ impl PoolScheduler {
             RoutingStrategy::QuotaHighest => common
                 .then_with(|| self.compare_quota_and_reset(left, right))
                 .then_with(load)
+                // A quota tie must not pin every sequential request to the
+                // same account. Keep the highest-quota preference, then use
+                // dispatch history as a fair tie-breaker.
+                .then_with(fair_rotation)
                 .then_with(|| right.id.cmp(&left.id)),
             RoutingStrategy::SubscriptionExpiry => common
                 .then_with(|| self.compare_subscription_expiry(left, right))
@@ -81,6 +93,13 @@ impl PoolScheduler {
         runner_up: &RuntimeCandidate,
         lane: InFlightLane,
     ) -> SelectionReason {
+        if let Some(policy) = &self.pool_routing {
+            return match policy.mode {
+                crate::PoolRoutingMode::InOrder => SelectionReason::ManualPriority,
+                crate::PoolRoutingMode::RoundRobin => SelectionReason::FairRotation,
+                crate::PoolRoutingMode::Smart => SelectionReason::PoolPolicy,
+            };
+        }
         let selected_in_flight = self.in_flight_count(&selected.id, lane);
         let runner_up_in_flight = self.in_flight_count(&runner_up.id, lane);
         let selected_dispatches = self.rotation_dispatch_count(selected, lane);
@@ -106,13 +125,12 @@ impl PoolScheduler {
             && selected_in_flight != runner_up_in_flight
         {
             SelectionReason::ParallelLoad
-        } else if self.routing_strategy != RoutingStrategy::QuotaHighest
-            && self.compare_equal_quota_rotation(
-                selected,
-                runner_up,
-                selected_dispatches,
-                runner_up_dispatches,
-            ) != Ordering::Equal
+        } else if self.compare_equal_quota_rotation(
+            selected,
+            runner_up,
+            selected_dispatches,
+            runner_up_dispatches,
+        ) != Ordering::Equal
         {
             SelectionReason::FairRotation
         } else {
@@ -142,6 +160,34 @@ impl PoolScheduler {
                 }
             }
             (left_quota, right_quota) => left_quota.compare_preference(right_quota),
+        }
+        .then_with(|| self.compare_provider_credits(left, right))
+    }
+
+    fn compare_provider_credits(
+        &self,
+        left: &RuntimeCandidate,
+        right: &RuntimeCandidate,
+    ) -> Ordering {
+        if left.kind != CandidateKind::OAuthAccount || right.kind != CandidateKind::OAuthAccount {
+            return Ordering::Equal;
+        }
+        match (
+            left.provider_credits_unlimited,
+            right.provider_credits_unlimited,
+        ) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => match (
+                left.provider_credits_micro_units,
+                right.provider_credits_micro_units,
+            ) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            },
         }
     }
 

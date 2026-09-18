@@ -151,6 +151,17 @@ describe("usage data", () => {
       ttft: 100,
       generationMs: 500,
     });
+    const upstreamError = { httpStatus: 422, code: "future_constraint", errorType: "validation_error", message: "Invalid field: temperature", redacted: false, truncated: false };
+    for (const success of [false, true]) {
+      const localRow = usageRowsFromLocal([{ ...local, success, upstreamError }], {
+        ...labels, accountLabels: new Map(), sourceLabels: new Map(),
+      })[0];
+      const remoteRow = usageRowsFromRemote([{ ...remote, success, upstreamError }], {
+        ...labels, accountDisplayName: (label) => label,
+      })[0];
+      expect(localRow?.upstreamError).toEqual(success ? null : upstreamError);
+      expect(remoteRow?.upstreamError).toEqual(success ? null : upstreamError);
+    }
   });
 
   test("labels deleted account history without collapsing it into an unknown account", () => {

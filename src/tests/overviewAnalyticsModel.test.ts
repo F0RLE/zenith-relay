@@ -9,7 +9,7 @@ import {
   totalsFromSamples,
   type UsageSample,
 } from "../src/features/relay/pages/overview/overviewAnalyticsModel";
-import { sourceHost } from "../src/features/relay/sourceUrl";
+import { sourceHost, sourcePort } from "../src/features/relay/sourceUrl";
 
 const sample = (overrides: Partial<UsageSample> = {}): UsageSample => ({
   createdAtMs: 1_000,
@@ -89,5 +89,10 @@ describe("overview analytics model", () => {
   test("uses a readable source host without rejecting manual addresses", () => {
     expect(sourceHost("https://api.example.test/v1")).toBe("api.example.test");
     expect(sourceHost("manual source")).toBe("manual source");
+  });
+
+  test("reads an explicit port without rejecting a malformed address", () => {
+    expect(sourcePort("http://127.0.0.1:4317/v1")).toBe("4317");
+    expect(sourcePort("partial gateway address")).toBe("");
   });
 });

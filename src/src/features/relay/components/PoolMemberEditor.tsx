@@ -1,32 +1,27 @@
-import { Fragment, useCallback, useMemo, useState } from "react";
-import { ArrowDown, ArrowRight, ArrowUp, GripVertical, Power } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { ChevronDown, CircleDollarSign, Pause, RotateCcw, Search } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
-import type { SourceSummary } from "../api/types";
 import { SourcePriceEditor } from "./SourcePriceEditor";
 import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./sourcePriceEditorModel";
 import { effectiveSourceProtocolBindings } from "../sourceProtocolBindings";
-import { Button, Dialog, IconButton, OptionMenu, StatusIcon } from "./Ui";
-import { apiSourcePriority, apiSourceRole, type ApiSourceRole } from "../routingOrder";
-import { sourceOrderForRole, sourceRoutingStages, toggle, type PoolMember } from "../poolHelpers";
+import { Button, Dialog, OptionMenu, Tabs } from "./Ui";
+import { toggle, type PoolMember } from "../poolHelpers";
+import { groupModels, memberModelCatalog } from "../modelGroups";
 import { useRelayState } from "../state/RelayStateProvider";
 import {
   modelSelectionForMember,
   modelSelectionPayload,
-  moveSourceBy as moveSourceByOrder,
-  moveSourceOrder,
-  sourcePrioritiesForOrder,
 } from "./poolMemberEditorModel";
-import { useSourceOrderDrag } from "./useSourceOrderDrag";
 
 export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
-  const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
-  const [sourceOrder, setSourceOrder] = useState<string[]>(() => member.kind === "source" ? sourceOrderForRole(runtime?.sources ?? [], apiSourceRole(member.priority), member.id) : []);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
+  const [tab, setTab] = useState("models");
+  const [search, setSearch] = useState("");
   const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
   const [enabledModels, setEnabledModels] = useState(initialEnabledModels);
   const toggleEnabledModel = useCallback((model: string) => {
@@ -38,32 +33,20 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const [purchaseCost, setPurchaseCost] = useState(member.kind === "account" && member.purchaseCostMicroUsd ? String(member.purchaseCostMicroUsd / 1_000_000) : "");
   const purchaseCostUsd = purchaseCost.trim() === "" ? 0 : Number(purchaseCost);
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
-  const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole) : [];
-  const orderedSources = sourceOrder.map((sourceId) => runtime?.sources.find((source) => source.id === sourceId)).filter((source): source is SourceSummary => Boolean(source));
-  const chooseSourceRole = useCallback((role: ApiSourceRole) => {
-    setSourceRole(role);
-    setSourceOrder(sourceOrderForRole(runtime?.sources ?? [], role, member.id));
-  }, [member.id, runtime?.sources]);
-  const moveSource = useCallback((sourceId: string, targetId: string, after = false) => {
-    setSourceOrder((current) => moveSourceOrder(current, sourceId, targetId, after));
-  }, []);
-  const moveSourceBy = (sourceId: string, offset: number) => {
-    setSourceOrder((current) => moveSourceByOrder(current, sourceId, offset));
-  };
-  const {
-    draggedSource,
-    dropTarget,
-    dropAfter,
-    dropRole,
-    startSourceDrag,
-  } = useSourceOrderDrag({
-    memberId: member.id,
-    sourceRole,
-    onRoleDrop: chooseSourceRole,
-    onSourceDrop: moveSource,
+  const filteredModels = modelIds.filter((model) => model.toLowerCase().includes(search.trim().toLowerCase()));
+  const catalog = memberModelCatalog(runtime?.gateway);
+  const modelGroups = groupModels(filteredModels, {
+    metadata: (model) => catalog.get(model.toLowerCase()),
+    isNativeChatGpt: () => member.kind === "account",
   });
-  const save = () => {
-    if (member.kind === "source" && !sourcePriceOverrides) return;
+  const memberName = member.kind === "source" ? member.name : member.label;
+  const tabs = [
+    { id: "models", label: t("common.models") },
+    ...(member.kind === "source" ? [{ id: "prices", label: t("sources.editorPricesTab") }] : []),
+    { id: "settings", label: t("nav.settings") },
+  ];
+  const save = async () => {
+    if (busy || !canSave || !purchaseCostValid || (member.kind === "source" && !sourcePriceOverrides)) return;
     const { allowedModels, excludedModels } = modelSelectionPayload(modelIds, enabledModels);
     const persist = () => {
       if (member.kind === "account") {
@@ -73,60 +56,39 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
       const protocolBindings = effectiveSourceProtocolBindings(member);
-      const sourcePriorities = sourcePrioritiesForOrder(sourceOrder, sourceRole);
-      const priority = sourcePriorities[member.id] ?? apiSourcePriority(sourceRole);
-      const payload = { allowedModels, excludedModels, draining: member.draining, priority, sourcePriorities, weight: 1, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
+      const payload = { allowedModels, excludedModels, draining, priority: member.priority, weight: member.weight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
     };
-    onClose();
-    void perform(`member-${member.id}`, persist, "feedback.saved");
+    const ok = await perform(`member-${member.id}`, persist, "feedback.saved");
+    if (ok) onClose();
   };
-  return <Dialog wide className={member.kind === "source" ? "source-policy-dialog" : ""} title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave || !purchaseCostValid || (member.kind === "source" && !sourcePriceOverrides)} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}>
+  return <Dialog className="member-policy-dialog" title={t("pool.editMember")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave || !purchaseCostValid || (member.kind === "source" && !sourcePriceOverrides)} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={() => void save()}>{t("pool.savePolicy")}</Button></>}>
     <div className="relay-form member-editor">
-      {member.kind === "source" ? <section className="source-routing-section">
-        <header className="source-routing-heading"><div><h3>{t("sources.poolRole")}</h3><p className="sr-only">{t("sources.routingHint")}</p></div></header>
-        <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
-          <span>{t("sources.fallbackOrder")}</span>
-          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")} data-dragging={draggedSource ? "true" : undefined}>
-            {sourceStages.map((stage, index) => {
-              const label = stage.role === "accounts" ? t("connections.accounts") : t(`sources.roles.${stage.role}`);
-              const arrow = index > 0 ? <ArrowRight className="source-route-arrow" aria-hidden /> : null;
-              if (stage.role === "accounts") {
-                return <Fragment key={stage.role}>{arrow}<div className="source-route-stage accounts" data-stage-index={index} aria-label={`${label}: ${stage.count}`}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></div></Fragment>;
-              }
-              const role: ApiSourceRole = stage.role;
-              return <Fragment key={role}>{arrow}<button className="source-route-stage" data-stage-index={index} data-current={role === sourceRole ? "true" : undefined} data-source-role={role} data-drop-available={draggedSource === member.id ? "true" : undefined} data-drop-target={dropRole === role ? "true" : undefined} type="button" role="radio" aria-checked={role === sourceRole} aria-label={`${label}: ${t(`sources.roleHints.${role}`)}`} onClick={() => chooseSourceRole(role)}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></button></Fragment>;
-            })}
-          </div>
-        </div>
-        <p className="source-role-help">{t(`sources.roleHints.${sourceRole}`)}</p>
-        <div className="source-priority-policy">
-          <header title={t("sources.sourceOrderHint")}><strong>{t("sources.sourceOrder")}</strong><small className="sr-only">{t("sources.sourceOrderHint")}</small></header>
-          <div className="subscription-plan-order source-priority-order" role="list" aria-label={t("sources.sourceOrder")}>{orderedSources.map((source, index) => {
-            return <div key={source.id} className="subscription-plan-order-row source-priority-row" role="listitem" data-source-id={source.id} data-current={source.id === member.id ? "true" : undefined} data-dragging={draggedSource === source.id ? "true" : undefined} data-drop-target={dropTarget === source.id ? "true" : undefined} data-drop-after={dropTarget === source.id && dropAfter ? "true" : undefined}>
-              <button className="source-priority-drag-handle" data-source-drag-handle type="button" aria-label={t("sources.reorderSource", { source: source.name })} title={t("sources.reorderSource", { source: source.name })} onPointerDown={(event) => startSourceDrag(event, source.id)}><GripVertical aria-hidden /></button>
-              <span className="subscription-plan-rank">{index + 1}</span>
-              <span className="source-priority-name"><strong>{source.name}</strong>{source.id === member.id ? <small>{t("sources.currentSource")}</small> : null}</span>
-              <div className="inline-actions"><IconButton label={t("sources.moveSourceUp", { source: source.name })} icon={<ArrowUp aria-hidden />} disabled={index === 0} onClick={() => moveSourceBy(source.id, -1)} /><IconButton label={t("sources.moveSourceDown", { source: source.name })} icon={<ArrowDown aria-hidden />} disabled={index === orderedSources.length - 1} onClick={() => moveSourceBy(source.id, 1)} /></div>
-            </div>;
-          })}</div>
-        </div>
-        <div className="source-routing-controls">
-          <div className="relay-field source-routing-control"><span>{t("sources.recoveryDelay")}</span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /><small className="sr-only">{t("sources.recoveryDelayHint")}</small></div>
-        </div>
-      </section> : <><div className="settings-row"><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><label className="relay-field"><span>{t("accounts.accountValue.purchaseCost")}</span><input type="number" min="0" max="1000000" step="0.01" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} placeholder="0.00" /><small>{t("accounts.accountValue.purchaseCostHint")}</small></label></>}
-      {member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} enabledModels={enabledModels} onToggleModel={toggleEnabledModel} /> : <details className="member-model-rules source-editor-panel">
-        <summary className="source-editor-panel-summary"><span><strong>{t("common.models")}</strong><small>{t("models.memberRulesHint")}</small></span><small>{t("common.enabled")}: {enabledModels.length}/{modelIds.length}</small></summary>
-        <div className="member-model-content">{modelIds.length ? <ul>{modelIds.map((model) => {
-          const enabled = enabledModels.includes(model);
-          return <li key={model} data-member-model-id={model} data-enabled={enabled ? "true" : "false"}>
-            <code>{model}</code>
-            <StatusIcon status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
-            <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => toggleEnabledModel(model)} />
-          </li>;
-        })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}</div>
-      </details>}
+      <div className="member-editor-identity"><strong data-relay-tooltip={memberName}>{memberName}</strong><span>{t(`pool.types.${member.kind}`)}</span></div>
+      <Tabs value={tab} items={tabs} onChange={setTab} label={t("pool.editMember")} />
+      <div role="tabpanel" aria-label={tabs.find((item) => item.id === tab)?.label}>
+        {tab === "models" ? <section className="member-model-rules">
+          <div className="member-model-heading"><strong>{t("pool.allowedModels")}</strong><span>{enabledModels.length} / {modelIds.length}</span></div>
+          {modelIds.length > 6 ? <label className="member-model-search"><Search aria-hidden /><input type="search" aria-label={t("pool.searchMemberModels")} placeholder={t("pool.searchMemberModels")} value={search} onChange={(event) => setSearch(event.target.value)} /></label> : null}
+          {modelGroups.length ? modelGroups.map((group) => <details className="source-price-group member-model-group" key={`${group.id}:${Boolean(search.trim())}`} data-model-provider={group.provider} open>
+            <summary><strong>{group.provider === "other" ? t("modelGroups.other") : group.label}</strong><span>{group.items.filter((model) => enabledModels.includes(model)).length} / {group.items.length}</span><ChevronDown aria-hidden /></summary>
+            <ul>{group.items.map((model) => {
+              const enabled = enabledModels.includes(model);
+              return <li key={model} data-member-model-id={model} data-enabled={String(enabled)}>
+                <label><code>{model}</code><input className="member-model-switch" type="checkbox" role="switch" aria-label={t("pool.allowMemberModel", { model })} checked={enabled} onChange={() => toggleEnabledModel(model)} /></label>
+              </li>;
+            })}</ul>
+          </details>) : <p className="form-note">{t(modelIds.length ? "common.noResults" : "models.emptyDescription")}</p>}
+        </section> : null}
+        {tab === "prices" && member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} presentation="member" /> : null}
+        {tab === "settings" ? <div className="member-editor-settings">
+          {member.kind === "source" ? <div className="member-editor-setting" data-member-setting="recovery"><span className="member-setting-label"><RotateCcw aria-hidden /><span>{t("sources.recoveryDelay")}</span></span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /></div> : <>
+            <label className="member-editor-setting" data-member-setting="drain"><span className="member-setting-label"><Pause aria-hidden /><span>{t("accounts.drain")}</span></span><input className="member-model-switch" type="checkbox" role="switch" checked={draining} onChange={(event) => setDraining(event.target.checked)} /></label>
+            <label className="member-editor-setting" data-member-setting="cost"><span className="member-setting-label"><CircleDollarSign aria-hidden /><span>{t("accounts.accountValue.purchaseCost")}</span></span><input type="number" min="0" max="1000000" step="0.01" aria-invalid={!purchaseCostValid || undefined} value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} placeholder={t("pool.purchaseCostNotSet")} /></label>
+          </>}
+        </div> : null}
+      </div>
     </div>
   </Dialog>;
 }

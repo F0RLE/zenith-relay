@@ -8,6 +8,7 @@ import type {
   RemoteUsage,
   RoutingDiagnostics,
   ToolUseDiagnostics,
+  UpstreamErrorDetails,
   UsageTotals,
 } from "../../api/types";
 import type { TokenSpeedSample } from "../../usageSpeed";
@@ -46,6 +47,7 @@ export type UsageRow = {
   httpStatus: number | null;
   errorCategory: string | null;
   errorOrigin: ErrorOrigin | null;
+  upstreamError?: UpstreamErrorDetails | null;
   toolUse: ToolUseDiagnostics | null;
   routing: RoutingDiagnostics | null;
   accountId: string | null;
@@ -123,6 +125,7 @@ function usageRowFromEvent(
     httpStatus: event.httpStatus,
     errorCategory: event.errorCategory,
     errorOrigin: event.errorOrigin ?? null,
+    upstreamError: event.success ? null : event.upstreamError ?? null,
     toolUse: event.toolUse ?? null,
     routing: event.routing ?? null,
     accountId,

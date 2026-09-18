@@ -1,9 +1,17 @@
+mod recovery;
+mod reservations;
 mod routing_policy;
 mod snapshot;
+mod unified;
+
+pub(crate) use reservations::ReservationId;
+use reservations::Reservations;
 
 use super::activity::{InFlightLane, SchedulerActivity};
 use super::affinity::AffinityCache;
-use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
+use super::candidate::{
+    CandidateHealth, CandidateKind, CandidateQuotaState, CandidateScope, RuntimeCandidate,
+};
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 use super::cooldown::{has_expired_cooldown, CooldownReason};
 use crate::WireApi;
@@ -58,6 +66,7 @@ pub struct Selection {
     pub response_affinity_hit: bool,
     pub half_open_probe: bool,
     pub diagnostics: RoutingDiagnostics,
+    rotation_members: Vec<(String, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +76,12 @@ pub struct PoolScheduler {
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
     activity: SchedulerActivity,
-    half_open: BTreeSet<(String, String)>,
+    member_activity: SchedulerActivity,
+    pool_routing: Option<crate::PoolRoutingPolicy>,
+    rotation_credit: BTreeMap<(String, InFlightLane), i64>,
+    native_routes: BTreeSet<String>,
+    reservations: Reservations,
+    failure_observed_at: BTreeMap<String, u64>,
     routing_strategy: RoutingStrategy,
     quota_stale_after_ms: u64,
     subscription_expires_at_ms: BTreeMap<String, u64>,
@@ -110,7 +124,12 @@ impl PoolScheduler {
                 PROMPT_AFFINITY_TTL_MS,
             ),
             activity: SchedulerActivity::default(),
-            half_open: BTreeSet::new(),
+            member_activity: SchedulerActivity::default(),
+            pool_routing: None,
+            rotation_credit: BTreeMap::new(),
+            native_routes: BTreeSet::new(),
+            reservations: Reservations::default(),
+            failure_observed_at: BTreeMap::new(),
             routing_strategy: RoutingStrategy::Adaptive,
             quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             subscription_expires_at_ms: BTreeMap::new(),
@@ -136,6 +155,10 @@ impl PoolScheduler {
     ) {
         self.cooldown_after_failures = u32::from(cooldown_after_failures.max(1));
         self.keep_last_candidate_available = keep_last_candidate_available;
+    }
+
+    pub(crate) fn automatic_recovery_enabled(&self) -> bool {
+        self.pool_routing.is_some()
     }
 
     pub fn set_provider_storm_breaker_enabled(&mut self, enabled: bool) {
@@ -199,6 +222,15 @@ impl PoolScheduler {
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         let candidate_id = candidate.id.clone();
+        if candidate.consecutive_failures == 0 {
+            self.failure_observed_at.remove(&candidate_id);
+        }
+        // A newly reintroduced id must not inherit an opaque response owner
+        // from a previously deleted credential or source. Existing candidates
+        // are updated in place and keep their conversation affinity.
+        if !self.candidates.contains_key(&candidate_id) {
+            self.response_affinity.invalidate_candidate(&candidate_id);
+        }
         self.retired_candidates.remove(&candidate_id);
         self.cooldown_reasons.retain(|(id, model), _| {
             id != &candidate_id || candidate.cooldowns.contains_key(model)
@@ -212,7 +244,10 @@ impl PoolScheduler {
             // Do not tear down activity or executor ownership underneath an
             // in-flight request. The candidate is immediately ineligible for
             // new work and is finalized once its last lease is released.
-            self.response_affinity.invalidate_candidate(candidate_id);
+            // Keep response affinity until the request layer can consume a
+            // bounded native replay for a continuation arriving after this
+            // candidate is removed. The retired candidate remains ineligible
+            // for new routing.
             self.prompt_affinity.invalidate_candidate(candidate_id);
             if let Some(candidate) = self.candidates.get_mut(candidate_id) {
                 candidate.enabled = false;
@@ -226,11 +261,12 @@ impl PoolScheduler {
 
     fn remove_now(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
         self.retired_candidates.remove(candidate_id);
-        self.response_affinity.invalidate_candidate(candidate_id);
+        // Retain the short-lived response owner so a pending continuation can
+        // load its bounded native replay and hand off to another candidate.
         self.prompt_affinity.invalidate_candidate(candidate_id);
         self.activity.remove_candidate(candidate_id);
-        self.half_open
-            .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
+        self.reservations.remove_candidate(candidate_id);
+        self.failure_observed_at.remove(candidate_id);
         self.subscription_expires_at_ms.remove(candidate_id);
         self.subscription_plans.remove(candidate_id);
         self.execution_fences.remove(candidate_id);
@@ -253,7 +289,19 @@ impl PoolScheduler {
         {
             self.protected_candidate = None;
         }
-        self.candidates.remove(candidate_id)
+        let removed = self.candidates.remove(candidate_id);
+        if let Some(candidate) = &removed {
+            let key = unified::member_key(candidate);
+            if !self
+                .candidates
+                .values()
+                .any(|other| unified::member_key(other) == key)
+            {
+                self.member_activity.remove_candidate(&key);
+                self.rotation_credit.retain(|(member, _), _| *member != key);
+            }
+        }
+        removed
     }
 
     fn finalize_retired_if_idle(&mut self, candidate_id: &str) {
@@ -286,73 +334,6 @@ impl PoolScheduler {
 
     pub fn candidates(&self) -> impl Iterator<Item = &RuntimeCandidate> {
         self.candidates.values()
-    }
-
-    pub fn runtime_order(&self, now_ms: u64) -> Vec<CandidateRuntimeSnapshot> {
-        let mut candidates = self
-            .candidates
-            .values()
-            .map(|candidate| {
-                (
-                    candidate,
-                    self.is_runtime_available(candidate, now_ms),
-                    self.in_flight_count(&candidate.id, InFlightLane::Text),
-                )
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(
-            |(left, left_available, left_in_flight), (right, right_available, right_in_flight)| {
-                (right_in_flight > &0)
-                    .cmp(&(left_in_flight > &0))
-                    .then_with(|| right_available.cmp(left_available))
-                    .then_with(|| self.compare_preference(right, left, InFlightLane::Text))
-            },
-        );
-        candidates
-            .into_iter()
-            .map(|(candidate, available, in_flight)| {
-                let active_models = self.active_models_for(&candidate.id);
-                let mut model_retries = candidate
-                    .cooldowns
-                    .iter()
-                    .filter(|(model, retry_at_ms)| model.as_str() != "*" && **retry_at_ms > now_ms)
-                    .map(|(model, retry_at_ms)| ModelRetryRuntime {
-                        model: model.clone(),
-                        retry_at_ms: *retry_at_ms,
-                    })
-                    .collect::<Vec<_>>();
-                model_retries.sort_by_key(|retry| retry.retry_at_ms);
-                CandidateRuntimeSnapshot {
-                    candidate_id: candidate.id.clone(),
-                    kind: candidate.kind,
-                    available,
-                    in_flight,
-                    active_request_count: self.active_request_count(&candidate.id),
-                    active_models,
-                    model_retries,
-                    last_used_at_ms: candidate.last_used_at,
-                    next_retry_at_ms: candidate
-                        .cooldowns
-                        .values()
-                        .copied()
-                        .filter(|retry_at_ms| *retry_at_ms > now_ms)
-                        .min(),
-                    half_open: self
-                        .half_open
-                        .iter()
-                        .any(|(candidate_id, _)| candidate_id == &candidate.id),
-                    dispatches: self.dispatch_count(&candidate.id, InFlightLane::Text),
-                }
-            })
-            .collect()
-    }
-
-    fn is_runtime_available(&self, candidate: &RuntimeCandidate, now_ms: u64) -> bool {
-        let scope = CandidateScope::default();
-        candidate
-            .models
-            .iter()
-            .any(|model| self.is_eligible(candidate, model, &[candidate.protocol], &scope, now_ms))
     }
 
     pub fn update_candidate_availability(
@@ -391,22 +372,59 @@ impl PoolScheduler {
         true
     }
 
+    /// Updates the operational and quota state from one fresh account snapshot
+    /// while holding the scheduler lock. Keeping these fields together avoids
+    /// dispatching with a newly refreshed quota and stale provider credits.
+    pub fn update_candidate_availability_with_quota_at(
+        &mut self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota_state: CandidateQuotaState,
+    ) -> bool {
+        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        let quota_state_changed = candidate.quota != quota_state.quota
+            || candidate.quota_updated_at_ms != quota_state.updated_at_ms
+            || candidate.quota_reset_at_ms != quota_state.reset_at_ms
+            || candidate.provider_credits_micro_units != quota_state.provider_credits_micro_units
+            || candidate.provider_credits_unlimited != quota_state.provider_credits_unlimited;
+        candidate.enabled = enabled;
+        candidate.health = health;
+        candidate.quota = quota_state.quota;
+        candidate.quota_updated_at_ms = quota_state.updated_at_ms;
+        candidate.quota_reset_at_ms = quota_state.reset_at_ms;
+        candidate.provider_credits_micro_units = quota_state.provider_credits_micro_units;
+        candidate.provider_credits_unlimited = quota_state.provider_credits_unlimited;
+        if quota_state_changed {
+            self.activity.clear_dispatches();
+        }
+        true
+    }
+
     pub fn update_candidate_quota_at(
         &mut self,
         candidate_id: &str,
         quota: CandidateQuota,
         quota_updated_at_ms: Option<u64>,
         quota_reset_at_ms: Option<u64>,
+        provider_credits_micro_units: Option<u64>,
+        provider_credits_unlimited: bool,
     ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
         let changed = candidate.quota != quota
             || candidate.quota_updated_at_ms != quota_updated_at_ms
-            || candidate.quota_reset_at_ms != quota_reset_at_ms;
+            || candidate.quota_reset_at_ms != quota_reset_at_ms
+            || candidate.provider_credits_micro_units != provider_credits_micro_units
+            || candidate.provider_credits_unlimited != provider_credits_unlimited;
         candidate.quota = quota;
         candidate.quota_updated_at_ms = quota_updated_at_ms;
         candidate.quota_reset_at_ms = quota_reset_at_ms;
+        candidate.provider_credits_micro_units = provider_credits_micro_units;
+        candidate.provider_credits_unlimited = provider_credits_unlimited;
         if changed {
             self.activity.clear_dispatches();
         }
@@ -536,6 +554,7 @@ impl PoolScheduler {
                         candidate_id,
                         response_affinity_hit: true,
                         diagnostics,
+                        rotation_members: Vec::new(),
                     });
                 }
                 return None;
@@ -566,10 +585,7 @@ impl PoolScheduler {
                     )
             })
             .collect::<Vec<_>>();
-        let baseline = eligible
-            .iter()
-            .copied()
-            .max_by(|left, right| self.compare_preference(left, right, lane))?;
+        let (baseline, rotation_members) = self.select_baseline(&eligible, lane, request.now_ms)?;
         let selected = prompt_affinity_candidate
             .as_deref()
             .and_then(|candidate_id| {
@@ -583,8 +599,10 @@ impl PoolScheduler {
                     && self.prompt_affinity_allows(
                         preferred,
                         baseline,
+                        &eligible,
                         lane,
                         explicit_prompt_cache_key,
+                        request.now_ms,
                     )
             })
             .unwrap_or(baseline);
@@ -593,7 +611,7 @@ impl PoolScheduler {
             .iter()
             .copied()
             .filter(|candidate| candidate.id != selected.id)
-            .max_by(|left, right| self.compare_preference(left, right, lane));
+            .max_by(|left, right| self.compare_preference(left, right, lane, request.now_ms));
         let reason = if prompt_affinity_hit {
             SelectionReason::PromptCacheAffinity
         } else if !request.tried.is_empty() {
@@ -608,14 +626,46 @@ impl PoolScheduler {
             response_affinity_hit: false,
             half_open_probe: self.is_half_open_probe(&selected.id, request.model, request.now_ms),
             diagnostics: self.diagnostics(&selected.id, reason, eligible.len(), lane)?,
+            rotation_members,
         })
     }
 
     fn lane_allows(&self, candidate: &RuntimeCandidate, lane: InFlightLane) -> bool {
+        if !self.member_capacity_allows(candidate) {
+            return false;
+        }
         if candidate.kind != CandidateKind::OAuthAccount || lane == InFlightLane::Text {
             return true;
         }
         self.in_flight_count(&candidate.id, InFlightLane::Image) < MAX_OAUTH_IMAGE_IN_FLIGHT
+    }
+
+    pub(crate) fn capacity_blocked(&mut self, request: SelectionRequest<'_>, image: bool) -> bool {
+        let lane = if image {
+            InFlightLane::Image
+        } else {
+            InFlightLane::Text
+        };
+        let owner = request.response_affinity_key.and_then(|key| {
+            self.response_affinity
+                .get(key, request.now_ms)
+                .map(str::to_owned)
+        });
+        self.candidates.values().any(|candidate| {
+            owner.as_ref().is_none_or(|id| *id == candidate.id)
+                && !request.tried.contains(&candidate.id)
+                && (!self.lane_allows(candidate, lane)
+                    || !self
+                        .reservations
+                        .probe_available(&candidate.id, request.model))
+                && self.is_operationally_eligible(
+                    candidate,
+                    request.model,
+                    request.allowed_protocols,
+                    request.scope,
+                    request.now_ms,
+                )
+        })
     }
 
     fn is_half_open_probe(&self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
@@ -660,6 +710,36 @@ impl PoolScheduler {
                     )
             })
             .count()
+    }
+
+    pub(crate) fn recovery_retry_at(&mut self, request: SelectionRequest<'_>) -> Option<u64> {
+        let owner = match request.response_affinity_key {
+            Some(key) => Some(self.response_affinity.get(key, request.now_ms)?.to_string()),
+            None => None,
+        };
+        self.candidates
+            .values()
+            .filter(|candidate| !request.tried.contains(&candidate.id))
+            .filter(|candidate| owner.as_ref().is_none_or(|id| id == &candidate.id))
+            .filter(|candidate| self.quota_reserve_allows(candidate, request.now_ms))
+            .filter(|candidate| {
+                candidate.is_catalog_visible(
+                    request.model,
+                    request.allowed_protocols,
+                    request.scope,
+                )
+            })
+            .filter_map(|candidate| {
+                candidate
+                    .cooldowns
+                    .iter()
+                    .filter(|(model, _)| {
+                        model.as_str() == "*" || model.eq_ignore_ascii_case(request.model)
+                    })
+                    .map(|(_, retry_at)| (*retry_at).max(request.now_ms))
+                    .max()
+            })
+            .min()
     }
 
     pub fn earliest_retry_at(&mut self, request: SelectionRequest<'_>) -> Option<u64> {
@@ -807,6 +887,18 @@ impl PoolScheduler {
         scope: &CandidateScope,
         now_ms: u64,
     ) -> bool {
+        self.is_operationally_eligible(candidate, model, allowed_protocols, scope, now_ms)
+            && self.reservations.probe_available(&candidate.id, model)
+    }
+
+    fn is_operationally_eligible(
+        &self,
+        candidate: &RuntimeCandidate,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+        now_ms: u64,
+    ) -> bool {
         !self.retired_candidates.contains(&candidate.id)
             && !self.execution_fences.contains_key(&candidate.id)
             && !self
@@ -815,8 +907,6 @@ impl PoolScheduler {
             && !self.provider_storm_open(candidate, model, now_ms)
             && self.quota_reserve_allows(candidate, now_ms)
             && candidate.is_eligible(model, allowed_protocols, scope, now_ms)
-            && half_open_scope(candidate, model, now_ms)
-                .is_none_or(|scope| !self.half_open.contains(&(candidate.id.clone(), scope)))
     }
 
     pub fn bind_response_affinity(
@@ -896,6 +986,72 @@ impl PoolScheduler {
         self.response_affinity.contains(key, now_ms)
     }
 
+    pub(crate) fn response_affinity_candidate(&mut self, key: &str, now_ms: u64) -> Option<String> {
+        self.response_affinity.get(key, now_ms).map(str::to_string)
+    }
+
+    /// Returns whether the current affinity owner can structurally serve this
+    /// route. Health, quota, capacity, and cooldown state are intentionally
+    /// excluded: they are temporary and must not discard an opaque response
+    /// continuation.
+    pub(crate) fn response_affinity_owner_supports_route(
+        &mut self,
+        key: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request_scope: &CandidateScope,
+        now_ms: u64,
+    ) -> Option<bool> {
+        let candidate_id = self.response_affinity.get(key, now_ms)?;
+        self.candidates.get(candidate_id).map(|candidate| {
+            // Pool membership and per-candidate policy are structural route
+            // constraints. If the affinity owner left the key scope, the
+            // opaque continuation cannot be sent there and the caller may
+            // safely reset it before selecting another provider. Temporary
+            // health, quota, capacity, and cooldown state remain excluded so
+            // those conditions continue to wait for the original owner.
+            candidate.is_configured(model, allowed_protocols, request_scope)
+        })
+    }
+
+    /// Returns whether the current affinity owner is eligible for a new
+    /// optional request. Unlike `response_affinity_owner_supports_route`,
+    /// this includes mutable health, quota, and cooldown state. Callers must
+    /// only use it when the request does not carry an opaque continuation.
+    pub(crate) fn response_affinity_owner_is_eligible(
+        &mut self,
+        key: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request_scope: &CandidateScope,
+        now_ms: u64,
+    ) -> Option<bool> {
+        let candidate_id = self.response_affinity.get(key, now_ms)?;
+        self.candidates.get(candidate_id).map(|candidate| {
+            self.is_eligible(candidate, model, allowed_protocols, request_scope, now_ms)
+        })
+    }
+
+    /// Returns whether the affinity owner still matches the model and wire
+    /// contract, without considering the caller's mutable pool scope. This
+    /// distinction lets the request layer reset a model switch immediately,
+    /// while giving an owner that merely left the pool a chance to replay its
+    /// bounded local continuation first.
+    pub(crate) fn response_affinity_owner_supports_model(
+        &mut self,
+        key: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        let candidate_id = self.response_affinity.get(key, now_ms)?;
+        self.candidates.get(candidate_id).map(|candidate| {
+            candidate.supports_model(model)
+                && candidate.model_rules.allows(model)
+                && allowed_protocols.contains(&candidate.protocol)
+        })
+    }
+
     pub fn has_prompt_affinity(&mut self, key: &str, now_ms: u64) -> bool {
         self.prompt_affinity.contains(key, now_ms)
     }
@@ -904,318 +1060,22 @@ impl PoolScheduler {
         self.response_affinity.invalidate(key)
     }
 
-    #[cfg(test)]
-    pub(crate) fn reserve(&mut self, candidate_id: &str) -> bool {
-        self.reserve_for(candidate_id, "", 0)
-    }
-
-    pub(crate) fn reserve_for(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
-        self.reserve_for_lane(candidate_id, model, now_ms, InFlightLane::Text)
-    }
-
-    pub(crate) fn reserve_image_for(
-        &mut self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-    ) -> bool {
-        self.reserve_for_lane(candidate_id, model, now_ms, InFlightLane::Image)
-    }
-
-    fn reserve_for_lane(
-        &mut self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-        lane: InFlightLane,
-    ) -> bool {
-        if !self.candidates.contains_key(candidate_id) {
-            return false;
-        }
-        if self
-            .candidates
-            .get(candidate_id)
-            .is_some_and(|candidate| !self.lane_allows(candidate, lane))
-        {
-            return false;
-        }
-        if !model.is_empty() {
-            let half_open_key = self
-                .candidates
-                .get(candidate_id)
-                .and_then(|candidate| half_open_scope(candidate, model, now_ms))
-                .map(|scope| (candidate_id.to_string(), scope));
-            if half_open_key.is_some_and(|key| !self.half_open.insert(key)) {
-                return false;
-            }
-        }
-        self.activity.reserve(candidate_id, model, lane);
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn release(&mut self, candidate_id: &str) -> bool {
-        self.release_for(candidate_id, None)
-    }
-
-    pub(crate) fn release_for(&mut self, candidate_id: &str, model: Option<&str>) -> bool {
-        self.release_for_lane(candidate_id, model, InFlightLane::Text)
-    }
-
-    pub(crate) fn release_image_for(&mut self, candidate_id: &str, model: Option<&str>) -> bool {
-        self.release_for_lane(candidate_id, model, InFlightLane::Image)
-    }
-
-    fn release_for_lane(
-        &mut self,
-        candidate_id: &str,
-        model: Option<&str>,
-        lane: InFlightLane,
-    ) -> bool {
-        if let Some(model) = model {
-            self.half_open
-                .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
-            self.half_open
-                .remove(&(candidate_id.to_string(), "*".to_string()));
-        } else {
-            self.half_open
-                .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
-        }
-        let released = self.activity.release(candidate_id, model, lane);
-        if released {
-            self.finalize_retired_if_idle(candidate_id);
-        }
-        released
-    }
-
-    pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
-        self.record_success_with_metrics(candidate_id, model, now_ms, None, 0)
-    }
-
-    pub fn record_success_with_metrics(
-        &mut self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-        _output_tokens: Option<u64>,
-        _latency_ms: u64,
-    ) -> bool {
-        let (provider_key, recovered) = {
-            let Some(candidate) = self.candidates.get_mut(candidate_id) else {
-                return false;
-            };
-            let provider_key = (candidate.source_id.clone(), model.to_ascii_lowercase());
-            self.half_open
-                .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
-            candidate.cooldowns.retain(|candidate_model, retry_at_ms| {
-                let applies = candidate_model == "*" || candidate_model.eq_ignore_ascii_case(model);
-                !applies || *retry_at_ms > now_ms
-            });
-            candidate.last_used_at = Some(now_ms);
-            let recovered = !candidate
-                .cooldowns
-                .values()
-                .any(|retry_at_ms| *retry_at_ms > now_ms);
-            if recovered {
-                candidate.health = CandidateHealth::Healthy;
-                candidate.consecutive_failures = 0;
-            }
-            (provider_key, recovered)
-        };
-        if let Some(candidate) = self.candidates.get(candidate_id) {
-            self.cooldown_reasons
-                .retain(|(cooled_candidate, scope), _| {
-                    cooled_candidate != candidate_id || candidate.cooldowns.contains_key(scope)
-                });
-        }
-        self.provider_storm_breakers.remove(&provider_key);
-        recovered
-    }
-
-    pub fn record_failure(&mut self, candidate_id: &str) -> Option<u32> {
-        let candidate = self.candidates.get_mut(candidate_id)?;
-        candidate.consecutive_failures = candidate.consecutive_failures.saturating_add(1);
-        Some(candidate.consecutive_failures)
-    }
-
-    pub fn reset_failures(&mut self, candidate_id: &str) -> bool {
-        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
-            return false;
-        };
-        candidate.consecutive_failures = 0;
-        true
-    }
-
-    pub fn set_cooldown(&mut self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
-        self.set_cooldown_with_reason(candidate_id, model, retry_at_ms, CooldownReason::Transient)
-    }
-
-    pub(crate) fn set_cooldown_with_reason(
-        &mut self,
-        candidate_id: &str,
-        model: &str,
-        retry_at_ms: u64,
-        reason: CooldownReason,
-    ) -> bool {
-        self.set_cooldown_with_reason_inner(
-            candidate_id,
-            CooldownRequest {
-                scope: model,
-                policy_model: model,
-                allowed_protocols: &[],
-                request_scope: &CandidateScope::default(),
-                retry_at_ms,
-                reason,
-                now_ms: 0,
-            },
-            false,
-        )
-    }
-
-    pub(crate) fn set_cooldown_with_reason_for_model_at(
-        &mut self,
-        candidate_id: &str,
-        request: CooldownRequest<'_>,
-    ) -> bool {
-        self.set_cooldown_with_reason_inner(candidate_id, request, true)
-    }
-
-    fn set_cooldown_with_reason_inner(
-        &mut self,
-        candidate_id: &str,
-        request: CooldownRequest<'_>,
-        enforce_policy: bool,
-    ) -> bool {
-        if enforce_policy
-            && request.reason == CooldownReason::Transient
-            && !self.transient_cooldown_allowed(
-                candidate_id,
-                request.policy_model,
-                request.allowed_protocols,
-                request.request_scope,
-                request.now_ms,
-            )
-        {
-            return false;
-        }
-        let scope = if request.scope == "*" {
-            "*".to_string()
-        } else {
-            request.scope.to_ascii_lowercase()
-        };
-        let previous = self
-            .candidates
-            .get(candidate_id)
-            .and_then(|candidate| candidate.cooldowns.get(&scope).copied());
-        let previous_reason = self
-            .cooldown_reasons
-            .get(&(candidate_id.to_string(), scope.clone()))
-            .copied();
-        let should_store_reason = previous.is_none_or(|current| {
-            request.retry_at_ms > current
-                || (request.retry_at_ms == current
-                    && request.reason == CooldownReason::RateLimit
-                    && previous_reason != Some(CooldownReason::Mandatory))
-                || (request.reason == CooldownReason::Mandatory
-                    && previous_reason != Some(CooldownReason::Mandatory))
-        });
-        {
-            let Some(candidate) = self.candidates.get_mut(candidate_id) else {
-                return false;
-            };
-            candidate
-                .cooldowns
-                .entry(scope.clone())
-                .and_modify(|current| *current = (*current).max(request.retry_at_ms))
-                .or_insert(request.retry_at_ms);
-        }
-        if should_store_reason {
-            self.cooldown_reasons
-                .insert((candidate_id.to_string(), scope.clone()), request.reason);
-        }
-        if scope == "*" {
-            self.half_open
-                .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
-        } else {
-            self.half_open.remove(&(candidate_id.to_string(), scope));
-        }
-        true
-    }
-
-    fn transient_cooldown_allowed(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        request_scope: &CandidateScope,
-        now_ms: u64,
-    ) -> bool {
-        let Some(candidate) = self.candidates.get(candidate_id) else {
-            return false;
-        };
-        if candidate.consecutive_failures < self.cooldown_after_failures {
-            return false;
-        }
-        if !self.keep_last_candidate_available {
-            return true;
-        }
-        !self.is_last_applicable_candidate(
-            candidate_id,
-            model,
-            allowed_protocols,
-            request_scope,
-            now_ms,
-        )
-    }
-
-    fn is_last_applicable_candidate(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        request_scope: &CandidateScope,
-        now_ms: u64,
-    ) -> bool {
-        if !self.candidates.contains_key(candidate_id) {
-            return false;
-        }
-        self.candidates
-            .values()
-            .filter(|candidate| {
-                self.is_eligible(candidate, model, allowed_protocols, request_scope, now_ms)
-            })
-            .count()
-            <= 1
-    }
-
-    pub fn clear_cooldown(&mut self, candidate_id: &str, model: &str) -> bool {
-        let removed = self
-            .candidates
-            .get_mut(candidate_id)
-            .map(|candidate| {
-                let previous_len = candidate.cooldowns.len();
-                candidate
-                    .cooldowns
-                    .retain(|candidate_model, _| !candidate_model.eq_ignore_ascii_case(model));
-                candidate.cooldowns.len() != previous_len
-            })
-            .unwrap_or(false);
-        if removed {
-            self.cooldown_reasons
-                .retain(|(cooled_candidate, scope), _| {
-                    cooled_candidate != candidate_id || !scope.eq_ignore_ascii_case(model)
-                });
-        }
-        removed
+    pub fn invalidate_prompt_affinity(&mut self, key: &str) -> bool {
+        self.prompt_affinity.invalidate(key)
     }
 
     fn prompt_affinity_allows(
         &self,
         preferred: &RuntimeCandidate,
         baseline: &RuntimeCandidate,
+        eligible: &[&RuntimeCandidate],
         lane: InFlightLane,
         explicit_prompt_cache_key: bool,
+        now_ms: u64,
     ) -> bool {
+        if self.pool_routing.is_some() {
+            return self.unified_prompt_affinity_allows(preferred, eligible, lane, now_ms);
+        }
         let preferred_in_flight = self.in_flight_count(&preferred.id, lane);
         let baseline_in_flight = self.in_flight_count(&baseline.id, lane);
         if routing_tier(preferred) != routing_tier(baseline)

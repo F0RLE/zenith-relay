@@ -194,11 +194,11 @@ impl Store {
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json,
                         service_tier, applied_service_tier, tool_use_json, error_origin,
-                        requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl
+                        requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, upstream_error_json
                     ) SELECT
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                        ?23, ?24, ?25, ?26, ?27, ?28, ?29
+                        ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?31
                     WHERE NOT EXISTS (
                         SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
@@ -233,7 +233,8 @@ impl Store {
                         error_origin=excluded.error_origin,
                         requested_reasoning_effort=excluded.requested_reasoning_effort,
                         effective_reasoning_effort=excluded.effective_reasoning_effort,
-                        cache_write_ttl=excluded.cache_write_ttl
+                        cache_write_ttl=excluded.cache_write_ttl,
+                        upstream_error_json=excluded.upstream_error_json
                     WHERE excluded.attempt >= usage_events.attempt"#,
                 )
                 .map_err(db_error)?;
@@ -296,6 +297,12 @@ impl Store {
                             .cache_write_ttl
                             .and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
                         candidate_id,
+                        event
+                            .upstream_error
+                            .as_ref()
+                            .filter(|_| !event.success)
+                            .map(|details| to_json(&details.sanitized()))
+                            .transpose()?,
                     ])
                     .map_err(db_error)?;
             }
@@ -375,7 +382,7 @@ impl Store {
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
             let sql = format!(
-                "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, attempt \
+                "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin, requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, attempt, upstream_error_json \
                  FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
             );
             let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -422,6 +429,10 @@ impl Store {
                         success: row.get::<_, i64>(8)? != 0,
                         http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
                         error_category: row.get(10)?,
+                        upstream_error: row
+                            .get::<_, Option<String>>(30)?
+                            .as_deref()
+                            .and_then(|value| serde_json::from_str(value).ok()),
                         error_origin: row
                             .get::<_, Option<String>>(25)?
                             .as_deref()
@@ -776,6 +787,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -809,9 +821,24 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         };
+        event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ));
+        event.upstream_error.as_mut().unwrap().message =
+            Some("Capacity exhausted; Bearer synthetic-private".into());
         store.record_usage(&event, 1_000).unwrap();
+        let stored: String = store
+            .lock()
+            .unwrap()
+            .query_row("SELECT upstream_error_json FROM usage_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!stored.contains("synthetic-private"));
         event.attempt = 2;
         event.source_id = "source_2".into();
         event.candidate_id = Some("source_2".into());
@@ -850,6 +877,7 @@ mod tests {
             .find(|event| event.request_id == "req_fallback")
             .unwrap();
         assert!(fallback.success);
+        assert!(fallback.upstream_error.is_none());
         assert_eq!(fallback.http_status, 200);
         assert_eq!(fallback.service_tier, DefaultServiceTier::Fast);
         assert_eq!(fallback.applied_service_tier, Some("flex".into()));
@@ -868,6 +896,13 @@ mod tests {
             .find(|event| event.request_id == "req_failed")
             .unwrap();
         assert!(!failed.success);
+        assert_eq!(
+            failed.upstream_error,
+            event
+                .upstream_error
+                .as_ref()
+                .map(|details| details.sanitized())
+        );
         assert_eq!(failed.http_status, 429);
         assert_eq!(failed.error_origin, Some(ErrorOrigin::Provider));
         assert_eq!(failed.requested_reasoning_effort, None);
@@ -919,6 +954,7 @@ mod tests {
             source_id: "codex".into(),
             candidate_id: Some(account_id.into()),
             account_id: Some(account_id.into()),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-5.4".into()),
@@ -945,6 +981,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(3),
             total_tokens: Some(5),
+            upstream_error: None,
             quota_snapshot: None,
         };
         store.record_usage(&event, 10).unwrap();
@@ -1000,6 +1037,7 @@ mod tests {
             source_id: "source_alpha".into(),
             candidate_id: Some("source_alpha".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-5.4".into()),
@@ -1026,6 +1064,7 @@ mod tests {
             reasoning_tokens: Some(0),
             output_tokens: Some(100_000),
             total_tokens: Some(1_100_000),
+            upstream_error: None,
             quota_snapshot: None,
         };
         store.record_usage(&event, DAY_MS).unwrap();
@@ -1119,6 +1158,7 @@ mod tests {
                     pricing_provider: None,
                     official_provider_family: None,
                     wire_api: WireApi::Responses,
+                    protocol_config: Default::default(),
                     protocol_bindings: Vec::new(),
                     models: vec!["private-model".into()],
                     allowed_models: Vec::new(),
@@ -1139,6 +1179,7 @@ mod tests {
             source_id: "source_cheap".into(),
             candidate_id: Some("source_cheap".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("private-model".into()),
@@ -1165,6 +1206,7 @@ mod tests {
             reasoning_tokens: Some(0),
             output_tokens: Some(100_000),
             total_tokens: Some(1_100_000),
+            upstream_error: None,
             quota_snapshot: None,
         };
         store.record_usage(&event, 1).unwrap();
@@ -1228,6 +1270,7 @@ mod tests {
                         source_id: "source_alpha".to_string(),
                         candidate_id: Some("source_alpha".to_string()),
                         account_id: None,
+                        account_token_generation: None,
                         client_context_id: None,
                         routing: Some(RoutingDiagnostics {
                             reason: SelectionReason::QuotaHeadroom,
@@ -1261,6 +1304,7 @@ mod tests {
                         reasoning_tokens: Some(1),
                         output_tokens: Some(1),
                         total_tokens: Some(2),
+                        upstream_error: None,
                         quota_snapshot: None,
                     },
                     2_000 + index,

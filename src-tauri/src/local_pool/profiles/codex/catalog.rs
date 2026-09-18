@@ -5,6 +5,7 @@ use super::{
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde_json::{json, Value};
 use std::{collections::HashSet, fs, path::Path};
+use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::{
     codex_catalog_entry_is_compatible, codex_model_display_name, codex_model_is_picker_eligible,
     decode_codex_model_alias, normalize_codex_catalog_priorities,
@@ -56,6 +57,31 @@ pub(super) fn direct_source_model_catalog_with_manifest(
         return Ok(None);
     }
     Ok(Some(normalize_model_catalog_values(models)?))
+}
+
+pub(super) fn direct_source_model_catalog_with_capabilities(
+    codex_home: &Path,
+    source_models: &[String],
+    metadata: &ModelMetadataCatalog,
+) -> Result<Option<String>> {
+    let catalog = direct_source_model_catalog_with_manifest(codex_home, source_models, None)?;
+    let Some(catalog) = catalog else {
+        return Ok(None);
+    };
+    let mut value: Value = serde_json::from_str(&catalog)
+        .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
+    if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
+            metadata.apply_codex_capabilities(&decoded, model);
+        }
+    }
+    Ok(Some(
+        serde_json::to_string(&value).map_err(LocalPoolError::invalid_state)?,
+    ))
 }
 
 fn is_direct_source_model(model: &str) -> bool {
@@ -358,7 +384,12 @@ pub(super) fn build_managed_model_catalog(
         let mut entry = relay_model
             .as_object()
             .and_then(|upstream| {
-                if relay_managed {
+                if codex_catalog_entry_is_compatible(relay_model) {
+                    // The gateway already projected models.dev capabilities.
+                    // Re-normalizing would reintroduce legacy context defaults
+                    // and discard output modalities on an unknown model.
+                    Some(relay_model.clone())
+                } else if relay_managed {
                     normalize_upstream_codex_catalog_entry(
                         upstream,
                         &model,
@@ -370,7 +401,28 @@ pub(super) fn build_managed_model_catalog(
                 }
             })
             .unwrap_or_else(|| {
-                routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
+                if relay_managed {
+                    routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
+                } else {
+                    // A malformed native row must not fall back to Relay's
+                    // routed context policy. Codex owns native context, so a
+                    // missing field stays missing until the native catalog is
+                    // available again.
+                    let mut fallback =
+                        routed_codex_catalog_entry(Some(&template), &model, priority, None);
+                    if let Some(object) = fallback.as_object_mut() {
+                        for key in [
+                            "context_window",
+                            "max_context_window",
+                            "auto_compact_token_limit",
+                            "effective_context_window_percent",
+                        ] {
+                            object.remove(key);
+                        }
+                        object.insert("slug".into(), Value::String(slug.to_string()));
+                    }
+                    fallback
+                }
             });
         if !slug.to_ascii_lowercase().starts_with("zenith/") {
             entry["slug"] = Value::String(slug.to_string());

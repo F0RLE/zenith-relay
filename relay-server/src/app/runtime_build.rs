@@ -37,8 +37,10 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
     let model_display_order = state.store.model_display_order()?;
     let routing_policy = state.store.routing_policy()?;
+    let pool_routing = resolve_pool_routing(&routing_policy, &source_records, &account_records);
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
+    let chatgpt_retry_until_available = state.store.chatgpt_retry_until_available()?;
     let (mut pool_source_ids, mut pool_account_ids) =
         pool_member_ids(&source_records, &account_records);
     if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
@@ -92,12 +94,14 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             cooldown_after_failures: routing_policy.cooldown_after_failures,
             keep_last_candidate_available: routing_policy.keep_last_candidate_available,
             routing_strategy: routing_policy.routing_strategy,
+            pool_routing: Some(pool_routing),
             subscription_plan_order: routing_policy.subscription_plan_order,
             hidden_models,
             default_service_tier: routing_policy.default_service_tier,
             quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             image_pricing_catalog: Some(state.pricing_catalog()),
+            model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
             model_reasoning_allowed_levels,
             response_affinity_store: Some(state.store.clone()),
             provider_storm_breaker: true,
@@ -111,11 +115,42 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(codex_websockets_enabled);
+    runtime.set_chatgpt_retry_until_available(chatgpt_retry_until_available);
     let breaker_store = state.store.clone();
     runtime.set_chatgpt_team_breaker_callback(move |account_ids| {
         let _ = breaker_store.block_accounts_for_team(&account_ids);
     });
     state.replace_runtime(Some(Arc::new(runtime)))
+}
+
+pub(super) fn resolve_pool_routing(
+    routing: &zenith_relay_core::protocol::PresetRoutingPolicy,
+    sources: &[SourceRecord],
+    accounts: &[ServerAccountRecord],
+) -> zenith_relay_core::PoolRoutingPolicy {
+    zenith_relay_core::resolve_pool_routing(
+        routing.pool_routing.as_ref(),
+        sources
+            .iter()
+            .filter(|m| m.in_pool)
+            .map(|m| {
+                (
+                    zenith_relay_core::PoolMemberKind::Source,
+                    m.id.clone(),
+                    m.priority,
+                    m.weight,
+                )
+            })
+            .chain(accounts.iter().filter(|m| m.in_pool).map(|m| {
+                (
+                    zenith_relay_core::PoolMemberKind::Account,
+                    m.id.clone(),
+                    m.priority,
+                    m.weight,
+                )
+            }))
+            .collect(),
+    )
 }
 
 /// Candidate state remains available to management, while the internal profile

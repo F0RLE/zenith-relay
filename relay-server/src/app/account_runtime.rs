@@ -197,7 +197,14 @@ pub(super) fn source_summary(
         pricing_provider: record.pricing_provider.clone(),
         official_provider_family: record.official_provider_family.clone(),
         wire_api: record.wire_api,
+        protocol_config: record.protocol_config.with_effective_capabilities(
+            &record.base_url,
+            &record.models,
+            &record.protocol_bindings,
+            record.wire_api,
+        ),
         protocol_bindings: record.protocol_bindings.clone(),
+        resolved_protocol_bindings: Some(record.effective_protocol_bindings().unwrap_or_default()),
         models: record.models.clone(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
@@ -268,5 +275,7 @@ pub(super) fn account_summary(
         proxy_id: record.proxy_id.clone(),
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.last_error_code.clone(),
+        client_auth_status: None,
+        last_client_login_redirect_at_ms: None,
     }
 }

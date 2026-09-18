@@ -36,19 +36,27 @@ be opened again from **Help**.
 
 | Mode | Use it when | What remains running |
 | --- | --- | --- |
-| **This computer** | You want to combine personal accounts without deploying a server. | Relay and the local endpoint must stay open. |
+| **Computer** | You want to combine personal accounts without deploying a server. | Relay and the local endpoint must stay open. |
 | **Choose API** | You already have a compatible hosted API and its key. | The provider runs the requests. |
-| **My server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. |
+| **On your server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. |
 
 ## Everyday workflow
 
-1. Open **Connections** and add a ChatGPT account, an API source, or a proxy.
+For a pool in **Computer** mode:
+
+1. Open **Connections** and add a ChatGPT account or an API source. Configure
+   a proxy there if needed.
 2. In **Pool**, include the connections and models that may receive traffic.
-3. Start the endpoint in **API**, open the **Application** tab, and connect
-   ChatGPT or OpenCode when needed.
+3. Start the endpoint in **API**, then use **Pool → Connect** to connect
+   ChatGPT or OpenCode. Other compatible clients use the displayed API address
+   and request key.
 4. Use **Overview** for status and performance, **Usage** for request history,
    and **Recovery** to restore Relay-managed ChatGPT settings or the saved
    OpenCode configuration.
+
+**Choose API** connects directly to the selected provider without pool
+rotation. The ChatGPT interface account is separate from the member chosen
+to serve a request through the pool.
 
 The complete behavior and troubleshooting guidance are kept in the in-app
 **Help** section and the [English guide](docs/help/en/README.md).
@@ -65,6 +73,13 @@ The complete behavior and troubleshooting guidance are kept in the in-app
     <td align="center" width="50%"><img src="docs/screenshots/usage.png" height="360" alt="Usage"></td>
   </tr>
 </table>
+
+<details>
+<summary>ChatGPT account and connection settings</summary>
+
+![ChatGPT settings](docs/screenshots/chatgpt-settings.png)
+
+</details>
 
 ## Help
 

@@ -3,13 +3,17 @@ use super::super::errors::{
     upstream_event_failure_category, upstream_status_from_value, RateLimitBodyHint,
 };
 use super::super::now_ms;
+use crate::error_codes;
 use axum::http::header::{HeaderName, HeaderValue, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 
 #[derive(Default)]
 pub(super) struct EventTerminal {
+    pub(super) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(super) outcome: Option<EventTerminalOutcome>,
+    /// Completed Responses object used to materialize a safe native replay.
+    pub(super) response: Option<Value>,
     pub(super) status: Option<StatusCode>,
     pub(super) error_category: Option<&'static str>,
     pub(super) headers: HeaderMap,
@@ -36,7 +40,10 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
     };
     let status = upstream_status_from_value(value);
     EventTerminal {
+        upstream_error: (outcome == Some(EventTerminalOutcome::Failure))
+            .then(|| crate::usage::UpstreamErrorDetails::from_value(None, value)),
         outcome,
+        response: value.get("response").cloned(),
         status,
         error_category: upstream_event_failure_category(
             value.get("type").and_then(Value::as_str),
@@ -51,12 +58,12 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
 
 pub(super) fn incomplete_status(category: &str) -> Option<StatusCode> {
     match category {
-        "websocket_idle_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
-        "stream_semantic_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
-        "stream_event_too_large"
-        | "upstream_transport"
-        | "upstream_websocket"
-        | "upstream_websocket_closed" => Some(StatusCode::BAD_GATEWAY),
+        error_codes::WEBSOCKET_IDLE_TIMEOUT => Some(StatusCode::GATEWAY_TIMEOUT),
+        error_codes::STREAM_SEMANTIC_TIMEOUT => Some(StatusCode::GATEWAY_TIMEOUT),
+        error_codes::STREAM_EVENT_TOO_LARGE
+        | error_codes::UPSTREAM_TRANSPORT
+        | error_codes::UPSTREAM_WEBSOCKET
+        | error_codes::UPSTREAM_WEBSOCKET_CLOSED => Some(StatusCode::BAD_GATEWAY),
         _ => None,
     }
 }
@@ -64,12 +71,12 @@ pub(super) fn incomplete_status(category: &str) -> Option<StatusCode> {
 pub(super) fn incomplete_requires_cooldown(category: &str) -> bool {
     matches!(
         category,
-        "stream_event_too_large"
-            | "upstream_transport"
-            | "upstream_websocket"
-            | "upstream_websocket_closed"
-            | "websocket_idle_timeout"
-            | "stream_semantic_timeout"
+        error_codes::STREAM_EVENT_TOO_LARGE
+            | error_codes::UPSTREAM_TRANSPORT
+            | error_codes::UPSTREAM_WEBSOCKET
+            | error_codes::UPSTREAM_WEBSOCKET_CLOSED
+            | error_codes::WEBSOCKET_IDLE_TIMEOUT
+            | error_codes::STREAM_SEMANTIC_TIMEOUT
     )
 }
 

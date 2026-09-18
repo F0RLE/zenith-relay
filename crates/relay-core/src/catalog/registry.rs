@@ -117,6 +117,8 @@ mod tests {
             model_rules: ModelRules::default(),
             health: CandidateHealth::Healthy,
             quota: CandidateQuota::Unknown,
+            provider_credits_micro_units: None,
+            provider_credits_unlimited: false,
             quota_updated_at_ms: None,
             quota_reset_at_ms: None,
             cooldowns: BTreeMap::new(),

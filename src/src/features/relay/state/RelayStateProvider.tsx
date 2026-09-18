@@ -183,6 +183,16 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "feedback.saved",
   ), [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
 
+  const setChatgptRetryUntilAvailable = useCallback((enabled: boolean) => perform(
+    "chatgpt-retry-until-available",
+    mode === "local"
+      ? () => relayCommands.setChatgptRetryUntilAvailable(enabled)
+      : mode === "remote"
+        ? () => relayCommands.setRemoteChatgptRetryUntilAvailable(enabled)
+        : () => Promise.reject(new Error(t("errors.chatgpt_retry_until_available_unavailable"))),
+    "feedback.saved",
+  ), [mode, perform, t]);
+
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
@@ -248,6 +258,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
     codexWebsocketsEnabled: displayRuntime?.gateway.codexWebsocketsEnabled ?? true,
+    chatgptRetryUntilAvailable: displayRuntime?.gateway.chatgptRetryUntilAvailable ?? false,
+    setChatgptRetryUntilAvailable,
   }), [
     mode,
     setMode,
@@ -282,6 +294,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexPoolOauthSelection,
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
+    setChatgptRetryUntilAvailable,
   ]);
 
   const usage = useMemo<RelayUsageContextValue>(() => ({

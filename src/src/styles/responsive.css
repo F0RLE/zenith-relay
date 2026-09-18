@@ -3,7 +3,6 @@
   .relay-page { padding: 0 16px 24px; }
   .relay-page-header { min-height: 64px; }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pool-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .pool-member-state {
     display: flex;
     align-items: center;
@@ -35,20 +34,40 @@
   .relay-shell[data-page="profiles"] .relay-table { min-width: 720px; }
   .relay-shell[data-page="usage"] .usage-request-table { min-width: 0; }
   .usage-request-table [data-column="connection"],
+  .usage-request-table [data-column="speed"],
+  .usage-request-table [data-column="tier"],
   .usage-request-table [data-column="tokens"] {
     display: none;
   }
+  .usage-request-table col[data-column="time"] { width: 14%; }
+  .usage-request-table col[data-column="status"] { width: 8%; }
+  .usage-request-table col[data-column="model"] { width: 17%; }
+  .usage-request-table col[data-column="protocol"] { width: 14%; }
+  .usage-request-table col[data-column="timing"] { width: 18%; }
+  .usage-request-table col[data-column="equivalent"] { width: 13%; }
+  .usage-request-table col[data-column="request"] { width: 16%; }
   .usage-request-table th {
     height: auto;
+    padding-inline: 4px;
+    font-size: 11px;
     line-height: 14px;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+  }
+  .usage-request-table .usage-column-heading {
+    padding-inline: 4px;
+  }
+  .usage-request-table th[data-column="request"] .usage-column-heading > span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
   }
   .usage-request-table .usage-column-heading > svg {
     display: none;
   }
   .usage-request-table td[data-column="timing"] {
     line-height: 15px;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
@@ -537,26 +556,6 @@
     grid-column: auto;
   }
 
-  .account-command-bar:has(.account-command-context > span) {
-    min-height: 0;
-    width: 100%;
-    align-items: stretch;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px;
-  }
-
-  .account-command-bar:has(.account-command-context > span) .account-command-context {
-    padding-right: 0;
-    padding-bottom: 6px;
-    border-right: 0;
-    border-bottom: 1px solid var(--relay-border);
-  }
-
-  .account-command-bar:has(.account-command-context > span) .account-command-actions {
-    justify-content: flex-start;
-  }
-
   .model-rules > header {
     padding-bottom: 10px;
   }
@@ -589,6 +588,7 @@
   }
 
   .gateway-setting-row,
+  .gateway-account-panel,
   .gateway-api-connection-panel {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
@@ -601,15 +601,21 @@
 }
 
 @media (max-width: 700px) {
-  .codex-background-tasks-control,
-  .codex-websockets-control {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
+  .gateway-setting-row.codex-feature-control {
+    gap: 12px;
+    padding: 16px;
   }
 
-  .codex-background-tasks-toggle,
-  .codex-websockets-toggle {
-    width: 100%;
+  .codex-feature-toggle > span {
+    display: none;
+  }
+
+  .gateway-account-panel {
+    padding: 16px;
+  }
+
+  .setting-toggle.oauth-binding-reserve-toggle {
+    padding-left: 0;
   }
 
   .profile-snapshot-create {
@@ -639,8 +645,6 @@
     justify-content: flex-start;
   }
   .metric-band,
-  .pool-summary,
-  .connections-account-summary,
   .runtime-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -691,10 +695,6 @@
   }
   .client-oauth-binding {
     max-width: none;
-  }
-
-  .oauth-binding-settings {
-    grid-template-columns: 1fr;
   }
 
   .gateway-runtime-panel {
@@ -877,10 +877,13 @@
 @media (prefers-reduced-motion: reduce) {
   .subscription-plan-order-row,
   .pool-speed-control,
-  .pool-speed-control > svg,
-  .pool-speed-track,
-  .pool-speed-track > span {
+  .pool-speed-selection,
+  .pool-speed-rail::after {
     transition: none;
+  }
+
+  .pool-speed-label {
+    animation: none;
   }
 
   .intro-mark { animation: none; }

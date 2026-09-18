@@ -10,11 +10,13 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
+    discover_source_with_protocol_config, fetch_source_provider_stats,
     normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding,
+    SourceProtocolConfig, WireApi,
 };
 
 mod policy;
@@ -26,6 +28,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/sources", get(list_sources).post(create_source))
         .route("/sources/{id}", patch(update_source).delete(delete_source))
         .route("/sources/{id}/test", post(test_source))
+        .route("/sources/{id}/probe", post(probe_source))
         .route("/sources/{id}/stats", get(source_stats))
 }
 
@@ -48,6 +51,8 @@ pub struct SourceInput {
     wire_api: WireApi,
     #[serde(default)]
     protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    protocol_mode: Option<zenith_relay_core::ProtocolSelectionMode>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -81,6 +86,7 @@ pub async fn create_source(
             }
             record.models = discovery.models;
             record.protocol_bindings = discovery.protocol_bindings;
+            record.protocol_config.merge_catalog(discovery.capabilities);
             record.detected_model_prices = discovery.detected_model_prices;
         }
         Err(error) => {
@@ -123,6 +129,7 @@ pub struct SourcePatch {
     official_provider_family: Option<String>,
     wire_api: Option<WireApi>,
     protocol_bindings: Option<Vec<SourceProtocolBinding>>,
+    protocol_mode: Option<zenith_relay_core::ProtocolSelectionMode>,
     models: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
     excluded_models: Option<Vec<String>>,
@@ -143,6 +150,7 @@ pub async fn update_source(
     Path(id): Path<String>,
     Json(input): Json<SourcePatch>,
 ) -> Result<Json<SourceSummary>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
     let mut record = find_source(&state, &id)?;
     let old_record = record.clone();
     let source_priorities = input.source_priorities.clone();
@@ -151,7 +159,7 @@ pub async fn update_source(
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret missing")
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
     if let Some(value) = input.name {
         record.name = clean_label(&value, "source name")?;
@@ -171,6 +179,12 @@ pub async fn update_source(
     }
     if let Some(value) = input.protocol_bindings {
         record.protocol_bindings = value;
+    }
+    if record.base_url != old_record.base_url || input.api_key.is_some() {
+        record.protocol_config.invalidate(&record.base_url);
+    }
+    if let Some(mode) = input.protocol_mode {
+        record.protocol_config.mode = mode;
     }
     if let Some(value) = input.models {
         record.models = normalized_values(value);
@@ -207,13 +221,13 @@ pub async fn update_source(
     }
     normalize_record_protocol_bindings(&mut record)?;
     if record.in_pool
-        && !record
-            .supports_any_wire_api()
-            .map_err(|message| ManagementError::validation("source_protocol_invalid", message))?
+        && !record.supports_any_wire_api().map_err(|message| {
+            ManagementError::validation(error_codes::SOURCE_PROTOCOL_INVALID, message)
+        })?
     {
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
-            "source_pool_protocol_unsupported",
+            error_codes::SOURCE_POOL_PROTOCOL_UNSUPPORTED,
             "source must expose at least one verified API route before joining the pool",
             "pool",
             false,
@@ -231,7 +245,7 @@ pub async fn update_source(
             .find(|source| source.id == record.id)
             .ok_or_else(|| {
                 ManagementError::validation(
-                    "source_priority_target_not_found",
+                    error_codes::SOURCE_PRIORITY_TARGET_NOT_FOUND,
                     "source priority target not found",
                 )
             })?;
@@ -326,7 +340,7 @@ fn apply_source_priorities(
             .find(|source| source.id == *source_id)
             .ok_or_else(|| {
                 ManagementError::validation(
-                    "source_priority_target_not_found",
+                    error_codes::SOURCE_PRIORITY_TARGET_NOT_FOUND,
                     "source priority target not found",
                 )
             })?;
@@ -339,13 +353,14 @@ pub async fn delete_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
     let record = find_source(&state, &id)?;
     let secret = state
         .vault
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret missing")
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
     state.store.delete_source(&id).map_err(store_error)?;
     state
@@ -367,23 +382,40 @@ pub async fn test_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<SourceSummary>, ManagementError> {
-    let mut record = find_source(&state, &id)?;
-    let previous = record.clone();
+    let record = find_source(&state, &id)?;
+    let checked = record.clone();
     let api_key = state
         .vault
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret missing")
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    let discovery = match discover_models(&record, &api_key).await {
+    let discovery = discover_models(&record, &api_key).await;
+    let _configuration = state.configuration_lock.lock().await;
+    let current = find_source(&state, &id)?;
+    if current.protocol_config != checked.protocol_config
+        || current.base_url != checked.base_url
+        || current.wire_api != checked.wire_api
+        || current.protocol_bindings != checked.protocol_bindings
+        || current.models != checked.models
+        || state
+            .vault
+            .load(&current.secret_ref)
+            .map_err(vault_error)?
+            .as_deref()
+            != Some(api_key.as_str())
+    {
+        return Err(stale_probe_error());
+    }
+    let previous = current.clone();
+    let mut record = current;
+    let discovery = match discovery {
         Ok(discovery) => discovery,
         Err(error) => {
-            // Keep the last confirmed catalog available while the upstream
-            // endpoint is temporarily unreachable. The error is diagnostic;
-            // it must not silently remove otherwise valid runtime routes.
-            record.last_error_code = Some(error.code.clone());
+            // Even a failed refresh must not overwrite a concurrent edit.
+            record.last_error_code = Some(error.code);
             state.store.save_source(&record).map_err(store_error)?;
             return Ok(Json(source_summary(&state, &record)?));
         }
@@ -393,6 +425,7 @@ pub async fn test_source(
     }
     record.models = discovery.models;
     record.protocol_bindings = discovery.protocol_bindings;
+    record.protocol_config.merge_catalog(discovery.capabilities);
     record.detected_model_prices = discovery.detected_model_prices;
     normalize_record_protocol_bindings(&mut record)?;
     record.last_error_code = None;
@@ -410,6 +443,71 @@ pub async fn test_source(
     Ok(Json(source_summary(&state, &record)?))
 }
 
+fn stale_probe_error() -> ManagementError {
+    ManagementError::new(
+        StatusCode::CONFLICT,
+        error_codes::SOURCE_PROBE_STALE,
+        "source changed during the check; refresh and try again",
+        "source",
+        false,
+    )
+}
+
+pub async fn probe_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<zenith_relay_core::SourceProbeInput>,
+) -> Result<Json<zenith_relay_core::SourceProbeResult>, ManagementError> {
+    let record = find_source(&state, &id)?;
+    if record.protocol_config.revision != input.expected_revision {
+        return Err(stale_probe_error());
+    }
+    ensure_not_server_self_source(&state, &record.base_url)?;
+    let api_key = state
+        .vault
+        .load(&record.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
+        })?;
+    let source = ProviderSource {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        base_url: record.base_url.clone(),
+        api_key: api_key.clone(),
+        wire_api: record.wire_api,
+        models: record.models.clone(),
+    };
+    let result = zenith_relay_core::probe_source_generation(&source, &input)
+        .await
+        .map_err(source_discovery_error)?;
+    let _configuration = state.configuration_lock.lock().await;
+    let mut current = find_source(&state, &id)?;
+    let previous = current.clone();
+    if current.base_url != record.base_url
+        || current.models != record.models
+        || current.protocol_config != record.protocol_config
+        || state
+            .vault
+            .load(&current.secret_ref)
+            .map_err(vault_error)?
+            .as_deref()
+            != Some(api_key.as_str())
+        || !current
+            .protocol_config
+            .apply_probe(input.expected_revision, result.capability.clone())
+    {
+        return Err(stale_probe_error());
+    }
+    normalize_record_protocol_bindings(&mut current)?;
+    state.store.save_source(&current).map_err(store_error)?;
+    state
+        .rebuild_runtime_or_rollback(|| state.store.save_source(&previous))
+        .await
+        .map_err(runtime_error)?;
+    Ok(Json(result))
+}
+
 pub async fn source_stats(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -420,7 +518,10 @@ pub async fn source_stats(
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret is missing")
+            ManagementError::not_found(
+                error_codes::SOURCE_SECRET_MISSING,
+                "source secret is missing",
+            )
         })?;
     ensure_not_server_self_source(&state, &record.base_url)?;
     fetch_source_provider_stats(&record.base_url, &api_key)
@@ -429,7 +530,7 @@ pub async fn source_stats(
         .map_err(|_| {
             ManagementError::new(
                 StatusCode::BAD_GATEWAY,
-                "source_stats_unavailable",
+                error_codes::SOURCE_STATS_UNAVAILABLE,
                 "source stats are unavailable",
                 "source",
                 true,
@@ -442,6 +543,15 @@ fn source_record(
     secret_ref: String,
     input: SourceInput,
 ) -> Result<SourceRecord, ManagementError> {
+    let mut protocol_config = SourceProtocolConfig::automatic(&input.base_url);
+    // Payloads from before protocol selection was persisted did not carry a
+    // mode. Keep those legacy connections on their explicit native route;
+    // automatic capability expansion is opt-in through `protocolMode: auto`.
+    // This also prevents an old Responses-only source from silently gaining
+    // adapted client routes after a server upgrade.
+    protocol_config.mode = input
+        .protocol_mode
+        .unwrap_or(zenith_relay_core::ProtocolSelectionMode::Manual);
     let mut record = SourceRecord {
         id,
         name: clean_label(&input.name, "source name")?,
@@ -457,6 +567,7 @@ fn source_record(
         )?,
         wire_api: input.wire_api,
         protocol_bindings: input.protocol_bindings,
+        protocol_config,
         models: normalized_values(input.models),
         allowed_models: normalized_values(input.allowed_models),
         excluded_models: normalized_values(input.excluded_models),
@@ -509,7 +620,7 @@ fn normalize_pricing_identity(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
     {
         return Err(ManagementError::validation(
-            "source_pricing_identity_invalid",
+            error_codes::SOURCE_PRICING_IDENTITY_INVALID,
             format!("{label} contains unsupported characters"),
         ));
     }
@@ -520,16 +631,19 @@ fn validate_record_protocol_bindings(record: &SourceRecord) -> Result<(), Manage
     if record.protocol_bindings.is_empty() {
         return Ok(());
     }
-    normalize_source_protocol_bindings(
-        record.protocol_bindings.clone(),
-        record.wire_api,
-        &record.models,
-    )
-    .map(drop)
-    .map_err(|error| validation_error(error.to_string()))
+    record
+        .effective_protocol_bindings()
+        .map(drop)
+        .map_err(|error| validation_error(error.to_string()))
 }
 
 fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), ManagementError> {
+    if record.protocol_config.mode == zenith_relay_core::ProtocolSelectionMode::Auto {
+        record
+            .effective_protocol_bindings()
+            .map_err(validation_error)?;
+        return Ok(());
+    }
     if record.protocol_bindings.is_empty() {
         return Ok(());
     }
@@ -567,7 +681,7 @@ fn clear_source_catalog(record: &mut SourceRecord) {
 fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
     (value <= 24 * 60 * 60).then_some(value).ok_or_else(|| {
         ManagementError::validation(
-            "source_recovery_delay_invalid",
+            error_codes::SOURCE_RECOVERY_DELAY_INVALID,
             "source recovery delay must not exceed 24 hours",
         )
     })
@@ -576,8 +690,9 @@ fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
 fn normalize_source_prices(
     prices: BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<BTreeMap<String, ApiModelPriceOverride>, ManagementError> {
-    normalize_model_price_overrides(prices)
-        .map_err(|message| ManagementError::validation("source_model_price_invalid", message))
+    normalize_model_price_overrides(prices).map_err(|message| {
+        ManagementError::validation(error_codes::SOURCE_MODEL_PRICE_INVALID, message)
+    })
 }
 
 async fn discover_models(
@@ -592,10 +707,13 @@ async fn discover_models(
         wire_api: record.wire_api,
         models: record.models.clone(),
     };
-    let discovery =
-        discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings)
-            .await
-            .map_err(source_discovery_error)?;
+    let discovery = discover_source_with_protocol_config(
+        &source,
+        &record.protocol_bindings,
+        &record.protocol_config,
+    )
+    .await
+    .map_err(source_discovery_error)?;
     Ok(discovery)
 }
 
@@ -614,7 +732,7 @@ fn source_discovery_error(error: zenith_relay_core::Error) -> ManagementError {
     };
     ManagementError::new(
         status,
-        "source_test_failed",
+        error_codes::SOURCE_TEST_FAILED,
         error.to_string(),
         "upstream",
         retryable,
@@ -628,7 +746,9 @@ fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementErr
         .map_err(store_error)?
         .into_iter()
         .find(|record| record.id == id)
-        .ok_or_else(|| ManagementError::not_found("source_not_found", "source not found"))
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::SOURCE_NOT_FOUND, "source not found")
+        })
 }
 
 fn source_summary(
@@ -641,7 +761,9 @@ fn source_summary(
         .sources
         .into_iter()
         .find(|value| value.id == record.id)
-        .ok_or_else(|| ManagementError::internal("snapshot_missing", "source snapshot missing"))
+        .ok_or_else(|| {
+            ManagementError::internal(error_codes::SNAPSHOT_MISSING, "source snapshot missing")
+        })
 }
 
 fn ensure_not_server_self_source(
@@ -654,7 +776,7 @@ fn ensure_not_server_self_source(
     );
     if source_points_to_gateway(source_base_url, &gateway_base_url) {
         return Err(ManagementError::validation(
-            "source_self_route",
+            error_codes::SOURCE_SELF_ROUTE,
             "source base URL must not point back to this Relay gateway",
         ));
     }
@@ -713,6 +835,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: zenith_relay_core::SourceAdapter::Native,
@@ -765,6 +888,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["provider/model".to_string()],
             allowed_models: Vec::new(),

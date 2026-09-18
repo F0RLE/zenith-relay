@@ -247,9 +247,13 @@ impl<B: SecretBackend> ImportSessionStore<B> {
         } else {
             None
         };
-        let content = content
-            .or(original_content.as_deref())
-            .expect("prepared import content is available");
+        let content = content.or(original_content.as_deref()).ok_or_else(|| {
+            ImportSessionError::new(
+                ImportSessionErrorCode::SnapshotMismatch,
+                "prepared import content is missing",
+            )
+            .for_session(&session_id)
+        })?;
         let (base, stable_source_file) =
             parse_stable(content, original.source_file.as_deref(), &[])?;
         if base.items.len() != selectable_row_count(&final_preview) {

@@ -7,6 +7,7 @@ import type {
 import {
   normalizedAdapter,
   normalizedModelIds,
+  upstreamWireApi,
 } from "../sourceProtocolBindings";
 
 type EditorContext = {
@@ -32,39 +33,6 @@ function routeBinding(
   return bindings.find(
     (binding) => binding.wireApi === wireApi && normalizedAdapter(binding) === adapter,
   );
-}
-
-function routesMayShareModel(
-  left: SourceProtocolBinding,
-  right: SourceProtocolBinding,
-) {
-  return (left.wireApi === "messages"
-    && normalizedAdapter(left) === "native"
-    && right.wireApi === "responses"
-    && normalizedAdapter(right) === "responses_to_messages")
-    || (right.wireApi === "messages"
-      && normalizedAdapter(right) === "native"
-      && left.wireApi === "responses"
-      && normalizedAdapter(left) === "responses_to_messages");
-}
-
-function removeModelFromOtherRoutes(
-  sourceBindings: readonly SourceProtocolBinding[],
-  target: SourceProtocolBinding,
-  model: string,
-  context: EditorContext,
-) {
-  return sourceBindings.map((binding) => {
-    if (binding === target || routesMayShareModel(binding, target)) return binding;
-    const nextModelIds = selectedModels(binding, context)
-      .filter((candidate) => candidate.toLowerCase() !== model.toLowerCase());
-    return {
-      ...binding,
-      // Materialize the remaining catalog when a legacy single-route binding
-      // used an empty model list as its source-wide fallback.
-      modelIds: normalizedModelIds(nextModelIds, context.models),
-    };
-  });
 }
 
 function addModelToRoute(
@@ -111,7 +79,7 @@ export function updateNativeProtocol({
       modelIds: bindings.length ? [] : [...models],
       adapter: "native" as const,
       reasoningMode: "disabled" as const,
-      cacheWriteTtl: wireApi === "messages" ? "1h" as const : "provider" as const,
+      cacheWriteTtl: "provider" as const,
     },
   ];
 }
@@ -132,7 +100,9 @@ export function updateModelRoute({
 }) {
   const context = { bindings, models, autoAssignModels };
   const target = routeBinding(bindings, wireApi, adapter);
-  if (!target) return [...bindings];
+  if (!target) return selected ? [...bindings, {
+    wireApi, adapter, modelIds: [model], reasoningMode: adapter === "native" ? "disabled" as const : "adaptive" as const,
+  }] : [...bindings];
   if (!selected) {
     const selectedIds = selectedModels(target, context);
     const nextModelIds = selectedIds.filter((candidate) => candidate.toLowerCase() !== model.toLowerCase());
@@ -150,8 +120,7 @@ export function updateModelRoute({
       }
       : binding);
   }
-  const moved = removeModelFromOtherRoutes(bindings, target, model, context);
-  return addModelToRoute(moved, target, model, context);
+  return addModelToRoute(bindings, target, model, context);
 }
 
 export function updateBridgeModel({
@@ -185,12 +154,7 @@ export function updateBridgeModel({
   }
 
   if (target) {
-    const moved = removeModelFromOtherRoutes(bindings, target, model, context);
-    return addModelToRoute(moved, target, model, context).map((binding) => (
-      binding === target
-        ? { ...binding, modelIds: normalizedModelIds([...bridgeModels, model], models) }
-        : binding
-    ));
+    return addModelToRoute(bindings, target, model, context);
   }
 
   const newBinding: SourceProtocolBinding = adapter === "responses_to_messages"
@@ -198,17 +162,17 @@ export function updateBridgeModel({
       wireApi: "responses",
       adapter,
       reasoningMode: "adaptive",
-      cacheWriteTtl: cacheWriteTtl === "provider" ? "1h" : cacheWriteTtl,
+      cacheWriteTtl,
       modelIds: [model],
     }
     : {
       wireApi: "responses",
       adapter,
-      reasoningMode: "disabled",
+      reasoningMode: "adaptive",
       modelIds: [model],
     };
   return [
-    ...removeModelFromOtherRoutes(bindings, newBinding, model, context),
+    ...bindings,
     newBinding,
   ];
 }
@@ -218,7 +182,7 @@ export function updateCacheWriteTtl(
   cacheWriteTtl: CacheWriteTtl,
 ) {
   return bindings.map((binding) => (
-    binding.wireApi === "messages" || normalizedAdapter(binding) === "responses_to_messages"
+    upstreamWireApi(binding) === "messages"
       ? { ...binding, cacheWriteTtl }
       : binding
   ));

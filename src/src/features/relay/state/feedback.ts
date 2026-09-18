@@ -15,8 +15,9 @@ const MAX_FEEDBACK_MESSAGE_LENGTH = 600;
 const MAX_FEEDBACK_FIELD_LENGTH = 160;
 const SAFE_CODE = /^[a-z0-9][a-z0-9_.:-]{0,119}$/i;
 const SENSITIVE_VALUE_FIELD = "(?:api[_-]?key|x[_-]?api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|password|client[_-]?secret|secret|token|set[_-]?cookie|cookie|session(?:[_-]?id)?|csrf(?:[_-]?token)?|account(?:[_-]?(?:id|email|identity|name|label))?|user(?:[_-]?(?:id|email|identity|name))?|email|identity)";
-const SENSITIVE_VALUE = new RegExp(`(${SENSITIVE_VALUE_FIELD}\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;]+)`, "gi");
+const SENSITIVE_VALUE = new RegExp(`(["']?${SENSITIVE_VALUE_FIELD}["']?\\s*[:=]\\s*)("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^\\s,;}]+)`, "gi");
 const SENSITIVE_QUERY_VALUE = new RegExp(`([?&]${SENSITIVE_VALUE_FIELD}=)[^&\\s]*`, "gi");
+const URL_CREDENTIALS = /([a-z][a-z\d+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 
 export function sanitizeFeedbackError(error: unknown, fallbackCode = "general", fallbackMessage = ""): FeedbackError {
   const envelope = isRecord(error) && isRecord(error["error"]) ? error["error"] : error;
@@ -89,14 +90,15 @@ export function redactFeedbackText(value: string) {
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim()
-    .slice(0, MAX_FEEDBACK_MESSAGE_LENGTH)
     .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
     .replace(/\b(?:eyJ[A-Za-z0-9_-]*\.){2}[A-Za-z0-9_-]+\b/g, "[redacted JWT]")
+    .replace(URL_CREDENTIALS, "$1[redacted]@")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted email]")
     .replace(SENSITIVE_VALUE, "$1[redacted]")
     .replace(SENSITIVE_QUERY_VALUE, "$1[redacted]")
     .replace(/\b(?:account|user)[_-][A-Z0-9][A-Z0-9_-]{3,}\b/gi, "[redacted identity]")
-    .replace(/\b(?:sk|pk|rk|znt|zrs|ghp|github_pat|xox[baprs]-|at-)[A-Za-z0-9_-]{8,}\b/gi, "[redacted]");
+    .replace(/\b(?:sk|pk|rk|znt|zrs|ghp|github_pat|xox[baprs]-|at-)[A-Za-z0-9_-]{8,}\b/gi, "[redacted]")
+    .slice(0, MAX_FEEDBACK_MESSAGE_LENGTH);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,158 +1,100 @@
 import { describe, expect, test } from "bun:test";
-import { groupModels, modelProviderGroup, modelProviderGroupLabel, sortModelIdsForLauncher, supportsCacheWritePricing } from "../src/features/relay/modelGroups";
-import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../src/features/relay/modelPricing";
+import {
+  groupModels,
+  orderModelIdsBySnapshot,
+  uniqueModelIds,
+} from "../src/features/relay/modelGroups";
+import {
+  formatEditableModelPrice,
+  parseEditableModelPrice,
+  parseOptionalEditableModelPrice,
+} from "../src/features/relay/modelPricing";
+import type { ModelSummary } from "../src/features/relay/api/types";
 
-describe("model pricing", () => {
-  test("groups known and future provider families without a fixed model catalog", () => {
-    expect(modelProviderGroup("gpt-5.7-future")).toBe("openai");
-    expect(modelProviderGroup("claude-opus-4-8")).toBe("anthropic");
-    expect(modelProviderGroup("grok-4.5")).toBe("provider-grok");
-    expect(modelProviderGroup("gemini-3.6-flash")).toBe("provider-gemini");
-    expect(modelProviderGroup("glm-5.2")).toBe("provider-glm");
-    expect(modelProviderGroupLabel("provider-gemini")).toBe("Google");
-    expect(modelProviderGroupLabel("provider-grok")).toBe("xAI");
-    expect(modelProviderGroupLabel("provider-glm")).toBe("Z.ai");
-    expect(modelProviderGroupLabel("provider-deepseek")).toBe("Deepseek");
-    expect(supportsCacheWritePricing("claude-sonnet-next")).toBe(true);
-    expect(groupModels(["glm-5", "gpt-5", "gemini-3", "grok-4", "new-provider"], (model) => model).map((group) => [group.id, group.items])).toEqual([
-      ["openai", ["gpt-5"]],
-      ["provider-gemini", ["gemini-3"]],
-      ["provider-grok", ["grok-4"]],
-      ["provider-glm", ["glm-5"]],
-      ["provider-new", ["new-provider"]],
-    ]);
-  });
+function metadata(
+  id: string,
+  catalogProvider: string | null,
+  catalogFamily: string | null,
+): Pick<ModelSummary, "id" | "catalogProvider" | "catalogFamily"> {
+  return { id, catalogProvider, catalogFamily };
+}
 
-  test("uses semantic model order in source price editors and launchers", () => {
-    expect(sortModelIdsForLauncher([
-      "private-second",
-      "grok-build-0.1",
-      "grok-4.20-0309-non-reasoning",
-      "grok-4.20-0309-reasoning",
-      "grok-4.3",
-      "grok-4.5",
-      "grok-4.6",
-      "gemini-2.5-flash-lite",
-      "gemini-3.1-flash-lite",
-      "gemini-2.5-flash",
-      "gemini-3-flash-preview",
-      "gemini-3-flash",
-      "gemini-3.5-flash",
-      "gemini-3.6-flash",
-      "gemini-3.7-flash",
-      "gemini-2.5-pro",
-      "gemini-3-pro-preview",
-      "gemini-3-pro",
-      "gemini-3.1-pro-preview",
-      "claude-haiku-4-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-5",
-      "claude-opus-4-6",
-      "claude-opus-4-7",
-      "claude-opus-4-8",
-      "claude-opus-5",
-      "claude-fable-5",
-      "gpt-5.4-mini",
-      "gpt-5.4",
-      "gpt-5.5",
-      "gpt-5.6-terra",
-      "gpt-5.6-sol",
-      "private-first",
-    ])).toEqual([
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.4-mini",
-      "claude-fable-5",
-      "claude-opus-5",
-      "claude-opus-4-8",
-      "claude-opus-4-7",
-      "claude-opus-4-6",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-haiku-4-5",
-      "gemini-3.1-pro-preview",
-      "gemini-3-pro",
-      "gemini-3-pro-preview",
-      "gemini-2.5-pro",
-      "gemini-3.7-flash",
-      "gemini-3.6-flash",
-      "gemini-3.5-flash",
-      "gemini-3-flash",
-      "gemini-3-flash-preview",
-      "gemini-2.5-flash",
-      "gemini-3.1-flash-lite",
-      "gemini-2.5-flash-lite",
-      "grok-4.6",
-      "grok-4.5",
-      "grok-4.3",
-      "grok-4.20-0309-reasoning",
-      "grok-4.20-0309-non-reasoning",
-      "grok-build-0.1",
-      "private-second",
-      "private-first",
-    ]);
-
-    expect(sortModelIdsForLauncher([
-      "grok-5.20-0612-non-reasoning",
-      "grok-5.20-0612-reasoning",
-      "grok-5.6",
-      "grok-5.6.1",
-      "gemini-4.1-flash",
-      "gemini-4.1.2-flash",
-      "gemini-3.9-pro",
-      "gemini-4-pro",
-      "claude-sonnet-6",
-      "claude-opus-5",
-      "claude-opus-6",
-      "claude-opus-6-1",
-      "gpt-6.2-terra",
-      "gpt-6.2.1-terra",
-      "gpt-6.2-sol",
-      "gpt-6.2-experimental",
-      "gpt-7.0",
-    ])).toEqual([
-      "gpt-7.0",
-      "gpt-6.2.1-terra",
-      "gpt-6.2-sol",
-      "gpt-6.2-terra",
-      "gpt-6.2-experimental",
-      "claude-opus-6-1",
-      "claude-opus-6",
-      "claude-opus-5",
-      "claude-sonnet-6",
-      "gemini-4-pro",
-      "gemini-3.9-pro",
-      "gemini-4.1.2-flash",
-      "gemini-4.1-flash",
-      "grok-5.6.1",
-      "grok-5.6",
-      "grok-5.20-0612-reasoning",
-      "grok-5.20-0612-non-reasoning",
-    ]);
-  });
-
-  test("groups native and API OpenAI models together for display", () => {
+describe("model metadata presentation", () => {
+  test("keeps all company families in one stable group in snapshot order", () => {
     const models = [
-      { id: "gpt-5.4-mini", nativeChatGpt: false },
-      { id: "claude-opus-5", nativeChatGpt: false },
-      { id: "gpt-5.6-sol", nativeChatGpt: true },
-      { id: "gpt-5.4", nativeChatGpt: true },
+      metadata("new", "openai", "gpt-astra"),
+      metadata("sol", "openai", "gpt-sol"),
+      metadata("claude", "anthropic", "claude-opus"),
+      metadata("terra", "openai", "gpt-terra"),
+      metadata("mini", "openai", "gpt-mini"),
+      metadata("unclassified", "openai", null),
+    ];
+    const groups = groupModels(models, { metadata: (model) => model });
+    expect(groups.map((group) => [group.id, group.label, group.items.map((item) => item.id)]))
+      .toEqual([
+        ["catalog-openai", "OpenAI", ["new", "sol", "terra", "mini", "unclassified"]],
+        ["catalog-anthropic", "Anthropic", ["claude"]],
+      ]);
+    const changedFamily = models.map((model) => ({ ...model, catalogFamily: "renamed" }));
+    expect(groupModels(changedFamily, { metadata: (model) => model }).map((group) => group.id))
+      .toEqual(groups.map((group) => group.id));
+  });
+
+  test("groups by backend metadata without parsing model IDs", () => {
+    const models = [
+      metadata("anything-1", "google", "gemini-flash"),
+      metadata("private", null, null),
+      metadata("anything-2", " GOOGLE ", "gemini-pro"),
+      metadata("future", "new-lab", "new-family"),
     ];
 
-    expect(
-      groupModels(
-        models,
-        (model) => model.id,
-        (model) => model.nativeChatGpt,
-      ).map((group) => [group.id, group.items.map((model) => model.id)]),
-    ).toEqual([
-      ["openai", ["gpt-5.6-sol", "gpt-5.4", "gpt-5.4-mini"]],
-      ["anthropic", ["claude-opus-5"]],
-    ]);
+    expect(groupModels(models, { metadata: (model) => model })
+      .map((group) => [group.label, group.items.map((model) => model.id)]))
+      .toEqual([
+        ["Google", ["anything-1", "anything-2"]],
+        ["Other", ["private"]],
+        ["New Lab", ["future"]],
+      ]);
   });
 
+  test("formats catalog identity without changing its grouping key", () => {
+    const models = [
+      metadata("gpt", "openai", "gpt"),
+      metadata("grok", "xai", "grok"),
+      metadata("glm", "zai", "glm"),
+    ];
+
+    expect(groupModels(models, { metadata: (model) => model }).map((group) => group.label))
+      .toEqual(["OpenAI", "xAI", "Z.ai"]);
+  });
+
+  test("merges native ChatGPT and catalog OpenAI models visually", () => {
+    const models = [
+      { ...metadata("native-new", null, null), nativeChatGpt: true },
+      { ...metadata("api-model", "openai", "gpt-sol"), nativeChatGpt: false },
+    ];
+
+    expect(groupModels(models, {
+      metadata: (model) => model,
+      isNativeChatGpt: (model) => model.nativeChatGpt,
+    }).map((group) => [group.provider, group.items.map((model) => model.id)]))
+      .toEqual([["openai", ["native-new", "api-model"]]]);
+  });
+
+  test("keeps backend order and appends history-only models", () => {
+    const summaries = [
+      metadata("new", "openai", "gpt"),
+      metadata("old", "openai", "gpt"),
+    ] as ModelSummary[];
+    expect(orderModelIdsBySnapshot(
+      ["history", "old", "NEW", "history", "removed"],
+      summaries,
+    )).toEqual(["NEW", "old", "history", "removed"]);
+    expect(uniqueModelIds([" First ", "first", "Second"])).toEqual([" First ", "Second"]);
+  });
+});
+
+describe("model pricing", () => {
   test("converts editable USD prices to integer micro-USD", () => {
     expect(parseEditableModelPrice("1.4")).toBe(1_400_000);
     expect(parseEditableModelPrice("1,4")).toBe(1_400_000);

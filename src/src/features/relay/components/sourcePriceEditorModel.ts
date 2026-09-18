@@ -1,5 +1,6 @@
 import type { ApiModelPriceOverride, SourceSummary } from "../api/types";
 import { formatEditableModelPrice, parseEditableModelPrice } from "../modelPricing";
+import { uniqueModelIds } from "../modelGroups";
 
 export type SourcePriceDraft = {
   input: string;
@@ -15,13 +16,15 @@ export type SourcePriceDraftField = keyof SourcePriceDraft;
 const emptyDraft = (): SourcePriceDraft => ({ input: "", output: "", cached: "", cacheWrite5m: "", cacheWrite1h: "" });
 
 export function sourcePriceModels(source: Pick<SourceSummary, "modelPriceOverrides" | "detectedModelPrices" | "allowedModels" | "excludedModels" | "models">) {
-  return [...new Map([
-    ...Object.keys(source.modelPriceOverrides ?? {}),
-    ...Object.keys(source.detectedModelPrices ?? {}),
+  // Rust projects the complete inventory in catalog/manual order. Filters and
+  // prices must not move disabled models or replace their original spelling.
+  return uniqueModelIds([
+    ...source.models,
     ...source.allowedModels,
     ...source.excludedModels,
-    ...source.models,
-  ].map((model) => [model.toLowerCase(), model])).values()];
+    ...Object.keys(source.modelPriceOverrides ?? {}),
+    ...Object.keys(source.detectedModelPrices ?? {}),
+  ]);
 }
 
 export function updateSourcePriceDraft(

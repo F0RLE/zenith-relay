@@ -1,5 +1,6 @@
 use crate::accounts::{TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities};
+use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
@@ -24,7 +25,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -39,6 +40,7 @@ mod images;
 mod selection;
 mod session_state;
 mod source_metadata;
+mod source_speed;
 
 use control::RuntimeControl;
 use session_state::CodexTurnStateStore;
@@ -64,6 +66,7 @@ const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 8 * 60 * 60 * 1_000;
 const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
+static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A request activity delta for hosts that render the pool while requests are
 /// in flight. It intentionally contains only routing identifiers and counts;
@@ -71,6 +74,8 @@ const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeActivitySnapshot {
+    #[serde(default)]
+    pub runtime_id: u64,
     pub revision: u64,
     pub candidate_id: String,
     pub in_flight: u32,
@@ -88,27 +93,13 @@ pub(crate) struct CodexSourceModelMetadata {
 fn source_candidate_id(
     source_id: &str,
     binding: &SourceProtocolBinding,
-    binding_count: usize,
+    legacy_protocol: WireApi,
 ) -> String {
-    if binding_count == 1 {
+    if binding.adapter.is_passthrough() && binding.wire_api == legacy_protocol {
         return source_id.to_string();
     }
     let suffix = binding.adapter.route_suffix(binding.wire_api);
     format!("{source_id}::{suffix}")
-}
-
-fn apply_model_display_order(models: &mut [String], saved_order: &[String]) {
-    let positions = saved_order
-        .iter()
-        .enumerate()
-        .map(|(position, model)| (model.to_ascii_lowercase(), position))
-        .collect::<BTreeMap<_, _>>();
-    models.sort_by_key(|model| {
-        positions
-            .get(&model.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
 }
 
 fn source_reasoning_for_route(
@@ -123,7 +114,7 @@ fn source_reasoning_for_route(
         return Some(capabilities);
     }
     capabilities
-        .retain_efforts(|effort| reasoning_mode.supports_effort(effort))
+        .retain_efforts(|effort| adapter.supports_reasoning_effort(reasoning_mode, effort))
         .then_some(())?;
     capabilities.clear_summary_capabilities();
     Some(capabilities)
@@ -171,6 +162,7 @@ pub struct RuntimeSource {
     /// verified for each route. An empty list preserves the legacy source-wide
     /// `wire_api`.
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    pub protocol_config: crate::SourceProtocolConfig,
     pub enabled: bool,
     pub draining: bool,
     pub priority: i32,
@@ -184,6 +176,7 @@ pub struct RuntimeSource {
 impl RuntimeSource {
     pub fn unrestricted(source: ProviderSource) -> Self {
         Self {
+            protocol_config: crate::SourceProtocolConfig::default(),
             protocol_bindings: vec![SourceProtocolBinding::legacy(
                 source.wire_api,
                 &source.models,
@@ -312,10 +305,13 @@ pub enum DefaultServiceTier {
     #[default]
     Standard,
     Fast,
+    /// OpenAI's access-controlled lowest-latency tier.
+    Ultrafast,
 }
 
-/// Normalizes the explicit per-model policy. Older configurations may omit a
-/// model, in which case the legacy pool default remains the fallback.
+/// Normalizes the explicit per-model policy. Capability is resolved only from
+/// a live route's confirmed upstream manifest, so persistence must retain a
+/// valid model ID without inferring support from its spelling.
 pub fn normalize_model_service_tier_overrides(
     overrides: BTreeMap<String, DefaultServiceTier>,
 ) -> std::result::Result<BTreeMap<String, DefaultServiceTier>, &'static str> {
@@ -325,9 +321,7 @@ pub fn normalize_model_service_tier_overrides(
         if !is_valid_model_id(model) {
             return Err("model service tier override has an invalid model id");
         }
-        if crate::model_supports_fast_service_tier(model) {
-            normalized.insert(model.to_ascii_lowercase(), tier);
-        }
+        normalized.insert(model.to_ascii_lowercase(), tier);
     }
     Ok(normalized)
 }
@@ -337,16 +331,33 @@ impl DefaultServiceTier {
         match self {
             Self::Standard => "standard",
             Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
         }
     }
 
     /// Parses the durable service-tier spelling, including the legacy Codex
     /// `priority` alias for Relay's fast tier.
     pub fn from_storage_value(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
-            Self::Fast
-        } else {
-            Self::Standard
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ultrafast" => Self::Ultrafast,
+            "fast" | "priority" => Self::Fast,
+            _ => Self::Standard,
+        }
+    }
+
+    pub(crate) const fn atomic_value(self) -> u8 {
+        match self {
+            Self::Standard => 0,
+            Self::Fast => 1,
+            Self::Ultrafast => 2,
+        }
+    }
+
+    pub(crate) const fn from_atomic_value(value: u8) -> Self {
+        match value {
+            1 => Self::Fast,
+            2 => Self::Ultrafast,
+            _ => Self::Standard,
         }
     }
 }
@@ -377,6 +388,7 @@ pub struct GatewayRuntimeOptions {
     pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     pub subscription_plan_order: Vec<String>,
+    pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub quota_stale_after_ms: u64,
@@ -386,6 +398,9 @@ pub struct GatewayRuntimeOptions {
     /// Immutable pricing snapshot used only to rank the automatic image
     /// bridge model. A missing or empty snapshot never blocks runtime build.
     pub image_pricing_catalog: Option<Arc<PricingCatalog>>,
+    /// Advisory presentation metadata. It only orders model-list responses;
+    /// admission and routing remain owned by the runtime registry.
+    pub model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     /// Manually enabled source-model reasoning efforts. An absent model
     /// exposes no reasoning selector for API sources.
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
@@ -414,6 +429,10 @@ impl fmt::Debug for GatewayRuntimeOptions {
                 &self.image_pricing_catalog.as_ref().map(|_| "configured"),
             )
             .field(
+                "model_metadata_catalog",
+                &self.model_metadata_catalog.as_ref().map(|_| "configured"),
+            )
+            .field(
                 "model_reasoning_allowed_levels",
                 &self.model_reasoning_allowed_levels,
             )
@@ -434,11 +453,13 @@ impl Default for GatewayRuntimeOptions {
             keep_last_candidate_available: crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
             subscription_plan_order: Vec::new(),
+            pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             image_pricing_catalog: None,
+            model_metadata_catalog: None,
             model_reasoning_allowed_levels: BTreeMap::new(),
             response_affinity_store: None,
             provider_storm_breaker: false,
@@ -451,6 +472,7 @@ pub struct GatewayRuntime {
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    source_capabilities: BTreeMap<String, Vec<crate::ModelEndpointCapability>>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
@@ -465,16 +487,18 @@ pub struct GatewayRuntime {
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
     model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
     model_display_order: Mutex<Vec<String>>,
+    model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     codex_turn_state_store: CodexTurnStateStore,
     control: RuntimeControl,
-    max_retry_candidates: usize,
+    max_retry_candidates: std::sync::atomic::AtomicUsize,
     quota_stale_after_ms: u64,
-    default_service_tier_fast: AtomicBool,
+    default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
+    activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
     chatgpt_team_breaker_callback: Arc<Mutex<RuntimeTeamBreakerCallback>>,
     pub(crate) usage: UsageCallback,
@@ -552,9 +576,9 @@ pub(crate) struct CandidateLease {
     scheduler: Arc<Mutex<PoolScheduler>>,
     availability: Arc<tokio::sync::Notify>,
     candidate_id: String,
-    model: String,
-    lane: CandidateLeaseLane,
+    reservation_id: crate::scheduler::ReservationId,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
+    activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
     released: AtomicBool,
 }
@@ -581,20 +605,14 @@ impl CandidateLease {
                 .scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let released = match self.lane {
-                CandidateLeaseLane::Text => {
-                    scheduler.release_for(&self.candidate_id, Some(&self.model))
-                }
-                CandidateLeaseLane::Image => {
-                    scheduler.release_image_for(&self.candidate_id, Some(&self.model))
-                }
-            };
+            let released = scheduler.release_reservation(self.reservation_id);
             if !released {
                 None
             } else {
                 let (in_flight, active_request_count, active_models) =
                     scheduler.runtime_activity_for(&self.candidate_id);
                 Some(RuntimeActivitySnapshot {
+                    runtime_id: self.activity_runtime_id,
                     revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
                     candidate_id: self.candidate_id.clone(),
                     in_flight,
@@ -681,6 +699,9 @@ pub(crate) struct ExecutorRoute {
     pub(crate) candidate_id: String,
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
+    /// The exact OAuth token generation that was used for this upstream
+    /// request. This is request-local provenance, not route configuration.
+    pub(crate) account_token_generation: Option<u64>,
     pub(crate) client_context_id: Option<String>,
     pub(crate) scope: CandidateScope,
     pub(crate) allowed_protocols: Vec<WireApi>,
@@ -712,6 +733,14 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
     pub(crate) agent_task_id: Option<String>,
+}
+
+/// The upstream response together with the exact OAuth credential generation
+/// that authorized it. Keeping this alongside the response lets delayed usage
+/// callbacks distinguish an old 401 from a failure of a newer login.
+pub(crate) struct AuthorizedResponse {
+    pub(crate) response: reqwest::Response,
+    pub(crate) account_token_generation: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -878,6 +907,12 @@ impl GatewayRuntime {
             &mut scheduler,
         )?;
         let hidden_models = normalized_set(options.hidden_models.iter());
+        // Desktop and server resolve the versioned policy from the complete
+        // configured inventory. `None` keeps the legacy core compatibility
+        // path for direct callers and older saved runtimes.
+        if let Some(policy) = options.pool_routing.clone() {
+            scheduler.set_pool_routing(policy)?;
+        }
         let key_parts = build_keys(keys, &hidden_models)?;
         validate_reachability(
             reachability_requirement,
@@ -921,6 +956,7 @@ impl GatewayRuntime {
             discovery_client,
             sources: source_parts.executors,
             source_candidate_bindings: source_parts.candidate_bindings,
+            source_capabilities: source_parts.capabilities,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
             chatgpt_team_members: account_parts.team_members,
@@ -935,18 +971,18 @@ impl GatewayRuntime {
             model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
             model_service_tier_overrides: Mutex::new(BTreeMap::new()),
             model_display_order: Mutex::new(Vec::new()),
+            model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             codex_turn_state_store: CodexTurnStateStore::default(),
             control: RuntimeControl::default(),
-            max_retry_candidates: options.max_retry_candidates,
+            max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),
             quota_stale_after_ms: options.quota_stale_after_ms,
-            default_service_tier_fast: AtomicBool::new(
-                options.default_service_tier == DefaultServiceTier::Fast,
-            ),
+            default_service_tier_value: AtomicU8::new(options.default_service_tier.atomic_value()),
             response_affinity_store: affinity_store,
             activity_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+            activity_runtime_id: NEXT_ACTIVITY_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
             activity_revision: Arc::new(AtomicU64::new(0)),
             chatgpt_team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
             usage,
@@ -1004,6 +1040,24 @@ impl GatewayRuntime {
         self.control.set_codex_websockets_enabled(enabled);
     }
 
+    pub fn chatgpt_retry_until_available(&self) -> bool {
+        self.control.chatgpt_retry_until_available()
+    }
+
+    pub fn set_chatgpt_retry_until_available(&self, enabled: bool) {
+        self.control.set_chatgpt_retry_until_available(enabled);
+    }
+
+    /// Maximum time a managed ChatGPT request may wait for a transiently
+    /// unavailable candidate before returning a machine-readable 503.
+    pub fn chatgpt_retry_window_ms(&self) -> u64 {
+        self.control.chatgpt_retry_window_ms()
+    }
+
+    pub fn set_chatgpt_retry_window_ms(&self, value: u64) {
+        self.control.set_chatgpt_retry_window_ms(value);
+    }
+
     pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
         self.control.mark_request_origin(request_id, origin);
     }
@@ -1059,6 +1113,38 @@ impl GatewayRuntime {
             .map(|key| self.authenticated_key(key))
     }
 
+    /// Creates an ephemeral key scope for scheduler-owned work on exactly one
+    /// OAuth account.  Background probes must use the same scheduler,
+    /// cooldowns, token authority, and usage callback as normal gateway
+    /// requests, but they must never inherit the user's broad pool scope or
+    /// fall back to a different account.
+    pub(crate) fn internal_account_key(
+        &self,
+        local_key_id: &str,
+        account_id: &str,
+    ) -> Option<AuthenticatedKey> {
+        let local_key_id = local_key_id.trim();
+        let account_id = account_id.trim();
+        if local_key_id.is_empty() || account_id.is_empty() {
+            return None;
+        }
+        self.chatgpt_accounts.get(account_id)?;
+        Some(AuthenticatedKey {
+            id: local_key_id.to_string(),
+            scope: Arc::new(RwLock::new(CandidateScope {
+                // An explicit empty source set prevents a synthetic internal
+                // key from selecting an API source while the account set below
+                // pins selection to the requested OAuth candidate.
+                source_ids: Some(BTreeSet::new()),
+                account_ids: Some(BTreeSet::from([account_id.to_string()])),
+                model_rules: ModelRules::default(),
+            })),
+            model_rules: ModelRules::default(),
+            model_prefix: None,
+            client_wire_apis: Some(vec![ClientWireApi::Responses]),
+        })
+    }
+
     fn authenticated_key(&self, key: &RuntimeKey) -> AuthenticatedKey {
         AuthenticatedKey {
             id: key.id.clone(),
@@ -1102,12 +1188,49 @@ impl GatewayRuntime {
         self.resolve_from_visible(key, model, &visible)
     }
 
+    /// Resolves a model that belongs to at least one configured route even
+    /// when every such route is temporarily hidden by runtime health. This is
+    /// deliberately narrower than `resolve_model`: unknown model ids must
+    /// still fail admission instead of occupying a retry window.
+    pub(crate) fn resolve_configured_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+    ) -> Option<String> {
+        let scope = key.scope_snapshot();
+        let scheduler = self.lock_scheduler();
+        let resolve = |candidate: &str| {
+            let resolved = self.resolve_model(key, candidate)?;
+            scheduler
+                .candidates()
+                .any(|candidate| candidate.is_configured(&resolved, allowed_protocols, &scope))
+                .then_some(resolved)
+        };
+        resolve(model).or_else(|| decode_codex_model_alias(model).and_then(|id| resolve(&id)))
+    }
+
     pub(crate) fn resolve_visible_account_model(
         &self,
         key: &AuthenticatedKey,
         model: &str,
     ) -> Option<String> {
         self.resolve_from_visible(key, model, &self.visible_account_models(key))
+    }
+
+    pub(crate) fn resolve_configured_account_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Option<String> {
+        let resolve = |candidate: &str| {
+            let resolved = self.resolve_model(key, candidate)?;
+            (!self
+                .codex_model_chatgpt_account_ids_for_resolved(key, &resolved)
+                .is_empty())
+            .then_some(resolved)
+        };
+        resolve(model).or_else(|| decode_codex_model_alias(model).and_then(|id| resolve(&id)))
     }
 
     fn resolve_from_visible(
@@ -1146,7 +1269,14 @@ impl GatewayRuntime {
             .model_display_order
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        apply_model_display_order(&mut models, &order);
+        models = self.model_metadata_catalog.as_ref().map_or_else(
+            || crate::normalize_model_ids(models.iter()),
+            |catalog| {
+                catalog
+                    .snapshot()
+                    .merge_display_order(models.iter(), &order)
+            },
+        );
         models
             .into_iter()
             .map(|model| match key.model_prefix.as_deref() {
@@ -1232,6 +1362,7 @@ impl GatewayRuntime {
     /// union of efforts declared by at least one source. Discovery metadata
     /// only informs the picker: source routing stays model-based and request
     /// admission never depends on reasoning metadata.
+    #[cfg(test)]
     pub(crate) async fn codex_source_model_metadata(
         &self,
         key: &AuthenticatedKey,
@@ -1328,6 +1459,7 @@ impl GatewayRuntime {
             candidate_id: candidate_id.to_string(),
             source_id: binding.source_id.clone(),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             scope: scope.clone(),
             allowed_protocols: allowed_protocols.to_vec(),
@@ -1350,16 +1482,27 @@ impl GatewayRuntime {
         scope: &CandidateScope,
         allowed_protocols: &[WireApi],
     ) -> ExecutorRoute {
+        let wire_api = allowed_protocols
+            .first()
+            .copied()
+            .unwrap_or(WireApi::Responses);
+        let adapter =
+            SourceAdapter::between(wire_api, WireApi::Responses).expect("registered account route");
         ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            account_token_generation: None,
             client_context_id: None,
             scope: scope.clone(),
             allowed_protocols: allowed_protocols.to_vec(),
-            wire_api: WireApi::Responses,
-            adapter: SourceAdapter::Native,
-            reasoning_mode: MessagesReasoningMode::Disabled,
+            wire_api,
+            adapter,
+            reasoning_mode: if adapter.is_passthrough() {
+                MessagesReasoningMode::Disabled
+            } else {
+                MessagesReasoningMode::Adaptive
+            },
             cache_write_ttl: CacheWriteTtl::Provider,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
@@ -1418,7 +1561,43 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
+        let scheduler = self.lock_scheduler();
+        if scheduler.automatic_recovery_enabled() {
+            // Cover the whole configured pool and one recovery attempt per
+            // route. Selection still enforces the key, model and owner scope.
+            scheduler.candidates().count().saturating_mul(2).max(1)
+        } else {
+            self.max_retry_candidates.load(Ordering::Relaxed)
+        }
+    }
+
+    pub(crate) fn automatic_recovery_enabled(&self) -> bool {
+        self.lock_scheduler().automatic_recovery_enabled()
+    }
+
+    pub fn set_pool_routing_policy(
+        &self,
+        policy: crate::PoolRoutingPolicy,
+        max_retry_candidates: u8,
+        cooldown_after_failures: u8,
+        keep_last_candidate_available: bool,
+    ) -> Result<()> {
+        policy
+            .validate()
+            .map_err(|message| Error::Validation(message.into()))?;
+        if !(1..=8).contains(&max_retry_candidates) || !(1..=8).contains(&cooldown_after_failures) {
+            return Err(Error::Validation(
+                "routing retry limits must be between 1 and 8".into(),
+            ));
+        }
+        let mut scheduler = self.lock_scheduler();
+        scheduler.set_pool_routing(policy)?;
+        scheduler.set_cooldown_policy(cooldown_after_failures, keep_last_candidate_available);
         self.max_retry_candidates
+            .store(usize::from(max_retry_candidates), Ordering::Relaxed);
+        drop(scheduler);
+        self.candidate_availability.notify_waiters();
+        Ok(())
     }
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
@@ -1430,20 +1609,18 @@ impl GatewayRuntime {
     }
 
     pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
-        self.default_service_tier_fast
-            .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
+        self.default_service_tier_value
+            .store(tier.atomic_value(), Ordering::Relaxed);
     }
 
     pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
-        if self.default_service_tier_fast.load(Ordering::Relaxed) {
-            DefaultServiceTier::Fast
-        } else {
-            DefaultServiceTier::Standard
-        }
+        DefaultServiceTier::from_atomic_value(
+            self.default_service_tier_value.load(Ordering::Relaxed),
+        )
     }
 
-    /// Applies the operator-selected two-speed policy. Client-owned API
-    /// requests retain an explicit tier at the gateway boundary.
+    /// Applies the operator-selected speed policy. Client-owned API requests
+    /// retain an explicit tier at the gateway boundary.
     pub fn set_model_service_tier_overrides(
         &self,
         overrides: BTreeMap<String, DefaultServiceTier>,
@@ -1457,16 +1634,30 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    pub(crate) fn model_service_tier(&self, model: &str) -> DefaultServiceTier {
-        if !crate::model_supports_fast_service_tier(model) {
-            return DefaultServiceTier::Standard;
-        }
-        self.model_service_tier_overrides
+    pub(crate) fn model_service_tier_for_candidate(
+        &self,
+        candidate_id: &str,
+        model: &str,
+    ) -> DefaultServiceTier {
+        let requested = self
+            .model_service_tier_overrides
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&model.trim().to_ascii_lowercase())
             .copied()
-            .unwrap_or_else(|| self.default_service_tier())
+            .unwrap_or_else(|| self.default_service_tier());
+        self.effective_service_tier_for_candidate(candidate_id, model, requested)
+    }
+
+    pub(crate) fn model_effective_service_tier(&self, model: &str) -> DefaultServiceTier {
+        let requested = self
+            .model_service_tier_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model.trim().to_ascii_lowercase())
+            .copied()
+            .unwrap_or_else(|| self.default_service_tier());
+        self.project_service_tier_for_model(model, requested)
     }
 
     pub fn set_model_display_order(&self, models: Vec<String>) {
@@ -1505,8 +1696,32 @@ impl GatewayRuntime {
         candidate_id: &str,
         request: CooldownRequest<'_>,
     ) -> bool {
-        self.lock_scheduler()
-            .set_cooldown_with_reason_for_model_at(candidate_id, request)
+        let mut scheduler = self.lock_scheduler();
+        let applied = scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request);
+        if applied {
+            if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+                let resource_failure = request.reason
+                    == crate::scheduler::CooldownReason::RateLimit
+                    || (request.scope == "*"
+                        && request.reason == crate::scheduler::CooldownReason::Mandatory);
+                let upstream = binding.adapter.upstream_protocol(binding.wire_api);
+                for (id, sibling) in &self.source_candidate_bindings {
+                    if id != candidate_id
+                        && sibling.source_id == binding.source_id
+                        && (resource_failure
+                            || sibling.adapter.upstream_protocol(sibling.wire_api) == upstream)
+                    {
+                        scheduler.set_cooldown_with_reason(
+                            id,
+                            request.scope,
+                            request.retry_at_ms,
+                            request.reason,
+                        );
+                    }
+                }
+            }
+        }
+        applied
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {

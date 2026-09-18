@@ -1,6 +1,6 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
-export type DefaultServiceTier = "standard" | "fast";
+export type DefaultServiceTier = "standard" | "fast" | "ultrafast";
 export type ObservedServiceTier = string;
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
@@ -28,6 +28,11 @@ export type QuotaSnapshot = {
   supplemental?: SupplementalQuotaWindow[];
   limitReached: boolean;
   resetCreditsAvailable: number | null;
+  /** Provider-reported credits in millionths of one credit; informational only. */
+  availableCreditsMicroUnits?: number | null;
+  /** Fresh positive or unlimited provider credits keep an exhausted account eligible. */
+  providerCreditsAvailable?: boolean;
+  providerCreditsUnlimited?: boolean;
   directBalanceMicroUsd?: number | null;
   updatedAtMs: number | null;
   error: { code: string; occurredAtMs: number } | null;
@@ -88,7 +93,38 @@ export type ApiModelPriceOverride = {
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini";
 
-export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini";
+export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini"
+  | "responses_to_chat_completions" | "chat_completions_to_responses" | "chat_completions_to_messages"
+  | "chat_completions_to_gemini" | "messages_to_responses" | "messages_to_chat_completions"
+  | "messages_to_gemini" | "gemini_to_responses" | "gemini_to_chat_completions" | "gemini_to_messages";
+
+export type ProtocolSelectionMode = "auto" | "manual";
+export type CapabilityStatus = "declared" | "confirmed" | "unsupported" | "unknown";
+export type CapabilityOrigin = "catalog" | "service_profile" | "endpoint_url" | "manual" | "generation_probe";
+export type ProtocolFeature = "text" | "streaming" | "images" | "function_tools" | "tool_choice" | "structured_output" | "reasoning";
+export type ModelEndpointCapability = {
+  modelId: string;
+  upstreamWireApi: SourceWireApi;
+  status: CapabilityStatus;
+  origin: CapabilityOrigin;
+  checkedAtMs: number;
+  features: Partial<Record<ProtocolFeature, CapabilityStatus>>;
+  reasoningEfforts: string[];
+};
+export type SourceProtocolConfig = {
+  mode: ProtocolSelectionMode;
+  revision: number;
+  capabilities: ModelEndpointCapability[];
+  endpointHint?: SourceWireApi | null;
+};
+
+export type SourceProbeInput = { modelId: string; wireApi: SourceWireApi; expectedRevision: number };
+export type SourceProbeResult = {
+  capability: ModelEndpointCapability;
+  revision: number;
+  httpStatus: number | null;
+  errorCode: string | null;
+};
 
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";
@@ -117,6 +153,8 @@ export type SourceSummary = {
   officialProviderFamily?: string | null;
   wireApi: SourceWireApi;
   protocolBindings?: SourceProtocolBinding[];
+  protocolConfig?: SourceProtocolConfig;
+  resolvedProtocolBindings?: SourceProtocolBinding[];
   models: string[];
   allowedModels: string[];
   excludedModels: string[];
@@ -131,11 +169,22 @@ export type SourceSummary = {
 };
 
 export type SourceStats = {
-  provider: "zenith" | "openrouter" | "unsupported";
+  provider: "zenith" | "openrouter" | "sub2api" | "new_api" | "billing" | "deepseek" | "siliconflow" | "unsupported";
   balanceMicroUsd: number | null;
   spentMicroUsd: number | null;
   requests: number | null;
   totalTokens: number | null;
+  status?: SourceStatsStatus;
+  balanceKind?: "wallet" | "key_quota" | "subscription";
+  balanceUnlimited?: boolean;
+  amounts?: SourceStatsAmount[];
+};
+
+export type SourceStatsStatus = "available" | "unsupported" | "unauthorized" | "rate_limited" | "unavailable" | "invalid_response";
+export type SourceStatsAmount = {
+  currency: "USD" | "CNY" | "CREDITS";
+  balanceMicros: number | null;
+  spentMicros: number | null;
 };
 
 export type AccountSummary = {
@@ -166,6 +215,16 @@ export type AccountSummary = {
   proxyId?: string | null;
   routingBlockReason?: "disabled" | "not_in_pool" | "draining" | "secret_unavailable" | "proxy_unavailable" | "reauth_required" | "auth_error" | "checkpoint" | "captcha" | "subscription_forbidden" | "subscription_expired" | "account_unhealthy" | "quota_exhausted" | null;
   lastErrorCode: string | null;
+  clientAuthStatus?: "login_required" | "available" | null;
+  lastClientLoginRedirectAtMs?: number | null;
+};
+
+export type CredentialRefreshResult = {
+  accountId: string;
+  status: "refreshed" | "retryable_failure" | "requires_reauth";
+  code: string;
+  expiresAtMs?: number | null;
+  generation?: number | null;
 };
 
 export type RevealedAccountIdentity = {
@@ -175,11 +234,35 @@ export type RevealedAccountIdentity = {
 
 export type ModelSummary = {
   id: string;
+  protocolRoutes?: {
+    clientWireApi: SourceWireApi;
+    upstreamWireApi: SourceWireApi;
+    features: Partial<Record<ProtocolFeature, CapabilityStatus>>;
+    reasoningEfforts: string[];
+  }[];
   enabled: boolean;
   memberCount: number;
   codexVisible: boolean;
   codexDisplayName: string;
-  catalogRank: number | null;
+  catalogProvider?: string | null;
+  catalogFamily?: string | null;
+  catalogName?: string | null;
+  catalogReleaseDate?: string | null;
+  catalogLastUpdated?: string | null;
+  catalogStatus?: string | null;
+  catalogReasoning?: boolean | null;
+  catalogReasoningMethod?: "effort" | "toggle" | "budget_tokens" | "adaptive" | "unknown" | null;
+  catalogReasoningEffortLevels?: string[];
+  catalogDefaultReasoningEffort?: string | null;
+  catalogToolCall?: boolean | null;
+  catalogStructuredOutput?: boolean | null;
+  catalogAttachment?: boolean | null;
+  catalogOpenWeights?: boolean | null;
+  catalogInputModalities?: string[];
+  catalogOutputModalities?: string[];
+  catalogContextLimit?: number | null;
+  catalogInputLimit?: number | null;
+  catalogOutputLimit?: number | null;
   inputMicroUsdPerMillion: number | null;
   cachedInputMicroUsdPerMillion?: number | null;
   cacheWrite5mMicroUsdPerMillion?: number | null;
@@ -193,6 +276,8 @@ export type ModelSummary = {
   reasoningConfigurable?: boolean;
   reasoningManualFallback?: boolean;
   speedSupported?: boolean;
+  /** Exact speed tiers confirmed by current routes, including standard. */
+  speedTiers?: DefaultServiceTier[];
   speedTier?: DefaultServiceTier;
   speedConfigurable?: boolean;
 };
@@ -208,6 +293,9 @@ export type CandidateRuntimeSnapshot = {
   candidateId: string;
   kind: "api_source" | "oauth_account";
   available: boolean;
+  nextForNewRequest?: boolean;
+  activityRevision?: number;
+  runtimeId?: number;
   inFlight: number;
   activeRequestCount?: number;
   activeModels?: Array<{
@@ -225,6 +313,7 @@ export type CandidateRuntimeSnapshot = {
 };
 
 export type RuntimeActivitySnapshot = {
+  runtimeId?: number;
   revision: number;
   candidateId: string;
   inFlight: number;
@@ -244,8 +333,15 @@ export type RuntimeActivitySnapshot = {
  * marker also prevents a stale poll from bringing a completed route back.
  */
 export type RuntimeActivityState = {
+  runtimeId?: number;
   revision: number;
   lastCandidateId: string | null;
+  /**
+   * The latest event for every touched candidate. The runtime order is
+   * eventually consistent, so the pool needs these facts while its next
+   * snapshot is still in flight.
+   */
+  candidates: Readonly<Record<string, RuntimeActivitySnapshot>>;
 };
 
 export type WakeTask = {
@@ -279,6 +375,7 @@ export type RuntimeSnapshot = {
   configurationRevision?: string | null;
   runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
   gateway: {
+    poolRouting?: PoolRoutingPolicy;
     running: boolean;
     baseUrl: string;
     candidateCount: number;
@@ -290,6 +387,8 @@ export type RuntimeSnapshot = {
     subscriptionPlanOrder?: string[];
     defaultServiceTier: DefaultServiceTier;
     models?: ModelSummary[];
+    /** Display metadata for the complete inventory, independent of routing rules. */
+    modelCatalog?: Record<string, Pick<ModelSummary, "catalogProvider" | "catalogFamily">>;
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
     commonProxyId?: string | null;
@@ -298,6 +397,7 @@ export type RuntimeSnapshot = {
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     codexBackgroundTasksEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
+    chatgptRetryUntilAvailable?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
@@ -349,6 +449,7 @@ type ConfigurationPresetMemberRule = {
 };
 
 export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
+  protocolMode?: ProtocolSelectionMode;
   name: string;
   baseUrl: string;
   pricingProvider?: string | null;
@@ -413,6 +514,19 @@ export type ConfigurationPresetApplyResult = {
 };
 
 export type RoutingStrategy = "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
+
+export type PoolRoutingMode = "smart" | "in_order" | "round_robin";
+export type PoolRoutingMember = {
+  kind: "account" | "source";
+  id: string;
+  weight: number;
+  maxConcurrency: number;
+};
+export type PoolRoutingPolicy = {
+  version: 1;
+  mode: PoolRoutingMode;
+  members: PoolRoutingMember[];
+};
 
 export type ProxyAssignmentResult = {
   assigned: number;
@@ -489,6 +603,14 @@ export type ToolUseDiagnostics = {
 };
 
 export type ErrorOrigin = "provider" | "account" | "relay";
+export type UpstreamErrorDetails = {
+  httpStatus: number | null;
+  code: string | null;
+  errorType: string | null;
+  message: string | null;
+  redacted: boolean;
+  truncated: boolean;
+};
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /** Fields shared by local SQLite and remote Relay usage events. */
@@ -508,6 +630,7 @@ type UsageEventRecord = {
   httpStatus: number;
   errorCategory: string | null;
   errorOrigin?: ErrorOrigin | null;
+  upstreamError?: UpstreamErrorDetails | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs?: number | null;
@@ -762,4 +885,19 @@ export type SupportBundlePreview = {
 
 export type RelayStorageInfo = {
   dataPath: string;
+  logsPath: string;
+  errorLogsPath: string;
+  crashLogsPath: string;
+  operationLogsPath: string;
+};
+
+export type DiagnosticPaths = {
+  logsPath: string;
+  errorLogsPath: string;
+  crashLogsPath: string;
+  operationLogsPath: string;
+};
+
+export type DiagnosticSettings = {
+  debugEnabled: boolean;
 };

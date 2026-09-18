@@ -3,6 +3,7 @@ import {
   effectiveSourceProtocolBindings,
   runtimeSourceProtocolBindings,
   sourceModelsForWireApi,
+  sourceModelsWithCacheWritePricing,
   sourceSupportsNativeResponses,
   sourceSupportsWireApi,
 } from "../src/features/relay/sourceProtocolBindings";
@@ -13,6 +14,23 @@ import {
 import type { SourceSummary } from "../src/features/relay/api/types";
 
 describe("source protocol bindings", () => {
+  test("cache-write pricing follows Messages upstream routes", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["gpt-native", "claude-bridge", "claude-native"],
+      protocolBindings: [
+        { wireApi: "responses", adapter: "native", modelIds: ["gpt-native"] },
+        { wireApi: "responses", adapter: "responses_to_messages", modelIds: ["claude-bridge"] },
+        { wireApi: "messages", adapter: "native", modelIds: ["claude-native"] },
+      ],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(sourceModelsWithCacheWritePricing(source)).toEqual([
+      "claude-bridge",
+      "claude-native",
+    ]);
+  });
+
   test("preserves two Responses connector routes for one source", () => {
     const source = {
       wireApi: "responses",

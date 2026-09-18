@@ -13,6 +13,7 @@ pub enum Feature {
     AccountExport,
     AccountIdentityReveal,
     Sources,
+    SourceProtocols,
     Quota,
     Models,
     ModelPricing,
@@ -28,6 +29,7 @@ pub enum Feature {
     ProfileKeyRotation,
     CodexBackgroundTasks,
     CodexWebsockets,
+    ChatgptRetryUntilAvailable,
     Images,
 }
 
@@ -41,6 +43,7 @@ impl Feature {
             Self::AccountExport => "account_export",
             Self::AccountIdentityReveal => "account_identity_reveal",
             Self::Sources => "sources",
+            Self::SourceProtocols => "source_protocols_v1",
             Self::Quota => "quota",
             Self::Models => "models",
             Self::ModelPricing => "model_pricing",
@@ -56,6 +59,7 @@ impl Feature {
             Self::ProfileKeyRotation => "profile_key_rotation",
             Self::CodexBackgroundTasks => "codex_background_tasks",
             Self::CodexWebsockets => "codex_websockets",
+            Self::ChatgptRetryUntilAvailable => "chatgpt_retry_until_available",
             Self::Images => "images",
         }
     }
@@ -105,6 +109,7 @@ impl Capabilities {
             Feature::AccountExport,
             Feature::AccountIdentityReveal,
             Feature::Sources,
+            Feature::SourceProtocols,
             Feature::Quota,
             Feature::Models,
             Feature::ModelPricing,
@@ -120,6 +125,7 @@ impl Capabilities {
             Feature::ProfileKeyRotation,
             Feature::CodexBackgroundTasks,
             Feature::CodexWebsockets,
+            Feature::ChatgptRetryUntilAvailable,
             Feature::Images,
         ]
         .into_iter()

@@ -19,6 +19,11 @@ export function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () 
   const callbackReceived = flow.status === "callback_received" || busy === "oauth-complete";
   const flowFailed = flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed";
   const flowUnavailable = secondsRemaining === 0 || flow.status !== "pending";
+  const closeLocked = busy === "oauth-complete" || busy === "oauth-cancel";
+  const requestClose = () => {
+    if (closeLocked) return;
+    void onCancel();
+  };
   const reopen = async () => {
     const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId));
     if (opened) setReopenAt(Date.now() + 3_000);
@@ -29,8 +34,8 @@ export function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () 
   };
   return <Dialog
     title={t("accounts.signIn")}
-    onClose={() => void onCancel()}
-    footer={<Button variant="secondary" busy={busy === "oauth-cancel"} onClick={() => void onCancel()}>{t("common.cancel")}</Button>}
+    onClose={requestClose}
+    footer={<Button variant="secondary" busy={busy === "oauth-cancel"} disabled={closeLocked} onClick={requestClose}>{t("common.cancel")}</Button>}
   >
     <div className="relay-form oauth-waiting">
       <div className="oauth-waiting-status"><Loader2 className="spin" aria-hidden /><div><strong>{t(callbackReceived ? "accounts.completingSignIn" : "accounts.waitingForSignIn")}</strong><p>{t("accounts.waitingForSignInHint")}</p></div></div>
@@ -51,6 +56,11 @@ export function OAuthAccountSetupDialog({ accountId, onClose }: { accountId: str
   const [addToPool, setAddToPool] = useState(true);
   const [assignProxy, setAssignProxy] = useState(false);
   const account = runtime?.accounts.find((item) => item.id === accountId);
+  const closeLocked = busy === "oauth-setup";
+  const requestClose = () => {
+    if (closeLocked) return;
+    onClose();
+  };
   const apply = async () => {
     if (!addToPool && !assignProxy) {
       onClose();
@@ -62,7 +72,7 @@ export function OAuthAccountSetupDialog({ accountId, onClose }: { accountId: str
     }, "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("accounts.accountAdded")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("accounts.configureLater")}</Button><Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}>{t("common.done")}</Button></>}><div className="relay-form oauth-account-setup"><div className="oauth-account-added"><Check aria-hidden /><div><strong>{account?.identityHint ?? t("accounts.accountReady")}</strong><p>{t("accounts.accountAddedHint")}</p></div></div><div className="post-import-options"><label><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span><strong>{t("accounts.addAccountToPool")}</strong><small>{t("accounts.addToPoolHint")}</small></span></label><label><input type="checkbox" checked={assignProxy} disabled={!pool || pool.total === 0} onChange={(event) => setAssignProxy(event.target.checked)} /><span><strong>{t("proxies.assignStoredAfterAdd")}</strong><small>{pool ? t(pool.total ? "proxies.storedAvailable" : "proxies.noStored", { count: pool.total }) : t("common.loading")}</small></span></label></div></div></Dialog>;
+  return <Dialog title={t("accounts.accountAdded")} onClose={requestClose} footer={<><Button variant="secondary" disabled={closeLocked} onClick={requestClose}>{t("accounts.configureLater")}</Button><Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}>{t("common.done")}</Button></>}><div className="relay-form oauth-account-setup"><div className="oauth-account-added"><Check aria-hidden /><div><strong>{account?.identityHint ?? t("accounts.accountReady")}</strong><p>{t("accounts.accountAddedHint")}</p></div></div><div className="post-import-options"><label><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span><strong>{t("accounts.addAccountToPool")}</strong><small>{t("accounts.addToPoolHint")}</small></span></label><label><input type="checkbox" checked={assignProxy} disabled={!pool || pool.total === 0} onChange={(event) => setAssignProxy(event.target.checked)} /><span><strong>{t("proxies.assignStoredAfterAdd")}</strong><small>{pool ? t(pool.total ? "proxies.storedAvailable" : "proxies.noStored", { count: pool.total }) : t("common.loading")}</small></span></label></div></div></Dialog>;
 }
 
 function formatCountdown(seconds: number) {

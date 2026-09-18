@@ -3,24 +3,34 @@ use crate::{
     launcher::restart_opencode,
     local_pool::{
         error::{CommandError, ErrorCode, LocalPoolError},
+        models::ProviderSourceRecord,
         state::DesktopState,
+        store::secret_store,
     },
     platform::default_opencode_config_path,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
 use tauri::State;
-use zenith_relay_core::protocol::ModelSummary;
+use zenith_relay_core::{
+    model_metadata::{ModelCapabilities, ModelMetadataCatalog},
+    protocol::ModelSummary,
+    SourceAdapter, WireApi,
+};
 
 const PROVIDER_ID: &str = "zenith-relay";
 const MAX_SNAPSHOT_NAME_CHARS: usize = 80;
 // OpenCode uses the official OpenAI AI SDK so requests use Relay's Responses
 // contract, which preserves tool calls across adapters.
 const PROVIDER_NPM: &str = "@ai-sdk/openai";
+mod protocols;
+mod refresh;
+pub(in crate::local_pool) use refresh::refresh_active_opencode_catalog;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,7 +143,9 @@ fn remove_managed_configuration(config: &mut Map<String, Value>) -> bool {
         .and_then(Value::as_object_mut)
         .map_or((false, false), |providers| {
             (
-                providers.remove(PROVIDER_ID).is_some(),
+                protocols::GROUPS.iter().fold(false, |removed, (_, id, _)| {
+                    providers.remove(*id).is_some() || removed
+                }),
                 providers.is_empty(),
             )
         });
@@ -143,7 +155,7 @@ fn remove_managed_configuration(config: &mut Map<String, Value>) -> bool {
     let model_removed = if config
         .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|model| model.starts_with(&format!("{PROVIDER_ID}/")))
+        .is_some_and(protocols::managed_model)
     {
         config.remove("model");
         true
@@ -161,7 +173,7 @@ fn current_config_is_managed(path: &Path) -> Result<bool, LocalPoolError> {
     Ok(config
         .get("provider")
         .and_then(Value::as_object)
-        .is_some_and(|providers| providers.contains_key(PROVIDER_ID)))
+        .is_some_and(|providers| providers.keys().any(|id| protocols::managed_id(id))))
 }
 
 fn restore_original_config_preserving_user_changes(
@@ -199,7 +211,7 @@ fn restore_original_config_preserving_user_changes(
         .unwrap_or_default();
     if let Some(current_providers) = current_config.get("provider").and_then(Value::as_object) {
         for (id, provider) in current_providers {
-            if id != PROVIDER_ID {
+            if !protocols::managed_id(id) {
                 providers.insert(id.clone(), provider.clone());
             }
         }
@@ -213,7 +225,7 @@ fn restore_original_config_preserving_user_changes(
     let current_model_is_managed = current_config
         .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|model| model.starts_with(&format!("{PROVIDER_ID}/")));
+        .is_some_and(protocols::managed_model);
     if !current_model_is_managed {
         match current_config.get("model") {
             Some(model) => {
@@ -319,50 +331,91 @@ fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
 fn model_ids(models: &[ModelSummary]) -> Vec<ModelSummary> {
     models
         .iter()
-        .filter(|model| model.enabled)
+        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
         .cloned()
         .collect()
+}
+
+fn capability_config(id: &str, capabilities: &ModelCapabilities, levels: &[String]) -> Value {
+    let mut value = json!({
+        "name": id,
+        "attachment": capabilities.attachment.unwrap_or_else(|| capabilities.input_modalities.iter().any(|mode| mode != "text")),
+        "reasoning": capabilities.reasoning == Some(true),
+        "tool_call": capabilities.tool_call == Some(true),
+        "modalities": {"input": capabilities.input_modalities, "output": capabilities.output_modalities}
+    });
+    if let (Some(context), Some(output)) = (capabilities.context_limit, capabilities.output_limit) {
+        value["limit"] = json!({"context": context, "output": output});
+        if let Some(input) = capabilities.input_limit {
+            value["limit"]["input"] = json!(input);
+        }
+    }
+    if capabilities.reasoning == Some(true) && !levels.is_empty() {
+        value["variants"] = Value::Object(
+            levels
+                .iter()
+                .map(|level| (level.clone(), json!({"reasoningEffort": level})))
+                .collect(),
+        );
+    }
+    value
 }
 
 fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
     models
         .iter()
         .map(|model| {
-            let mut value = Map::new();
-            value.insert("name".into(), Value::String(model.id.clone()));
-            // Relay accepts image attachments and forwards them to the active
-            // route. OpenCode requires both fields before it exposes image
-            // attachments for a custom provider model.
-            value.insert("attachment".into(), Value::Bool(true));
-            value.insert(
-                "modalities".into(),
-                json!({"input": ["text", "image"], "output": ["text"]}),
-            );
-            let levels = if !model.reasoning_allowed_levels.is_empty() {
-                model.reasoning_allowed_levels.clone()
-            } else if !model.reasoning_supported_levels.is_empty() && !model.reasoning_configurable
-            {
-                model.reasoning_supported_levels.clone()
+            let capabilities =
+                if model.catalog_input_modalities.is_empty() && model.catalog_provider.is_none() {
+                    ModelCapabilities::unknown_model()
+                } else {
+                    ModelCapabilities {
+                        reasoning: model.catalog_reasoning,
+                        tool_call: model.catalog_tool_call,
+                        attachment: model.catalog_attachment,
+                        input_modalities: model.catalog_input_modalities.clone(),
+                        output_modalities: model.catalog_output_modalities.clone(),
+                        context_limit: model.catalog_context_limit,
+                        input_limit: model.catalog_input_limit,
+                        output_limit: model.catalog_output_limit,
+                        ..ModelCapabilities::default()
+                    }
+                };
+            let supported_levels = if model.reasoning_supported_levels.is_empty() {
+                &model.catalog_reasoning_effort_levels
             } else {
-                Vec::new()
+                &model.reasoning_supported_levels
             };
-            if !levels.is_empty() {
-                value.insert("reasoning".into(), Value::Bool(true));
-                value.insert(
-                    "variants".into(),
-                    Value::Object(
-                        levels
-                            .iter()
-                            .map(|level| (level.clone(), json!({ "reasoningEffort": level })))
-                            .collect(),
-                    ),
-                );
-            }
-            (model.id.clone(), Value::Object(value))
+            let levels = supported_levels
+                .iter()
+                .filter(|level| {
+                    !model.reasoning_configurable || model.reasoning_allowed_levels.contains(level)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            (
+                model.id.clone(),
+                capability_config(&model.id, &capabilities, &levels),
+            )
         })
         .collect()
 }
 
+fn model_config_ids(models: &[String], metadata: &ModelMetadataCatalog) -> Map<String, Value> {
+    models
+        .iter()
+        .filter(|model| !model.trim().is_empty())
+        .map(|model| {
+            let capabilities = metadata.capabilities_for(model);
+            (
+                model.clone(),
+                capability_config(model, &capabilities, &capabilities.reasoning_effort_levels),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn managed_provider(base_url: &str, secret: &str, models: &[ModelSummary]) -> Value {
     json!({
         "npm": PROVIDER_NPM,
@@ -381,42 +434,7 @@ fn apply_managed_provider(
     secret: &str,
     models: &[ModelSummary],
 ) -> Result<(), LocalPoolError> {
-    config
-        .entry("$schema")
-        .or_insert_with(|| Value::String("https://opencode.ai/config.json".into()));
-    config
-        .entry("provider")
-        .or_insert_with(|| Value::Object(Map::new()));
-    let providers = config
-        .get_mut("provider")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "OpenCode provider configuration must be an object",
-            )
-        })?;
-    providers.insert(
-        PROVIDER_ID.into(),
-        managed_provider(base_url, secret, models),
-    );
-
-    let current_model = config
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let managed_model_selected = current_model.starts_with(&format!("{PROVIDER_ID}/"));
-    if let Some(first) = models.first() {
-        if !current_model.contains('/') || managed_model_selected {
-            config.insert(
-                "model".into(),
-                Value::String(format!("{PROVIDER_ID}/{}", first.id)),
-            );
-        }
-    } else if managed_model_selected {
-        config.remove("model");
-    }
-    Ok(())
+    protocols::apply(config, base_url, secret, models)
 }
 
 fn backup_original_config(
@@ -448,18 +466,22 @@ fn backup_original_config(
 fn config_status_for(state: &DesktopState) -> Result<OpenCodeConfigStatus, LocalPoolError> {
     let path = default_opencode_config_path();
     let config = read_config(&path)?;
-    let provider = config
+    let providers = config
         .get("provider")
         .and_then(Value::as_object)
-        .and_then(|providers| providers.get(PROVIDER_ID));
-    let model_count = provider
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("models"))
-        .and_then(Value::as_object)
-        .map_or(0, Map::len);
+        .into_iter()
+        .flat_map(|providers| providers.iter())
+        .filter(|(id, _)| protocols::managed_id(id))
+        .collect::<Vec<_>>();
+    let model_count = providers
+        .iter()
+        .filter_map(|(_, value)| value.get("models"))
+        .filter_map(Value::as_object)
+        .map(Map::len)
+        .sum();
     let has_backup = backup_path(state).exists() || missing_marker_path(state).exists();
     Ok(OpenCodeConfigStatus {
-        configured: provider.is_some(),
+        configured: !providers.is_empty(),
         model_count,
         has_backup,
         backup_created_at_ms: backup_created_at_ms(state),
@@ -518,6 +540,75 @@ pub async fn connect_opencode_to_local_gateway(
     })
 }
 
+/// Configure OpenCode to use one API source directly. This is intentionally
+/// separate from the pool connection: selecting a source in the Connections
+/// table must not silently fall back to the local pool and must preserve the
+/// source's exact endpoint and credential.
+#[tauri::command]
+pub async fn launch_opencode_source(
+    source_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<OpenCodeConnectionResult, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let source = state
+        .store()?
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    if !source.enabled {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source must be enabled before launching OpenCode",
+        )
+        .into());
+    }
+    let models = source_opencode_models(&source)?;
+    let secret = secret_store::load(&source.secret_ref)?
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    let path = default_opencode_config_path();
+    let mut config = read_config(&path)?;
+    let backup_created = backup_original_config(&state, &path, None)?;
+    protocols::apply_source(
+        &mut config,
+        &source,
+        &secret,
+        &state.model_metadata_catalog(),
+        true,
+    )?;
+    write_config(&path, &config)?;
+    restart_opencode().map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::Io,
+            format!("failed to restart OpenCode: {error}"),
+        )
+    })?;
+    Ok(OpenCodeConnectionResult {
+        path: path.display().to_string(),
+        model_count: models.len(),
+        backup_created,
+    })
+}
+
+fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, LocalPoolError> {
+    let mut seen = HashSet::new();
+    let models = source
+        .effective_protocol_bindings()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
+        .into_iter()
+        .filter(|binding| binding.adapter == SourceAdapter::Native)
+        .flat_map(|binding| binding.model_ids)
+        .filter(|model| !model.trim().is_empty())
+        .filter(|model| seen.insert(model.clone()))
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source has no compatible native API models",
+        ));
+    }
+    Ok(models)
+}
+
 #[tauri::command]
 pub fn restart_opencode_app() -> Result<(), CommandError> {
     restart_opencode().map_err(|error| {
@@ -571,19 +662,79 @@ pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<b
 mod tests {
     use super::{
         apply_managed_provider, managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
-        remove_managed_configuration, PROVIDER_ID, PROVIDER_NPM,
+        remove_managed_configuration, source_opencode_models, ErrorCode, ProviderSourceRecord,
+        SourceAdapter, PROVIDER_ID, PROVIDER_NPM,
     };
     use serde_json::{json, Map, Value};
-    use zenith_relay_core::protocol::ModelSummary;
+    use std::collections::BTreeMap;
+    use zenith_relay_core::{protocol::ModelSummary, SourceProtocolBinding, WireApi};
 
-    fn model(id: &str, enabled: bool) -> ModelSummary {
+    pub(super) fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceRecord {
+        ProviderSourceRecord {
+            id: "source".into(),
+            name: "Source".into(),
+            enabled: true,
+            in_pool: false,
+            draining: false,
+            base_url: "https://provider.example/v1".into(),
+            secret_ref: "source:test".into(),
+            pricing_provider: None,
+            official_provider_family: None,
+            wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
+            protocol_bindings: bindings,
+            models: vec![
+                "gpt-test".into(),
+                "gpt-other".into(),
+                "chat-only".into(),
+                "claude".into(),
+            ],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        }
+    }
+
+    pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         ModelSummary {
             id: id.into(),
+            protocol_routes: vec![zenith_relay_core::protocol::ModelProtocolRoute {
+                client_wire_api: WireApi::Responses,
+                upstream_wire_api: WireApi::Responses,
+                features: BTreeMap::new(),
+                reasoning_efforts: Vec::new(),
+            }],
             enabled,
             member_count: 1,
             codex_visible: enabled,
             codex_display_name: id.into(),
-            catalog_rank: None,
+            catalog_provider: None,
+            catalog_family: None,
+            catalog_name: None,
+            catalog_release_date: None,
+            catalog_last_updated: None,
+            catalog_status: None,
+            catalog_reasoning: None,
+            catalog_reasoning_method: None,
+            catalog_reasoning_effort_levels: Vec::new(),
+            catalog_default_reasoning_effort: None,
+            catalog_tool_call: None,
+            catalog_structured_output: None,
+            catalog_attachment: None,
+            catalog_open_weights: None,
+            catalog_input_modalities: Vec::new(),
+            catalog_output_modalities: Vec::new(),
+            catalog_context_limit: None,
+            catalog_input_limit: None,
+            catalog_output_limit: None,
             input_micro_usd_per_million: None,
             cached_input_micro_usd_per_million: None,
             cache_write_5m_micro_usd_per_million: None,
@@ -597,6 +748,7 @@ mod tests {
             reasoning_configurable: false,
             reasoning_manual_fallback: false,
             speed_supported: false,
+            speed_tiers: Vec::new(),
             speed_tier: Default::default(),
             speed_configurable: false,
         }
@@ -647,6 +799,77 @@ mod tests {
             provider["models"]["gpt-5.6-sol"]["modalities"]["input"],
             json!(["text", "image"])
         );
+    }
+
+    #[test]
+    fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
+        let metadata = super::ModelMetadataCatalog::from_models_dev_json(
+            r#"{
+            "test/text-only": {"reasoning": true, "reasoning_effort_levels": ["low", "high"],
+            "attachment": false, "tool_call": true,
+            "modalities": {"input": ["text"], "output": ["text"]},
+            "limit": {"context": 32000, "input": 24000, "output": 8000}}
+        }"#,
+        )
+        .unwrap();
+        let mut models = vec![model("text-only", true), model("unknown", true)];
+        zenith_relay_core::protocol::apply_model_metadata(&mut models, &metadata);
+        let pooled = super::model_config(&models);
+        let direct = super::model_config_ids(&["text-only".into(), "unknown".into()], &metadata);
+        assert_eq!(pooled, direct);
+        assert_eq!(pooled["text-only"]["attachment"], false);
+        assert_eq!(pooled["text-only"]["modalities"]["input"], json!(["text"]));
+        assert_eq!(pooled["text-only"]["tool_call"], true);
+        assert_eq!(pooled["text-only"]["limit"]["context"], 32000);
+        assert_eq!(
+            pooled["unknown"]["modalities"]["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(pooled["unknown"]["reasoning"], false);
+        assert_eq!(pooled["unknown"]["tool_call"], false);
+        assert!(pooled["unknown"].get("limit").is_none());
+        models[0].reasoning_configurable = true;
+        models[0].reasoning_allowed_levels = vec!["high".into(), "max".into()];
+        let filtered = super::model_config(&models);
+        assert_eq!(
+            filtered["text-only"]["variants"],
+            json!({"high": {"reasoningEffort": "high"}})
+        );
+
+        models[0].reasoning_supported_levels = vec!["low".into(), "high".into(), "ultra".into()];
+        models[0].reasoning_allowed_levels = vec!["high".into(), "ultra".into()];
+        let native = super::model_config(&models);
+        assert_eq!(
+            native["text-only"]["variants"],
+            json!({
+                "high": {"reasoningEffort": "high"},
+                "ultra": {"reasoningEffort": "ultra"}
+            })
+        );
+    }
+
+    #[test]
+    fn direct_source_models_include_all_native_protocols() {
+        let source = source(vec![
+            SourceProtocolBinding::legacy(
+                WireApi::Responses,
+                &["gpt-test".into(), "gpt-other".into(), "gpt-test".into()],
+            ),
+            SourceProtocolBinding::legacy(WireApi::ChatCompletions, &["chat-only".into()]),
+        ]);
+
+        assert_eq!(
+            source_opencode_models(&source).unwrap(),
+            ["gpt-test", "gpt-other", "chat-only"]
+        );
+    }
+
+    #[test]
+    fn direct_source_models_reject_bridge_only_routes() {
+        let mut binding = SourceProtocolBinding::legacy(WireApi::Responses, &["claude".into()]);
+        binding.adapter = SourceAdapter::ResponsesToMessages;
+        let error = source_opencode_models(&source(vec![binding])).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
     }
 
     #[test]

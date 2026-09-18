@@ -452,9 +452,12 @@ fn stop_windows_processes(
     }
 
     loop {
-        // The initial taskkill uses `/T`, so all children are already covered.
         // Probe only those exact main-process PIDs instead of enumerating every
-        // process on the machine on each 100 ms stop-loop iteration.
+        // process on the machine on each 100 ms stop-loop iteration. The
+        // signal deliberately does not use taskkill's `/T`: a desktop Codex
+        // process can own unrelated children (for example the Codex
+        // app-server used by another host), and killing that whole tree can
+        // terminate Relay or another user's process.
         let running = current_pids(initial_pids);
         let now = Instant::now();
         let elapsed = now.duration_since(started);
@@ -485,11 +488,17 @@ fn stop_windows_processes(
 #[cfg(target_os = "windows")]
 fn signal_windows_process(pid: u32, force: bool) {
     let mut command = windows_hidden_command("taskkill");
-    command.args(["/PID", &pid.to_string(), "/T"]);
-    if force {
-        command.arg("/F");
-    }
+    command.args(windows_taskkill_arguments(pid, force));
     let _ = command.status();
+}
+
+#[cfg(target_os = "windows")]
+fn windows_taskkill_arguments(pid: u32, force: bool) -> Vec<String> {
+    let mut arguments = vec!["/PID".to_string(), pid.to_string()];
+    if force {
+        arguments.push("/F".to_string());
+    }
+    arguments
 }
 
 fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
@@ -753,7 +762,7 @@ fn running_target_pids(targets: &[u32]) -> Vec<u32> {
         .collect()
 }
 
-fn is_codex_process(process: &sysinfo::Process) -> bool {
+pub(crate) fn is_codex_process(process: &sysinfo::Process) -> bool {
     let name = process.name().to_string_lossy();
     let executable = process.exe();
     let command = process
@@ -825,6 +834,12 @@ fn is_codex_process_identity(
         let path = executable
             .map(|value| value.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
+        // Keep this exclusion explicit. Relay may launch or own a process
+        // tree that contains a compatible executable name in the future, but
+        // profile switching must never classify Relay itself as Codex.
+        if path.ends_with("\\zenith relay.exe") {
+            return false;
+        }
         if name.eq_ignore_ascii_case("ChatGPT.exe") {
             return path.contains("openai.codex_")
                 || path.contains("openai.chatgpt_")
@@ -991,6 +1006,29 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn windows_relay_is_never_classified_as_codex() {
+        assert!(!is_codex_process_identity(
+            "Zenith Relay.exe",
+            Some(Path::new(r"C:\Users\FORLE\Desktop\Zenith Relay.exe")),
+            &[""]
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_taskkill_never_targets_a_process_tree() {
+        assert_eq!(
+            windows_taskkill_arguments(1234, false),
+            vec!["/PID".to_string(), "1234".to_string()]
+        );
+        assert_eq!(
+            windows_taskkill_arguments(1234, true),
+            vec!["/PID".to_string(), "1234".to_string(), "/F".to_string()]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn windows_opencode_matches_desktop_but_ignores_electron_helpers() {
         let executable =
             Path::new(r"C:\Users\test\AppData\Local\Programs\@opencode-aidesktop\opencode.exe");
@@ -1015,7 +1053,7 @@ mod tests {
     #[test]
     fn start_apps_parser_prefers_chatgpt_and_rejects_unrelated_apps() {
         let targets = parse_windows_start_apps_output(
-            "Codex\tOpenAI.Codex_2p2nqsd0c76g0!App\nChatGPT\tOpenAI.ChatGPT_2p2nqsd0c76g0!App\nZenith Relay\tcom.zenith.codex\n",
+            "Codex\tOpenAI.Codex_2p2nqsd0c76g0!App\nChatGPT\tOpenAI.ChatGPT_2p2nqsd0c76g0!App\nZenith Relay\tcom.zenith.relay\n",
         );
         assert_eq!(
             targets,

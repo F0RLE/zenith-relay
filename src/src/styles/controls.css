@@ -56,12 +56,32 @@ input[type="checkbox"]:checked::before {
   transform: scale(1);
 }
 
+input[type="checkbox"]:indeterminate {
+  border-color: var(--relay-accent-hover);
+  background: var(--relay-accent-hover);
+}
+
+input[type="checkbox"]:indeterminate::before {
+  width: 8px;
+  height: 2px;
+  clip-path: none;
+  transform: scale(1);
+}
+
 :root[data-theme="dark"] input[type="checkbox"]:checked::before {
+  background: var(--relay-bg);
+}
+
+:root[data-theme="dark"] input[type="checkbox"]:indeterminate::before {
   background: var(--relay-bg);
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] input[type="checkbox"]:checked::before {
+    background: var(--relay-bg);
+  }
+
+  :root[data-theme="system"] input[type="checkbox"]:indeterminate::before {
     background: var(--relay-bg);
   }
 }

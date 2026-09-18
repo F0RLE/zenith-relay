@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, reconcileRuntimeActivityOverlay } from "../routingOrder";
+import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
@@ -12,8 +12,10 @@ import {
   ROUTING_REFRESH_INTERVAL_MS,
   RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
   RUNTIME_REFRESH_INTERVAL_MS,
+  STARTUP_RUNTIME_RETRY_DELAYS_MS,
   isRuntimeRefreshPage,
   isUsageRefreshPage,
+  startupSnapshotNeedsRetry,
   usageRefreshDebounceMs,
 } from "./refreshPolicy";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
@@ -43,6 +45,7 @@ export function useRelayRuntime({
   const [runtimeActivity, setRuntimeActivity] = useState<RuntimeActivityState>({
     revision: 0,
     lastCandidateId: null,
+    candidates: {},
   });
   const [loading, setLoading] = useState(true);
   const modeRef = useRef(mode);
@@ -55,6 +58,8 @@ export function useRelayRuntime({
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
+  const runtimeActivityRuntimeId = useRef(0);
+  const runtimeSnapshotRef = useRef<RuntimeSnapshot | null>(null);
   // Keep the scheduler order separate from the activity facts. The map also
   // retains the latest zero-count event: a routing poll can finish while a
   // request is in flight, and that stale snapshot must not resurrect the
@@ -76,8 +81,10 @@ export function useRelayRuntime({
     modeRef.current = next;
     stateRevision.current += 1;
     runtimeActivityOverlay.current.clear();
+    runtimeActivityRuntimeId.current = 0;
     runtimeRoutingOrderBase.current = [];
-    setRuntimeActivity({ revision: 0, lastCandidateId: null });
+    runtimeSnapshotRef.current = null;
+    setRuntimeActivity({ revision: 0, lastCandidateId: null, candidates: {} });
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
     resetUsage();
@@ -100,7 +107,7 @@ export function useRelayRuntime({
     if (modeRef.current !== requestedMode) return;
     if (requestedMode === "zenith") setReadyState(loaded.readyState);
     if (requestedMode === "local") {
-      runtimeRoutingOrderBase.current = loaded.snapshot?.gateway.routingOrder ?? [];
+      runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded.snapshot?.gateway.routingOrder ?? []);
       reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
     }
     const snapshot = loaded.snapshot && requestedMode === "local"
@@ -112,6 +119,7 @@ export function useRelayRuntime({
         },
       }
       : loaded.snapshot;
+    runtimeSnapshotRef.current = snapshot;
     setRuntime(snapshot);
     clearInactiveUsage(requestedMode);
     refreshedRevision.current = requestedRevision;
@@ -162,8 +170,27 @@ export function useRelayRuntime({
 
   useEffect(() => {
     let active = true;
+    let startupRetryTimer: number | undefined;
+    let startupRetryIndex = 0;
+    const scheduleStartupRetry = () => {
+      if (!active || modeRef.current !== mode || !startupSnapshotNeedsRetry(runtimeSnapshotRef.current)) return;
+      const delay = STARTUP_RUNTIME_RETRY_DELAYS_MS[startupRetryIndex];
+      if (delay === undefined) return;
+      startupRetryIndex += 1;
+      startupRetryTimer = window.setTimeout(() => {
+        startupRetryTimer = undefined;
+        void refresh(true)
+          .then(scheduleStartupRetry)
+          .catch(() => {
+            // State/focus events and the regular refresh remain the fallback
+            // if a retry races a transient native startup error.
+            scheduleStartupRetry();
+          });
+      }, delay);
+    };
     setLoading(true);
     refresh()
+      .then(scheduleStartupRetry)
       .catch((error) => active && reportErrorFeedback(error, "feedback.refreshFailed", "refresh_failed"))
       .finally(() => {
         if (!active) return;
@@ -178,8 +205,9 @@ export function useRelayRuntime({
       });
     return () => {
       active = false;
+      if (startupRetryTimer !== undefined) window.clearTimeout(startupRetryTimer);
     };
-  }, [refresh, reportErrorFeedback]);
+  }, [mode, refresh, reportErrorFeedback]);
 
   useEffect(() => {
     if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith" || !runtimeRoutingSupported) return;
@@ -194,7 +222,7 @@ export function useRelayRuntime({
           : await relayCommands.remoteRuntimeOrder();
         if (!active || routingOrder == null) return;
         if (mode === "local") {
-          runtimeRoutingOrderBase.current = routingOrder;
+          runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, routingOrder);
           reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
         }
         const visibleRoutingOrder = mode === "local"
@@ -271,7 +299,10 @@ export function useRelayRuntime({
       const pending = pendingRuntimeActivity;
       pendingRuntimeActivity = null;
       if (pending) {
-        setRuntimeActivity((current) => pending.revision > current.revision ? pending : current);
+        const candidates = Object.fromEntries(runtimeActivityOverlay.current);
+        setRuntimeActivity((current) => compareRuntimeActivity(pending, current) > 0
+          ? { ...pending, candidates }
+          : current);
       }
       if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
       setRuntime((snapshot) => {
@@ -335,16 +366,24 @@ export function useRelayRuntime({
     });
     void relayCommands.onRuntimeActivity((activity) => {
       if (!active || modeRef.current !== "local") return;
+      const runtimeId = activity.runtimeId ?? 0;
+      if (runtimeId < Math.max(runtimeActivityRuntimeId.current, runtimeRoutingOrderBase.current[0]?.runtimeId ?? 0)) return;
+      if (runtimeId > runtimeActivityRuntimeId.current) {
+        runtimeActivityOverlay.current.clear();
+        runtimeActivityRuntimeId.current = runtimeId;
+      }
       const previous = runtimeActivityOverlay.current.get(activity.candidateId);
-      if (previous && activity.revision <= previous.revision) return;
+      if (previous && compareRuntimeActivity(activity, previous) <= 0) return;
       // Keep both active and zero-count snapshots. A zero-count snapshot is a
       // tombstone for an older live poll state and must be applied to the next
       // base order as well as the current one.
       runtimeActivityOverlay.current.set(activity.candidateId, activity);
-      if (!pendingRuntimeActivity || activity.revision > pendingRuntimeActivity.revision) {
+      if (!pendingRuntimeActivity || compareRuntimeActivity(activity, pendingRuntimeActivity) > 0) {
         pendingRuntimeActivity = {
+          ...(activity.runtimeId == null ? {} : { runtimeId: activity.runtimeId }),
           revision: activity.revision,
           lastCandidateId: activity.candidateId,
+          candidates: {},
         };
       }
       scheduleRuntimeActivityFlush();

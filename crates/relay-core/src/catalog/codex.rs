@@ -138,19 +138,20 @@ pub fn routed_codex_catalog_entry(
     entry.insert("supports_search_tool".into(), Value::Bool(false));
     entry.insert("web_search_tool_type".into(), Value::String("text".into()));
     entry.insert("supports_image_detail_original".into(), Value::Bool(false));
-    // Codex uses this field as a client-side attachment gate. Routed sources
-    // may omit or under-report vision metadata, so let the selected upstream
-    // model make the final capability decision instead of blocking the image
-    // before Relay receives it.
+    // Unknown models support text/image input; models.dev replaces this
+    // fallback for known exact model identities at the publication boundary.
     entry.insert("input_modalities".into(), json!(["text", "image"]));
     entry.insert("experimental_supported_tools".into(), json!([]));
     entry.insert(
         "apply_patch_tool_type".into(),
         Value::String("freeform".into()),
     );
+    // Codex currently requires a truncation policy in every catalog entry.
+    // Keep this as a small client-side parsing default; it does not describe
+    // provider capabilities or change Relay's route selection.
     entry.insert(
         "truncation_policy".into(),
-        json!({ "mode": "tokens", "limit": 10_000 }),
+        json!({"mode": "tokens", "limit": 10000}),
     );
     let context_window = advertised_context_window
         .or_else(|| entry.get("context_window").and_then(Value::as_u64))
@@ -162,6 +163,9 @@ pub fn routed_codex_catalog_entry(
     } else {
         entry.remove("max_context_window");
     }
+    // Do not synthesize auto-compaction metadata for routed models. The
+    // provider owns that policy, and publishing a Relay-side limit would make
+    // the catalog claim a capability that was never observed upstream.
     entry.remove("auto_compact_token_limit");
     entry.insert("effective_context_window_percent".into(), 95.into());
     entry.insert(
@@ -191,6 +195,17 @@ pub fn normalize_upstream_codex_catalog_entry(
 ) -> Option<Value> {
     let mut entry = catalog_entry_base(template, model, priority, advertised_context_window)?;
 
+    if let Some(image_input) = super::source_model_declares_image_input(template) {
+        entry.insert(
+            "input_modalities".into(),
+            if image_input {
+                json!(["text", "image"])
+            } else {
+                json!(["text"])
+            },
+        );
+    }
+
     for key in [
         "additional_speed_tiers",
         "default_service_tier",
@@ -219,14 +234,9 @@ pub fn normalize_upstream_codex_catalog_entry(
         }
     }
 
-    if let Some(value) = template.get("supported_reasoning_levels") {
-        if value
-            .as_array()
-            .is_some_and(|levels| levels.iter().all(valid_reasoning_level))
-        {
-            entry.insert("supported_reasoning_levels".into(), value.clone());
-            compact_reasoning_level_descriptions(&mut entry);
-        }
+    if let Some(value) = upstream_reasoning_levels(template) {
+        entry.insert("supported_reasoning_levels".into(), value);
+        compact_reasoning_level_descriptions(&mut entry);
     }
     // API routes use Relay's neutral automatic default and never inherit an
     // upstream automatic default such as `ultra`.
@@ -367,6 +377,18 @@ pub fn normalize_native_codex_catalog_entry(
     // Native rows own their context and capability fields. An API-source
     // context override must never be allowed to fill or replace them.
     let mut entry = catalog_entry_base(template, model, priority, None)?;
+    // `catalog_entry_base` starts from the routed fallback schema, which has
+    // a context value for API clients. Native catalogs are different: an
+    // omitted field means Codex owns the context policy, so do not manufacture
+    // a Relay limit before overlaying the native row.
+    for key in [
+        "context_window",
+        "max_context_window",
+        "auto_compact_token_limit",
+        "effective_context_window_percent",
+    ] {
+        entry.remove(key);
+    }
     // Start from a known-compatible native-shaped row so partial manifests
     // cannot make the whole pool catalog row disappear, then overlay every
     // upstream field to retain native capabilities verbatim.
@@ -378,7 +400,6 @@ pub fn normalize_native_codex_catalog_entry(
     if !template.contains_key("input_modalities") {
         entry.remove("input_modalities");
     }
-    let context_window = entry.get("context_window").and_then(context_window);
     // Native account rows are identified by the upstream slug. The caller's
     // model is only a routing fallback; never replace a real upstream ID with
     // a Relay alias or a configured spelling.
@@ -393,12 +414,6 @@ pub fn normalize_native_codex_catalog_entry(
         "priority".into(),
         Value::Number(priority.min(i32::MAX as u64).into()),
     );
-    if let Some(context_window) = context_window {
-        entry.insert("context_window".into(), context_window.into());
-        entry
-            .entry("max_context_window")
-            .or_insert_with(|| context_window.into());
-    }
     codex_catalog_entry_is_compatible(&Value::Object(entry.clone())).then_some(Value::Object(entry))
 }
 
@@ -644,12 +659,108 @@ fn required_i64(entry: &Map<String, Value>, key: &str) -> bool {
 }
 
 fn valid_truncation_policy(entry: &Map<String, Value>) -> bool {
-    entry
-        .get("truncation_policy")
-        .and_then(Value::as_object)
-        .is_some_and(|policy| {
+    // The absence of this field is intentional for routed/API models: Relay
+    // must not impose a synthetic request-size limit on an upstream that may
+    // support a larger context. If a provider-owned catalog supplies the
+    // policy, still validate it strictly instead of accepting malformed data.
+    entry.get("truncation_policy").is_some_and(|value| {
+        value.as_object().is_some_and(|policy| {
             enum_string(policy, "mode", &["bytes", "tokens"], true) && required_i64(policy, "limit")
         })
+    })
+}
+
+/// Reports whether a source row explicitly attempted to describe reasoning.
+/// An empty or malformed declaration is still deliberate and remains empty.
+pub fn source_row_declares_reasoning(template: &Map<String, Value>) -> bool {
+    [
+        "supported_reasoning_levels",
+        "supportedReasoningLevels",
+        "supported_reasoning_efforts",
+        "supportedReasoningEfforts",
+        "efforts",
+        "reasoning_efforts",
+        "reasoningEfforts",
+        "reasoning_effort_options",
+        "reasoningEffortOptions",
+        "reasoning_effort_modes",
+        "reasoningEffortModes",
+        "supports_reasoning_effort",
+        "supportsReasoningEffort",
+    ]
+    .into_iter()
+    .any(|key| template.contains_key(key))
+}
+
+fn upstream_reasoning_levels(template: &Map<String, Value>) -> Option<Value> {
+    if ["supports_reasoning_effort", "supportsReasoningEffort"]
+        .into_iter()
+        .find_map(|key| template.get(key).and_then(Value::as_bool))
+        == Some(false)
+    {
+        return Some(Value::Array(Vec::new()));
+    }
+    let raw = [
+        "supported_reasoning_levels",
+        "supportedReasoningLevels",
+        "supported_reasoning_efforts",
+        "supportedReasoningEfforts",
+        "efforts",
+        "reasoning_efforts",
+        "reasoningEfforts",
+        "reasoning_effort_options",
+        "reasoningEffortOptions",
+        "reasoning_effort_modes",
+        "reasoningEffortModes",
+    ]
+    .into_iter()
+    .find_map(|key| template.get(key))?;
+    let levels = raw.as_array()?;
+    let normalized = levels
+        .iter()
+        .filter_map(|level| {
+            let (effort, description) = match level {
+                Value::String(effort) => (effort.as_str(), effort.as_str()),
+                Value::Object(level) => {
+                    let effort = level
+                        .get("effort")
+                        .or_else(|| level.get("id"))
+                        .or_else(|| level.get("value"))
+                        .and_then(Value::as_str)?;
+                    let description = level
+                        .get("description")
+                        .or_else(|| level.get("label"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(effort);
+                    (effort, description)
+                }
+                _ => return None,
+            };
+            let effort = effort.trim();
+            let description = description.trim();
+            (valid_reasoning_effort_text(effort) && !description.is_empty())
+                .then(|| json!({"effort": effort, "description": description}))
+        })
+        .collect::<Vec<_>>();
+    (normalized.len() == levels.len()).then_some(Value::Array(normalized))
+}
+
+pub(crate) fn codex_reasoning_level_ids(value: &Value) -> Vec<String> {
+    let Some(template) = value.as_object() else {
+        return Vec::new();
+    };
+    let Some(Value::Array(levels)) = upstream_reasoning_levels(template) else {
+        return Vec::new();
+    };
+    crate::canonicalize_reasoning_levels(
+        levels
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str)),
+    )
+}
+
+fn valid_reasoning_effort_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control)
 }
 
 fn valid_input_modalities(entry: &Map<String, Value>) -> bool {
@@ -725,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_picker_order_matches_relay_provider_groups() {
+    fn generated_picker_order_preserves_discovery_order_without_metadata() {
         let models = crate::canonicalize_model_ids([
             "vendor/glm-5.2",
             "vendor/grok-4.5",
@@ -743,16 +854,16 @@ mod tests {
         assert_eq!(
             models,
             [
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.6-luna",
-                "gpt-5.5",
-                "vendor/gpt-5.4",
-                "gpt-5.4-mini",
-                "vendor/claude-opus-4-8",
-                "vendor/gemini-3.6-flash",
-                "vendor/grok-4.5",
                 "vendor/glm-5.2",
+                "vendor/grok-4.5",
+                "vendor/gemini-3.6-flash",
+                "vendor/claude-opus-4-8",
+                "gpt-5.4-mini",
+                "vendor/gpt-5.4",
+                "gpt-5.5",
+                "gpt-5.6-luna",
+                "gpt-5.6-terra",
+                "gpt-5.6-sol",
                 "vendor/unknown-model",
             ]
         );
@@ -927,6 +1038,31 @@ mod tests {
         .unwrap();
 
         assert!(entry.get("input_modalities").is_none());
+        assert!(entry.get("context_window").is_none());
+        assert!(entry.get("max_context_window").is_none());
+        assert!(entry.get("auto_compact_token_limit").is_none());
+    }
+
+    #[test]
+    fn native_models_do_not_synthesize_missing_context_fields() {
+        let template = json!({
+            "slug": "gpt-native",
+            "display_name": "GPT Native",
+            "context_window": 128_000,
+        });
+
+        let entry = normalize_native_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "gpt-native",
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(entry["context_window"], 128_000);
+        assert!(entry.get("max_context_window").is_none());
+        assert!(entry.get("auto_compact_token_limit").is_none());
+        assert!(entry.get("effective_context_window_percent").is_none());
     }
 
     #[test]
@@ -972,6 +1108,17 @@ mod tests {
         assert_eq!(unknown["context_window"], 272_000);
         assert!(unknown.get("max_context_window").is_none());
         assert!(unknown.get("auto_compact_token_limit").is_none());
+    }
+
+    #[test]
+    fn routed_models_publish_codex_required_truncation_policy() {
+        let entry = routed_codex_catalog_entry(None, "vendor/large", 1_000, Some(1_000_000));
+
+        assert_eq!(
+            entry.get("truncation_policy"),
+            Some(&json!({"mode": "tokens", "limit": 10000}))
+        );
+        assert_eq!(entry["context_window"], 1_000_000);
     }
 
     #[test]

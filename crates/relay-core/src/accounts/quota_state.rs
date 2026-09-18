@@ -1,4 +1,5 @@
 use super::{provider_account_failure, AccountHealthState, ProviderAccountFailure};
+use crate::error_codes;
 use crate::quota::{
     QuotaErrorState, QuotaNormalizationError, QuotaRefreshFailure, QuotaRefreshResult,
     QuotaSnapshot, QuotaTransition, QuotaWindowKind, Subscription,
@@ -64,7 +65,7 @@ pub fn reduce_account_quota(
             });
             let auth_owned_error = previous_last_error_code.is_some_and(is_auth_owned_error);
             let (health, last_error_code) = if health == AccountHealthState::Blocked {
-                (health, Some("quota_forbidden".to_string()))
+                (health, Some(error_codes::QUOTA_FORBIDDEN.to_string()))
             } else if previous_last_error_code.is_some() && !quota_owned_error && !auth_owned_error
             {
                 (
@@ -122,7 +123,7 @@ fn is_auth_owned_error(code: &str) -> bool {
         Some(ProviderAccountFailure::Authentication)
     ) || matches!(
         code,
-        "credential_access_expiry_failed" | "upstream_unauthorized"
+        "credential_access_expiry_failed" | error_codes::UPSTREAM_UNAUTHORIZED
     ) || code.starts_with("auth_")
 }
 

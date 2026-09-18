@@ -13,6 +13,7 @@ use super::response::{
     apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
     proxy_sse_response, usage_event,
 };
+use crate::error_codes;
 use crate::protocol::{sse_event_end, ClientWireApi};
 use crate::runtime::{is_image_model_id, IMAGE_API_MODEL};
 use crate::runtime::{AuthenticatedKey, ExecutorRoute};
@@ -83,6 +84,7 @@ type ParsedImageFields = (Map<String, Value>, Vec<String>, Option<String>);
 
 #[derive(Debug)]
 struct ImageFailure {
+    upstream_error: Option<Box<crate::usage::UpstreamErrorDetails>>,
     status: StatusCode,
     category: &'static str,
     code: String,
@@ -128,6 +130,10 @@ async fn execute(
     execute_prepared(runtime, key, prepared, endpoint).await
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The bounded Axum response is the existing image-request short-circuit contract."
+)]
 async fn prepare_request(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
@@ -141,7 +147,7 @@ async fn prepare_request(
             api_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "image request body exceeds 64 MiB",
-                "request_too_large",
+                error_codes::REQUEST_TOO_LARGE,
             )
         })?;
     let content_type = headers
@@ -168,14 +174,14 @@ async fn prepare_request(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "prompt must be a non-empty string",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         ));
     }
     if endpoint == ImageEndpoint::Edits && input_images.is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "image edits require at least one image",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         ));
     }
 
@@ -195,14 +201,14 @@ async fn prepare_request(
         return Err(api_error(
             StatusCode::NOT_FOUND,
             "model is not available in this managed pool",
-            "model_not_found",
+            error_codes::MODEL_NOT_FOUND,
         ));
     };
     if !is_image_model_id(&resolved_model) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "images endpoints require the configured image-generation model",
-            "invalid_image_model",
+            error_codes::INVALID_IMAGE_MODEL,
         ));
     }
     fields.insert("model".to_string(), Value::String(resolved_model.clone()));
@@ -213,7 +219,7 @@ async fn prepare_request(
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 "stream must be a boolean",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             ))
         }
         None => false,
@@ -229,7 +235,7 @@ async fn prepare_request(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "response_format must be b64_json or url",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         ));
     }
 
@@ -253,7 +259,7 @@ fn parse_json(body: &[u8], endpoint: ImageEndpoint) -> Result<ParsedImageFields,
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         ));
     };
     if endpoint == ImageEndpoint::Generations {
@@ -295,7 +301,7 @@ async fn parse_multipart(
         api_error(
             StatusCode::BAD_REQUEST,
             "multipart boundary is invalid",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         )
     })?;
     let size_limit = SizeLimit::new()
@@ -318,7 +324,7 @@ async fn parse_multipart(
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
                     "uploaded image must not be empty",
-                    "invalid_request",
+                    error_codes::INVALID_REQUEST,
                 ));
             }
             let data_url = image_data_url(&bytes, content_type.as_deref());
@@ -333,7 +339,7 @@ async fn parse_multipart(
             api_error(
                 StatusCode::BAD_REQUEST,
                 "multipart text fields must be UTF-8",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             )
         })?;
         let value = value.trim();
@@ -352,7 +358,7 @@ async fn parse_multipart(
                     return Err(api_error(
                         StatusCode::BAD_REQUEST,
                         "stream must be a boolean",
-                        "invalid_request",
+                        error_codes::INVALID_REQUEST,
                     ))
                 }
             };
@@ -362,7 +368,7 @@ async fn parse_multipart(
                 api_error(
                     StatusCode::BAD_REQUEST,
                     "numeric multipart fields must be positive integers",
-                    "invalid_request",
+                    error_codes::INVALID_REQUEST,
                 )
             })?;
             fields.insert(name, Value::Number(parsed.into()));
@@ -390,9 +396,9 @@ fn multipart_error(error: multer::Error) -> Response<Body> {
             "multipart image upload is invalid"
         },
         if too_large {
-            "request_too_large"
+            error_codes::REQUEST_TOO_LARGE
         } else {
-            "invalid_request"
+            error_codes::INVALID_REQUEST
         },
     )
 }
@@ -437,13 +443,16 @@ async fn execute_prepared(
     let mut last_failure = None;
 
     while usize::from(attempt) < runtime.max_retry_candidates() {
-        let Some((selected, lease)) = runtime.select_and_reserve_image(
-            &key,
-            &prepared.resolved_model,
-            IMAGE_PROTOCOLS,
-            &tried,
-            now_ms(),
-        ) else {
+        let Some((selected, lease)) = runtime
+            .select_and_reserve_image(
+                &key,
+                &prepared.resolved_model,
+                IMAGE_PROTOCOLS,
+                &tried,
+                now_ms(),
+            )
+            .await
+        else {
             break;
         };
         tried.insert(selected.candidate_id.clone());
@@ -483,7 +492,7 @@ async fn execute_prepared(
                     return api_error(
                         StatusCode::BAD_REQUEST,
                         "image request could not be serialized",
-                        "invalid_request",
+                        error_codes::INVALID_REQUEST,
                     )
                 }
             }
@@ -517,7 +526,10 @@ async fn execute_prepared(
             .send_authorized_request(&route.candidate_id, upstream, None)
             .await
         {
-            Ok(upstream) => upstream,
+            Ok(upstream) => {
+                route.account_token_generation = upstream.account_token_generation;
+                upstream.response
+            }
             Err(error) => {
                 let failure = AttemptFailure::authorized_request(error);
                 let state = apply_attempt_failure_cooldown(
@@ -579,6 +591,8 @@ async fn execute_prepared(
             continue;
         };
         if !status.is_success() {
+            let upstream_error =
+                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             let capability_failure = image_capability_unavailable(&bytes);
             if retryable_failure(status, failure.category, false) || capability_failure {
@@ -613,12 +627,13 @@ async fn execute_prepared(
                     false,
                     status,
                     Some(if capability_failure {
-                        "image_generation_not_enabled".to_string()
+                        error_codes::IMAGE_GENERATION_NOT_ENABLED.to_string()
                     } else {
                         failure.category.to_string()
                     }),
                     started,
                 );
+                event.upstream_error = Some(upstream_error);
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -636,6 +651,7 @@ async fn execute_prepared(
                 started,
             );
             populate_tokens(&mut event, &bytes);
+            event.upstream_error = Some(upstream_error);
             emit_usage(&runtime, event);
             return proxy_response(status, &response_headers, Body::from(bytes));
         }
@@ -677,7 +693,7 @@ async fn execute_prepared(
         ) {
             Ok(translated) => translated,
             Err(failure) if failure.retryable => {
-                let state = if failure.category == "image_generation_not_enabled" {
+                let state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
                     apply_mandatory_cooldown(
                         &runtime,
                         &route.candidate_id,
@@ -710,6 +726,10 @@ async fn execute_prepared(
                     Some(failure.category.to_string()),
                     started,
                 );
+                event.upstream_error = failure.upstream_error.map(|mut details| {
+                    details.http_status = Some(status.as_u16());
+                    *details
+                });
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(AttemptFailure::classified_with_hint(
@@ -720,7 +740,7 @@ async fn execute_prepared(
                 continue;
             }
             Err(failure) => {
-                let event = image_usage_event(
+                let mut event = image_usage_event(
                     &request_id,
                     attempt,
                     &key,
@@ -731,6 +751,10 @@ async fn execute_prepared(
                     Some(failure.category.to_string()),
                     started,
                 );
+                event.upstream_error = failure.upstream_error.clone().map(|mut details| {
+                    details.http_status = Some(status.as_u16());
+                    *details
+                });
                 emit_usage(&runtime, event);
                 return image_error_response(failure);
             }
@@ -967,8 +991,9 @@ fn translate_account_response(
     let Some(mut completed) = completed else {
         return Err(ImageFailure {
             status: StatusCode::BAD_GATEWAY,
-            category: "stream_incomplete",
-            code: "stream_incomplete".to_string(),
+            category: error_codes::STREAM_INCOMPLETE,
+            upstream_error: None,
+            code: error_codes::STREAM_INCOMPLETE.to_string(),
             message: "upstream image stream ended before completion".to_string(),
             retryable: true,
             cooldown_hint: RateLimitBodyHint::default(),
@@ -992,8 +1017,9 @@ fn translate_account_response(
     if images.is_empty() {
         return Err(ImageFailure {
             status: StatusCode::BAD_GATEWAY,
-            category: "image_output_missing",
-            code: "image_output_missing".to_string(),
+            category: error_codes::IMAGE_OUTPUT_MISSING,
+            upstream_error: None,
+            code: error_codes::IMAGE_OUTPUT_MISSING.to_string(),
             message: "upstream did not return image output".to_string(),
             retryable: true,
             cooldown_hint: RateLimitBodyHint::default(),
@@ -1168,9 +1194,9 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or(if event_type == "response.incomplete" {
-            "response_incomplete"
+            error_codes::RESPONSE_INCOMPLETE
         } else {
-            "upstream_error"
+            error_codes::UPSTREAM_ERROR
         });
     let message = error
         .get("message")
@@ -1195,8 +1221,8 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
         .unwrap_or_else(|| upstream_failure_status(classification.category));
     let classified_status = canonical_upstream_status(classified_status, classification.category);
     let capability = normalized.contains("image generation is not enabled")
-        || normalized.contains("image_generation_not_enabled");
-    let user_error = error_type.eq_ignore_ascii_case("image_generation_user_error")
+        || normalized.contains(error_codes::IMAGE_GENERATION_NOT_ENABLED);
+    let user_error = error_type.eq_ignore_ascii_case(error_codes::IMAGE_GENERATION_USER_ERROR)
         || normalized.contains("moderation")
         || normalized.contains("content_policy")
         || normalized.contains("content filter")
@@ -1205,13 +1231,13 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
     let (status, category, retryable) = if capability {
         (
             StatusCode::BAD_GATEWAY,
-            "image_generation_not_enabled",
+            error_codes::IMAGE_GENERATION_NOT_ENABLED,
             true,
         )
     } else if user_error {
         (
             StatusCode::BAD_REQUEST,
-            "image_generation_user_error",
+            error_codes::IMAGE_GENERATION_USER_ERROR,
             false,
         )
     } else {
@@ -1222,6 +1248,9 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
         )
     };
     Some(ImageFailure {
+        upstream_error: Some(Box::new(crate::usage::UpstreamErrorDetails::from_value(
+            None, value,
+        ))),
         status,
         category,
         code: code.to_string(),
@@ -1234,7 +1263,7 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
 fn image_capability_unavailable(bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     text.contains("image generation is not enabled")
-        || text.contains("image_generation_not_enabled")
+        || text.contains(error_codes::IMAGE_GENERATION_NOT_ENABLED)
 }
 
 fn image_error_response(failure: ImageFailure) -> Response<Body> {

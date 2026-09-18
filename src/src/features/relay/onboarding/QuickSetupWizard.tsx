@@ -219,7 +219,17 @@ export function QuickSetupWizard() {
       if (!ok) return;
     }
     if (step === 3 && client === "codex" && mode === "local") {
+      // Selecting ChatGPT configures the existing profile only. Never launch
+      // an application from the wizard; the user can open it later from the
+      // normal Gateway/Overview controls.
       const ok = await activateCodexProfile("onboarding-client", () => relayCommands.attachCodexGateway());
+      if (!ok) return;
+    }
+    if (step === 3 && client === "opencode" && mode === "local") {
+      // OpenCode is the first supported "other" client. Its configuration is
+      // switched to the local pool, with an automatic one-shot recovery copy
+      // made by the native command before the first write. Do not launch it.
+      const ok = await perform("onboarding-opencode", relayCommands.connectOpenCode, "feedback.saved");
       if (!ok) return;
     }
     if (step === 3 && client === "codex" && mode === "zenith") {
@@ -244,7 +254,7 @@ export function QuickSetupWizard() {
     <section className="setup-body">
       {step === 1 ? <div className="setup-step setup-mode-step"><div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div><div className="mode-options">{(["local", "zenith", "remote"] as RelayMode[]).map((value) => { const Icon = value === "local" ? Laptop : value === "remote" ? Server : Cloud; return <button key={value} type="button" className={mode === value ? "selected" : ""} onClick={() => selectMode(value)}><Icon aria-hidden /><span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span><i>{mode === value ? <Check aria-hidden /> : null}</i></button>; })}</div></div> : null}
       {step === 2 ? <div className="setup-step"><ConnectionStep mode={mode} provider={provider} onProviderChange={(value) => { setProvider(value); setConnectionReady(false); }} serverUrl={serverUrl} setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }} serverToken={serverToken} setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }} currentProfileAvailable={currentProfileAvailable} currentProfileImport={currentProfileImport} currentProfileCountdown={currentProfileCountdown} onConnected={() => setConnectionReady(true)} onOAuthPendingChange={setOauthPending} onImport={openFileImport} onImportCurrent={() => void openCurrentProfileImport()} onRetryCurrent={retryCurrentProfileImport} onUseAnotherConnection={resetCurrentProfileImport} />{mode === "remote" && insecureRemote ? <label className="check-line"><input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} /><span>{t("onboarding.allowInsecureRemote")}</span></label> : null}</div> : null}
-      {step === 3 ? <div className="setup-step"><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options">{["codex", "other", "later"].map((value) => <button type="button" key={value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><span>{t(`clients.${value}`)}</span><i>{client === value ? <Check aria-hidden /> : null}</i></button>)}</div></div> : null}
+      {step === 3 ? <div className="setup-step"><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options">{["codex", "opencode", "later"].map((value) => <button type="button" key={value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><span>{t(`clients.${value}`)}</span><i>{client === value ? <Check aria-hidden /> : null}</i></button>)}</div></div> : null}
       {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p></div> : null}
     </section>
     <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 4 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>

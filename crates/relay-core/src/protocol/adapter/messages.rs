@@ -1,7 +1,7 @@
 use super::contracts::{
-    custom_tool_item_id, request_tool_catalog, AdapterError, AdapterResult, ClientToolTarget,
-    MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode,
-    ResponsesToolKind, TranslatedTools,
+    bridged_namespace_tool_name, custom_tool_item_id, prepare_bridge_state, request_tool_catalog,
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest, MessagesBridgeResponse,
+    MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
 };
 use crate::CacheWriteTtl;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -16,9 +16,7 @@ const SUPPORTED_IMAGE_TYPES: &[&str] = &["image/gif", "image/jpeg", "image/png",
 /// JSON-schema functions retain their object input. Direct custom tools are
 /// represented as a function with one raw-text field and are translated back
 /// to the exact Responses custom-call shape before the client sees them.
-/// Provider-hosted and dynamic-discovery tools are omitted from the upstream
-/// Messages catalog. They remain in the client request; the bridge only sends
-/// the subset it can represent without inventing a provider capability.
+/// Provider-hosted tools require a native route and are rejected before sending.
 pub fn prepare_responses_to_messages(
     request: &Value,
     model: &str,
@@ -61,31 +59,13 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     previous: Option<MessagesBridgeState>,
     response_scope: &str,
 ) -> AdapterResult<MessagesBridgeRequest> {
-    let object = request
-        .as_object()
-        .ok_or_else(AdapterError::invalid_request)?;
-    let previous_response_id = object
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let mut state = match (previous_response_id, previous) {
-        (Some(_), Some(state)) if state.model == model => state,
-        (Some(_), Some(_)) => return Err(AdapterError::continuation_mismatch()),
-        (Some(_), None) => return Err(AdapterError::continuation_missing()),
-        (None, _) => MessagesBridgeState::new(model, reasoning_mode),
-    };
-    if state.reasoning_mode != reasoning_mode {
-        return Err(AdapterError::continuation_mismatch());
-    }
-
-    if previous_response_id.is_none() {
-        if let Some(instructions) = object.get("instructions") {
-            append_system_value(&mut state, instructions)?;
-        }
-    } else if object.contains_key("instructions") {
-        return Err(AdapterError::continuation_mismatch());
-    }
+    let (object, mut state) = prepare_bridge_state(
+        request,
+        model,
+        reasoning_mode,
+        previous,
+        crate::WireApi::Messages,
+    )?;
 
     if let Some(tools) = request_tool_catalog(object)? {
         let TranslatedTools {
@@ -102,10 +82,6 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
         state.tool_allow_list = None;
     }
     if let Some(tool_choice) = object.get("tool_choice") {
-        // A Responses choice may target a hosted or future tool which is not
-        // present in the translated Messages catalog. Dropping that choice
-        // lets the upstream model answer normally instead of turning a
-        // representable request into a Relay-side 400.
         let translated = translate_tool_choice(tool_choice, &state)?;
         state.tool_choice = translated.value;
         state.tool_allow_list = translated.allowed_names;
@@ -119,6 +95,10 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     )?;
     if state.messages.is_empty() {
         return Err(AdapterError::invalid_request());
+    }
+    state.historical_system = state.system.clone();
+    if let Some(instructions) = object.get("instructions").filter(|value| !value.is_null()) {
+        append_system_value(&mut state, instructions)?;
     }
 
     let mut body = Map::from_iter([
@@ -142,6 +122,37 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     if let Some(tool_choice) = state.tool_choice.clone() {
         body.insert("tool_choice".to_string(), tool_choice);
     }
+    if let Some(parallel) = object
+        .get("parallel_tool_calls")
+        .filter(|value| !value.is_null())
+    {
+        let parallel = parallel
+            .as_bool()
+            .ok_or_else(AdapterError::invalid_request)?;
+        body.entry("tool_choice")
+            .or_insert_with(|| json!({"type":"auto"}))["disable_parallel_tool_use"] =
+            (!parallel).into();
+    }
+    if let Some(format) = object
+        .get("text")
+        .and_then(|text| text.get("format"))
+        .filter(|value| !value.is_null())
+    {
+        match format.get("type").and_then(Value::as_str) {
+            Some("text") => {}
+            Some("json_schema") => {
+                let schema = format
+                    .get("schema")
+                    .filter(|schema| schema.is_object())
+                    .ok_or_else(AdapterError::invalid_request)?;
+                body.insert(
+                    "output_config".into(),
+                    json!({"format":{"type":"json_schema","schema":schema}}),
+                );
+            }
+            _ => return Err(AdapterError::parameter_unsupported()),
+        }
+    }
     if let Some(temperature) = object.get("temperature") {
         body.insert("temperature".to_string(), temperature.clone());
     }
@@ -151,7 +162,12 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     if let Some(stop_sequences) = object.get("stop") {
         body.insert("stop_sequences".to_string(), stop_sequences.clone());
     }
-    apply_reasoning(&mut body, object.get("reasoning"), reasoning_mode)?;
+    apply_reasoning(
+        &mut body,
+        object.get("reasoning"),
+        reasoning_mode,
+        object.contains_key("max_output_tokens"),
+    )?;
     let mut upstream_body = Value::Object(body);
     apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
     Ok(MessagesBridgeRequest {
@@ -812,13 +828,7 @@ fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools> {
         };
         match tool.get("type").and_then(Value::as_str) {
             Some("function" | "custom") => {
-                if let Err(error) =
-                    translate_client_tool(&mut upstream, &mut client_tools, tool, None, None)
-                {
-                    if !error.is_route_incompatible() {
-                        return Err(error);
-                    }
-                }
+                translate_client_tool(&mut upstream, &mut client_tools, tool, None, None)?;
             }
             Some("namespace") => {
                 let Some(namespace) = tool
@@ -845,28 +855,20 @@ fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools> {
                         child.get("type").and_then(Value::as_str),
                         Some("function" | "custom") | None
                     ) {
-                        if let Err(error) = translate_client_tool(
+                        translate_client_tool(
                             &mut upstream,
                             &mut client_tools,
                             child,
                             Some(namespace),
                             namespace_description,
-                        ) {
-                            if !error.is_route_incompatible() {
-                                return Err(error);
-                            }
-                        }
+                        )?;
                     }
                     // The Responses namespace can carry tools that require
                     // server execution or a separate adapter. Do not make a
                     // Messages source advertise them under a fake contract.
                 }
             }
-            // Hosted and dynamic Responses tools (for example web search and
-            // tool search) cannot be executed by an Anthropic Messages source.
-            // Omitting them preserves every representable client tool instead
-            // of rejecting the complete Codex request.
-            _ => {}
+            _ => return Err(AdapterError::unsupported_tool()),
         }
     }
     Ok(TranslatedTools {
@@ -916,6 +918,12 @@ fn translate_client_tool(
                 _ => return Err(AdapterError::unsupported_tool()),
             }
             translated.insert("input_schema".to_string(), Value::Object(schema.clone()));
+            if let Some(strict) = tool.get("strict").filter(|value| !value.is_null()) {
+                if !strict.is_boolean() {
+                    return Err(AdapterError::invalid_request());
+                }
+                translated.insert("strict".to_string(), strict.clone());
+            }
         }
         ResponsesToolKind::Custom => {
             if tool
@@ -961,16 +969,6 @@ fn translate_client_tool(
     );
     upstream.push(Value::Object(translated));
     Ok(())
-}
-
-fn bridged_namespace_tool_name(namespace: &str, name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((namespace.len() as u64).to_le_bytes());
-    hasher.update(namespace.as_bytes());
-    hasher.update((name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-    format!("relay_ns_{}", hex::encode(&digest[..12]))
 }
 
 fn custom_tool_input_schema(tool: &Map<String, Value>) -> AdapterResult<Value> {
@@ -1036,14 +1034,7 @@ fn translate_tool_choice(
                 value: Some(json!({"type": "any"})),
                 allowed_names: None,
             }),
-            "required" => Ok(TranslatedToolChoice {
-                value: None,
-                allowed_names: None,
-            }),
-            _ => Ok(TranslatedToolChoice {
-                value: None,
-                allowed_names: None,
-            }),
+            _ => Err(AdapterError::unsupported_tool()),
         },
         Value::Object(value)
             if matches!(
@@ -1052,10 +1043,7 @@ fn translate_tool_choice(
             ) =>
         {
             let Some(name) = selected_upstream_tool_name(state, value) else {
-                return Ok(TranslatedToolChoice {
-                    value: None,
-                    allowed_names: None,
-                });
+                return Err(AdapterError::unsupported_tool());
             };
             Ok(TranslatedToolChoice {
                 value: Some(json!({"type": "tool", "name": name})),
@@ -1156,10 +1144,11 @@ fn translate_tool_choice(
                 allowed_names: Some(allowed_names),
             })
         }
-        _ => Ok(TranslatedToolChoice {
+        Value::Null => Ok(TranslatedToolChoice {
             value: None,
             allowed_names: None,
         }),
+        _ => Err(AdapterError::unsupported_tool()),
     }
 }
 
@@ -1190,16 +1179,27 @@ fn apply_reasoning(
     body: &mut Map<String, Value>,
     reasoning: Option<&Value>,
     mode: MessagesReasoningMode,
+    explicit_max_tokens: bool,
 ) -> AdapterResult<()> {
     let effort = reasoning
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("effort"))
         .and_then(Value::as_str)
         .map(|effort| effort.trim().to_ascii_lowercase())
-        .filter(|effort| !effort.is_empty() && effort != "none");
+        .filter(|effort| !effort.is_empty());
     let Some(effort) = effort else {
         return Ok(());
     };
+    if effort == "none" {
+        body.insert("thinking".to_string(), json!({"type":"disabled"}));
+        return Ok(());
+    }
+    if ["temperature", "top_p"]
+        .iter()
+        .any(|name| body.get(*name).is_some_and(|value| !value.is_null()))
+    {
+        return Err(AdapterError::parameter_unsupported());
+    }
     match mode {
         MessagesReasoningMode::Disabled => Err(AdapterError::reasoning_unsupported()),
         MessagesReasoningMode::Budget => {
@@ -1213,6 +1213,14 @@ fn apply_reasoning(
                 _ => return Err(AdapterError::reasoning_unsupported()),
             };
             let minimum_max_tokens = budget_tokens + 1_024;
+            if explicit_max_tokens
+                && body
+                    .get("max_tokens")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|limit| limit < minimum_max_tokens)
+            {
+                return Err(AdapterError::parameter_unsupported());
+            }
             let max_tokens = body
                 .get("max_tokens")
                 .and_then(Value::as_u64)
@@ -1223,21 +1231,15 @@ fn apply_reasoning(
                 "thinking".to_string(),
                 json!({"type": "enabled", "budget_tokens": budget_tokens}),
             );
-            body.remove("temperature");
-            body.remove("top_p");
             Ok(())
         }
         MessagesReasoningMode::Adaptive => {
             let effort = match effort.as_str() {
-                "minimal" => "low",
-                "ultra" => "max",
-                "low" | "medium" | "high" | "xhigh" | "max" => effort.as_str(),
+                "low" | "medium" | "high" | "max" => effort.as_str(),
                 _ => return Err(AdapterError::reasoning_unsupported()),
             };
             body.insert("thinking".to_string(), json!({"type": "adaptive"}));
-            body.insert("output_config".to_string(), json!({"effort": effort}));
-            body.remove("temperature");
-            body.remove("top_p");
+            body.entry("output_config").or_insert_with(|| json!({}))["effort"] = effort.into();
             Ok(())
         }
     }

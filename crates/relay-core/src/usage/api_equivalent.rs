@@ -362,7 +362,6 @@ mod pricing_tests {
         assert_eq!(estimate.micro_usd, 3_100_000);
         assert_eq!(estimate.priced_tokens, 1_100_000);
         assert_eq!(estimate.unpriced_tokens, 0);
-        assert!(catalog.rank_for("GPT-5.4").is_some());
         assert_eq!(
             catalog
                 .resolve_account("GPT-5.4", Some("openai"))
@@ -689,6 +688,21 @@ mod pricing_tests {
             context.candidate_price(&catalog, "source", "source-1", Some("PRIVATE-MODEL"));
         assert_eq!(source_price.source, PriceSource::Provider);
         assert_eq!(source_price.quote, Some(provider.into()));
+        let protocol_source_price = context.candidate_price(
+            &catalog,
+            "source",
+            "source-1::messages",
+            Some("private-model"),
+        );
+        assert_eq!(protocol_source_price.source, PriceSource::Provider);
+        assert_eq!(protocol_source_price.quote, Some(provider.into()));
+        let bridged_source_price = context.candidate_price(
+            &catalog,
+            "source",
+            "source-1::responses_to_messages",
+            Some("private-model"),
+        );
+        assert_eq!(bridged_source_price.source, PriceSource::Provider);
         let fallback_price =
             context.candidate_price(&catalog, "source", "missing-source", Some("private-model"));
         assert_eq!(fallback_price.source, PriceSource::Manual);

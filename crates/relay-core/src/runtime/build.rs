@@ -9,9 +9,9 @@ use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::{
-    normalize_subscription_plan_order, runtime_source_protocol_bindings, CandidateHealth,
-    CandidateKind, CandidateQuota, CandidateScope, Error, ModelRegistry, ModelRules, PoolScheduler,
-    Result, RuntimeCandidate, RuntimeMixedLocalKey, SourceConnector, WireApi,
+    normalize_subscription_plan_order, CandidateHealth, CandidateKind, CandidateQuota,
+    CandidateScope, Error, ModelRegistry, ModelRules, PoolScheduler, Result, RuntimeCandidate,
+    RuntimeMixedLocalKey, SourceConnector, WireApi,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -26,6 +26,7 @@ pub(super) enum ReachabilityRequirement {
 pub(super) struct SourceRuntimeParts {
     pub(super) executors: BTreeMap<String, SourceConnector>,
     pub(super) candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    pub(super) capabilities: BTreeMap<String, Vec<crate::ModelEndpointCapability>>,
     pub(super) recovery_delays_ms: BTreeMap<String, u64>,
 }
 
@@ -84,6 +85,7 @@ pub(super) fn build_sources(
 ) -> Result<SourceRuntimeParts> {
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
+    let mut capabilities = BTreeMap::new();
     let mut recovery_delays_ms = BTreeMap::new();
     for source in sources {
         source.source.validate()?;
@@ -100,12 +102,22 @@ pub(super) fn build_sources(
         if executors.contains_key(&source.source.id) {
             return Err(Error::Validation("source ids must be unique".to_string()));
         }
-        let bindings = runtime_source_protocol_bindings(
-            source.protocol_bindings.clone(),
-            source.source.wire_api,
+        let bindings = source.protocol_config.resolve(
+            &source.source.base_url,
             &source.source.models,
+            &source.protocol_bindings,
+            source.source.wire_api,
         )?;
         let source_id = source.source.id.clone();
+        capabilities.insert(
+            source_id.clone(),
+            source.protocol_config.effective_capabilities(
+                &source.source.base_url,
+                &source.source.models,
+                &source.protocol_bindings,
+                source.source.wire_api,
+            ),
+        );
         let connector = SourceConnector::new(&source.source, &bindings)?;
         let rules = model_rules(&source.allowed_models, &source.excluded_models);
         for binding in &bindings {
@@ -113,7 +125,7 @@ pub(super) fn build_sources(
             if models.is_empty() {
                 continue;
             }
-            let candidate_id = source_candidate_id(&source_id, binding, bindings.len());
+            let candidate_id = source_candidate_id(&source_id, binding, source.source.wire_api);
             if candidate_bindings.contains_key(&candidate_id) {
                 return Err(Error::Validation(
                     "source protocol candidate ids must be unique".to_string(),
@@ -133,6 +145,8 @@ pub(super) fn build_sources(
                 model_rules: rules.clone(),
                 health: CandidateHealth::Healthy,
                 quota: CandidateQuota::Unknown,
+                provider_credits_micro_units: None,
+                provider_credits_unlimited: false,
                 quota_updated_at_ms: None,
                 quota_reset_at_ms: None,
                 cooldowns: BTreeMap::new(),
@@ -142,6 +156,7 @@ pub(super) fn build_sources(
             };
             registry.replace(candidate_id.clone(), binding.model_ids.iter());
             scheduler.upsert(candidate);
+            scheduler.set_native_route(&candidate_id, binding.adapter.is_passthrough());
             if source.recovery_delay_seconds > 0 {
                 recovery_delays_ms.insert(
                     candidate_id.clone(),
@@ -165,6 +180,7 @@ pub(super) fn build_sources(
     Ok(SourceRuntimeParts {
         executors,
         candidate_bindings,
+        capabilities,
         recovery_delays_ms,
     })
 }
@@ -241,6 +257,8 @@ pub(super) fn build_accounts(
             model_rules: model_rules(&account.allowed_models, &account.excluded_models),
             health: account.health,
             quota: account.quota,
+            provider_credits_micro_units: account.quota_snapshot.available_credits_micro_units,
+            provider_credits_unlimited: account.quota_snapshot.provider_credits_unlimited,
             quota_updated_at_ms: account.quota_updated_at_ms,
             quota_reset_at_ms: account.quota_snapshot.limiting_reset_at_ms(),
             cooldowns: BTreeMap::new(),

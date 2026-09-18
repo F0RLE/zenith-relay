@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct TokenSet {
     access_token: String,
     refresh_token: Option<String>,
@@ -288,6 +288,25 @@ struct TokenSlot {
     auth_state_persistence_pending: bool,
 }
 
+impl TokenSlot {
+    fn fresh(tokens: TokenSet, auth_state: AccountAuthState) -> Self {
+        Self {
+            tokens,
+            auth_state,
+            persistence_pending: false,
+            auth_state_persistence_pending: false,
+        }
+    }
+}
+
+enum PreparedTokenSlot {
+    Existing {
+        slot: Arc<AsyncMutex<TokenSlot>>,
+        candidate: TokenSlot,
+    },
+    Inserted,
+}
+
 pub struct TokenAuthority {
     slots: Mutex<HashMap<String, Arc<AsyncMutex<TokenSlot>>>>,
     max_accounts: usize,
@@ -304,43 +323,162 @@ impl TokenAuthority {
         })
     }
 
+    /// Validates an account identifier and atomically either creates its
+    /// initial slot or returns the existing slot with the caller's candidate.
+    /// The standard mutex is released before any async slot lock is awaited.
+    fn prepare_slot(
+        &self,
+        account_id: &str,
+        candidate: TokenSlot,
+    ) -> Result<PreparedTokenSlot, TokenAuthorityError> {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return Err(TokenAuthorityError::InvalidAccountId);
+        }
+
+        let mut slots = lock(&self.slots);
+        if let Some(slot) = slots.get(account_id) {
+            return Ok(PreparedTokenSlot::Existing {
+                slot: slot.clone(),
+                candidate,
+            });
+        }
+        if slots.len() >= self.max_accounts {
+            return Err(TokenAuthorityError::CapacityReached);
+        }
+        slots.insert(account_id.to_string(), Arc::new(AsyncMutex::new(candidate)));
+        Ok(PreparedTokenSlot::Inserted)
+    }
+
     pub async fn register(
         &self,
         account_id: &str,
         tokens: TokenSet,
         auth_state: AccountAuthState,
     ) -> Result<(), TokenAuthorityError> {
+        match self.prepare_slot(account_id, TokenSlot::fresh(tokens, auth_state))? {
+            PreparedTokenSlot::Inserted => Ok(()),
+            PreparedTokenSlot::Existing { slot, candidate } => {
+                *slot.lock().await = candidate;
+                Ok(())
+            }
+        }
+    }
+
+    /// Registers a credential snapshot only when it is newer than the
+    /// authority's current token generation. Request preparation uses this to
+    /// initialize a missing slot without clearing an in-flight refresh,
+    /// pending persistence, or a terminal authentication state from a newer
+    /// in-memory result.
+    pub async fn register_if_newer(
+        &self,
+        account_id: &str,
+        tokens: TokenSet,
+        auth_state: AccountAuthState,
+    ) -> Result<bool, TokenAuthorityError> {
+        match self.prepare_slot(account_id, TokenSlot::fresh(tokens, auth_state))? {
+            PreparedTokenSlot::Inserted => Ok(true),
+            PreparedTokenSlot::Existing { slot, candidate } => {
+                let mut existing = slot.lock().await;
+                if !token_set_is_newer(&candidate.tokens, &existing.tokens) {
+                    return Ok(false);
+                }
+                *existing = candidate;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Registers a token snapshot unless an in-memory refresh has already
+    /// produced an unmistakably newer generation. Desktop-profile import uses
+    /// this after releasing its cross-process credential lock, so it cannot
+    /// roll back a concurrent automatic refresh.
+    pub async fn register_if_not_stale(
+        &self,
+        account_id: &str,
+        tokens: TokenSet,
+        auth_state: AccountAuthState,
+    ) -> Result<bool, TokenAuthorityError> {
+        match self.prepare_slot(account_id, TokenSlot::fresh(tokens, auth_state))? {
+            PreparedTokenSlot::Inserted => Ok(true),
+            PreparedTokenSlot::Existing { slot, candidate } => {
+                let mut existing = slot.lock().await;
+                if token_set_is_newer(&existing.tokens, &candidate.tokens) {
+                    return Ok(false);
+                }
+                *existing = candidate;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Replaces an authority slot only while it still contains the exact
+    /// token/authentication state installed by the caller. Compensating
+    /// account mutations use this instead of an unconditional `register` so a
+    /// delayed rollback cannot replace a login or refresh that completed
+    /// meanwhile.
+    pub async fn replace_if_current(
+        &self,
+        account_id: &str,
+        expected_tokens: &TokenSet,
+        expected_auth_state: AccountAuthState,
+        replacement_tokens: TokenSet,
+        replacement_auth_state: AccountAuthState,
+    ) -> Result<bool, TokenAuthorityError> {
         let account_id = account_id.trim();
         if account_id.is_empty() {
             return Err(TokenAuthorityError::InvalidAccountId);
         }
-        let existing = {
-            let mut slots = lock(&self.slots);
-            if let Some(slot) = slots.get(account_id) {
-                slot.clone()
-            } else {
-                if slots.len() >= self.max_accounts {
-                    return Err(TokenAuthorityError::CapacityReached);
-                }
-                slots.insert(
-                    account_id.to_string(),
-                    Arc::new(AsyncMutex::new(TokenSlot {
-                        tokens,
-                        auth_state,
-                        persistence_pending: false,
-                        auth_state_persistence_pending: false,
-                    })),
-                );
-                return Ok(());
-            }
+        let slot = { lock(&self.slots).get(account_id).cloned() };
+        let Some(slot) = slot else {
+            return Ok(false);
         };
-        *existing.lock().await = TokenSlot {
-            tokens,
-            auth_state,
+        let mut slot = slot.lock().await;
+        if slot.auth_state != expected_auth_state || slot.tokens != *expected_tokens {
+            return Ok(false);
+        }
+        *slot = TokenSlot {
+            tokens: replacement_tokens,
+            auth_state: replacement_auth_state,
             persistence_pending: false,
             auth_state_persistence_pending: false,
         };
-        Ok(())
+        Ok(true)
+    }
+
+    /// Removes a newly-created authority slot only while it still belongs to
+    /// the failed mutation. A concurrent login/refresh may reuse the same
+    /// account id, so removing by id alone is not safe.
+    pub async fn remove_if_current(
+        &self,
+        account_id: &str,
+        expected_tokens: &TokenSet,
+        expected_auth_state: AccountAuthState,
+    ) -> Result<bool, TokenAuthorityError> {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return Err(TokenAuthorityError::InvalidAccountId);
+        }
+        let slot = { lock(&self.slots).get(account_id).cloned() };
+        let Some(slot) = slot else {
+            return Ok(false);
+        };
+        let slot_guard = slot.lock().await;
+        if slot_guard.auth_state != expected_auth_state || slot_guard.tokens != *expected_tokens {
+            return Ok(false);
+        }
+        // All authority operations take the map lock only long enough to copy
+        // an Arc, then await the slot lock. Holding this slot lock while
+        // checking the Arc therefore prevents a remove/re-register race.
+        let mut slots = lock(&self.slots);
+        if slots
+            .get(account_id)
+            .is_none_or(|current| !Arc::ptr_eq(current, &slot))
+        {
+            return Ok(false);
+        }
+        slots.remove(account_id);
+        Ok(true)
     }
 
     pub fn register_if_absent(
@@ -585,6 +723,12 @@ fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
+fn token_set_is_newer(current: &TokenSet, candidate: &TokenSet) -> bool {
+    current.generation() > candidate.generation()
+        || (current.generation() == candidate.generation()
+            && current.issued_at_ms() > candidate.issued_at_ms())
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -689,6 +833,185 @@ mod tests {
         let stored = authority.tokens("account").await.unwrap();
         assert_eq!(stored.generation(), 2);
         assert_eq!(stored.access_token(), "new-access");
+    }
+
+    #[tokio::test]
+    async fn conditional_registration_never_replaces_a_newer_refresh_generation() {
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "account",
+                TokenSet::new("new-access", Some("new-refresh".into()), None, None, 2, 2).unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+
+        let stale =
+            TokenSet::new("old-access", Some("old-refresh".into()), None, None, 1, 1).unwrap();
+        assert!(!authority
+            .register_if_not_stale("account", stale, AccountAuthState::Active)
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "new-access"
+        );
+
+        let newest = TokenSet::new(
+            "newest-access",
+            Some("newest-refresh".into()),
+            None,
+            None,
+            3,
+            3,
+        )
+        .unwrap();
+        assert!(authority
+            .register_if_not_stale("account", newest, AccountAuthState::Active)
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "newest-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_rollback_never_replaces_a_newer_token_generation() {
+        let authority = TokenAuthority::new(1).unwrap();
+        let attempted = TokenSet::new(
+            "attempted-access",
+            Some("attempted-refresh".into()),
+            None,
+            Some(20_000),
+            20,
+            2,
+        )
+        .unwrap();
+        let newer = TokenSet::new(
+            "newer-access",
+            Some("newer-refresh".into()),
+            None,
+            Some(30_000),
+            30,
+            3,
+        )
+        .unwrap();
+        let previous = TokenSet::new(
+            "previous-access",
+            Some("previous-refresh".into()),
+            None,
+            Some(10_000),
+            10,
+            1,
+        )
+        .unwrap();
+        authority
+            .register("account", newer, AccountAuthState::Active)
+            .await
+            .unwrap();
+
+        assert!(!authority
+            .replace_if_current(
+                "account",
+                &attempted,
+                AccountAuthState::Active,
+                previous,
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "newer-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_remove_never_evicts_a_reused_account_slot() {
+        let authority = TokenAuthority::new(1).unwrap();
+        let attempted = TokenSet::new(
+            "attempted-access",
+            Some("attempted-refresh".into()),
+            None,
+            Some(20_000),
+            20,
+            2,
+        )
+        .unwrap();
+        let newer = TokenSet::new(
+            "newer-access",
+            Some("newer-refresh".into()),
+            None,
+            Some(30_000),
+            30,
+            3,
+        )
+        .unwrap();
+        authority
+            .register("account", newer, AccountAuthState::Active)
+            .await
+            .unwrap();
+
+        assert!(!authority
+            .remove_if_current("account", &attempted, AccountAuthState::Active)
+            .await
+            .unwrap());
+        assert_eq!(authority.len(), 1);
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "newer-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_only_registration_preserves_equal_generation_auth_state() {
+        let authority = TokenAuthority::new(1).unwrap();
+        let current = TokenSet::new(
+            "access",
+            Some("refresh".into()),
+            Some("identity".into()),
+            Some(10_000),
+            7,
+            3,
+        )
+        .unwrap();
+        authority
+            .register(
+                "account",
+                current.clone(),
+                AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            )
+            .await
+            .unwrap();
+
+        assert!(!authority
+            .register_if_newer("account", current, AccountAuthState::Active)
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.auth_state("account").await,
+            Some(AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant))
+        );
+
+        let newer = TokenSet::new(
+            "new-access",
+            Some("new-refresh".into()),
+            Some("new-identity".into()),
+            Some(20_000),
+            8,
+            3,
+        )
+        .unwrap();
+        assert!(authority
+            .register_if_newer("account", newer, AccountAuthState::Active)
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.auth_state("account").await,
+            Some(AccountAuthState::Active)
+        );
     }
 
     struct InvalidGrant;

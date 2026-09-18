@@ -1,5 +1,7 @@
 import type { PoolMember } from "../poolHelpers";
 import { apiSourcePriority, type ApiSourceRole } from "../routingOrder";
+import { uniqueModelIds } from "../modelGroups";
+import { sourcePriceModels } from "./sourcePriceEditorModel";
 
 export type ModelSelection = {
   modelIds: string[];
@@ -7,14 +9,10 @@ export type ModelSelection = {
 };
 
 export function modelSelectionForMember(member: PoolMember): ModelSelection {
-  const pricedModels = member.kind === "source"
-    ? [...Object.keys(member.modelPriceOverrides ?? {}), ...Object.keys(member.detectedModelPrices ?? {})]
-    : [];
-  const modelIds = uniqueModels([
-    ...pricedModels,
+  const modelIds = member.kind === "source" ? sourcePriceModels(member) : uniqueModelIds([
+    ...member.models,
     ...member.allowedModels,
     ...member.excludedModels,
-    ...member.models,
   ]);
   const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
   const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
@@ -56,8 +54,4 @@ export function sourcePrioritiesForOrder(order: readonly string[], role: ApiSour
     sourceId,
     apiSourcePriority(role, index, order.length),
   ]));
-}
-
-function uniqueModels(models: readonly string[]) {
-  return [...new Map(models.map((model) => [model.toLocaleLowerCase(), model])).values()];
 }

@@ -6,24 +6,24 @@ mod codex_config_backup;
 mod codex_config_text;
 
 pub(crate) use codex_config_auth::load_api_key_for_launch;
-use codex_config_auth::{
-    codex_auth_content, load_zenith_auth_key_if_configured, load_zenith_key_from_codex_config,
-    restore_or_remove_zenith_auth, save_previous_auth_if_needed,
-};
+use codex_config_auth::restore_or_remove_zenith_auth;
 #[cfg(test)]
 use codex_config_auth::{
     previous_codex_auth_should_be_saved, zenith_auth_is_owned, zenith_auth_key_if_configured,
 };
 #[cfg(test)]
 use codex_config_backup::redact_config_secrets;
-use codex_config_backup::{backup_config, prune_config_backups};
-use codex_config_text::{
-    backup_paths_from_directories, config_selects_zenith_provider, config_uses_zenith_provider,
-    is_zenith_customer_key, latest_backup_model_provider, remove_zenith_provider,
-    upsert_zenith_provider, with_model_provider,
-};
 #[cfg(test)]
-use codex_config_text::{backup_paths_newest_first, remove_zenith_openai_base_url_override};
+use codex_config_backup::{backup_config, prune_config_backups};
+#[cfg(test)]
+use codex_config_text::{
+    backup_paths_from_directories, backup_paths_newest_first,
+    remove_zenith_openai_base_url_override, upsert_zenith_provider,
+};
+use codex_config_text::{
+    config_selects_zenith_provider, config_uses_zenith_provider, is_zenith_customer_key,
+    latest_backup_model_provider, remove_zenith_provider, with_model_provider,
+};
 use std::{
     fs,
     path::Path,
@@ -37,19 +37,19 @@ use std::{
 
 use crate::{
     files::atomic_write,
-    key_storage::{
-        delete_previous_codex_auth, delete_saved_app_key, load_saved_app_key, save_app_key,
-    },
+    key_storage::{delete_saved_app_key, load_saved_app_key, save_app_key},
     platform::default_codex_home,
 };
 
 const PROVIDER_ID: &str = "codex_local_access";
 const LEGACY_PROVIDER_ID: &str = "zenith";
+#[cfg(test)]
 const PROVIDER_NAME: &str = "Zenith";
 const BASE_URL: &str = "https://api.zenithmarket.dev/v1";
 const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
 const BACKUP_SUFFIX: &str = ".zenith.bak";
+#[cfg(test)]
 const MAX_CONFIG_BACKUPS: usize = 3;
 const DEFAULT_MODEL_PROVIDER: &str = "openai";
 const LOCAL_POOL_PROVIDER_ID: &str = "zenith_relay_local";
@@ -65,133 +65,34 @@ pub fn enable_provider(api_key: &str, backup_dir: &Path) -> Result<(), String> {
     if api_key.is_empty() {
         return Err("Введите API key.".to_string());
     }
-    let _profile_guard = lock_codex_profile();
+    crate::local_pool::profiles::codex::attach_ready_api(
+        &default_codex_home(),
+        profile_root(backup_dir)?,
+        api_key,
+    )
+    .map_err(|error| error.message)
+}
 
-    let codex_home = default_codex_home();
-    let config_path = codex_home.join(CONFIG_FILE);
-    let auth_path = codex_home.join(AUTH_FILE);
-    let original_config = read_optional_text(&config_path)?;
-    let original_auth = read_optional_text(&auth_path)?;
-    let original = original_config.as_deref().unwrap_or_default();
-    ensure_ready_api_profile_is_inactive(original)?;
-    fs::create_dir_all(&codex_home)
-        .map_err(|err| format!("Не удалось создать {}: {err}", codex_home.display()))?;
-    prune_config_backups(backup_dir)?;
-    let next = upsert_zenith_provider(original);
-    if next != original {
-        backup_config(backup_dir, original)?;
-        replace_if_unchanged(&config_path, original_config.as_deref(), &next)?;
-    }
-    let managed_auth = codex_auth_content(api_key);
-    if let Err(error) = replace_if_unchanged(&auth_path, original_auth.as_deref(), &managed_auth) {
-        return Err(with_cleanup(
-            error,
-            rollback_ready_config(
-                next != original,
-                &config_path,
-                &next,
-                original_config.as_deref(),
-            ),
-        ));
-    }
-    let saved_previous_auth = match save_previous_auth_if_needed(original, original_auth.as_deref())
+fn profile_root(backup_dir: &Path) -> Result<&Path, String> {
+    if backup_dir
+        .file_name()
+        .is_some_and(|name| name == "client-config")
     {
-        Ok(saved) => saved,
-        Err(error) => {
-            let auth_rollback =
-                rollback_file(&auth_path, Some(&managed_auth), original_auth.as_deref());
-            let config_rollback = rollback_ready_config(
-                next != original,
-                &config_path,
-                &next,
-                original_config.as_deref(),
-            );
-            return Err(with_cleanup(
-                error,
-                merge_cleanup(auth_rollback, config_rollback),
-            ));
-        }
-    };
-    if let Err(error) = ensure_unchanged(&auth_path, Some(&managed_auth)) {
-        let config_rollback = rollback_ready_config(
-            next != original,
-            &config_path,
-            &next,
-            original_config.as_deref(),
-        );
-        let secret_cleanup = if saved_previous_auth {
-            delete_previous_codex_auth()
-        } else {
-            Ok(())
-        };
-        return Err(with_cleanup(
-            error,
-            merge_cleanup(config_rollback, secret_cleanup),
-        ));
-    }
-    let expected_config = if next != original {
-        Some(next.as_str())
+        backup_dir
+            .parent()
+            .ok_or_else(|| "Profile recovery root is missing".to_string())
     } else {
-        original_config.as_deref()
-    };
-    if let Err(error) = ensure_unchanged(&config_path, expected_config) {
-        let auth_rollback =
-            rollback_file(&auth_path, Some(&managed_auth), original_auth.as_deref());
-        let secret_cleanup = if saved_previous_auth {
-            delete_previous_codex_auth()
-        } else {
-            Ok(())
-        };
-        return Err(with_cleanup(
-            error,
-            merge_cleanup(auth_rollback, secret_cleanup),
-        ));
+        Ok(backup_dir)
     }
-    Ok(())
 }
 
-pub fn ensure_provider_on_launch(backup_dir: &Path) -> Result<(), String> {
-    prune_config_backups(backup_dir)?;
-    if current_config_uses_local_pool_provider()? {
-        return Ok(());
-    }
-    let config = read_optional_text(&default_codex_home().join(CONFIG_FILE))?.unwrap_or_default();
-    if !config_selects_zenith_provider(&config) {
-        return Ok(());
-    }
-    if let Some(api_key) = load_saved_app_key() {
-        enable_provider(&api_key, backup_dir)?;
-    } else if let Some(api_key) =
-        load_zenith_key_from_codex_config().or_else(load_zenith_auth_key_if_configured)
-    {
-        save_app_key(&api_key)?;
-        enable_provider(&api_key, backup_dir)?;
-    }
-    Ok(())
-}
-
-fn current_config_uses_local_pool_provider() -> Result<bool, String> {
-    let config_path = default_codex_home().join(CONFIG_FILE);
-    Ok(read_optional_text(&config_path)?
-        .as_deref()
-        .is_some_and(config_uses_local_pool_provider))
-}
-
+#[cfg(test)]
 fn config_uses_local_pool_provider(content: &str) -> bool {
     content.lines().any(|line| {
         let line = line.trim();
         line.eq_ignore_ascii_case(&format!("model_provider = \"{LOCAL_POOL_PROVIDER_ID}\""))
             || line == format!("[model_providers.{LOCAL_POOL_PROVIDER_ID}]")
     })
-}
-
-fn ensure_ready_api_profile_is_inactive(content: &str) -> Result<(), String> {
-    if config_uses_local_pool_provider(content) {
-        return Err(
-            "ChatGPT подключён к Local Pool. Сначала восстановите профиль Local Pool.".to_string(),
-        );
-    }
-    Ok(())
 }
 
 fn read_optional_text(path: &Path) -> Result<Option<String>, String> {
@@ -249,14 +150,6 @@ fn rollback_ready_config(
     }
 }
 
-fn merge_cleanup(first: Result<(), String>, second: Result<(), String>) -> Result<(), String> {
-    match (first, second) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(first), Err(second)) => Err(format!("{first}; {second}")),
-    }
-}
-
 fn with_cleanup(error: String, cleanup: Result<(), String>) -> String {
     match cleanup {
         Ok(()) => error,
@@ -280,6 +173,17 @@ pub fn reset_provider(backup_dir: &Path) -> Result<(), String> {
 }
 
 fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
+    let root = profile_root(backup_dir)?;
+    if crate::local_pool::profiles::codex::restore_ready_api(&default_codex_home(), root)
+        .map_err(|error| error.message)?
+    {
+        if forget_key {
+            delete_saved_app_key()?;
+        }
+        return Ok(());
+    }
+    // Read-only compatibility input for pre-unified API attachments. New
+    // attachments never create rotating text backups or use this path.
     let _profile_guard = lock_codex_profile();
     let codex_home = default_codex_home();
     let config_path = codex_home.join(CONFIG_FILE);
@@ -287,7 +191,6 @@ fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
     let original_config = read_optional_text(&config_path)?;
     let original_auth = read_optional_text(&auth_path)?;
     let original = original_config.as_deref().unwrap_or_default();
-    ensure_ready_api_profile_is_inactive(original)?;
     if !config_selects_zenith_provider(original) {
         if forget_key {
             delete_saved_app_key()?;
@@ -295,11 +198,11 @@ fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
         return Ok(());
     }
     let previous_model_provider = latest_backup_model_provider(backup_dir);
-    let mut next = remove_zenith_provider(original);
+    let mut next = remove_zenith_provider(original)?;
 
     let model_provider =
         previous_model_provider.unwrap_or_else(|| DEFAULT_MODEL_PROVIDER.to_string());
-    next = with_model_provider(next, &model_provider);
+    next = with_model_provider(next, &model_provider)?;
     let saved_key = load_saved_app_key();
     if forget_key {
         delete_saved_app_key()?;
@@ -362,10 +265,18 @@ name = "Old"
 base_url = "https://old.example/v1"
 "#;
 
-        let next = upsert_zenith_provider(original);
+        let next = upsert_zenith_provider(original).unwrap();
+        let parsed: toml_edit::DocumentMut = next.parse().unwrap();
 
         assert!(next.contains(r#"model_provider = "codex_local_access""#));
-        assert!(next.contains("[model_providers.codex_local_access]"));
+        assert_eq!(
+            parsed["model_providers"][PROVIDER_ID]["name"].as_str(),
+            Some("Zenith")
+        );
+        assert_eq!(
+            parsed["model_providers"][PROVIDER_ID]["base_url"].as_str(),
+            Some("https://api.zenithmarket.dev/v1")
+        );
         assert!(next.contains(r#"base_url = "https://api.zenithmarket.dev/v1""#));
         assert!(next.contains("supports_websockets = true"));
         assert!(next.contains("[profiles.default]"));
@@ -388,7 +299,7 @@ name = "OpenAI"
 base_url = "https://gateway.example/v1"
 "#;
 
-        let next = remove_zenith_provider(original);
+        let next = remove_zenith_provider(original).unwrap();
 
         assert!(next.contains("[model_providers.openai]"));
         assert!(next.contains(r#"base_url = "https://gateway.example/v1""#));
@@ -406,7 +317,8 @@ model = "gpt-5.5"
 "#
             .to_string(),
             DEFAULT_MODEL_PROVIDER,
-        );
+        )
+        .unwrap();
 
         assert!(next.starts_with(r#"model_provider = "openai""#));
         assert!(next.contains("[profiles.default]"));
@@ -419,7 +331,7 @@ openai_base_url = "https://us.api.openai.com/v1"
 model = "gpt-5.5"
 "#;
 
-        let next = remove_zenith_openai_base_url_override(original);
+        let next = remove_zenith_openai_base_url_override(original).unwrap();
 
         assert!(next.contains(r#"openai_base_url = "https://us.api.openai.com/v1""#));
         assert!(next.contains(r#"model = "gpt-5.5""#));
@@ -545,16 +457,6 @@ name = "OpenAI"
         assert!(!config_selects_zenith_provider(
             "model_provider = \"openai\"\n\n[model_providers.codex_local_access]"
         ));
-    }
-
-    #[test]
-    fn ready_api_guard_rejects_active_local_pool_profile() {
-        let error = ensure_ready_api_profile_is_inactive(
-            "model_provider = \"zenith_relay_local\"\n\n[model_providers.zenith_relay_local]",
-        )
-        .unwrap_err();
-
-        assert!(error.contains("Local Pool"));
     }
 
     #[test]

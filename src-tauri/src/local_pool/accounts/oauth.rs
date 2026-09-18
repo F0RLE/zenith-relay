@@ -13,6 +13,7 @@ use zenith_relay_core::accounts::{
     decode_unverified_jwt_payload, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
     TokenRefreshFailureKind,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code,
 };
@@ -169,7 +170,10 @@ impl CodexOAuthClient {
         now_ms: u64,
     ) -> Result<OAuthTokenSet, TokenRefreshFailure> {
         validate_token(refresh_token).map_err(|_| {
-            TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_refresh_token")
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                error_codes::INVALID_REFRESH_TOKEN,
+            )
         })?;
         let response = self
             .http

@@ -1,7 +1,8 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { SourceSummary } from "../../api/types";
+import type { ProtocolSelectionMode, SourceSummary } from "../../api/types";
+import { SourceProtocolStatus } from "../../components/SourceProtocolStatus";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import { SourceProtocolBindingsEditor } from "../../components/SourceProtocolBindingsEditor";
 import { SecretField, Button, Dialog, ErrorDetailsDialog, Tabs } from "../../components/Ui";
@@ -12,17 +13,21 @@ import { effectiveSourceProtocolBindings, normalizedBindings } from "../../sourc
 import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
 
-type SourceEditTab = "main" | "routes" | "adapters" | "prices";
+type SourceEditTab = "main" | "prices";
 type SourceAddStep = "provider" | "configure";
 
-export function SourceDialog({ source, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
+export function SourceDialog({ source: initialSource, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
   const { t } = useTranslation();
-  const { mode, perform, busy } = useRelayState();
+  const { mode, runtime, perform, busy } = useRelayState();
+  const [savedSource, setSavedSource] = useState(initialSource);
+  const source = runtime?.sources.find((value) => value.id === savedSource?.id) ?? savedSource;
+  const supportsProtocols = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("source_protocols_v1"));
+  const [protocolMode, setProtocolMode] = useState<ProtocolSelectionMode>(source?.protocolConfig?.mode ?? "manual");
   const [provider, setProvider] = useState(defaultApiProviderValue);
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [protocolBindings, setProtocolBindings] = useState(() => source ? effectiveSourceProtocolBindings(source) : []);
+  const [protocolBindings, setProtocolBindings] = useState(() => source ? source.protocolBindings ?? effectiveSourceProtocolBindings(source) : []);
   const [priceDrafts, setPriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(source?.modelPriceOverrides ?? {}));
   const [activeTab, setActiveTab] = useState<SourceEditTab>("main");
   const [addStep, setAddStep] = useState<SourceAddStep>("provider");
@@ -30,8 +35,6 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   const modelPriceOverrides = useMemo(() => parseSourcePriceDrafts(priceDrafts), [priceDrafts]);
   const sourceEditTabs = [
     { id: "main", label: t("sources.editorMainTab") },
-    { id: "routes", label: t("sources.editorRoutesTab") },
-    { id: "adapters", label: t("sources.editorAdaptersTab") },
     { id: "prices", label: t("sources.editorPricesTab") },
   ];
 
@@ -42,11 +45,22 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
     const ok = await perform("source-save", async () => {
       if (!source) {
         const payload = apiProviderSourceInput(provider);
+        if (!supportsProtocols) delete (payload as { protocolMode?: ProtocolSelectionMode }).protocolMode;
         const created = mode !== "remote"
           ? await relayCommands.createSource(payload) as { id: string; models?: string[] }
           : await relayCommands.remoteAction({ type: "create_source" }, payload) as { id: string; models?: string[] };
-        if (addToPool && created.models?.length) {
+        const latest = (mode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((value) => value.id === created.id);
+        if (addToPool && latest && effectiveSourceProtocolBindings(latest).some((route) => route.modelIds.length)) {
           await updatePoolMembership(mode, { accountIds: [], sourceIds: [created.id], inPool: true });
+        }
+        if (latest) {
+          setSavedSource(latest);
+          setName(latest.name);
+          setBaseUrl(latest.baseUrl);
+          setProtocolMode(latest.protocolConfig?.mode ?? "manual");
+          setProtocolBindings(latest.protocolBindings ?? effectiveSourceProtocolBindings(latest));
+          setPriceDrafts(sourcePriceDrafts(latest.modelPriceOverrides ?? {}));
+          setProvider(defaultApiProviderValue());
         }
         return;
       }
@@ -59,6 +73,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
         officialProviderFamily: source.officialProviderFamily ?? null,
         wireApi,
         protocolBindings: normalizedProtocolBindings,
+        ...(supportsProtocols ? { protocolMode } : {}),
         models: source.models,
         allowedModels: source.allowedModels,
         excludedModels: source.excludedModels,
@@ -74,11 +89,17 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
       } else {
         await relayCommands.remoteAction({ type: "update_source", id: source.id }, { ...update, ...(apiKey ? { apiKey } : {}) });
       }
+      if (addToPool && !initialSource && !source.inPool) {
+        const latest = (mode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((value) => value.id === source.id);
+        if (latest && effectiveSourceProtocolBindings(latest).some((route) => route.modelIds.length)) {
+          await updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool: true });
+        }
+      }
     }, source ? "feedback.saved" : "feedback.sourceAdded", {
       reportError: false,
       onError: (error, messageKey) => setOperationError({ error, messageKey }),
     });
-    if (ok) onClose();
+    if (ok && source) onClose();
   };
   const selectProvider = (nextProvider: typeof provider) => {
     setProvider(nextProvider);
@@ -95,7 +116,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
     });
     setAddStep("provider");
   };
-  const configuredAdapterLabel = provider.protocolBindings[0]
+  const configuredAdapterLabel = supportsProtocols && provider.protocolMode !== "manual" ? t("sources.protocolAuto") : provider.protocolBindings[0]
     ? t(`sources.protocolCards.${provider.protocolBindings[0].wireApi}.title`)
     : t("sources.routingPending");
   const adapterSummary = provider.modelCatalogMode === "manual"
@@ -105,14 +126,26 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
     ? "source-edit-dialog"
     : `source-add-dialog source-add-${addStep}`;
   const footer = source
-    ? <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!protocolBindings.length || !modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>
+    ? <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={(protocolMode === "manual" && !protocolBindings.length) || !modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>
     : addStep === "provider"
       ? <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" disabled={!provider.kind} onClick={() => setAddStep("configure")}>{t("common.continue")}</Button></>
       : <><Button variant="secondary" onClick={backToProviderStep}>{t("common.back")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!apiProviderReady(provider)} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>;
   return <><Dialog wide className={dialogClassName} title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={footer}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />
-     {activeTab === "main" ? <section className="source-editor-tab-panel source-editor-main" role="tabpanel" aria-label={t("sources.editorMainTab")}><section className="source-form-section source-basic-fields"><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section></section> : null}
-    {activeTab === "routes" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorRoutesTab")}><SourceProtocolBindingsEditor models={source.models} value={protocolBindings} onChange={setProtocolBindings} routeGroup="native" /></section> : null}
-    {activeTab === "adapters" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorAdaptersTab")}><SourceProtocolBindingsEditor models={source.models} value={protocolBindings} onChange={setProtocolBindings} routeGroup="adapters" /></section> : null}
+    {activeTab === "main" ? <section className="source-editor-tab-panel source-editor-main" role="tabpanel" aria-label={t("sources.editorMainTab")}>
+      <section className="source-form-section source-basic-fields"><div className="source-identity-grid">
+        <label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+        <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label>
+      </div><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section>
+      <SourceProtocolStatus source={source} onConfirmed={addToPool && !initialSource && !source.inPool
+        ? () => updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool: true }).then(() => undefined) : undefined} dirty={baseUrl !== source.baseUrl || Boolean(apiKey)
+        || protocolMode !== (source.protocolConfig?.mode ?? "manual")
+        || JSON.stringify(normalizedBindings(protocolBindings, source.models)) !== JSON.stringify(normalizedBindings(source.protocolBindings ?? effectiveSourceProtocolBindings(source), source.models))} />
+      <details className="source-add-adapters"><summary><span className="source-add-adapters-copy"><strong>{t("sources.configureAdapters")}</strong></span><span className="source-add-adapters-state">{t(protocolMode === "auto" ? "sources.protocolAuto" : "sources.routingManual")}</span></summary>
+        {supportsProtocols ? <Tabs value={protocolMode} items={[{ id: "auto", label: t("sources.protocolAuto") }, { id: "manual", label: t("sources.routingManual") }]}
+          onChange={(value) => setProtocolMode(value as ProtocolSelectionMode)} label={t("sources.routingTitle")} /> : null}
+        {protocolMode === "manual" ? <SourceProtocolBindingsEditor models={source.models} value={protocolBindings} onChange={setProtocolBindings} /> : null}
+      </details>
+    </section> : null}
     {activeTab === "prices" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorPricesTab")}><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} presentation="tab" /></section> : null}
   </> : <>
     <ol className="source-add-steps" aria-label={t("sources.addFlowSteps")}>
@@ -135,10 +168,12 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
     />
     {addStep === "configure" ? <details className="source-add-adapters">
       <summary>
-        <span className="source-add-adapters-copy"><strong>{t("sources.configureAdapters")}</strong><small>{t("sources.configureAdaptersHint")}</small></span>
+        <span className="source-add-adapters-copy"><strong>{t("sources.configureAdapters")}</strong></span>
         <span className="source-add-adapters-state"><b>{configuredAdapterLabel}</b><small>{adapterSummary}</small></span>
       </summary>
-      <SourceProtocolBindingsEditor
+      {supportsProtocols ? <Tabs value={provider.protocolMode ?? "auto"} items={[{ id: "auto", label: t("sources.protocolAuto") }, { id: "manual", label: t("sources.routingManual") }]}
+        onChange={(value) => selectProvider({ ...provider, protocolMode: value as ProtocolSelectionMode })} label={t("sources.routingTitle")} /> : null}
+      {!supportsProtocols || provider.protocolMode === "manual" ? <SourceProtocolBindingsEditor
         models={provider.modelCatalogMode === "manual" ? (provider.models ?? []) : []}
         value={provider.protocolBindings}
         showSimplePicker={mode !== "remote"}
@@ -146,10 +181,11 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
         exclusiveSimplePicker
         onChange={(protocolBindings) => selectProvider({
           ...provider,
+          protocolMode: "manual",
           protocolBindings,
           wireApi: protocolBindings[0]?.wireApi ?? provider.wireApi,
         })}
-      />
+      /> : null}
     </details> : null}
   </>}</form></Dialog>{operationError ? <ErrorDetailsDialog error={operationError.error} message={t(operationError.messageKey)} onClose={() => setOperationError(null)} /> : null}</>;
 }

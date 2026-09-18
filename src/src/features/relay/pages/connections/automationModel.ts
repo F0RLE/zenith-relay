@@ -1,6 +1,6 @@
 import type { AccountSummary, RuntimeSnapshot, WakeTask } from "../../api/types";
 import { defaultWakeInput } from "../../api/commands";
-import { sortModelIdsForLauncher } from "../../modelGroups";
+import { orderModelIdsBySnapshot, uniqueModelIds } from "../../modelGroups";
 
 export type AutomationSelectorKind = WakeTask["accountSelector"]["kind"];
 export type AutomationTriggerKind = WakeTask["trigger"]["kind"];
@@ -18,10 +18,7 @@ export function automationPoolModels(gateway: RuntimeSnapshot["gateway"]) {
   const rawModels = gateway.visibleModelIds.length
     ? gateway.visibleModelIds
     : (gateway.models ?? []).filter((model) => model.enabled).map((model) => model.id);
-  const uniqueModels = rawModels.filter((model, index) =>
-    rawModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index,
-  );
-  return sortModelIdsForLauncher(uniqueModels);
+  return orderModelIdsBySnapshot(uniqueModelIds(rawModels), gateway.models ?? []);
 }
 
 export function automationTargetModels(

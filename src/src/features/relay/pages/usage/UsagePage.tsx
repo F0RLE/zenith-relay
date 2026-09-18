@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RemoteUsageQuery } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
-import { sortModelIdsForLauncher } from "../../modelGroups";
+import { orderModelIdsBySnapshot } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useRelayUsageContext } from "../../state/relayStateContext";
 import { formatTokenSpeed } from "../../usageSpeed";
@@ -193,11 +193,15 @@ export function UsagePage() {
       ? accountDisplayName(null, group.label) ?? group.label ?? t("usage.removedAccount")
       : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown"),
   })), [accountDisplayName, accountLabels, mode, sourceLabels, t, usagePage?.poolMembers]);
-  const modelOptionIds = useMemo(() => sortModelIdsForLauncher([...new Map(
-    [...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])]
-      .filter(Boolean)
-      .map((value) => [value.toLowerCase(), value] as const),
-  ).values()]), [modelGroups, modelQuery, rows, runtime?.gateway.visibleModelIds]);
+  const modelOptionIds = useMemo(() => orderModelIdsBySnapshot(
+    [
+      ...(runtime?.gateway.visibleModelIds ?? []),
+      ...(modelGroups?.map((group) => group.key) ?? []),
+      ...rows.flatMap((row) => row.model ? [row.model] : []),
+      ...(modelQuery ? [modelQuery] : []),
+    ],
+    runtime?.gateway.models ?? [],
+  ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.visibleModelIds]);
   const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))], [modelOptionIds, t]);
   const poolMemberOptionSource = useMemo(() => [
     ...(poolMemberGroups ?? []),

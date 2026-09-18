@@ -16,6 +16,7 @@ pub(super) fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSo
             models: record.models,
         },
         protocol_bindings: record.protocol_bindings,
+        protocol_config: record.protocol_config,
         enabled: record.enabled,
         draining: record.draining,
         priority: record.priority,

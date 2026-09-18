@@ -1,9 +1,9 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use std::{net::SocketAddr, sync::Arc};
+use std::{io::ErrorKind, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
     sync::{oneshot, Mutex},
-    time::{timeout, Duration},
+    time::{sleep, timeout, Duration},
 };
 use zenith_relay_core::GatewayRuntime;
 
@@ -12,6 +12,13 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
+// Windows can report an address as still in use for a moment after a clean
+// listener shutdown. Retrying this narrow, local condition prevents a normal
+// account/source import from being rolled back merely because the previous
+// gateway listener is finishing its release.
+const BIND_RETRY_DELAY: Duration = Duration::from_millis(50);
+const BIND_RETRY_ATTEMPTS: usize = 5;
+
 struct RunningGateway {
     address: SocketAddr,
     runtime: Arc<GatewayRuntime>,
@@ -19,9 +26,9 @@ struct RunningGateway {
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct GatewayManager {
-    running: Mutex<Option<RunningGateway>>,
+    running: Arc<Mutex<Option<RunningGateway>>>,
 }
 
 impl GatewayManager {
@@ -31,14 +38,7 @@ impl GatewayManager {
         if let Some(current) = running.as_ref() {
             return Ok(current.address);
         }
-        let listener = TcpListener::bind(("127.0.0.1", port))
-            .await
-            .map_err(|error| {
-                LocalPoolError::new(
-                    ErrorCode::GatewayUnavailable,
-                    format!("failed to bind local gateway on port {port}: {error}"),
-                )
-            })?;
+        let listener = bind_loopback_listener(port).await?;
         let address = listener.local_addr().map_err(|error| {
             LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string())
         })?;
@@ -82,6 +82,25 @@ impl GatewayManager {
         let mut running = self.running.lock().await;
         prune_finished(&mut running);
         running.as_ref().map(|running| running.runtime.clone())
+    }
+}
+
+async fn bind_loopback_listener(port: u16) -> Result<TcpListener> {
+    let mut retries = 0;
+    loop {
+        match TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == ErrorKind::AddrInUse && retries < BIND_RETRY_ATTEMPTS => {
+                retries += 1;
+                sleep(BIND_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                return Err(LocalPoolError::new(
+                    ErrorCode::GatewayUnavailable,
+                    format!("failed to bind local gateway on port {port}: {error}"),
+                ));
+            }
+        }
     }
 }
 
@@ -231,6 +250,26 @@ mod tests {
             .await
             .unwrap()
             .contains("model"));
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn start_retries_a_port_released_by_a_previous_listener() {
+        let manager = GatewayManager::default();
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let release = tauri::async_runtime::spawn(async move {
+            sleep(Duration::from_millis(20)).await;
+            drop(occupied);
+        });
+
+        let address = manager
+            .start(test_runtime("source", "model", "key"), port)
+            .await
+            .unwrap();
+
+        assert_eq!(address.port(), port);
+        release.await.unwrap();
         manager.stop().await;
     }
 

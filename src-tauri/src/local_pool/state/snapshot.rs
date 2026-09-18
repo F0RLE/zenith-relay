@@ -18,6 +18,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::atomic::Ordering,
 };
+use zenith_relay_core::error_codes;
 
 pub(super) trait SecretLookup {
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
@@ -70,12 +71,15 @@ impl DesktopState {
         } = self.snapshot_base().await?;
         for source in &sources {
             if secrets.load(&source.secret_ref)?.is_none() {
-                warnings.push(warning_code("source_secret_missing", &source.id));
+                warnings.push(warning_code(error_codes::SOURCE_SECRET_MISSING, &source.id));
             }
         }
         for account in &accounts {
             if !account_secret_available(account, secrets)? {
-                warnings.push(warning_code("account_secret_missing", &account.account.id));
+                warnings.push(warning_code(
+                    error_codes::ACCOUNT_SECRET_MISSING,
+                    &account.account.id,
+                ));
             }
         }
         Ok(LocalPoolSnapshot {
@@ -128,7 +132,7 @@ impl DesktopState {
                 .and_then(Option::as_ref)
                 .is_none()
             {
-                warnings.push(warning_code("source_secret_missing", &source.id));
+                warnings.push(warning_code(error_codes::SOURCE_SECRET_MISSING, &source.id));
             }
         }
         for account in &accounts {
@@ -137,7 +141,10 @@ impl DesktopState {
                 .and_then(Option::as_ref)
                 .is_none()
             {
-                warnings.push(warning_code("account_secret_missing", &account.account.id));
+                warnings.push(warning_code(
+                    error_codes::ACCOUNT_SECRET_MISSING,
+                    &account.account.id,
+                ));
             }
         }
         Ok(LocalRuntimeInputs {
@@ -165,10 +172,10 @@ impl DesktopState {
         };
         let mut warnings = Vec::new();
         if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("usage_persistence_failed".to_string());
+            warnings.push(error_codes::USAGE_PERSISTENCE_FAILED.to_string());
         }
         if self.failed_affinity_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("response_affinity_persistence_failed".to_string());
+            warnings.push(error_codes::RESPONSE_AFFINITY_PERSISTENCE_FAILED.to_string());
         }
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());

@@ -52,27 +52,6 @@ impl SourceReasoningCapabilities {
         self.levels.is_empty()
     }
 
-    /// Adds Relay's Anthropic-only top tier when a provider has published
-    /// `max`. The upstream adapter translates `ultra` back to `max`.
-    pub(crate) fn apply_model_implied_efforts(&mut self, model: &str) {
-        if !crate::anthropic_max_implies_ultra(model)
-            || !self
-                .levels
-                .iter()
-                .any(|level| level.effort.eq_ignore_ascii_case("max"))
-            || self
-                .levels
-                .iter()
-                .any(|level| level.effort.eq_ignore_ascii_case("ultra"))
-        {
-            return;
-        }
-        self.levels.push(SourceReasoningLevel {
-            effort: "ultra".to_string(),
-            description: "ultra".to_string(),
-        });
-    }
-
     /// Removes efforts that cannot be represented by the selected adapter.
     ///
     /// Native Responses routes preserve provider-defined effort names. A
@@ -157,33 +136,33 @@ pub(crate) fn source_context_windows(
     manifest: &Value,
     configured_models: &BTreeSet<String>,
 ) -> BTreeMap<String, u64> {
-    manifest
-        .get("data")
-        .and_then(Value::as_array)
+    let mut windows = BTreeMap::new();
+    for model in source_catalog_model_rows(manifest).filter_map(|model| {
+        let object = model.as_object()?;
+        let id = source_catalog_model_id(object)?;
+        if !configured_models
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(id))
+        {
+            return None;
+        }
+        let context_window = [
+            object.get("context_length"),
+            object.get("context_window"),
+            object.get("max_context_tokens"),
+            model.pointer("/top_provider/context_length"),
+            model.pointer("/metadata/context_length"),
+        ]
         .into_iter()
         .flatten()
-        .filter_map(|model| {
-            let id = model.get("id")?.as_str()?.trim();
-            if !configured_models
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(id))
-            {
-                return None;
-            }
-            let context_window = [
-                model.get("context_length"),
-                model.get("context_window"),
-                model.get("max_context_tokens"),
-                model.get("max_input_tokens"),
-                model.pointer("/top_provider/context_length"),
-                model.pointer("/metadata/context_length"),
-            ]
-            .into_iter()
-            .flatten()
-            .find_map(context_window)?;
-            Some((id.to_ascii_lowercase(), context_window))
-        })
-        .collect()
+        .find_map(context_window)?;
+        Some((id.to_ascii_lowercase(), context_window))
+    }) {
+        // Keep the canonical OpenAI-style `data` row when a provider also
+        // returns a secondary `models` array with the same id.
+        windows.entry(model.0).or_insert(model.1);
+    }
+    windows
 }
 
 /// Reads reasoning modes declared by a provider/Gateway catalog.
@@ -358,7 +337,82 @@ fn parse_source_reasoning_capabilities(
     let raw_modes = model
         .get("reasoningEffortModes")
         .or_else(|| model.get("reasoning_effort_modes"))
-        .and_then(Value::as_array)?;
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| {
+            model
+                .get("reasoning_effort_levels")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .or_else(|| {
+            model
+                .get("reasoningEffortLevels")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .or_else(|| {
+            let names = [
+                (
+                    "none",
+                    [
+                        "supports_none_reasoning_effort",
+                        "supportsNoneReasoningEffort",
+                    ],
+                ),
+                (
+                    "minimal",
+                    [
+                        "supports_minimal_reasoning_effort",
+                        "supportsMinimalReasoningEffort",
+                    ],
+                ),
+                (
+                    "low",
+                    [
+                        "supports_low_reasoning_effort",
+                        "supportsLowReasoningEffort",
+                    ],
+                ),
+                (
+                    "medium",
+                    [
+                        "supports_medium_reasoning_effort",
+                        "supportsMediumReasoningEffort",
+                    ],
+                ),
+                (
+                    "high",
+                    [
+                        "supports_high_reasoning_effort",
+                        "supportsHighReasoningEffort",
+                    ],
+                ),
+                (
+                    "xhigh",
+                    [
+                        "supports_xhigh_reasoning_effort",
+                        "supportsXhighReasoningEffort",
+                    ],
+                ),
+                (
+                    "max",
+                    [
+                        "supports_max_reasoning_effort",
+                        "supportsMaxReasoningEffort",
+                    ],
+                ),
+            ];
+            let levels: Vec<Value> = names
+                .into_iter()
+                .filter(|(_, keys)| {
+                    keys.iter()
+                        .any(|key| model.get(*key).and_then(Value::as_bool) == Some(true))
+                })
+                .map(|(name, _)| Value::String(name.to_string()))
+                .collect();
+            (!levels.is_empty()).then_some(levels)
+        })?;
     // A missing field means that the provider did not publish reasoning
     // metadata. An explicitly empty array is a real declaration that this
     // route has no reasoning modes, even when the provider declares an empty list.
@@ -366,10 +420,7 @@ fn parse_source_reasoning_capabilities(
         return Some(SourceReasoningCapabilities::empty());
     }
     let mut published = Map::new();
-    published.insert(
-        "reasoningEffortModes".to_string(),
-        Value::Array(raw_modes.clone()),
-    );
+    published.insert("reasoningEffortModes".to_string(), Value::Array(raw_modes));
     for (target, aliases) in [
         (
             "default_effort",
@@ -377,6 +428,8 @@ fn parse_source_reasoning_capabilities(
                 "default_effort",
                 "default_reasoning_level",
                 "defaultReasoningLevel",
+                "default_reasoning_effort",
+                "defaultReasoningEffort",
             ]
             .as_slice(),
         ),
@@ -599,7 +652,8 @@ mod tests {
                 {"id": "gemini-3.5-flash", "top_provider": {"context_length": 1_048_576}},
                 {"id": "not-configured", "context_length": 2_000_000},
                 {"id": "invalid", "context_length": 0}
-            ]
+            ],
+            "models": [{"slug": "grok-4.5", "context_window": 700_000}]
         });
 
         assert_eq!(
@@ -613,6 +667,22 @@ mod tests {
     }
 
     #[test]
+    fn does_not_treat_max_input_tokens_as_context_window() {
+        let configured = ["provider/models-row"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let manifest = json!({
+            "models": [{
+                "slug": "provider/models-row",
+                "max_input_tokens": "262144"
+            }]
+        });
+
+        assert!(source_context_windows(&manifest, &configured).is_empty());
+    }
+
+    #[test]
     fn reads_explicit_image_input_capabilities_without_inferring_from_model_names() {
         let configured = ["provider/vision", "provider/text", "provider/unknown"]
             .into_iter()
@@ -623,14 +693,14 @@ mod tests {
                 {"id": "provider/vision", "input_modalities": ["text", "image"]},
                 {"id": "provider/text", "supports_vision": false},
                 {"id": "provider/unknown"}
-            ]
+            ],
+            "models": [{"slug": "provider/text", "supports_vision": true}]
         });
 
         assert_eq!(
             source_image_input_capabilities(&manifest, &configured),
             BTreeMap::from([
                 ("provider/text".into(), false),
-                ("provider/unknown".into(), false),
                 ("provider/vision".into(), true),
             ])
         );
@@ -752,6 +822,49 @@ mod tests {
     }
 
     #[test]
+    fn reads_litellm_sub2api_reasoning_levels_and_default() {
+        let configured = ["gpt-5.4"].into_iter().map(str::to_string).collect();
+        let manifest = json!({
+            "data": [{
+                "id": "gpt-5.4",
+                "supports_none_reasoning_effort": true,
+                "supports_low_reasoning_effort": true,
+                "supports_medium_reasoning_effort": true,
+                "supports_high_reasoning_effort": true,
+                "supports_xhigh_reasoning_effort": false,
+                "default_reasoning_effort": "high"
+            }]
+        });
+
+        let capabilities = source_reasoning_capabilities(&manifest, &configured);
+        assert_eq!(
+            capabilities["gpt-5.4"].effort_ids().collect::<Vec<_>>(),
+            vec!["none", "low", "medium", "high"]
+        );
+        assert_eq!(
+            capabilities["gpt-5.4"].default_effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn explicit_reasoning_effort_levels_take_precedence_over_support_flags() {
+        let configured = ["provider/model"].into_iter().map(str::to_string).collect();
+        let manifest = json!({"data": [{
+            "id": "provider/model",
+            "reasoning_effort_levels": ["minimal", "custom"],
+            "supports_high_reasoning_effort": true
+        }]});
+        let capabilities = source_reasoning_capabilities(&manifest, &configured);
+        assert_eq!(
+            capabilities["provider/model"]
+                .effort_ids()
+                .collect::<Vec<_>>(),
+            vec!["minimal", "custom"]
+        );
+    }
+
+    #[test]
     fn explicit_reasoning_support_rejection_hides_stale_option_list() {
         let configured = ["provider/fable"].into_iter().map(str::to_string).collect();
         let manifest = json!({
@@ -860,28 +973,6 @@ mod tests {
             .as_object()
             .unwrap()
             .clone()
-        );
-    }
-
-    #[test]
-    fn anthropic_max_adds_relay_ultra_to_the_source_catalog() {
-        let mut capabilities = parse_reasoning_object(
-            json!({
-                "reasoningEffortModes": ["low", "medium", "high", "max"]
-            })
-            .as_object()
-            .unwrap(),
-        )
-        .expect("source-declared reasoning levels");
-
-        capabilities.apply_model_implied_efforts("claude-fable-5");
-
-        assert_eq!(
-            capabilities
-                .effort_ids()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>(),
-            vec!["low", "medium", "high", "max", "ultra"]
         );
     }
 }

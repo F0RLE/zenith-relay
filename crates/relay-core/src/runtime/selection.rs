@@ -1,7 +1,99 @@
 use super::*;
 use crate::{scheduler::CooldownReason, Selection, SelectionRequest};
+use std::time::Duration;
+use tokio::time::sleep;
 
 impl GatewayRuntime {
+    pub(crate) fn configured_executor_routes(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        protocols: &[WireApi],
+        stream: bool,
+    ) -> Vec<ExecutorRoute> {
+        let scope = key.scope_snapshot();
+        let ids = self
+            .lock_scheduler()
+            .candidates()
+            .filter(|candidate| candidate.is_configured(model, protocols, &scope))
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        ids.iter()
+            .filter_map(|id| self.executor_route(id, model, &scope, protocols, stream))
+            .collect()
+    }
+
+    pub(crate) fn route_capabilities(
+        &self,
+        candidate_id: &str,
+        model: &str,
+    ) -> Option<&crate::ModelEndpointCapability> {
+        let binding = self.source_candidate_bindings.get(candidate_id)?;
+        self.source_capabilities
+            .get(&binding.source_id)?
+            .iter()
+            .find(|entry| {
+                entry.model_id.eq_ignore_ascii_case(model)
+                    && entry.upstream_wire_api
+                        == binding
+                            .adapter
+                            .upstream_protocol(binding.wire_api)
+                            .wire_api()
+            })
+    }
+
+    /// Waits for either a pool mutation or the next known cooldown to expire.
+    /// The bounded poll prevents a missed `Notify` wake-up from turning a
+    /// persistent ChatGPT request into a hot loop while still allowing
+    /// cooldown-only recovery without another external mutation.
+    pub(crate) async fn wait_for_candidate_availability(
+        &self,
+        retry_at_ms: Option<u64>,
+        backoff: Duration,
+        deadline: Option<tokio::time::Instant>,
+    ) -> bool {
+        let notified = self.candidate_availability.notified();
+        let delay = retry_at_ms
+            .map(|retry_at| retry_at.saturating_sub(crate::unix_time_ms()))
+            .map(Duration::from_millis)
+            .map(|delay| delay.min(Duration::from_secs(1)))
+            .unwrap_or_else(|| Duration::from_secs(1))
+            .min(backoff);
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            // A cooldown can elapse in the short gap between scheduler
+            // selection and this wait. That is an immediate retry, not an
+            // expired request window; otherwise a bounded request can fail at
+            // the exact moment its only candidate becomes eligible.
+            if delay.is_zero() {
+                return true;
+            }
+            let delay = delay.min(remaining);
+            return tokio::select! {
+                _ = notified => true,
+                _ = sleep(delay) => tokio::time::Instant::now() < deadline,
+            };
+        }
+        // In persistent mode an already-expired cooldown must not be treated
+        // as a deadline. Fall back to the bounded poll interval instead;
+        // otherwise an `earliest_retry_at` equal to `now` would terminate the
+        // supposedly unbounded wait immediately.
+        let delay = if delay.is_zero() {
+            backoff
+                .min(Duration::from_secs(1))
+                .max(Duration::from_millis(1))
+        } else {
+            delay
+        };
+        tokio::select! {
+            _ = notified => true,
+            _ = sleep(delay) => true,
+        }
+    }
+
     pub(crate) async fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,
@@ -12,7 +104,7 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
         let (response_affinity_key, prompt_affinity_key) = affinity_keys;
-        self.try_select_and_reserve_for(
+        self.select_and_wait_for_capacity(
             key,
             model,
             allowed_protocols,
@@ -22,10 +114,10 @@ impl GatewayRuntime {
             now_ms,
             CandidateLeaseLane::Text,
         )
-        .0
+        .await
     }
 
-    pub(crate) fn select_and_reserve_image(
+    pub(crate) async fn select_and_reserve_image(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -33,7 +125,7 @@ impl GatewayRuntime {
         tried: &HashSet<String>,
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
-        self.try_select_and_reserve_for(
+        self.select_and_wait_for_capacity(
             key,
             model,
             allowed_protocols,
@@ -43,7 +135,44 @@ impl GatewayRuntime {
             now_ms,
             CandidateLeaseLane::Image,
         )
-        .0
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn select_and_wait_for_capacity(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        tried: &HashSet<String>,
+        response_affinity_key: Option<&str>,
+        prompt_affinity_key: Option<&str>,
+        now_ms: u64,
+        lane: CandidateLeaseLane,
+    ) -> Option<(Selection, CandidateLease)> {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(30);
+        loop {
+            let (reserved, busy) = self.try_select_and_reserve_for(
+                key,
+                model,
+                allowed_protocols,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms.saturating_add(started.elapsed().as_millis() as u64),
+                lane,
+            );
+            if reserved.is_some() || !busy {
+                return reserved;
+            }
+            if !self
+                .wait_for_candidate_availability(None, Duration::from_secs(1), Some(deadline))
+                .await
+            {
+                return None;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -114,32 +243,45 @@ impl GatewayRuntime {
             }),
         };
         let reserved = selection.and_then(|selection| {
-            let reserved = match lane {
-                CandidateLeaseLane::Text => {
-                    scheduler.reserve_for(&selection.candidate_id, model, now_ms)
-                }
-                CandidateLeaseLane::Image => {
-                    scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
-                }
-            };
-            reserved.then(|| {
+            let reservation = scheduler.reserve_request(
+                &selection.candidate_id,
+                model,
+                now_ms,
+                matches!(lane, CandidateLeaseLane::Image),
+            );
+            reservation.map(|reservation_id| {
+                scheduler.commit_rotation(&selection, matches!(lane, CandidateLeaseLane::Image));
                 let lease = CandidateLease {
                     scheduler: self.scheduler.clone(),
                     availability: self.candidate_availability.clone(),
                     candidate_id: selection.candidate_id.clone(),
-                    model: model.to_string(),
-                    lane,
+                    reservation_id,
                     activity_callback: self.activity_callback.clone(),
+                    activity_runtime_id: self.activity_runtime_id,
                     activity_revision: self.activity_revision.clone(),
                     released: AtomicBool::new(false),
                 };
                 (selection, lease)
             })
         });
+        let capacity_blocked = reserved.is_none()
+            && scheduler.capacity_blocked(
+                SelectionRequest {
+                    model,
+                    allowed_protocols,
+                    scope: &scope,
+                    tried,
+                    response_affinity_key,
+                    prompt_affinity_key,
+                    now_ms,
+                },
+                matches!(lane, CandidateLeaseLane::Image),
+            );
         let activity = reserved.as_ref().map(|(selection, _)| {
             let (in_flight, active_request_count, active_models) =
                 scheduler.runtime_activity_for(&selection.candidate_id);
             RuntimeActivitySnapshot {
+                runtime_id: self.activity_runtime_id,
                 revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
                 candidate_id: selection.candidate_id.clone(),
                 in_flight,
@@ -157,7 +299,27 @@ impl GatewayRuntime {
                 self.persist_response_affinity(key, &selection.candidate_id, now_ms);
             }
         }
-        (reserved, false)
+        (reserved, capacity_blocked)
+    }
+
+    pub(crate) fn recovery_retry_at(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        exclusions: &HashSet<String>,
+        response_affinity_key: Option<&str>,
+        now_ms: u64,
+    ) -> Option<u64> {
+        self.lock_scheduler().recovery_retry_at(SelectionRequest {
+            model,
+            allowed_protocols,
+            scope: &key.scope_snapshot(),
+            tried: exclusions,
+            response_affinity_key,
+            prompt_affinity_key: None,
+            now_ms,
+        })
     }
 
     pub(crate) fn earliest_retry_at(

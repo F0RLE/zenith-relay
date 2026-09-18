@@ -19,6 +19,10 @@ export type SimpleRouteCard = {
 
 export const simpleRouteCards: readonly SimpleRouteCard[] = [
   {
+    id: "chat_completions", wireApi: "chat_completions", adapter: "native", icon: Braces,
+    titleKey: "sources.protocolCards.chat_completions.title", subtitleKey: "sources.protocolCards.chat_completions.description",
+  },
+  {
     id: "openai",
     wireApi: "responses",
     adapter: "native",

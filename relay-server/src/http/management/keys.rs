@@ -10,6 +10,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{ProfileKeyRotation, PROFILE_KEY_ROTATION_SCHEMA_VERSION};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -45,7 +46,7 @@ pub async fn profile_credential(
         .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
         .ok_or_else(|| {
             ManagementError::internal(
-                "system_key_missing",
+                error_codes::SYSTEM_KEY_MISSING,
                 "managed profile credential is unavailable",
             )
         })?;
@@ -55,7 +56,7 @@ pub async fn profile_credential(
         .map_err(vault_error)?
         .ok_or_else(|| {
             ManagementError::internal(
-                "system_key_missing",
+                error_codes::SYSTEM_KEY_MISSING,
                 "managed profile credential is unavailable",
             )
         })?;
@@ -90,7 +91,7 @@ pub async fn prepare_profile_key_rotation(
         .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
         .ok_or_else(|| {
             ManagementError::internal(
-                "system_key_missing",
+                error_codes::SYSTEM_KEY_MISSING,
                 "managed profile credential is unavailable",
             )
         })?;
@@ -148,7 +149,7 @@ pub async fn commit_profile_key_rotation(
         .cloned()
         .ok_or_else(|| {
             ManagementError::internal(
-                "system_key_missing",
+                error_codes::SYSTEM_KEY_MISSING,
                 "managed profile credential is unavailable",
             )
         })?;
@@ -166,7 +167,7 @@ pub async fn commit_profile_key_rotation(
         .and_then(|(_, secret)| secret.clone())
         .ok_or_else(|| {
             ManagementError::not_found(
-                "profile_rotation_missing",
+                error_codes::PROFILE_ROTATION_MISSING,
                 "profile credential rotation was not found",
             )
         })?;
@@ -176,7 +177,7 @@ pub async fn commit_profile_key_rotation(
         .map_err(vault_error)?
         .ok_or_else(|| {
             ManagementError::internal(
-                "system_key_missing",
+                error_codes::SYSTEM_KEY_MISSING,
                 "managed profile credential is unavailable",
             )
         })?;
@@ -226,7 +227,7 @@ pub async fn abort_profile_key_rotation(
         .find(|key| key.system && key.id == id)
         .ok_or_else(|| {
             ManagementError::not_found(
-                "profile_rotation_missing",
+                error_codes::PROFILE_ROTATION_MISSING,
                 "profile credential rotation was not found",
             )
         })?;
@@ -253,7 +254,7 @@ fn profile_gateway_base_url(state: &AppState) -> Result<String, ManagementError>
     if !state.store.gateway_enabled().map_err(store_error)? {
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
-            "profile_attach_unavailable",
+            error_codes::PROFILE_ATTACH_UNAVAILABLE,
             "remote gateway is stopped",
             "profile_attach",
             true,
@@ -271,7 +272,7 @@ fn validate_profile_rotation_id(id: &str) -> Result<(), ManagementError> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err(ManagementError::validation(
-            "profile_rotation_invalid",
+            error_codes::PROFILE_ROTATION_INVALID,
             "profile credential rotation ID is invalid",
         ));
     }

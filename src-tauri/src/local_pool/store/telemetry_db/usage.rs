@@ -550,6 +550,10 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         http_status: row.get(12)?,
         error_category: row.get(13)?,
         error_origin: error_origin.as_deref().and_then(|value| value.parse().ok()),
+        upstream_error: row
+            .get::<_, Option<String>>(32)?
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         tool_use: tool_use_json
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),

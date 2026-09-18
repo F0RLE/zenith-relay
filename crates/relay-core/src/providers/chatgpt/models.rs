@@ -2,6 +2,7 @@ use super::{
     is_agent_identity_task_invalid_response, valid_access_token, valid_codex_client_version,
     CodexIdentityEnvelope,
 };
+use crate::error_codes;
 use crate::{transport::collect_limited, Error, ProxyConfig};
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
@@ -173,19 +174,19 @@ impl ModelDiscoveryFailureCode {
     /// Stable management identifier shared by desktop and server account flows.
     pub fn management_code(self) -> &'static str {
         match self {
-            Self::AgentTaskInvalid => "models_agent_task_invalid",
-            Self::Forbidden => "models_forbidden",
-            Self::HttpStatus => "models_http_status",
-            Self::InvalidAccessToken => "models_invalid_access_token",
-            Self::InvalidAccountId => "models_invalid_account_id",
-            Self::InvalidClientVersion => "models_invalid_client_version",
-            Self::InvalidEndpoint => "models_invalid_endpoint",
-            Self::InvalidResponse => "models_invalid_response",
-            Self::RateLimited => "models_rate_limited",
-            Self::ResponseTooLarge => "models_response_too_large",
-            Self::Transport => "models_transport",
-            Self::Unauthorized => "models_unauthorized",
-            Self::Upstream => "models_upstream",
+            Self::AgentTaskInvalid => error_codes::MODELS_AGENT_TASK_INVALID,
+            Self::Forbidden => error_codes::MODELS_FORBIDDEN,
+            Self::HttpStatus => error_codes::MODELS_HTTP_STATUS,
+            Self::InvalidAccessToken => error_codes::MODELS_INVALID_ACCESS_TOKEN,
+            Self::InvalidAccountId => error_codes::MODELS_INVALID_ACCOUNT_ID,
+            Self::InvalidClientVersion => error_codes::MODELS_INVALID_CLIENT_VERSION,
+            Self::InvalidEndpoint => error_codes::MODELS_INVALID_ENDPOINT,
+            Self::InvalidResponse => error_codes::MODELS_INVALID_RESPONSE,
+            Self::RateLimited => error_codes::MODELS_RATE_LIMITED,
+            Self::ResponseTooLarge => error_codes::MODELS_RESPONSE_TOO_LARGE,
+            Self::Transport => error_codes::MODELS_TRANSPORT,
+            Self::Unauthorized => error_codes::MODELS_UNAUTHORIZED,
+            Self::Upstream => error_codes::MODELS_UPSTREAM,
         }
     }
 
@@ -258,12 +259,6 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     slug: String,
-    #[serde(default)]
-    supported_in_api: Option<bool>,
-    #[serde(default)]
-    visibility: Option<String>,
-    #[serde(default)]
-    upgrade: Option<serde_json::Value>,
 }
 
 fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
@@ -278,14 +273,10 @@ fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
     Ok(response
         .models
         .into_iter()
-        .filter(|model| model.supported_in_api != Some(false))
-        .filter(|model| {
-            !model
-                .visibility
-                .as_deref()
-                .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
-                || model.upgrade.is_some()
-        })
+        // This endpoint is the account's authoritative model inventory.
+        // `supported_in_api` describes the upstream's current API capability,
+        // not whether the account owns the model. Retaining the model lets
+        // Relay expose newly enabled capabilities without a hardcoded list.
         .filter_map(|model| {
             let slug = model.slug.trim();
             (!slug.is_empty()
@@ -449,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovers_unique_supported_slugs_with_codex_request_contract() {
+    async fn discovers_unique_account_slugs_with_codex_request_contract() {
         let (endpoint, server) =
             spawn(Router::new().route("/backend-api/codex/models", get(successful_models))).await;
         let models = CodexModelsClient::with_endpoint(endpoint)
@@ -462,7 +453,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(models, vec!["gpt-5", "gpt-legacy", "gpt-5-mini"]);
+        assert_eq!(
+            models,
+            vec![
+                "gpt-5",
+                "gpt-hidden",
+                "gpt-internal",
+                "gpt-legacy",
+                "gpt-5-mini"
+            ]
+        );
         let rendered = format!("{models:?}");
         assert!(!rendered.contains("description-secret"));
         assert!(!rendered.contains("instructions-secret"));

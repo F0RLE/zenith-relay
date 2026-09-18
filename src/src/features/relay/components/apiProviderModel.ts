@@ -1,4 +1,4 @@
-import type { SourceProtocolBinding, SourceWireApi } from "../api/types";
+import type { ProtocolSelectionMode, SourceProtocolBinding, SourceWireApi } from "../api/types";
 import { normalizedAdapter, normalizedReasoningMode } from "../sourceProtocolBindings";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
@@ -8,6 +8,7 @@ export type ApiProviderValue = {
   baseUrl: string;
   wireApi: SourceWireApi;
   protocolBindings: SourceProtocolBinding[];
+  protocolMode?: ProtocolSelectionMode;
   apiKey: string;
   /** Explicit LiteLLM namespace used for source pricing, when confirmed. */
   pricingProvider?: string | null;
@@ -68,6 +69,7 @@ export const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = 
 export function defaultApiProviderValue(): ApiProviderValue {
   return {
     kind: null,
+    protocolMode: "auto",
     name: "",
     baseUrl: "",
     wireApi: "responses",
@@ -85,6 +87,7 @@ export function selectApiProvider(value: ApiProviderValue, kind: ApiProviderKind
   const definition = providerDefaults[kind];
   return {
     ...definition,
+    protocolMode: "auto",
     protocolBindings: definition.protocolBindings.map(cloneBinding),
     apiKey: value.apiKey,
     pricingProvider: definition.pricingProvider ?? null,
@@ -194,6 +197,7 @@ export function apiProviderSourceInput(value: ApiProviderValue) {
     officialProviderFamily: value.officialProviderFamily?.trim() || null,
     wireApi: protocolBindings[0]?.wireApi ?? value.wireApi,
     protocolBindings,
+    protocolMode: value.protocolMode ?? "auto",
     models,
     allowedModels: [],
     excludedModels: [],

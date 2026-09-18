@@ -2,11 +2,13 @@ use super::{AccountRoutingBlockReason, OperationalStatus, ProxyMode, QuotaRefres
 use crate::{
     accounts::AccountAuthState,
     quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
-    runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
     ApiEquivalentSummary, ApiModelPriceOverride, SourceProtocolBinding, WireApi,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 const MIN_WEEKLY_WINDOW_MINUTES: u32 = 6 * 24 * 60;
 const MAX_WEEKLY_WINDOW_MINUTES: u32 = 8 * 24 * 60;
@@ -29,6 +31,10 @@ pub struct SourceSummary {
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    pub protocol_config: crate::SourceProtocolConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_protocol_bindings: Option<Vec<SourceProtocolBinding>>,
     pub models: Vec<String>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
@@ -55,13 +61,15 @@ impl SourceSummary {
     ///
     /// Legacy records without bindings retain their single `wire_api` surface.
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
-        runtime_source_models_for_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .unwrap_or_default()
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                Some(wire_api),
+            )
+            .unwrap_or_default()
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
@@ -72,12 +80,45 @@ impl SourceSummary {
     /// Native Gemini and Chat Completions sources must remain visible even
     /// though the desktop profile itself normally speaks Responses.
     pub fn models_for_any_wire_api(&self) -> Vec<String> {
-        runtime_source_models_for_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                None,
+            )
             .unwrap_or_default()
     }
 
     pub fn supports_any_wire_api(&self) -> bool {
         !self.models_for_any_wire_api().is_empty()
+    }
+
+    /// Returns models that have at least one confirmed Anthropic-style
+    /// Messages upstream route. Cache creation tariffs are valid only for
+    /// those routes, even when the same model is also exposed by Responses or
+    /// another generic API route.
+    pub fn models_with_cache_write_pricing(&self) -> BTreeSet<String> {
+        self.protocol_config
+            .resolve(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|route| {
+                route.adapter.upstream_protocol(route.wire_api) == crate::UpstreamProtocol::Messages
+            })
+            .flat_map(|route| {
+                route
+                    .model_ids
+                    .into_iter()
+                    .map(|model| model.to_ascii_lowercase())
+            })
+            .collect()
     }
 }
 
@@ -214,6 +255,10 @@ pub struct AccountSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_block_reason: Option<AccountRoutingBlockReason>,
     pub last_error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_auth_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_client_login_redirect_at_ms: Option<u64>,
 }
 
 pub fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {

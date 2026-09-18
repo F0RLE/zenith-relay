@@ -1,8 +1,8 @@
 use super::{client::*, models::*, top_up};
 use crate::{
     codex_config::{
-        deactivate_provider, enable_provider, ensure_provider_on_launch, load_api_key_for_launch,
-        provider_has_token, reset_provider,
+        deactivate_provider, enable_provider, load_api_key_for_launch, provider_has_token,
+        reset_provider,
     },
     key_storage::{load_saved_app_key, save_app_key},
     launcher::{is_codex_running, launch_codex, launch_codex_with_profile},
@@ -19,8 +19,7 @@ const OPENROUTER_API_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 const MAX_MODELS_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[tauri::command]
-pub(super) fn get_state(state: tauri::State<'_, local_pool::DesktopState>) -> UiState {
-    let _ = ensure_provider_on_launch(&state.ready_api_backup_root());
+pub(super) fn get_state() -> UiState {
     UiState {
         provider_active: provider_has_token(),
         codex_running: is_codex_running(),
@@ -287,11 +286,7 @@ pub(super) fn profile_change_with_rollback(error: String, rollback: Result<(), S
 }
 
 #[tauri::command]
-pub(super) fn launch_saved_codex(
-    app: AppHandle,
-    state: tauri::State<'_, local_pool::DesktopState>,
-) -> Result<String, String> {
-    let _ = ensure_provider_on_launch(&state.ready_api_backup_root());
+pub(super) fn launch_saved_codex(app: AppHandle) -> Result<String, String> {
     if !provider_has_token() {
         return Err("Сначала сохраните API key.".to_string());
     }

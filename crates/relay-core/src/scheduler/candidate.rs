@@ -1,5 +1,6 @@
 use super::capacity::CandidateQuota;
 use super::cooldown::active_retry_at;
+use crate::error_codes;
 use crate::{
     accounts::{AccountAuthState, AccountHealthState},
     quota::SubscriptionStatus,
@@ -36,6 +37,19 @@ impl CandidateHealth {
     }
 }
 
+/// The complete quota data reported for one runtime candidate.
+///
+/// Keeping the timestamps and provider-credit ledger together prevents a
+/// refresh from publishing only part of the provider snapshot to the scheduler.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CandidateQuotaState {
+    pub quota: CandidateQuota,
+    pub updated_at_ms: Option<u64>,
+    pub reset_at_ms: Option<u64>,
+    pub provider_credits_micro_units: Option<u64>,
+    pub provider_credits_unlimited: bool,
+}
+
 pub fn account_candidate_health(
     auth_state: AccountAuthState,
     health: AccountHealthState,
@@ -49,7 +63,7 @@ pub fn account_candidate_health(
         return CandidateHealth::Unhealthy;
     }
     match last_error_code {
-        Some("checkpoint" | "upstream_account_verification_required") => {
+        Some("checkpoint" | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED) => {
             return CandidateHealth::Checkpoint
         }
         Some("captcha") => return CandidateHealth::Captcha,
@@ -111,6 +125,11 @@ pub struct RuntimeCandidate {
     pub model_rules: ModelRules,
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
+    /// Fresh provider-reported credits are a secondary routing signal. They
+    /// remain separate from percentage quota so diagnostics describe the
+    /// actual rate-limit window.
+    pub provider_credits_micro_units: Option<u64>,
+    pub provider_credits_unlimited: bool,
     pub quota_updated_at_ms: Option<u64>,
     pub quota_reset_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
@@ -161,7 +180,10 @@ impl RuntimeCandidate {
         self.enabled
             && !self.draining
             && self.secret_available
-            && allowed_protocols.contains(&self.protocol)
+            && (allowed_protocols.contains(&self.protocol)
+                || (self.kind == CandidateKind::OAuthAccount
+                    && self.protocol == WireApi::Responses
+                    && !allowed_protocols.is_empty()))
             && self.supports_model(model)
             && self.model_rules.allows(model)
             && scope.includes(self)
@@ -180,7 +202,7 @@ impl RuntimeCandidate {
             .flatten()
     }
 
-    fn supports_model(&self, model: &str) -> bool {
+    pub(crate) fn supports_model(&self, model: &str) -> bool {
         self.models
             .iter()
             .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))

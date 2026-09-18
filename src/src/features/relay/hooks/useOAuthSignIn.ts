@@ -30,16 +30,23 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     if (completingRef.current) return false;
     completingRef.current = true;
     const completed: { current: OAuthCompletion | null } = { current: null };
-    const ok = await perform("oauth-complete", async () => {
-      completed.current = await relayCommands.completeOAuth(loginId);
-    }, "feedback.accountAdded");
-    completingRef.current = false;
-    if (ok && completed.current) {
-      flowRef.current = null;
-      setFlow(null);
-      await onCompleteRef.current?.(completed.current);
+    try {
+      const ok = await perform("oauth-complete", async () => {
+        completed.current = await relayCommands.completeOAuth(loginId);
+      }, "feedback.accountAdded");
+      if (ok && completed.current) {
+        flowRef.current = null;
+        setFlow(null);
+        await onCompleteRef.current?.(completed.current);
+      }
+      return ok;
+    } catch {
+      // A callback or late renderer failure must not leave the sign-in lock
+      // held or become an unhandled promise from the native event listener.
+      return false;
+    } finally {
+      completingRef.current = false;
     }
-    return ok;
   }, [perform]);
   finishRef.current = finish;
 
@@ -50,18 +57,24 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     const next = { ...current, status: event.status };
     flowRef.current = next;
     setFlow(next);
-    if (event.status === "callback_received") void finishRef.current(event.loginId);
+    if (event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
   };
 
   const start = useCallback(async (openBrowser = true, accountId?: string) => {
     if (startingRef.current) return false;
     startingRef.current = true;
     const result: { current: OAuthFlow | null } = { current: null };
-    const ok = await perform("oauth-start", async () => {
-      await ensureListener();
-      result.current = await relayCommands.startOAuth(openBrowser, accountId);
-    });
-    startingRef.current = false;
+    let ok = false;
+    try {
+      ok = await perform("oauth-start", async () => {
+        await ensureListener();
+        result.current = await relayCommands.startOAuth(openBrowser, accountId);
+      });
+    } catch {
+      ok = false;
+    } finally {
+      startingRef.current = false;
+    }
     const started = result.current;
     if (!ok || !started) return false;
     const earlyEvent = latestEventRef.current;
@@ -70,7 +83,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
       : started;
     flowRef.current = next;
     setFlow(next);
-    if (next.status === "callback_received") void finishRef.current(next.loginId);
+    if (next.status === "callback_received") void finishRef.current(next.loginId).catch(() => undefined);
     return true;
   }, [ensureListener, perform]);
 
@@ -78,7 +91,13 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     const current = flowRef.current;
     flowRef.current = null;
     setFlow(null);
-    if (current) await perform("oauth-cancel", () => relayCommands.cancelOAuth(current.loginId));
+    if (current) {
+      try {
+        await perform("oauth-cancel", () => relayCommands.cancelOAuth(current.loginId));
+      } catch {
+        // Cancellation is best-effort after the dialog has already closed.
+      }
+    }
   }, [perform]);
 
   useEffect(() => () => {

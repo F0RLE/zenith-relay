@@ -8,6 +8,7 @@ use crate::local_pool::error::Result as LocalResult;
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
 use std::collections::HashMap;
+use zenith_relay_core::error_codes;
 
 pub(in crate::local_pool::accounts) fn existing_identity_index(
     state: &DesktopState,
@@ -50,7 +51,12 @@ pub(in crate::local_pool::accounts) fn find_existing_account(
 ) -> ItemResult<Option<LocalAccountRecord>> {
     let accounts = state
         .store()
-        .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::ACCOUNT_STORE_FAILED,
+                "account store is unavailable",
+            )
+        })?
         .accounts()
         .to_vec();
     let target = records::identity_hash(provider_account_id, provider_user_id, email);

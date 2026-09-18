@@ -1,4 +1,8 @@
+use crate::error_codes;
 mod api_equivalent;
+mod upstream_error;
+
+pub use upstream_error::UpstreamErrorDetails;
 
 pub use api_equivalent::{
     estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
@@ -362,6 +366,15 @@ pub enum ErrorOrigin {
 }
 
 impl ErrorOrigin {
+    pub fn for_category(self, category: &str) -> Self {
+        if relay_error_category(category) || adapter_error_category_is_relay(category) {
+            return Self::Relay;
+        }
+        // Origin identifies the selected route. Whether an upstream failure
+        // affects account health is a separate decision in affects_account_state.
+        self
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Provider => "provider",
@@ -396,6 +409,13 @@ pub struct UsageEvent {
     pub candidate_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Transient credential provenance for desktop account-state handling.
+    ///
+    /// It is deliberately excluded from persisted/exported usage. The desktop
+    /// callback uses it only to make a delayed 401 a no-op when a newer OAuth
+    /// credential generation is already stored for the same account.
+    #[serde(skip)]
+    pub account_token_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_context_id: Option<String>,
     #[serde(default)]
@@ -431,13 +451,12 @@ impl UsageEvent {
             return None;
         }
         let category = self.error_category.as_deref().unwrap_or_default();
-        if relay_error_category(category) || adapter_error_category_is_relay(category) {
-            return Some(ErrorOrigin::Relay);
-        }
-        if self.account_id.is_some() {
-            return Some(ErrorOrigin::Account);
-        }
-        Some(ErrorOrigin::Provider)
+        let route_origin = if self.account_id.is_some() {
+            ErrorOrigin::Account
+        } else {
+            ErrorOrigin::Provider
+        };
+        Some(route_origin.for_category(category))
     }
 
     pub fn affects_account_state(&self) -> bool {
@@ -447,24 +466,30 @@ impl UsageEvent {
         !matches!(
             self.error_category.as_deref(),
             Some(
-                "client_cancelled"
-                    | "response_affinity_miss"
-                    | "response_incomplete"
-                    | "upstream_cancelled"
-                    | "upstream_previous_response_not_found"
-                    | "upstream_tool_call_mismatch"
-                    | "upstream_context_too_large"
-                    | "upstream_encrypted_content_invalid"
-                    | "upstream_instructions_required"
-                    | "upstream_content_policy"
-                    | "upstream_payload_too_large"
-                    | "upstream_unsupported_request"
-                    | "upstream_websocket_unsupported"
-                    | "upstream_invalid_request"
-                    | "upstream_model_not_found"
-                    | "upstream_model_unsupported"
-                    | "upstream_usage_not_included"
-                    | "image_generation_not_enabled"
+                error_codes::CLIENT_CANCELLED
+                    | error_codes::RESPONSE_AFFINITY_MISS
+                    | error_codes::RESPONSE_INCOMPLETE
+                    | error_codes::UPSTREAM_CANCELLED
+                    | error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+                    | error_codes::UPSTREAM_TOOL_CALL_MISMATCH
+                    | error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+                    | error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID
+                    | error_codes::UPSTREAM_INSTRUCTIONS_REQUIRED
+                    | error_codes::UPSTREAM_CONTENT_POLICY
+                    | error_codes::UPSTREAM_PAYLOAD_TOO_LARGE
+                    | error_codes::UPSTREAM_UNSUPPORTED_REQUEST
+                    | error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
+                    | error_codes::UPSTREAM_INVALID_REQUEST
+                    | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                    | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                    | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                    | error_codes::UPSTREAM_MODEL_CAPACITY
+                    | error_codes::UPSTREAM_OVERLOADED
+                    | error_codes::UPSTREAM_SERVER_ERROR
+                    | error_codes::UPSTREAM_BAD_GATEWAY
+                    | error_codes::UPSTREAM_UNAVAILABLE
+                    | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+                    | error_codes::IMAGE_GENERATION_NOT_ENABLED
             )
         )
     }
@@ -473,16 +498,16 @@ impl UsageEvent {
 fn relay_error_category(category: &str) -> bool {
     matches!(
         category,
-        "invalid_request"
-            | "model_not_found"
-            | "no_eligible_source"
-            | "all_sources_temporarily_unavailable"
-            | "all_sources_cooling_down"
+        error_codes::INVALID_REQUEST
+            | error_codes::MODEL_NOT_FOUND
+            | error_codes::NO_ELIGIBLE_SOURCE
+            | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE
+            | error_codes::ALL_SOURCES_COOLING_DOWN
             | "adapter_websocket_not_supported"
-            | "client_cancelled"
+            | error_codes::CLIENT_CANCELLED
             | "client_websocket"
-            | "response_affinity_miss"
-            | "stream_event_too_large"
+            | error_codes::RESPONSE_AFFINITY_MISS
+            | error_codes::STREAM_EVENT_TOO_LARGE
     )
 }
 
@@ -503,6 +528,7 @@ mod tests {
             source_id: "source".into(),
             candidate_id: Some("candidate".into()),
             account_id: account_id.map(str::to_owned),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),
@@ -529,6 +555,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         }
     }
@@ -567,6 +594,30 @@ mod tests {
             failed_usage_event("adapter_invalid_request", Some("account")).error_origin(),
             Some(ErrorOrigin::Relay)
         );
+        assert_eq!(
+            failed_usage_event("upstream_overloaded", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("upstream_server_error", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+    }
+
+    #[test]
+    fn upstream_service_failures_do_not_mark_the_selected_account() {
+        for category in [
+            "upstream_model_capacity",
+            "upstream_overloaded",
+            "upstream_server_error",
+            "upstream_bad_gateway",
+            "upstream_unavailable",
+            "upstream_gateway_timeout",
+        ] {
+            let event = failed_usage_event(category, Some("account"));
+            assert_eq!(event.error_origin(), Some(ErrorOrigin::Account));
+            assert!(!event.affects_account_state());
+        }
     }
 
     #[test]

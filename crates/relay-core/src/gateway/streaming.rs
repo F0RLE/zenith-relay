@@ -1,22 +1,25 @@
 use super::errors::{
     api_error_type, apply_failure_cooldown_with_hint, apply_failure_state,
     canonical_upstream_status, failure_category_requires_cooldown, preserved_upstream_error_value,
-    rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
-    upstream_status_from_value, zenith_gateway_invalid_request_value, AttemptFailure,
-    CooldownContext, PreservedUpstreamError, RateLimitBodyHint,
+    rate_limit_body_hint_value, responses_tool_call_links_rejected_value,
+    upstream_event_failure_category, upstream_failure_status, upstream_status_from_value,
+    zenith_gateway_invalid_request_value, AttemptFailure, CooldownContext, PreservedUpstreamError,
+    RateLimitBodyHint,
 };
 use super::now_ms;
+use super::request::response_tool_call_ids;
 use super::response::{
     apply_usage, attach_stream_diagnostics, emit_callback, emit_usage, find_usage,
     proxy_sse_response, response_id, response_service_tier, route_error_origin, usage_event,
     CompletionCallback,
 };
+use crate::error_codes;
 use crate::protocol::sse_event_end;
 use crate::runtime::{CandidateLease, ExecutorRoute};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{
     AdapterStreamBridge, GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge,
-    NativeResponsesReplayState, PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
+    PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
 };
 use axum::body::{Body, Bytes};
 use axum::http::{Response, StatusCode};
@@ -30,13 +33,9 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
-const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
-const MAX_REPLAY_BOOTSTRAP_BYTES: usize = 256 * 1024;
-
-const SSE_FIRST_BYTE_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
-
-const SSE_REPLAY_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(2);
+const SSE_FIRST_OUTPUT_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -47,59 +46,70 @@ const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
 mod events;
+mod replay;
+mod upstream_usage;
+
+pub(super) use replay::NativeReplayCapture;
 
 pub(super) use events::{
-    has_output_delta, parse_sse_event, preserved_stream_error, rewrite_bridge_failure,
-    TerminalOutcome,
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    is_known_non_output_event, parse_sse_event, preserved_stream_error, rewrite_bridge_failure,
+    TerminalEvent, TerminalOutcome,
 };
 
 pub(super) struct StreamBootstrapFailure {
+    pub(super) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(super) failure: AttemptFailure,
     pub(super) preserved: Option<PreservedUpstreamError>,
     pub(super) zenith_gateway_invalid_request: bool,
+    pub(super) responses_tool_call_links_rejected: bool,
 }
 
 impl From<AttemptFailure> for StreamBootstrapFailure {
     fn from(failure: AttemptFailure) -> Self {
         Self {
             failure,
+            upstream_error: None,
             preserved: None,
             zenith_gateway_invalid_request: false,
+            responses_tool_call_links_rejected: false,
         }
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The bounded bootstrap failure carries the diagnostics needed for retry and response ownership."
+)]
 pub(super) async fn bootstrap_stream(
     upstream: reqwest::Response,
-    wait_for_native_replay_error: bool,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
     let mut buffered = Vec::new();
     let mut inspected = 0;
-    let mut first_chunk = true;
-    let mut replay_probe_deadline = None;
+    let mut saw_output = false;
+    let mut completed_output_items = 0_usize;
+    // `response.created` and other setup frames do not make a response safe to
+    // commit. Keep them private until the source produces real output or a
+    // terminal event, so a pre-output provider failure can use another route.
+    let first_output_deadline = TokioInstant::now() + SSE_FIRST_OUTPUT_TIMEOUT;
 
     loop {
-        let timeout = if first_chunk {
-            SSE_FIRST_BYTE_TIMEOUT
-        } else {
-            let replay_probe_deadline = replay_probe_deadline
-                .expect("replay probe deadline is set after the first stream chunk");
-            let now = TokioInstant::now();
-            if now >= replay_probe_deadline {
-                return Ok((headers, Bytes::from(buffered), stream));
+        match tokio::time::timeout_at(first_output_deadline, stream.next()).await {
+            Err(_) => {
+                return Err(AttemptFailure::stream(error_codes::STREAM_FIRST_OUTPUT_TIMEOUT).into())
             }
-            replay_probe_deadline - now
-        };
-        match tokio::time::timeout(timeout, stream.next()).await {
-            Err(_) if wait_for_native_replay_error && !buffered.is_empty() => {
-                return Ok((headers, Bytes::from(buffered), stream));
-            }
-            Err(_) => return Err(AttemptFailure::stream("stream_first_byte_timeout").into()),
             Ok(Some(Ok(chunk))) => {
                 if chunk.len() > MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream("stream_event_too_large").into());
+                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
+                }
+                // Bootstrap may contain a large Responses setup event before the
+                // first visible delta. Keep the same bounded budget as the
+                // regular SSE parser instead of rejecting valid upstream data
+                // at the old 256 KiB bootstrap threshold.
+                if buffered.len().saturating_add(chunk.len()) > MAX_SSE_EVENT_BYTES {
+                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
                 }
                 buffered.extend_from_slice(&chunk);
                 let mut ready_to_forward = false;
@@ -107,10 +117,12 @@ pub(super) async fn bootstrap_stream(
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
                     if event.has_data && !event.valid {
-                        return Err(AttemptFailure::stream("stream_invalid").into());
+                        return Err(AttemptFailure::stream(error_codes::STREAM_INVALID).into());
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
-                        let category = event.error_category.unwrap_or("upstream_terminal");
+                        let category = event
+                            .error_category
+                            .unwrap_or(error_codes::UPSTREAM_TERMINAL);
                         let failure = AttemptFailure::classified_with_hint(
                             event
                                 .error_status
@@ -120,38 +132,47 @@ pub(super) async fn bootstrap_stream(
                         );
                         return Err(StreamBootstrapFailure {
                             failure,
+                            upstream_error: event.upstream_error,
                             preserved: event.preserved_error,
                             zenith_gateway_invalid_request: event
                                 .payload
                                 .as_ref()
                                 .is_some_and(zenith_gateway_invalid_request_value),
+                            responses_tool_call_links_rejected: event
+                                .payload
+                                .as_ref()
+                                .is_some_and(responses_tool_call_links_rejected_value),
                         });
                     }
-                    ready_to_forward |= event.outcome.is_some()
-                        || event.has_output_delta
-                        || event.output_item.is_some();
+                    if event.output_item.is_some() && !event.is_compaction {
+                        completed_output_items = completed_output_items.saturating_add(1);
+                    }
+                    saw_output |= event.semantic_output;
+                    // A zero-token incomplete response has not committed any
+                    // client-visible output. Treat it as a pre-output source
+                    // failure, allowing the request executor to retry another
+                    // candidate. A non-empty incomplete response remains a
+                    // terminal client response (for example max output).
+                    if event.payload.as_ref().is_some_and(|payload| {
+                        is_empty_responses_incomplete(payload, saw_output, completed_output_items)
+                    }) {
+                        return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into());
+                    }
+                    ready_to_forward |= event.outcome.is_some() || event.semantic_output;
                     inspected = absolute_end;
                 }
-                if !wait_for_native_replay_error
-                    || ready_to_forward
-                    || buffered.len() >= MAX_REPLAY_BOOTSTRAP_BYTES
-                {
+                if ready_to_forward {
                     return Ok((headers, Bytes::from(buffered), stream));
-                }
-                if first_chunk {
-                    first_chunk = false;
-                    replay_probe_deadline =
-                        Some(TokioInstant::now() + SSE_REPLAY_BOOTSTRAP_TIMEOUT);
                 }
             }
             Ok(Some(Err(error))) => return Err(AttemptFailure::transport(&error).into()),
-            Ok(None) => return Err(AttemptFailure::stream("stream_incomplete").into()),
+            Ok(None) => return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()),
         }
     }
 }
 
-/// Owns the work that starts after an upstream stream has emitted safe first
-/// bytes. From this point the response is committed and no fallback is legal.
+/// Owns the work after an upstream stream has emitted client-visible output.
+/// From this point the response is committed and no fallback is legal.
 pub(in crate::gateway) struct StreamExecution {
     pub(in crate::gateway) runtime: Arc<GatewayRuntime>,
     pub(in crate::gateway) route: ExecutorRoute,
@@ -196,6 +217,33 @@ impl StreamExecution {
             started,
         } = self;
         let adapter_is_passthrough = adapter_request.is_passthrough();
+        let initial_event = usage_event(
+            &request_id,
+            attempt,
+            &local_key_id,
+            &route,
+            Some(&reasoning_effort),
+            &requested_model,
+            true,
+            status.as_u16(),
+            None,
+            0,
+            tool_use,
+        );
+        let upstream_usage = (!adapter_is_passthrough).then(|| {
+            let mut capture = upstream_usage::UpstreamUsage::new(initial_event.clone());
+            capture.observe(&first);
+            Arc::new(Mutex::new(capture))
+        });
+        let capture_stream = upstream_usage.clone();
+        let remaining: UpstreamStream = Box::pin(remaining.inspect(move |chunk| {
+            if let (Some(capture), Ok(bytes)) = (&capture_stream, chunk) {
+                capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .observe(bytes);
+            }
+        }));
         let completion_runtime = runtime.clone();
         let completion_source = route.candidate_id.clone();
         let completion_model = source_model.clone();
@@ -215,6 +263,12 @@ impl StreamExecution {
         let completion_scope = route.scope.clone();
         let completion_allowed_protocols = route.allowed_protocols.clone();
         let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
+            if let Some(capture) = &upstream_usage {
+                capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .apply_to(event);
+            }
             lease.release();
             // A response is healthy only after the upstream has emitted its
             // successful terminal event. An incomplete response may have
@@ -261,21 +315,22 @@ impl StreamExecution {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .take()
                     {
-                        if let Some((response_id, replay)) =
-                            NativeResponsesReplayState::from_response(
-                                &completion_native_template,
-                                &completion_model,
-                                &response,
-                            )
-                        {
-                            completion_runtime.save_native_responses_replay(
+                        for call_id in response_tool_call_ids(&response) {
+                            completion_runtime.bind_tool_call_affinity(
                                 &completion_local_key,
+                                &call_id,
                                 &completion_source,
-                                &response_id,
-                                replay,
                                 now_ms(),
                             );
                         }
+                        completion_runtime.capture_native_responses_replay(
+                            &completion_local_key,
+                            &completion_source,
+                            &completion_native_template,
+                            &completion_model,
+                            &response,
+                            now_ms(),
+                        );
                     }
                 }
             } else if let Some(category) = event
@@ -315,6 +370,11 @@ impl StreamExecution {
                         .expect("Gemini bridge state is configured for Gemini routes");
                     Box::pin(bridge_gemini_stream(first, remaining, *bridge, completed))
                 }
+                Some(bridge @ AdapterStreamBridge::Translated(_)) => {
+                    let completed = completion_bridge_state
+                        .expect("translation completion state is configured");
+                    Box::pin(bridge_adapter_stream(first, remaining, bridge, completed))
+                }
                 None => Box::pin(
                     stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining),
                 ),
@@ -322,19 +382,7 @@ impl StreamExecution {
         let usage_stream = UsageStream::with_runtime(
             combined,
             runtime,
-            usage_event(
-                &request_id,
-                attempt,
-                &local_key_id,
-                &route,
-                Some(&reasoning_effort),
-                &requested_model,
-                true,
-                status.as_u16(),
-                None,
-                0,
-                tool_use,
-            ),
+            initial_event,
             started,
             completion,
             completion_native_response,
@@ -346,9 +394,9 @@ impl StreamExecution {
     }
 }
 
-struct MessagesBridgeStreamState {
+struct AdapterBridgeStreamState {
     inner: UpstreamStream,
-    bridge: MessagesStreamBridge,
+    bridge: AdapterStreamBridge,
     pending: VecDeque<Bytes>,
     finished: bool,
     completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
@@ -364,9 +412,23 @@ pub(super) fn bridge_messages_stream(
     bridge: MessagesStreamBridge,
     completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
 ) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
+    bridge_adapter_stream(
+        first,
+        remaining,
+        AdapterStreamBridge::Messages(Box::new(bridge)),
+        completed,
+    )
+}
+
+fn bridge_adapter_stream(
+    first: Bytes,
+    remaining: UpstreamStream,
+    bridge: AdapterStreamBridge,
+    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
+) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
     let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
     stream::unfold(
-        MessagesBridgeStreamState {
+        AdapterBridgeStreamState {
             inner: Box::pin(inner),
             bridge,
             pending: VecDeque::new(),
@@ -397,12 +459,11 @@ pub(super) fn bridge_messages_stream(
                     }
                 }
 
-                while let Some(bytes) = state.bridge.pop_output() {
-                    state.pending.push_back(Bytes::from(rewrite_bridge_failure(
-                        bytes,
-                        preserved_error.as_ref(),
-                    )));
-                }
+                queue_bridge_output(
+                    &mut state.pending,
+                    || state.bridge.pop_output(),
+                    preserved_error.as_ref(),
+                );
                 if let Some(response) = state.bridge.completed().cloned() {
                     *state
                         .completed
@@ -415,14 +476,6 @@ pub(super) fn bridge_messages_stream(
             }
         },
     )
-}
-
-struct GeminiBridgeStreamState {
-    inner: UpstreamStream,
-    bridge: crate::GeminiStreamBridge,
-    pending: VecDeque<Bytes>,
-    finished: bool,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
 }
 
 pub(super) fn bridge_gemini_stream(
@@ -431,45 +484,22 @@ pub(super) fn bridge_gemini_stream(
     bridge: crate::GeminiStreamBridge,
     completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
 ) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
-    let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
-    stream::unfold(
-        GeminiBridgeStreamState {
-            inner: Box::pin(inner),
-            bridge,
-            pending: VecDeque::new(),
-            finished: false,
-            completed,
-        },
-        |mut state| async move {
-            loop {
-                if let Some(bytes) = state.pending.pop_front() {
-                    return Some((Ok(bytes), state));
-                }
-                if state.finished {
-                    return None;
-                }
-                match state.inner.next().await {
-                    Some(Ok(bytes)) => state.bridge.push(&bytes),
-                    Some(Err(_)) | None => {
-                        state.bridge.finish();
-                        state.finished = true;
-                    }
-                }
-                while let Some(bytes) = state.bridge.pop_output() {
-                    state.pending.push_back(Bytes::from(bytes));
-                }
-                if let Some(response) = state.bridge.completed().cloned() {
-                    *state
-                        .completed
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
-                }
-                if state.bridge.is_terminal() {
-                    state.finished = true;
-                }
-            }
-        },
+    bridge_adapter_stream(
+        first,
+        remaining,
+        AdapterStreamBridge::Gemini(Box::new(bridge)),
+        completed,
     )
+}
+
+fn queue_bridge_output(
+    pending: &mut VecDeque<Bytes>,
+    mut next_output: impl FnMut() -> Option<Vec<u8>>,
+    error: Option<&PreservedUpstreamError>,
+) {
+    while let Some(bytes) = next_output() {
+        pending.push_back(Bytes::from(rewrite_bridge_failure(bytes, error)));
+    }
 }
 
 pub(super) struct UsageStream<S> {
@@ -481,11 +511,14 @@ pub(super) struct UsageStream<S> {
     pub(super) response_id: Option<String>,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
     pub(super) native_gemini: bool,
-    pub(super) native_output_items: Vec<Value>,
+    native_replay_capture: NativeReplayCapture,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
     pub(super) sse_pending: Vec<u8>,
     pub(super) output_pending: VecDeque<Bytes>,
+    // Track yielded bytes, not parsed deltas: even an incomplete SSE frame is
+    // already owned by the client and cannot be replaced by a synthetic response.
+    client_visible_output: bool,
     pub(super) heartbeat: Pin<Box<Sleep>>,
     pub(super) idle_watchdog: Pin<Box<Sleep>>,
     pub(super) terminated: bool,
@@ -510,11 +543,12 @@ impl<S> UsageStream<S> {
             response_id: None,
             native_response: None,
             native_gemini,
-            native_output_items: Vec::new(),
+            native_replay_capture: NativeReplayCapture::default(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
             output_pending: VecDeque::new(),
+            client_visible_output: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
             idle_watchdog: Box::pin(sleep(SSE_IDLE_TIMEOUT)),
             terminated: false,
@@ -540,11 +574,12 @@ impl<S> UsageStream<S> {
             response_id: None,
             native_response,
             native_gemini,
-            native_output_items: Vec::new(),
+            native_replay_capture: NativeReplayCapture::default(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
             output_pending: VecDeque::new(),
+            client_visible_output: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
             idle_watchdog: Box::pin(sleep(SSE_IDLE_TIMEOUT)),
             terminated: false,
@@ -566,12 +601,12 @@ impl<S> UsageStream<S> {
         }
         if !event.success
             && event.http_status < 400
-            && event.error_category.as_deref() != Some("response_incomplete")
+            && event.error_category.as_deref() != Some(error_codes::RESPONSE_INCOMPLETE)
         {
             event.http_status = event
                 .error_category
                 .as_deref()
-                .filter(|category| *category != "client_cancelled")
+                .filter(|category| *category != error_codes::CLIENT_CANCELLED)
                 .map(upstream_failure_status)
                 .unwrap_or(StatusCode::BAD_GATEWAY)
                 .as_u16();
@@ -593,7 +628,7 @@ impl<S> UsageStream<S> {
         let Some(event) = self.event.as_ref() else {
             return false;
         };
-        if event.wire_api != WireApi::Responses {
+        if event.wire_api != WireApi::Responses || self.client_visible_output {
             return false;
         }
         let response_id = self.response_id.clone().unwrap_or_else(|| {
@@ -605,9 +640,11 @@ impl<S> UsageStream<S> {
             format!("resp_{suffix}")
         });
         let message = match category {
-            "stream_invalid" => "Upstream returned an invalid streaming event",
-            "stream_event_too_large" => "Upstream streaming event exceeded the size limit",
-            "stream_incomplete" => "Upstream stream ended before response.completed",
+            error_codes::STREAM_INVALID => "Upstream returned an invalid streaming event",
+            error_codes::STREAM_EVENT_TOO_LARGE => {
+                "Upstream streaming event exceeded the size limit"
+            }
+            error_codes::STREAM_INCOMPLETE => "Upstream stream ended before response.completed",
             _ => "Upstream stream disconnected before completion",
         };
         let payload = json!({
@@ -619,7 +656,7 @@ impl<S> UsageStream<S> {
                 "status": "failed",
                 "output": [],
                 "error": {
-                    "type": "stream_error",
+                    "type": error_codes::STREAM_ERROR,
                     "code": category,
                     "message": message,
                     "zenith_relay": {
@@ -656,33 +693,38 @@ impl<S> UsageStream<S> {
         framed
     }
 
-    fn ingest_sse(&mut self, bytes: &[u8]) {
+    fn ingest_sse(&mut self, bytes: &[u8]) -> bool {
         if self.terminated {
-            return;
+            return false;
         }
         if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
-            self.fail_stream("stream_event_too_large");
-            return;
+            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
+            return false;
         }
         self.sse_pending.extend_from_slice(bytes);
         while let Some(end) = sse_event_end(&self.sse_pending) {
             if end > MAX_SSE_EVENT_BYTES {
                 self.sse_pending.clear();
-                self.fail_stream("stream_event_too_large");
-                return;
+                self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
+                return false;
             }
             let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
                 self.sse_pending.clear();
-                self.fail_stream("stream_invalid");
-                return;
+                self.fail_stream(error_codes::STREAM_INVALID);
+                return false;
             }
             if let Some(payload) = terminal.payload.as_ref() {
                 if let Some(current) = self.event.as_mut() {
                     current.tool_use.observe_stream_payload(payload);
                 }
+                if self.native_response.is_some() {
+                    self.native_replay_capture.observe(payload);
+                }
+            } else if terminal.is_compaction {
+                self.native_replay_capture.mark_unmaterialized();
             }
             if terminal.has_output_delta
                 && self
@@ -707,60 +749,82 @@ impl<S> UsageStream<S> {
             if terminal.response_id.is_some() {
                 self.response_id = terminal.response_id;
             }
-            if let Some(output_item) = terminal.output_item {
-                self.native_output_items.push(output_item);
-            }
             match terminal.outcome {
                 Some(TerminalOutcome::Success) => {
                     self.capture_native_response(terminal.response);
                     self.finish(None, None);
                     self.terminated = true;
-                    return;
+                    return true;
                 }
                 Some(TerminalOutcome::Incomplete) => {
                     self.capture_native_response(terminal.response);
                     self.finish(
                         Some(false),
-                        Some(terminal.error_category.unwrap_or("response_incomplete")),
+                        Some(
+                            terminal
+                                .error_category
+                                .unwrap_or(error_codes::RESPONSE_INCOMPLETE),
+                        ),
                     );
                     self.terminated = true;
-                    return;
+                    return true;
                 }
                 Some(TerminalOutcome::Failure) => {
                     self.cooldown_hint = terminal.cooldown_hint;
+                    self.set_upstream_error(terminal.upstream_error);
                     self.finish(
                         Some(false),
-                        Some(terminal.error_category.unwrap_or("upstream_terminal")),
+                        Some(
+                            terminal
+                                .error_category
+                                .unwrap_or(error_codes::UPSTREAM_TERMINAL),
+                        ),
                     );
                     self.terminated = true;
-                    return;
+                    return true;
                 }
                 None => {}
             }
         }
         if self.sse_pending.len() > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
-            self.fail_stream("stream_event_too_large");
+            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
+            return false;
         }
+        true
     }
 
     /// Gemini's native SSE has ordinary JSON chunks and ends with a clean EOF;
     /// it does not emit the Responses `response.completed` event. Inspect each
     /// complete frame only for usage/TTFT diagnostics and leave the bytes
     /// untouched for the client.
-    fn ingest_native_gemini(&mut self, bytes: &[u8]) {
+    fn ingest_native_gemini(&mut self, bytes: &[u8]) -> bool {
         if self.terminated {
-            return;
+            return false;
         }
         if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
-            self.fail_stream("stream_event_too_large");
-            return;
+            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
+            return false;
         }
         self.sse_pending.extend_from_slice(bytes);
         while let Some(end) = sse_event_end(&self.sse_pending) {
             let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
+            if terminal.outcome == Some(TerminalOutcome::Failure) {
+                self.cooldown_hint = terminal.cooldown_hint;
+                self.set_upstream_error(terminal.upstream_error);
+                self.finish(
+                    Some(false),
+                    Some(
+                        terminal
+                            .error_category
+                            .unwrap_or(error_codes::UPSTREAM_TERMINAL),
+                    ),
+                );
+                self.terminated = true;
+                return true;
+            }
             if let Some(usage) = terminal.usage {
                 if let Some(current) = self.event.as_mut() {
                     apply_usage(current, &usage);
@@ -777,33 +841,27 @@ impl<S> UsageStream<S> {
                 }
             }
         }
+        true
+    }
+
+    fn set_upstream_error(&mut self, details: Option<crate::usage::UpstreamErrorDetails>) {
+        if let Some(current) = self.event.as_mut() {
+            current.upstream_error = details.map(|mut details| {
+                details.http_status = Some(current.http_status);
+                details
+            });
+        }
     }
 
     fn capture_native_response(&mut self, response: Option<Value>) {
         let Some(shared) = self.native_response.as_ref() else {
             return;
         };
-        let mut response = response.unwrap_or_else(|| {
-            json!({
-                "id": self.response_id,
-                "output": self.native_output_items.clone(),
-            })
-        });
-        if let Some(object) = response.as_object_mut() {
-            object
-                .entry("id")
-                .or_insert_with(|| json!(self.response_id));
-            let output_is_empty = object
-                .get("output")
-                .and_then(Value::as_array)
-                .is_none_or(Vec::is_empty);
-            if output_is_empty {
-                object.insert(
-                    "output".to_string(),
-                    Value::Array(self.native_output_items.clone()),
-                );
-            }
-        }
+        let Some(response) = std::mem::take(&mut self.native_replay_capture)
+            .finish(response, self.response_id.as_deref())
+        else {
+            return;
+        };
         *shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
@@ -830,18 +888,22 @@ where
                     let now = TokioInstant::now();
                     this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
                     this.idle_watchdog.as_mut().reset(now + SSE_IDLE_TIMEOUT);
-                    if this.native_gemini {
-                        this.ingest_native_gemini(&bytes);
+                    let valid = if this.native_gemini {
+                        this.ingest_native_gemini(&bytes)
                     } else {
-                        this.ingest_sse(&bytes);
-                    }
+                        this.ingest_sse(&bytes)
+                    };
                     if let Some(failure) = this.output_pending.pop_front() {
                         return Poll::Ready(Some(Ok(failure)));
                     }
+                    if !valid {
+                        return Poll::Ready(None);
+                    }
+                    this.client_visible_output |= !bytes.is_empty();
                     return Poll::Ready(Some(Ok(bytes)));
                 }
                 Poll::Ready(Some(Err(error))) => {
-                    if this.fail_stream("upstream_stream") {
+                    if this.fail_stream(error_codes::UPSTREAM_STREAM) {
                         continue;
                     }
                     return Poll::Ready(Some(Err(error)));
@@ -854,7 +916,7 @@ where
                         return Poll::Ready(None);
                     }
                     if this.event.as_ref().is_some_and(|event| event.success) {
-                        if this.fail_stream("stream_incomplete") {
+                        if this.fail_stream(error_codes::STREAM_INCOMPLETE) {
                             continue;
                         }
                     } else {
@@ -866,7 +928,7 @@ where
                 }
                 Poll::Pending => {
                     if this.idle_watchdog.as_mut().poll(context).is_ready() {
-                        if this.fail_stream("stream_idle_timeout") {
+                        if this.fail_stream(error_codes::STREAM_IDLE_TIMEOUT) {
                             continue;
                         }
                         return Poll::Ready(None);
@@ -886,7 +948,7 @@ where
 
 impl<S> Drop for UsageStream<S> {
     fn drop(&mut self) {
-        self.finish(Some(false), Some("client_cancelled"));
+        self.finish(Some(false), Some(error_codes::CLIENT_CANCELLED));
     }
 }
 
@@ -896,6 +958,43 @@ mod tests {
     use crate::gateway::test_support::test_usage_event;
     use std::convert::Infallible;
     use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn usage_stream_with_events<S>(input: S, events: Arc<Mutex<Vec<UsageEvent>>>) -> UsageStream<S>
+    where
+        S: Stream<Item = Result<Bytes, Infallible>>,
+    {
+        let captured = events.clone();
+        UsageStream::new(
+            input,
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        )
+    }
+
+    async fn response_from_sse_event(
+        event: String,
+    ) -> (reqwest::Response, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            event.len(), event
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let upstream = reqwest::get(format!("http://{address}/stream"))
+            .await
+            .unwrap();
+        (upstream, server)
+    }
 
     #[test]
     fn streaming_terminal_errors_keep_the_canonical_category() {
@@ -911,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn delayed_gateway_invalid_request_sse_keeps_request_status() {
+    fn generic_gateway_rejection_sse_keeps_candidate_category_and_provider_details() {
         let terminal = parse_sse_event(
             br#"event: error
 data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}
@@ -919,13 +1018,76 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
 "#,
         );
 
-        assert_eq!(terminal.error_category, Some("upstream_invalid_request"));
-        assert_eq!(terminal.error_status, Some(StatusCode::BAD_REQUEST));
+        assert_eq!(terminal.error_category, Some("upstream_candidate_rejected"));
+        assert_eq!(terminal.error_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+        let upstream = terminal.upstream_error.unwrap();
+        assert_eq!(upstream.code.as_deref(), Some("invalid_request"));
+        assert_eq!(
+            upstream.error_type.as_deref(),
+            Some("invalid_request_error")
+        );
+        assert_eq!(upstream.http_status, None);
     }
 
     #[test]
     fn first_sse_event_gets_the_same_patience_as_an_active_stream() {
-        assert_eq!(SSE_FIRST_BYTE_TIMEOUT, SSE_IDLE_TIMEOUT);
+        assert_eq!(SSE_FIRST_OUTPUT_TIMEOUT, SSE_IDLE_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output() {
+        let event = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
+        );
+        let (upstream, server) = response_from_sse_event(event.into()).await;
+        let failure = bootstrap_stream(upstream)
+            .await
+            .err()
+            .expect("empty incomplete stream must not commit client output");
+        server.await.unwrap();
+
+        assert_eq!(failure.failure.category, "stream_incomplete");
+        assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_does_not_commit_an_opaque_compaction_before_disconnect() {
+        let event = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}}\n\n"
+        );
+        let (upstream, server) = response_from_sse_event(event.into()).await;
+        let failure = bootstrap_stream(upstream)
+            .await
+            .err()
+            .expect("compaction alone must remain retryable");
+        server.await.unwrap();
+
+        assert_eq!(failure.failure.category, "stream_incomplete");
+        assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
+        let delta = "a".repeat(300 * 1024);
+        let event =
+            format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{delta}\"}}\n\n");
+        let (upstream, server) = response_from_sse_event(event).await;
+        let result = bootstrap_stream(upstream).await;
+        server.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "valid large Responses event should bootstrap"
+        );
+        let (_, buffered, _) = if let Ok(value) = result {
+            value
+        } else {
+            return;
+        };
+        assert!(buffered.len() > 256 * 1024);
+        assert!(buffered.starts_with(b"data: {\"type\":\"response.output_text.delta\""));
     }
 
     #[tokio::test]
@@ -942,6 +1104,7 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
                 source_id: "source".into(),
                 candidate_id: Some("source".into()),
                 account_id: None,
+                account_token_generation: None,
                 client_context_id: None,
                 routing: None,
                 requested_model: Some("model".into()),
@@ -968,6 +1131,7 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
+                upstream_error: None,
                 quota_snapshot: None,
             },
             Instant::now(),
@@ -1036,6 +1200,115 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
         assert_eq!(stream.next().await.unwrap().unwrap(), first);
         assert_eq!(stream.next().await.unwrap().unwrap(), second);
         assert_eq!(stream.next().await.unwrap().unwrap(), completed);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_stream_does_not_append_a_synthetic_failure_after_visible_bytes() {
+        let partial = [
+            Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            ),
+            Bytes::from_static(
+                b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+            ),
+            Bytes::from_static(
+                b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            ),
+            Bytes::from_static(br#"data: {"type":"response.output_text.delta","delta":"par"#),
+        ];
+        let cases = partial
+            .into_iter()
+            .map(|first| (vec![first], "stream_incomplete"))
+            .chain(std::iter::once((
+                vec![
+                    Bytes::from_static(
+                        b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+                    ),
+                    Bytes::from_static(b"data: invalid-json\n\n"),
+                ],
+                "stream_invalid",
+            )));
+        for (input, category) in cases {
+            let first = input[0].clone();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut stream = usage_stream_with_events(
+                stream::iter(input.into_iter().map(Ok::<Bytes, Infallible>)),
+                events.clone(),
+            );
+
+            assert_eq!(stream.next().await.unwrap().unwrap(), first);
+            assert!(stream.next().await.is_none());
+            drop(stream);
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(!events[0].success);
+            assert_eq!(events[0].error_category.as_deref(), Some(category));
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_stream_preserves_transport_errors_after_partial_output() {
+        let first = Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        );
+        let mut stream = UsageStream::new(
+            stream::iter([
+                Ok(first.clone()),
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            ]),
+            Arc::new(|_| {}),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), first);
+        assert_eq!(
+            stream.next().await.unwrap().unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionReset
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_stream_still_reports_a_failure_before_any_visible_bytes() {
+        let mut stream = UsageStream::new(
+            stream::empty::<Result<Bytes, Infallible>>(),
+            Arc::new(|_| {}),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+
+        let bytes = stream.next().await.unwrap().unwrap();
+        let failure = parse_sse_event(&bytes);
+        assert_eq!(failure.outcome, Some(TerminalOutcome::Failure));
+        assert_eq!(
+            failure.payload.unwrap()["response"]["error"]["code"],
+            "stream_incomplete"
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_stream_preserves_upstream_terminal_failures_after_output() {
+        let first = Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        );
+        let failure = Bytes::from_static(
+            b"data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_test\",\"error\":{\"code\":\"server_error\"}}}\n\n",
+        );
+        let mut stream = UsageStream::new(
+            stream::iter([Ok::<_, Infallible>(first.clone()), Ok(failure.clone())]),
+            Arc::new(|_| {}),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), first);
+        assert_eq!(stream.next().await.unwrap().unwrap(), failure);
         assert!(stream.next().await.is_none());
     }
 
@@ -1167,6 +1440,7 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
             category: "upstream_unavailable",
             code: "service_unavailable".into(),
             message: "safe upstream message".into(),
+            error_type: None,
         };
         let rewritten = String::from_utf8(rewrite_bridge_failure(
             br#"event: response.cancelled
@@ -1184,11 +1458,48 @@ data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_
         assert!(rewritten.contains("\"message\":\"safe upstream message\""));
     }
 
+    #[tokio::test]
+    async fn native_gemini_error_is_not_promoted_to_success_at_eof() {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let captured = recorded.clone();
+        let mut event = test_usage_event();
+        event.wire_api = WireApi::Gemini;
+        let mut stream = UsageStream::new(
+            futures_util::stream::empty::<Result<Bytes, Infallible>>(),
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+            event,
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+        assert!(stream.ingest_native_gemini(b"data: {\"error\":{\"code\":400,\"status\":\"INVALID_ARGUMENT\",\"message\":\"Invalid field: temperature\"}}\n\n"));
+        assert!(stream.terminated);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(!recorded[0].success);
+        let details = recorded[0].upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(200));
+        assert_eq!(details.code.as_deref(), Some("400"));
+        assert_eq!(
+            details.message.as_deref(),
+            Some("Invalid field: temperature")
+        );
+    }
+
+    #[test]
+    fn bridge_rewrite_keeps_unknown_provider_codes_and_error_types() {
+        let value = json!({"error": {"code": "future_constraint", "type": "future_provider_type", "message": "Constraint check failed"}});
+        let preserved = preserved_stream_error(&value).unwrap();
+        let bytes = rewrite_bridge_failure(b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"adapter_upstream_stream_invalid\"}}}\n\n".to_vec(), Some(&preserved));
+        let details = parse_sse_event(&bytes).upstream_error.unwrap();
+        assert_eq!(details.code.as_deref(), Some("future_constraint"));
+        assert_eq!(details.error_type.as_deref(), Some("future_provider_type"));
+        assert_eq!(details.message.as_deref(), Some("Constraint check failed"));
+    }
+
     #[test]
     fn ttft_requires_real_output_for_supported_stream_protocols() {
         for event in [
             "data: {\"type\":\"response.created\"}\n\n",
-            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"hidden\"}\n\n",
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null}}\n\n",
         ] {
@@ -1196,10 +1507,13 @@ data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_
         }
         for event in [
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"summary\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"PowerShell\"}}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n",
         ] {
             assert!(parse_sse_event(event.as_bytes()).has_output_delta);
         }

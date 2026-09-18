@@ -1,18 +1,18 @@
 {
   "name": "zenith-relay",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.2"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
     "check:bundle-size": "bun ../.github/tools/check-frontend-bundle.mjs",
-    "test:unit": "bun test tests/accountEconomics.test.ts tests/accountIdentity.test.ts tests/accountQuotaRefresh.test.ts tests/accountStatus.test.ts tests/accountTableModel.test.ts tests/apiProviderModel.test.ts tests/automationModel.test.ts tests/connectionViewState.test.ts tests/feedback.test.ts tests/i18n.test.ts tests/latestRequestGate.test.ts tests/modelPricing.test.ts tests/modelReasoningPolicy.test.ts tests/modelRulesModel.test.ts tests/numberFormatting.test.ts tests/overviewAnalyticsCache.test.ts tests/overviewAnalyticsModel.test.ts tests/poolFormatting.test.ts tests/poolHelpers.test.ts tests/poolMemberEditorModel.test.ts tests/poolMembersModel.test.ts tests/poolMembership.test.ts tests/quotaFormatting.test.ts tests/refreshPolicy.test.ts tests/relativeTimeClock.test.ts tests/relayOperationModel.test.ts tests/relayPreferences.test.ts tests/runtimeDisplay.test.ts tests/snapshotLoader.test.ts tests/sourcePriceEditorModel.test.ts tests/sourceProtocolBindings.test.ts tests/sourceProtocolBindingsEditorModel.test.ts tests/sourceRefresh.test.ts tests/updateReleaseNotes.test.ts tests/usageBreakdown.test.ts tests/usageData.test.ts tests/usageSpeed.test.ts",
+    "test:unit": "bun test tests/accountEconomics.test.ts tests/accountIdentity.test.ts tests/accountQuotaRefresh.test.ts tests/accountStatus.test.ts tests/accountTableModel.test.ts tests/apiProviderModel.test.ts tests/automationModel.test.ts tests/connectionViewState.test.ts tests/feedback.test.ts tests/i18n.test.ts tests/latestRequestGate.test.ts tests/modelPricing.test.ts tests/modelReasoningPolicy.test.ts tests/modelRulesModel.test.ts tests/numberFormatting.test.ts tests/overviewAnalyticsCache.test.ts tests/overviewAnalyticsModel.test.ts tests/poolFormatting.test.ts tests/poolHelpers.test.ts tests/poolMemberEditorModel.test.ts tests/poolMembersModel.test.ts tests/poolMembership.test.ts tests/quotaFormatting.test.ts tests/refreshPolicy.test.ts tests/relativeTimeClock.test.ts tests/relayOperationModel.test.ts tests/relayPreferences.test.ts tests/runtimeDisplay.test.ts tests/snapshotLoader.test.ts tests/sourceStatsModel.test.ts tests/sourcePriceEditorModel.test.ts tests/sourceProtocolBindings.test.ts tests/sourceProtocolBindingsEditorModel.test.ts tests/sourceRefresh.test.ts tests/updateReleaseNotes.test.ts tests/usageBreakdown.test.ts tests/usageData.test.ts tests/usageSpeed.test.ts",
     "test:e2e": "playwright test",
     "screenshots": "playwright test --config playwright.docs.config.ts",
     "clean": "bun ../.github/tools/clean.mjs",
@@ -27,22 +27,22 @@
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.11.0",
-    "i18next": "^26.4.1",
-    "lucide-react": "^1.39.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "react-i18next": "^17.0.13",
+    "i18next": "^26.4.2",
+    "lucide-react": "^1.47.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-i18next": "^17.0.14",
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.63.0",
     "@tauri-apps/cli": "^2.11.4",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.3.0"
   },
   "overrides": {
     "nanoid": "3.3.18"
