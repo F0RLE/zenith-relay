@@ -101,7 +101,8 @@ release entries are kept concise and link to the corresponding tag.
 
 - ChatGPT account selection and quota reserve share a compact panel; feature
   switches use flat rows with concise descriptions. Pool member settings no
-  longer add a second frame inside the dialog. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+  longer add a second frame inside the dialog. The OpenCode tab subtitle now
+  says "Use the pool in OpenCode". ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - GPT model names in ChatGPT and Codex keep their original IDs even when the
   selected account has no matching catalog card. Explicit key prefixes and
   existing aliases remain supported; capabilities come from the matching model.

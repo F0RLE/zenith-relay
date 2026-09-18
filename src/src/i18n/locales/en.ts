@@ -1305,9 +1305,9 @@ const relayEn = {
         zenith: "Application setup",
       },
       opencode: {
-        local: "OpenCode integration",
-        remote: "OpenCode integration",
-        zenith: "OpenCode integration",
+        local: "Use the pool in OpenCode",
+        remote: "Use the pool in OpenCode",
+        zenith: "Use the pool in OpenCode",
       },
     },
     views: "Gateway views",

@@ -1305,9 +1305,9 @@ const relayRu = {
         zenith: "Настройка приложения",
       },
       opencode: {
-        local: "Интеграция OpenCode",
-        remote: "Интеграция OpenCode",
-        zenith: "Интеграция OpenCode",
+        local: "Использование пула в OpenCode",
+        remote: "Использование пула в OpenCode",
+        zenith: "Использование пула в OpenCode",
       },
     },
     views: "Виды адреса API",
