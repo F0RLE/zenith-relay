@@ -28,6 +28,9 @@ const MAX_SNAPSHOT_NAME_CHARS: usize = 80;
 // OpenCode uses the official OpenAI AI SDK so requests use Relay's Responses
 // contract, which preserves tool calls across adapters.
 const PROVIDER_NPM: &str = "@ai-sdk/openai";
+mod protocols;
+mod refresh;
+pub(in crate::local_pool) use refresh::refresh_active_opencode_catalog;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,7 +143,9 @@ fn remove_managed_configuration(config: &mut Map<String, Value>) -> bool {
         .and_then(Value::as_object_mut)
         .map_or((false, false), |providers| {
             (
-                providers.remove(PROVIDER_ID).is_some(),
+                protocols::GROUPS.iter().fold(false, |removed, (_, id, _)| {
+                    providers.remove(*id).is_some() || removed
+                }),
                 providers.is_empty(),
             )
         });
@@ -150,7 +155,7 @@ fn remove_managed_configuration(config: &mut Map<String, Value>) -> bool {
     let model_removed = if config
         .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|model| model.starts_with(&format!("{PROVIDER_ID}/")))
+        .is_some_and(protocols::managed_model)
     {
         config.remove("model");
         true
@@ -168,7 +173,7 @@ fn current_config_is_managed(path: &Path) -> Result<bool, LocalPoolError> {
     Ok(config
         .get("provider")
         .and_then(Value::as_object)
-        .is_some_and(|providers| providers.contains_key(PROVIDER_ID)))
+        .is_some_and(|providers| providers.keys().any(|id| protocols::managed_id(id))))
 }
 
 fn restore_original_config_preserving_user_changes(
@@ -206,7 +211,7 @@ fn restore_original_config_preserving_user_changes(
         .unwrap_or_default();
     if let Some(current_providers) = current_config.get("provider").and_then(Value::as_object) {
         for (id, provider) in current_providers {
-            if id != PROVIDER_ID {
+            if !protocols::managed_id(id) {
                 providers.insert(id.clone(), provider.clone());
             }
         }
@@ -220,7 +225,7 @@ fn restore_original_config_preserving_user_changes(
     let current_model_is_managed = current_config
         .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|model| model.starts_with(&format!("{PROVIDER_ID}/")));
+        .is_some_and(protocols::managed_model);
     if !current_model_is_managed {
         match current_config.get("model") {
             Some(model) => {
@@ -326,7 +331,7 @@ fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
 fn model_ids(models: &[ModelSummary]) -> Vec<ModelSummary> {
     models
         .iter()
-        .filter(|model| model.enabled)
+        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
         .cloned()
         .collect()
 }
@@ -410,6 +415,7 @@ fn model_config_ids(models: &[String], metadata: &ModelMetadataCatalog) -> Map<S
         .collect()
 }
 
+#[cfg(test)]
 fn managed_provider(base_url: &str, secret: &str, models: &[ModelSummary]) -> Value {
     json!({
         "npm": PROVIDER_NPM,
@@ -422,65 +428,13 @@ fn managed_provider(base_url: &str, secret: &str, models: &[ModelSummary]) -> Va
     })
 }
 
-fn managed_provider_for_source(
-    base_url: &str,
-    secret: &str,
-    models: &[String],
-    metadata: &ModelMetadataCatalog,
-) -> Value {
-    json!({
-        "npm": PROVIDER_NPM,
-        "name": "Zenith Relay",
-        "options": {
-            "baseURL": base_url,
-            "apiKey": secret,
-        },
-        "models": model_config_ids(models, metadata),
-    })
-}
-
 fn apply_managed_provider(
     config: &mut Map<String, Value>,
     base_url: &str,
     secret: &str,
     models: &[ModelSummary],
 ) -> Result<(), LocalPoolError> {
-    config
-        .entry("$schema")
-        .or_insert_with(|| Value::String("https://opencode.ai/config.json".into()));
-    config
-        .entry("provider")
-        .or_insert_with(|| Value::Object(Map::new()));
-    let providers = config
-        .get_mut("provider")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "OpenCode provider configuration must be an object",
-            )
-        })?;
-    providers.insert(
-        PROVIDER_ID.into(),
-        managed_provider(base_url, secret, models),
-    );
-
-    let current_model = config
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let managed_model_selected = current_model.starts_with(&format!("{PROVIDER_ID}/"));
-    if let Some(first) = models.first() {
-        if !current_model.contains('/') || managed_model_selected {
-            config.insert(
-                "model".into(),
-                Value::String(format!("{PROVIDER_ID}/{}", first.id)),
-            );
-        }
-    } else if managed_model_selected {
-        config.remove("model");
-    }
-    Ok(())
+    protocols::apply(config, base_url, secret, models)
 }
 
 fn backup_original_config(
@@ -512,18 +466,22 @@ fn backup_original_config(
 fn config_status_for(state: &DesktopState) -> Result<OpenCodeConfigStatus, LocalPoolError> {
     let path = default_opencode_config_path();
     let config = read_config(&path)?;
-    let provider = config
+    let providers = config
         .get("provider")
         .and_then(Value::as_object)
-        .and_then(|providers| providers.get(PROVIDER_ID));
-    let model_count = provider
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("models"))
-        .and_then(Value::as_object)
-        .map_or(0, Map::len);
+        .into_iter()
+        .flat_map(|providers| providers.iter())
+        .filter(|(id, _)| protocols::managed_id(id))
+        .collect::<Vec<_>>();
+    let model_count = providers
+        .iter()
+        .filter_map(|(_, value)| value.get("models"))
+        .filter_map(Value::as_object)
+        .map(Map::len)
+        .sum();
     let has_backup = backup_path(state).exists() || missing_marker_path(state).exists();
     Ok(OpenCodeConfigStatus {
-        configured: provider.is_some(),
+        configured: !providers.is_empty(),
         model_count,
         has_backup,
         backup_created_at_ms: backup_created_at_ms(state),
@@ -610,32 +568,13 @@ pub async fn launch_opencode_source(
     let path = default_opencode_config_path();
     let mut config = read_config(&path)?;
     let backup_created = backup_original_config(&state, &path, None)?;
-    let provider = managed_provider_for_source(
-        &source.base_url,
+    protocols::apply_source(
+        &mut config,
+        &source,
         &secret,
-        &models,
         &state.model_metadata_catalog(),
-    );
-    config
-        .entry("$schema")
-        .or_insert_with(|| Value::String("https://opencode.ai/config.json".into()));
-    config
-        .entry("provider")
-        .or_insert_with(|| Value::Object(Map::new()));
-    let providers = config
-        .get_mut("provider")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "OpenCode provider configuration must be an object",
-            )
-        })?;
-    providers.insert(PROVIDER_ID.into(), provider);
-    config.insert(
-        "model".into(),
-        Value::String(format!("{PROVIDER_ID}/{}", models[0])),
-    );
+        true,
+    )?;
     write_config(&path, &config)?;
     restart_opencode().map_err(|error| {
         LocalPoolError::new(
@@ -656,9 +595,7 @@ fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, 
         .effective_protocol_bindings()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
         .into_iter()
-        .filter(|binding| {
-            binding.wire_api == WireApi::Responses && binding.adapter == SourceAdapter::Native
-        })
+        .filter(|binding| binding.adapter == SourceAdapter::Native)
         .flat_map(|binding| binding.model_ids)
         .filter(|model| !model.trim().is_empty())
         .filter(|model| seen.insert(model.clone()))
@@ -666,7 +603,7 @@ fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, 
     if models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "source has no compatible Responses API models",
+            "source has no compatible native API models",
         ));
     }
     Ok(models)
@@ -732,7 +669,7 @@ mod tests {
     use std::collections::BTreeMap;
     use zenith_relay_core::{protocol::ModelSummary, SourceProtocolBinding, WireApi};
 
-    fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceRecord {
+    pub(super) fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceRecord {
         ProviderSourceRecord {
             id: "source".into(),
             name: "Source".into(),
@@ -744,6 +681,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: bindings,
             models: vec![
                 "gpt-test".into(),
@@ -765,9 +703,15 @@ mod tests {
         }
     }
 
-    fn model(id: &str, enabled: bool) -> ModelSummary {
+    pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         ModelSummary {
             id: id.into(),
+            protocol_routes: vec![zenith_relay_core::protocol::ModelProtocolRoute {
+                client_wire_api: WireApi::Responses,
+                upstream_wire_api: WireApi::Responses,
+                features: BTreeMap::new(),
+                reasoning_efforts: Vec::new(),
+            }],
             enabled,
             member_count: 1,
             codex_visible: enabled,
@@ -905,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_source_models_are_limited_to_native_responses() {
+    fn direct_source_models_include_all_native_protocols() {
         let source = source(vec![
             SourceProtocolBinding::legacy(
                 WireApi::Responses,
@@ -916,7 +860,7 @@ mod tests {
 
         assert_eq!(
             source_opencode_models(&source).unwrap(),
-            ["gpt-test", "gpt-other"]
+            ["gpt-test", "gpt-other", "chat-only"]
         );
     }
 

@@ -11,6 +11,7 @@ use crate::platform;
 use std::collections::BTreeMap;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{
     account_operational_state, apply_model_display_order_with_catalog, apply_model_metadata,
     apply_pool_model_configuration, operational_status, pool_candidate_count,
@@ -79,7 +80,7 @@ pub(crate) async fn build_local_runtime_state(
     let runtime = state.gateway.runtime().await;
     let routing_order = runtime
         .as_ref()
-        .map(|runtime| runtime.candidate_runtime_order())
+        .map(|runtime| runtime.candidate_runtime_order_for_key(super::pool::SYSTEM_GATEWAY_KEY_ID))
         .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&inputs.gateway);
     let snapshot_at_ms = unix_time_ms();
@@ -131,7 +132,7 @@ pub(crate) async fn build_local_runtime_state(
             ))
         })
         .collect::<BTreeMap<_, _>>();
-    let source_summaries = inputs
+    let mut source_summaries = inputs
         .sources
         .iter()
         .map(|record| {
@@ -157,7 +158,7 @@ pub(crate) async fn build_local_runtime_state(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let account_summaries = inputs
+    let mut account_summaries = inputs
         .accounts
         .iter()
         .map(|record| {
@@ -178,6 +179,10 @@ pub(crate) async fn build_local_runtime_state(
                     quota_window_usage: quota_window_usages.get(&record.account.id).cloned(),
                     now_ms: snapshot_at_ms,
                     refreshing: state.quota_refresh_in_flight(&record.account.id)?,
+                    runtime_available: (running && record.account.in_pool).then(|| {
+                        oauth_account_runtime_available(&routing_order, &record.account.id)
+                            .unwrap_or(false)
+                    }),
                 },
             )
         })
@@ -224,6 +229,12 @@ pub(crate) async fn build_local_runtime_state(
         &inputs.gateway.model_display_order,
         &model_metadata,
     );
+    zenith_relay_core::protocol::apply_member_model_display_order(
+        &mut source_summaries,
+        &mut account_summaries,
+        &inputs.gateway.model_display_order,
+        &model_metadata,
+    );
     let visible_model_ids = models
         .iter()
         .filter(|model| model.enabled)
@@ -259,6 +270,11 @@ pub(crate) async fn build_local_runtime_state(
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         gateway: GatewaySummary {
+            pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
+                inputs.gateway.pool_routing.as_ref(),
+                &source_summaries,
+                &account_summaries,
+            )),
             running,
             base_url,
             candidate_count,
@@ -271,6 +287,11 @@ pub(crate) async fn build_local_runtime_state(
             default_service_tier: inputs.gateway.default_service_tier,
             image_base_model: inputs.gateway.image_base_model.clone(),
             models,
+            model_catalog: zenith_relay_core::protocol::member_model_catalog(
+                &source_summaries,
+                &account_summaries,
+                &model_metadata,
+            ),
             common_proxy_configured: inputs.gateway.common_proxy_configured,
             common_proxy_available,
             common_proxy_id: None,
@@ -321,7 +342,7 @@ pub async fn get_local_runtime_order(
         .gateway
         .runtime()
         .await
-        .map(|runtime| runtime.candidate_runtime_order())
+        .map(|runtime| runtime.candidate_runtime_order_for_key(super::pool::SYSTEM_GATEWAY_KEY_ID))
         .unwrap_or_default())
 }
 
@@ -347,7 +368,14 @@ fn local_source_summary(
         pricing_provider: record.pricing_provider.clone(),
         official_provider_family: record.official_provider_family.clone(),
         wire_api: record.wire_api,
+        protocol_config: record.protocol_config.with_effective_capabilities(
+            &record.base_url,
+            &record.models,
+            &record.protocol_bindings,
+            record.wire_api,
+        ),
         protocol_bindings: record.protocol_bindings.clone(),
+        resolved_protocol_bindings: Some(record.effective_protocol_bindings().unwrap_or_default()),
         models: record.models.clone(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
@@ -370,6 +398,7 @@ struct LocalAccountSummaryContext<'a> {
     quota_window_usage: Option<QuotaWindowUsage>,
     now_ms: u64,
     refreshing: bool,
+    runtime_available: Option<bool>,
 }
 
 fn local_account_summary(
@@ -384,6 +413,7 @@ fn local_account_summary(
         quota_window_usage,
         now_ms,
         refreshing,
+        runtime_available,
     } = context;
     let secret_available = credentials.is_some();
     let (proxy_mode, proxy_available) = credentials
@@ -418,7 +448,7 @@ fn local_account_summary(
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
-        operational_status: operational.status,
+        operational_status: operational.status.with_runtime_available(runtime_available),
         auth_state: record.account.auth_state,
         health: format!("{:?}", record.account.health).to_ascii_lowercase(),
         models: record.effective_models().to_vec(),
@@ -467,12 +497,12 @@ fn account_runtime_warning(
     credentials: Option<&StoredCodexCredentials>,
 ) -> String {
     let code = match credentials {
-        None => "account_runtime_credential_missing",
+        None => error_codes::ACCOUNT_RUNTIME_CREDENTIAL_MISSING,
         Some(credentials) if credentials.provider_account_id().is_none() => {
-            "account_runtime_provider_account_id_missing"
+            error_codes::ACCOUNT_RUNTIME_PROVIDER_ACCOUNT_ID_MISSING
         }
         Some(credentials) if effective_proxy_config(settings, credentials).is_err() => {
-            "account_runtime_proxy_invalid"
+            error_codes::ACCOUNT_RUNTIME_PROXY_INVALID
         }
         Some(_) => "account_runtime_not_registered",
     };
@@ -504,6 +534,7 @@ mod parity_tests {
                 version: None,
             },
             gateway: GatewaySummary {
+                pool_routing: None,
                 running: false,
                 base_url: "http://127.0.0.1:14998/v1".into(),
                 candidate_count: 0,
@@ -517,6 +548,7 @@ mod parity_tests {
                 default_service_tier: Default::default(),
                 image_base_model: None,
                 models: Vec::new(),
+                model_catalog: BTreeMap::new(),
                 common_proxy_configured: false,
                 common_proxy_available: false,
                 common_proxy_id: None,
@@ -551,6 +583,9 @@ mod parity_tests {
             candidate_id: "account_plus".into(),
             kind: CandidateKind::OAuthAccount,
             available: true,
+            next_for_new_request: false,
+            activity_revision: 0,
+            runtime_id: 0,
             in_flight: 0,
             active_request_count: 0,
             active_models: Vec::new(),
@@ -568,6 +603,9 @@ mod parity_tests {
             candidate_id: "account_unavailable".into(),
             kind: CandidateKind::OAuthAccount,
             available: false,
+            next_for_new_request: false,
+            activity_revision: 0,
+            runtime_id: 0,
             in_flight: 0,
             active_request_count: 0,
             active_models: Vec::new(),

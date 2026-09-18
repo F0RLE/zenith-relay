@@ -20,6 +20,7 @@ use std::{
     sync::Arc,
 };
 use tauri::{AppHandle, Emitter, Manager};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::AccountRecord,
     changed_runtime_source_policy_updates,
@@ -39,8 +40,8 @@ pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms
 /// A malformed source record must not make an otherwise usable local pool
 /// disappear. Keep the source in the inventory, exclude only its runtime
 /// route, and expose stable codes to the UI so it can be repaired.
-const SOURCE_PROTOCOL_INVALID_CODE: &str = "source_protocol_invalid";
-const SOURCE_RUNTIME_INVALID_CODE: &str = "source_runtime_invalid";
+const SOURCE_PROTOCOL_INVALID_CODE: &str = error_codes::SOURCE_PROTOCOL_INVALID;
+const SOURCE_RUNTIME_INVALID_CODE: &str = error_codes::SOURCE_RUNTIME_INVALID;
 
 pub(in crate::local_pool) fn record_catalog_refresh_result(
     state: &DesktopState,
@@ -71,6 +72,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         account_credentials,
         ..
     } = state.runtime_inputs().await?;
+    let pool_routing = settings.pool_routing_for(&source_records, &account_records);
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed profile can expose every verified source protocol. Requests
     // still select only the protocol they actually use at the gateway edge.
@@ -112,6 +114,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         sources.push(RuntimeSource {
             source: runtime_source,
             protocol_bindings,
+            protocol_config: source.protocol_config,
             enabled: source.enabled,
             draining: source.draining,
             priority: source.priority,
@@ -242,6 +245,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         cooldown_after_failures: settings.cooldown_after_failures,
         keep_last_candidate_available: settings.keep_last_candidate_available,
         routing_strategy: settings.routing_strategy,
+        pool_routing: Some(pool_routing),
         subscription_plan_order: settings.subscription_plan_order,
         hidden_models: settings.hidden_models,
         default_service_tier: settings.default_service_tier,
@@ -456,12 +460,31 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
     runtime: &GatewayRuntime,
 ) -> Result<bool> {
     let system_key = pool::ensure_system_gateway_key(state)?;
-    let (sources, accounts) = {
+    let (sources, accounts, settings) = {
         let store = state.store()?;
-        (store.sources().to_vec(), store.accounts().to_vec())
+        (
+            store.sources().to_vec(),
+            store.accounts().to_vec(),
+            store.gateway().clone(),
+        )
     };
+    runtime
+        .set_pool_routing_policy(
+            settings.pool_routing_for(&sources, &accounts),
+            settings.max_retry_candidates,
+            settings.cooldown_after_failures,
+            settings.keep_last_candidate_available,
+        )
+        .map_err(core_error)?;
     let (source_ids, account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
-    let scope = runtime.active_responses_scope(&source_ids, &account_ids);
+    // Authorization follows configured membership. Temporary auth failures,
+    // cooldowns and disables are enforced by the scheduler and must recover
+    // without a second membership edit.
+    let scope = zenith_relay_core::CandidateScope {
+        source_ids: Some(source_ids),
+        account_ids: Some(account_ids),
+        model_rules: Default::default(),
+    };
     Ok(runtime.update_key_scope(&system_key.id, scope))
 }
 
@@ -491,6 +514,24 @@ pub(in crate::local_pool) async fn apply_account_policy_if_running(
     )
 }
 
+/// Refresh authentication health and quota from the current durable record.
+/// Policy edits use a separate path so changing a label or priority cannot
+/// clear a scheduler failure observed during an in-flight request.
+pub(in crate::local_pool) async fn sync_account_state_if_running(
+    state: &DesktopState,
+    account_id: &str,
+) -> bool {
+    let Some(runtime) = state.gateway.runtime().await else {
+        return true;
+    };
+    let Ok(store) = state.store() else {
+        return false;
+    };
+    store
+        .account(account_id)
+        .is_some_and(|account| sync_runtime_account_state(&runtime, account, current_time_ms()))
+}
+
 /// Maps the persisted account state into the part of a live candidate that can
 /// change without replacing its OAuth executor. Pool membership affects this
 /// policy through `runtime_account_operational_state`, so adding or removing
@@ -517,7 +558,7 @@ pub(in crate::local_pool) fn runtime_account_policy(
 pub(in crate::local_pool) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<DesktopState>();
-        let result = profiles::refresh_active_codex_catalog(&state).await;
+        let result = profiles::refresh_active_client_catalogs(&state).await;
         record_catalog_refresh_result(&state, &result);
         let _ = app.emit("zenith-state-changed", ());
     });
@@ -706,7 +747,7 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         runtime.prefetch_source_model_metadata();
     }
     crate::diagnostics::breadcrumb("gateway-runtime", "catalog_refresh_started", &[]);
-    let result = profiles::refresh_active_codex_catalog(state).await;
+    let result = profiles::refresh_active_client_catalogs(state).await;
     record_catalog_refresh_result(state, &result);
     crate::diagnostics::record_operation("gateway-runtime", "restart_completed", &[]);
     Ok(())
@@ -844,6 +885,7 @@ mod tests {
                 pricing_provider: None,
                 official_provider_family: None,
                 wire_api: zenith_relay_core::WireApi::Responses,
+                protocol_config: Default::default(),
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),
@@ -911,6 +953,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec![model.into()],
             allowed_models: Vec::new(),
@@ -1209,6 +1252,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
@@ -1345,6 +1389,7 @@ mod tests {
                 pricing_provider: None,
                 official_provider_family: None,
                 wire_api: zenith_relay_core::WireApi::Responses,
+                protocol_config: Default::default(),
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),
@@ -1415,6 +1460,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["old-model".into()],
             allowed_models: Vec::new(),
@@ -1507,6 +1553,7 @@ mod tests {
                 pricing_provider: None,
                 official_provider_family: None,
                 wire_api: zenith_relay_core::WireApi::Responses,
+                protocol_config: Default::default(),
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),

@@ -11,6 +11,8 @@ pub(crate) mod remote_server;
 pub(crate) mod state;
 pub(crate) mod usage;
 
+#[cfg(test)]
+mod rotation_regression_test;
 mod runtime;
 
 use crate::local_pool::{
@@ -104,7 +106,7 @@ pub(in crate::local_pool) use runtime::{
     apply_source_policies_if_running, apply_source_policy_if_running, core_error, current_time_ms,
     fail_closed, record_catalog_refresh_result, refresh_active_codex_catalog_in_background,
     refresh_local_gateway_key_scope_if_running, restart_after_secret_change, restart_or_rollback,
-    runtime_account_policy, runtime_from_store, sync_account_or_rollback, sync_gateway_or_rollback,
-    sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
-    sync_runtime_account_state,
+    runtime_account_policy, runtime_from_store, sync_account_or_rollback,
+    sync_account_state_if_running, sync_gateway_or_rollback, sync_records_or_rollback,
+    sync_refreshed_account_or_rollback, sync_running_account_states, sync_runtime_account_state,
 };

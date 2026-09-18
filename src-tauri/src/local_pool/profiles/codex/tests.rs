@@ -247,13 +247,61 @@ fn websocket_change_preserves_user_settings_on_restore_and_failed_save() {
     );
     fs::write(&path, &current).unwrap();
     *secrets.fail_projection_save.lock().unwrap() = true;
-    assert!(set_local_gateway_websockets_with_backend(&home, &backups, false, &secrets).is_err());
+    assert!(
+        set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).is_err()
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), current);
-    set_local_gateway_websockets_with_backend(&home, &backups, false, &secrets).unwrap();
+    set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
     restore_with(&home, &backups, &secrets).unwrap();
     let restored = parse_config(&fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(restored["user_setting"].as_str(), Some("keep"));
     assert!(restored.get("model_providers").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn websocket_change_is_scoped_to_the_expected_connection() {
+    let (root, home, backups) = profile_dirs("websocket-connection-scope");
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "fixture-key",
+        &secrets,
+    )
+    .unwrap();
+    let config = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let backup = fs::read(backup_path(&backups)).unwrap();
+    assert_eq!(
+        set_local_gateway_websockets_with_backend(
+            &home,
+            &backups,
+            false,
+            Some("another-pool"),
+            &secrets,
+        )
+        .unwrap(),
+        None,
+    );
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config);
+    assert_eq!(fs::read(backup_path(&backups)).unwrap(), backup);
+    assert_eq!(
+        set_local_gateway_websockets_with_backend(
+            &home,
+            &backups,
+            false,
+            Some("local_gateway"),
+            &secrets,
+        )
+        .unwrap(),
+        Some(true),
+    );
+    let document = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        document["model_providers"][PROVIDER_ID]["supports_websockets"].as_bool(),
+        Some(false)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -266,6 +314,7 @@ fn websocket_change_does_not_create_an_absent_codex_home() {
         &home,
         &backups,
         false,
+        None,
         &MemorySecrets::default(),
     )
     .unwrap();
@@ -418,7 +467,7 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
     )
     .unwrap();
 
-    set_local_gateway_websockets_with_backend(&home, &backups, false, &secrets).unwrap();
+    set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
     assert!(fs::read_to_string(home.join(CONFIG_FILE))
         .unwrap()
         .contains("supports_websockets = false"));
@@ -427,7 +476,7 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
         serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
     assert_eq!(backup["managedSupportsWebsockets"], false);
 
-    set_local_gateway_websockets_with_backend(&home, &backups, true, &secrets).unwrap();
+    set_local_gateway_websockets_with_backend(&home, &backups, true, None, &secrets).unwrap();
     assert!(fs::read_to_string(home.join(CONFIG_FILE))
         .unwrap()
         .contains("supports_websockets = true"));
@@ -465,7 +514,7 @@ fn ready_api_websocket_setting_and_restore_use_its_managed_provider_id() {
     )
     .unwrap();
 
-    set_local_gateway_websockets_with_backend(&home, &backups, false, &secrets).unwrap();
+    set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
     let managed = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert_eq!(
         managed["model_providers"][READY_API_PROVIDER_ID]["name"].as_str(),

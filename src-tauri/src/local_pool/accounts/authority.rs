@@ -19,6 +19,7 @@ use zenith_relay_core::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
@@ -259,7 +260,7 @@ where
             let current = self.credentials.require(local_account_id).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
-                    "credential_load_failed",
+                    error_codes::CREDENTIAL_LOAD_FAILED,
                 )
             })?;
             if current.is_access_usable(now_ms, self.refresh_skew_ms) {
@@ -273,7 +274,7 @@ where
             let refresh_token = current.refresh_token().ok_or_else(|| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::ExpiredRefreshToken,
-                    "refresh_token_missing",
+                    error_codes::REFRESH_TOKEN_MISSING,
                 )
             })?;
             let refreshed = self
@@ -294,7 +295,7 @@ where
             self.credentials.save(&updated).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
-                    "credential_persist_failed",
+                    error_codes::CREDENTIAL_PERSIST_FAILED,
                 )
             })?;
             updated.to_token_refresh().map_err(|_| {
@@ -353,7 +354,7 @@ where
             let current = self
                 .credentials
                 .require(local_account_id)
-                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
             let stored = if current.generation() > tokens.generation()
                 || (current.generation() == tokens.generation()
                     && current.issued_at_ms() >= tokens.issued_at_ms())
@@ -362,16 +363,16 @@ where
             } else {
                 let updated = current
                     .with_token_set(tokens)
-                    .map_err(|_| TokenPersistenceFailure::new("invalid_token_set"))?;
-                self.credentials
-                    .save(&updated)
-                    .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
+                    .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_TOKEN_SET))?;
+                self.credentials.save(&updated).map_err(|_| {
+                    TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED)
+                })?;
                 updated
             };
             self.metadata
                 .persist_generation(local_account_id, stored.generation(), stored.issued_at_ms())
                 .await
-                .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::METADATA_PERSIST_FAILED))
         })
     }
 
@@ -384,7 +385,7 @@ where
             self.metadata
                 .persist_auth_state(local_account_id, auth_state)
                 .await
-                .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::METADATA_PERSIST_FAILED))
         })
     }
 
@@ -398,7 +399,7 @@ where
             let current = self
                 .credentials
                 .require(local_account_id)
-                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
             if let Some(current_task_id) = current
                 .agent_identity()
                 .and_then(AgentIdentityCredential::task_id)
@@ -408,10 +409,10 @@ where
             }
             let updated = current
                 .with_agent_task_id(task_id.to_string())
-                .map_err(|_| TokenPersistenceFailure::new("invalid_agent_task_id"))?;
-            self.credentials
-                .save(&updated)
-                .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_AGENT_TASK_ID))?;
+            self.credentials.save(&updated).map_err(|_| {
+                TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED)
+            })?;
             Ok(task_id.to_string())
         })
     }
@@ -520,10 +521,12 @@ fn validate_local_account_id(value: &str) -> Result<(), ProcessLockError> {
 
 fn lock_refresh_failure(error: ProcessLockError) -> TokenRefreshFailure {
     let code = match error {
-        ProcessLockError::Timeout => "refresh_lock_timeout",
-        ProcessLockError::InvalidIdentity => "invalid_account_id",
-        ProcessLockError::InvalidConfiguration => "refresh_lock_configuration",
-        ProcessLockError::Io | ProcessLockError::UnsafePath => "refresh_lock_unavailable",
+        ProcessLockError::Timeout => error_codes::REFRESH_LOCK_TIMEOUT,
+        ProcessLockError::InvalidIdentity => error_codes::INVALID_ACCOUNT_ID,
+        ProcessLockError::InvalidConfiguration => error_codes::REFRESH_LOCK_CONFIGURATION,
+        ProcessLockError::Io | ProcessLockError::UnsafePath => {
+            error_codes::REFRESH_LOCK_UNAVAILABLE
+        }
     };
     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, code)
 }

@@ -11,6 +11,7 @@ use reqwest::redirect::Policy;
 use std::time::Duration;
 use url::Url;
 use zenith_relay_core::accounts::ParsedImportItem;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     resolve_account_check_account_id, AccountCheckIdentityError, AgentIdentityCredential,
 };
@@ -42,13 +43,16 @@ impl ImportedCredentialMaterial {
         if let Some(agent) = self.agent_identity.as_ref() {
             return agent.authorization(now_ms).map_err(|_| {
                 ImportItemError::new(
-                    "agent_identity_invalid",
+                    error_codes::AGENT_IDENTITY_INVALID,
                     "Agent Identity credential is invalid",
                 )
             });
         }
         bearer_authorization(&self.access_token).map_err(|_| {
-            ImportItemError::new("access_token_rejected", "imported access token is invalid")
+            ImportItemError::new(
+                error_codes::ACCESS_TOKEN_REJECTED,
+                "imported access token is invalid",
+            )
         })
     }
 
@@ -61,7 +65,10 @@ impl ImportedCredentialMaterial {
         bearer_authorization(&self.access_token)
             .map(Some)
             .map_err(|_| {
-                ImportItemError::new("access_token_rejected", "imported access token is invalid")
+                ImportItemError::new(
+                    error_codes::ACCESS_TOKEN_REJECTED,
+                    "imported access token is invalid",
+                )
             })
     }
 
@@ -74,7 +81,7 @@ impl ImportedCredentialMaterial {
         if self.access_token.is_empty() {
             let agent_identity = self.agent_identity.ok_or_else(|| {
                 ImportItemError::new(
-                    "access_token_missing",
+                    error_codes::ACCESS_TOKEN_MISSING,
                     "ChatGPT account import has no authorization method",
                 )
             })?;
@@ -133,7 +140,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         || endpoint.fragment().is_some()
     {
         return Err(ImportItemError::new(
-            "provider_account_lookup_failed",
+            error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
             "ChatGPT account lookup endpoint is invalid",
         ));
     }
@@ -162,7 +169,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             }
             .map_err(|_| {
                 ImportItemError::new(
-                    "agent_identity_invalid",
+                    error_codes::AGENT_IDENTITY_INVALID,
                     "Agent Identity credential is invalid",
                 )
             })?,
@@ -170,7 +177,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         (None, None) => None,
         _ => {
             return Err(ImportItemError::new(
-                "agent_identity_invalid",
+                error_codes::AGENT_IDENTITY_INVALID,
                 "Agent Identity credential is incomplete",
             ))
         }
@@ -203,7 +210,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
     let Some(refresh_token) = original_refresh else {
         let agent_identity = agent_identity.ok_or_else(|| {
             ImportItemError::new(
-                "access_token_missing",
+                error_codes::ACCESS_TOKEN_MISSING,
                 "ChatGPT account import requires an access or refresh token",
             )
         })?;
@@ -229,7 +236,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
     };
     let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
         ImportItemError::new(
-            "refresh_exchange_unavailable",
+            error_codes::REFRESH_EXCHANGE_UNAVAILABLE,
             "refresh-token exchange is unavailable",
         )
     })?;
@@ -239,7 +246,7 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         .map_err(|failure| ImportItemError::new(&failure.code, "refresh-token exchange failed"))?;
     let oauth_claims = tokens.identity_claims().map_err(|_| {
         ImportItemError::new(
-            "invalid_identity_token",
+            error_codes::INVALID_IDENTITY_TOKEN,
             "refreshed identity token is invalid",
         )
     })?;
@@ -333,10 +340,15 @@ async fn lookup_import_account_id_with_hints(
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
 ) -> ItemResult<String> {
-    let authorization =
-        crate::local_pool::accounts::credentials::bearer_authorization(access_token).map_err(
-            |_| ImportItemError::new("access_token_rejected", "imported access token is invalid"),
-        )?;
+    let authorization = crate::local_pool::accounts::credentials::bearer_authorization(
+        access_token,
+    )
+    .map_err(|_| {
+        ImportItemError::new(
+            error_codes::ACCESS_TOKEN_REJECTED,
+            "imported access token is invalid",
+        )
+    })?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(timeout)
@@ -348,7 +360,7 @@ async fn lookup_import_account_id_with_hints(
     .build()
     .map_err(|_| {
         ImportItemError::new(
-            "provider_account_lookup_failed",
+            error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
             "ChatGPT account lookup client could not be created",
         )
     })?;
@@ -360,7 +372,7 @@ async fn lookup_import_account_id_with_hints(
         .await
         .map_err(|_| {
             ImportItemError::new(
-                "provider_account_lookup_failed",
+                error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
                 "ChatGPT account lookup request failed",
             )
         })?;
@@ -369,26 +381,26 @@ async fn lookup_import_account_id_with_hints(
         .await
         .map_err(|error| match error {
             LimitedBodyError::Transport => ImportItemError::new(
-                "provider_account_lookup_failed",
+                error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
                 "ChatGPT account lookup response could not be read",
             ),
             LimitedBodyError::TooLarge => ImportItemError::new(
-                "provider_account_lookup_failed",
+                error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
                 "ChatGPT account lookup response was too large",
             ),
         })?;
     if !status.is_success() {
         let (code, message) = match status.as_u16() {
             401 | 403 => (
-                "access_token_rejected",
+                error_codes::ACCESS_TOKEN_REJECTED,
                 "ChatGPT rejected the imported access token",
             ),
             429 => (
-                "account_profile_rate_limited",
+                error_codes::ACCOUNT_PROFILE_RATE_LIMITED,
                 "ChatGPT rate limited the account lookup request",
             ),
             _ => (
-                "provider_account_lookup_failed",
+                error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
                 "ChatGPT account lookup returned an unexpected status",
             ),
         };
@@ -396,7 +408,7 @@ async fn lookup_import_account_id_with_hints(
     }
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
         ImportItemError::new(
-            "provider_account_lookup_failed",
+            error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
             "ChatGPT account lookup returned invalid JSON",
         )
     })?;
@@ -407,11 +419,11 @@ async fn lookup_import_account_id_with_hints(
     resolve_account_check_account_id(&payload, &claimed_account_ids).map_err(|error| {
         let (code, message) = match error {
             AccountCheckIdentityError::Missing => (
-                "provider_account_id_missing",
+                error_codes::PROVIDER_ACCOUNT_ID_MISSING,
                 "ChatGPT account lookup did not return an account id",
             ),
             AccountCheckIdentityError::Mismatch => (
-                "account_identity_mismatch",
+                error_codes::ACCOUNT_IDENTITY_MISMATCH,
                 "imported account identity does not match the authenticated account",
             ),
         };
@@ -448,7 +460,7 @@ fn push_account_id_hint(hints: &mut Vec<String>, value: String) {
 fn ensure_account_id_hints_are_consistent(hints: &[String]) -> ItemResult<()> {
     if hints.len() > 1 {
         return Err(ImportItemError::new(
-            "account_identity_claim_conflict",
+            error_codes::ACCOUNT_IDENTITY_CLAIM_CONFLICT,
             "imported account identity claims do not agree",
         ));
     }

@@ -500,6 +500,7 @@ fn model_unauthorized_does_not_downgrade_reauthentication() {
     account.account.auth_state = AccountAuthState::RequiresReauth(
         zenith_relay_core::accounts::ReauthReason::AccessTokenExpired,
     );
+    account.account.last_error_code = Some("auth_access_token_expired".into());
     let failure = ModelDiscoveryFailure {
         code: ModelDiscoveryFailureCode::Unauthorized,
         retryable: false,
@@ -516,7 +517,7 @@ fn model_unauthorized_does_not_downgrade_reauthentication() {
     assert_eq!(account.account.health, AccountHealthState::Unhealthy);
     assert_eq!(
         account.account.last_error_code.as_deref(),
-        Some("models_unauthorized")
+        Some("auth_access_token_expired")
     );
 }
 
@@ -1003,6 +1004,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         pricing_provider: None,
         official_provider_family: None,
         wire_api: WireApi::ChatCompletions,
+        protocol_config: Default::default(),
         protocol_bindings: Vec::new(),
         models: vec!["old-model".into()],
         allowed_models: vec!["gpt-*".into()],
@@ -1079,6 +1081,7 @@ async fn source_import_rejects_an_invalid_existing_protocol_before_persisting() 
         pricing_provider: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
+        protocol_config: Default::default(),
         protocol_bindings: vec![SourceProtocolBinding {
             wire_api: WireApi::Messages,
             adapter: SourceAdapter::ResponsesToMessages,

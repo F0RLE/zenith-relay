@@ -160,7 +160,7 @@ impl AccountMetadataSink for StoreAccountMetadata {
         auth_state: zenith_relay_core::accounts::AccountAuthState,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), MetadataSinkError>> + Send + 'a>> {
         Box::pin(async move {
-            let (account, changed) = {
+            let changed = {
                 let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
                 let mut account = store
                     .account(local_account_id)
@@ -171,10 +171,15 @@ impl AccountMetadataSink for StoreAccountMetadata {
                 store
                     .upsert_account(account.clone())
                     .map_err(|_| MetadataSinkError)?;
-                (account, changed)
+                changed
             };
             if let Some(runtime) = self.gateway.runtime().await {
-                sync_runtime_account_state(&runtime, &account, current_time_ms());
+                // The gateway lock can yield while a newer account edit is
+                // persisted. Read and apply the current state under one lock.
+                let store = self.store.lock().map_err(|_| MetadataSinkError)?;
+                if let Some(account) = store.account(local_account_id) {
+                    sync_runtime_account_state(&runtime, account, current_time_ms());
+                }
             }
             if changed {
                 self.events.emit_state_changed();

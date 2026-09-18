@@ -9,6 +9,7 @@ use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
 use zenith_relay_core::accounts::{AccountAuthState, TokenSet};
+use zenith_relay_core::error_codes;
 
 #[derive(Clone)]
 struct ImportedAccountCommit {
@@ -41,7 +42,7 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     // that finished while those probes were running.
     let commit_guard = locks.acquire(&account_id).await.map_err(|_| {
         ImportItemError::new(
-            "account_changed",
+            error_codes::ACCOUNT_CHANGED,
             "account credentials changed while importing; retry the import",
         )
     })?;
@@ -50,13 +51,18 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
         .map_err(credential_item_error)?;
     if !credential_snapshots_match(previous_credentials.as_ref(), old_credential) {
         return Err(ImportItemError::new(
-            "account_changed",
+            error_codes::ACCOUNT_CHANGED,
             "account credentials changed while importing; retry the import",
         ));
     }
     let previous_account = state
         .store()
-        .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::ACCOUNT_STORE_FAILED,
+                "account store is unavailable",
+            )
+        })?
         .account(&account_id)
         .cloned();
     let runtime_sync_required = account.account.in_pool
@@ -91,7 +97,10 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             credentials,
         )?;
         return Err(if restored {
-            ImportItemError::new("account_store_failed", "failed to save account record")
+            ImportItemError::new(
+                error_codes::ACCOUNT_STORE_FAILED,
+                "failed to save account record",
+            )
         } else {
             ImportItemError::recovery(
                 "failed to save account record and the credential state changed during recovery",
@@ -130,7 +139,7 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             .is_err()
         {
             return Err(ImportItemError::new(
-                "gateway_sync_failed",
+                error_codes::GATEWAY_SYNC_FAILED,
                 "failed to apply account to the local gateway",
             ));
         }
@@ -172,7 +181,7 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
             Err(_) => {
                 rollback_after_authority_failure(state, credential_store, &locks, &commit).await?;
                 return Err(ImportItemError::new(
-                    "token_authority_failed",
+                    error_codes::TOKEN_AUTHORITY_FAILED,
                     "failed to register account token state",
                 ));
             }
@@ -210,7 +219,7 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     {
         rollback_after_authority_failure(state, credential_store, &locks, &commit).await?;
         return Err(ImportItemError::new(
-            "quota_queue_failed",
+            error_codes::QUOTA_QUEUE_FAILED,
             "failed to schedule account quota refresh",
         ));
     }

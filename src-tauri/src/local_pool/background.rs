@@ -17,6 +17,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     automations::{
         verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
@@ -402,7 +403,8 @@ async fn source_model_loop(app: AppHandle) {
                     runtime.prefetch_source_model_metadata();
                 }
                 let _mutation = state.setup_guard().await;
-                let result = super::commands::profiles::refresh_active_codex_catalog(&state).await;
+                let result =
+                    super::commands::profiles::refresh_active_client_catalogs(&state).await;
                 if let Err(error) = &result {
                     crate::diagnostics::record_error(
                         "background-catalog",
@@ -667,7 +669,7 @@ async fn settle_quota_refresh(
             let account_id = permit.account_id.clone();
             crate::diagnostics::record_error(
                 "background-quota",
-                Some("account_refresh_failed"),
+                Some(error_codes::ACCOUNT_REFRESH_FAILED),
                 &error.message,
                 &[("account", crate::diagnostics::hash_identifier(&account_id))],
             );
@@ -1018,8 +1020,8 @@ fn failed_wake_completion(code: &'static str) -> WakeCompletion {
 
 fn credential_error_code(error: &LocalPoolError) -> &'static str {
     match &error.code {
-        ErrorCode::NotFound => "wake_account_missing",
-        _ => "wake_credentials_unavailable",
+        ErrorCode::NotFound => error_codes::WAKE_ACCOUNT_MISSING,
+        _ => error_codes::WAKE_CREDENTIALS_UNAVAILABLE,
     }
 }
 

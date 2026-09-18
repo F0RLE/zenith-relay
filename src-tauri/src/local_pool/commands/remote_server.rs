@@ -88,6 +88,7 @@ pub enum RemoteServerAction {
     UpdateSource { id: String },
     DeleteSource { id: String },
     TestSource { id: String },
+    ProbeSource { id: String },
     PreviewAccountImport,
     ConfirmAccountImport,
     PreviewAccountBatchImport,
@@ -373,6 +374,7 @@ pub async fn preview_remote_configuration_preset(
             LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
         );
     };
+    require_preset_protocol_contract(&client, &preset).await?;
     client
         .preview_configuration_preset(&ConfigurationPresetPreviewInput { preset })
         .await
@@ -391,10 +393,43 @@ pub async fn apply_remote_configuration_preset(
             LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
         );
     };
+    require_preset_protocol_contract(&client, &input.preset).await?;
     client
         .apply_configuration_preset(&input)
         .await
         .map_err(remote_error)
+}
+
+async fn require_preset_protocol_contract(
+    client: &RemoteClient,
+    preset: &ConfigurationPreset,
+) -> Result<(), CommandError> {
+    let needs_contract = preset.schema_version >= 4
+        || preset.settings.sources.iter().any(|source| {
+            !source.protocol_mode.is_manual()
+                || source.protocol_bindings.iter().any(|binding| {
+                    !matches!(
+                        binding.adapter,
+                        zenith_relay_core::SourceAdapter::Native
+                            | zenith_relay_core::SourceAdapter::ResponsesToMessages
+                            | zenith_relay_core::SourceAdapter::ResponsesToGemini
+                    )
+                })
+        });
+    if needs_contract
+        && !client
+            .capabilities()
+            .await
+            .map_err(remote_error)?
+            .supports(zenith_relay_core::protocol::Feature::SourceProtocols)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::UnsupportedSchema,
+            "server does not support this configuration preset protocol version",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -612,6 +647,42 @@ pub async fn execute_remote_server_action(
         );
     };
     let (method, path, requires_payload) = action_request(&input.action)?;
+    let uses_protocol_contract = matches!(&input.action, RemoteServerAction::ProbeSource { .. })
+        || (matches!(
+            &input.action,
+            RemoteServerAction::CreateSource | RemoteServerAction::UpdateSource { .. }
+        ) && input.payload.as_ref().is_some_and(|payload| {
+            payload.get("protocolMode").is_some()
+                || payload
+                    .get("protocolBindings")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|bindings| {
+                        bindings.iter().any(|binding| {
+                            binding
+                                .get("adapter")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|adapter| {
+                                    !matches!(
+                                        adapter,
+                                        "native" | "responses_to_messages" | "responses_to_gemini"
+                                    )
+                                })
+                        })
+                    })
+        }));
+    if uses_protocol_contract
+        && !client
+            .capabilities()
+            .await
+            .map_err(remote_error)?
+            .supports(zenith_relay_core::protocol::Feature::SourceProtocols)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::UnsupportedSchema,
+            "server does not support source protocol discovery",
+        )
+        .into());
+    }
     if requires_payload && input.payload.is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -670,6 +741,11 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
             Method::POST,
             format!("{}/test", object_path("sources", id)?),
             false,
+        ),
+        RemoteServerAction::ProbeSource { id } => (
+            Method::POST,
+            format!("{}/probe", object_path("sources", id)?),
+            true,
         ),
         RemoteServerAction::PreviewAccountImport => {
             (Method::POST, "/accounts/import/preview".to_string(), true)

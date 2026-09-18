@@ -152,6 +152,7 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     let Some(target) = target else {
         return Ok(CodexCatalogRefreshStatus::Skipped);
     };
+    let mut supports_websockets = None;
     let catalog = match target {
         CodexCatalogRefreshTarget::LocalGateway(key_id) => {
             let Some(address) = state.gateway.address().await else {
@@ -166,6 +167,15 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
                 return Ok(CodexCatalogRefreshStatus::Skipped);
             };
             let secret = super::super::pool::ensure_local_gateway_key_secret(&key)?;
+            let snapshot = super::super::state::build_local_runtime_state(state)
+                .await
+                .map_err(|error| LocalPoolError::new(error.code, error.message))?;
+            supports_websockets = Some(
+                snapshot.gateway.codex_websockets_enabled
+                    && zenith_relay_core::protocol::codex_catalog_supports_websockets(
+                        &snapshot.gateway.models,
+                    ),
+            );
             fetch_codex_model_catalog(&format!("http://{address}/v1"), &secret)
                 .await
                 .map_err(|error| LocalPoolError::new(error.code, error.message))?
@@ -183,7 +193,28 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
             catalog
         }
     };
-    codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog)?;
+    let previous_transport = supports_websockets
+        .map(|enabled| {
+            codex::set_local_gateway_websockets_with_previous(
+                &profile_dir,
+                &backup_root,
+                enabled,
+                Some(&binding.credential_id),
+            )
+        })
+        .transpose()?
+        .flatten();
+    if let Err(error) = codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog) {
+        if let Some(previous) = previous_transport {
+            codex::set_local_gateway_websockets_with_previous(
+                &profile_dir,
+                &backup_root,
+                previous,
+                Some(&binding.credential_id),
+            )?;
+        }
+        return Err(error);
+    }
     Ok(CodexCatalogRefreshStatus::Updated)
 }
 

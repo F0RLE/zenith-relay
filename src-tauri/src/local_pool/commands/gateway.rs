@@ -78,7 +78,7 @@ pub async fn start_local_gateway(
         if let Some(runtime) = state.gateway.runtime().await {
             runtime.prefetch_source_model_metadata();
         }
-        let result = super::profiles::refresh_active_codex_catalog(&state).await;
+        let result = super::profiles::refresh_active_client_catalogs(&state).await;
         super::record_catalog_refresh_result(&state, &result);
         let enable_result = { state.store()?.set_gateway_enabled(true) };
         if let Err(error) = enable_result {
@@ -264,22 +264,48 @@ pub async fn set_local_codex_websockets(
 ) -> Result<LocalPoolSnapshot, CommandError> {
     let _mutation = state.setup_guard().await;
     let previous_gateway = state.store()?.gateway().clone();
-    let previous_profile =
-        crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
-            &crate::platform::default_codex_home(),
-            &state.profile_backup_root(),
-            input.enabled,
-        )
-        .map_err(CommandError::from)?;
+    let snapshot = super::state::build_local_runtime_state(&state).await?;
+    let profile_websockets = input.enabled
+        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
+    let profile_dir = crate::platform::default_codex_home();
+    let backup_root = state.profile_backup_root();
+    let local_keys = state.store()?.keys().to_vec();
+    let local_binding =
+        crate::local_pool::profiles::codex::profile_bindings(&profile_dir, &backup_root)?
+            .into_iter()
+            .find(|binding| {
+                binding.active
+                    && binding.credential_kind
+                        == crate::local_pool::profiles::codex::ProfileCredentialKind::LocalGateway
+                    && local_keys
+                        .iter()
+                        .any(|key| key.system && key.id == binding.credential_id)
+            });
+    let previous_profile = local_binding
+        .as_ref()
+        .map(|binding| {
+            crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
+                &profile_dir,
+                &backup_root,
+                profile_websockets,
+                Some(&binding.credential_id),
+            )
+        })
+        .transpose()?
+        .flatten();
     let restore_profile = || -> Result<(), CommandError> {
         let Some(previous) = previous_profile else {
             return Ok(());
         };
-        crate::local_pool::profiles::codex::set_local_gateway_websockets(
-            &crate::platform::default_codex_home(),
-            &state.profile_backup_root(),
+        crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
+            &profile_dir,
+            &backup_root,
             previous,
+            local_binding
+                .as_ref()
+                .map(|binding| binding.credential_id.as_str()),
         )
+        .map(|_| ())
         .map_err(CommandError::from)
     };
     let previous_enabled = previous_gateway.codex_websockets_enabled;
@@ -322,11 +348,47 @@ pub async fn set_codex_profile_websockets(
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
-    crate::local_pool::profiles::codex::set_local_gateway_websockets(
+    let Some((_, client)) = super::remote_server::active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    let credential = client
+        .profile_credential()
+        .await
+        .map_err(super::remote_server::remote_error)?;
+    super::profiles::verify_remote_profile_binding(
         &crate::platform::default_codex_home(),
         &state.profile_backup_root(),
-        input.enabled,
+        &credential.key_id,
+    )?;
+    let mut snapshot = client
+        .state()
+        .await
+        .map_err(super::remote_server::remote_error)?;
+    for model in &mut snapshot.gateway.models {
+        model.protocol_routes = zenith_relay_core::protocol::model_protocol_routes(
+            &model.id,
+            &snapshot.sources,
+            &snapshot.accounts,
+        );
+    }
+    let enabled = input.enabled
+        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
+    crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+        enabled,
+        Some(&credential.key_id),
     )
+    .and_then(|previous| {
+        previous.map(|_| ()).ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::Conflict,
+                "the active profile changed during the update",
+            )
+        })
+    })
     .map_err(Into::into)
 }
 
@@ -464,7 +526,7 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
             if let Some(runtime) = state.gateway.runtime().await {
                 runtime.prefetch_source_model_metadata();
             }
-            let result = super::profiles::refresh_active_codex_catalog(state).await;
+            let result = super::profiles::refresh_active_client_catalogs(state).await;
             super::record_catalog_refresh_result(state, &result);
         }
     }

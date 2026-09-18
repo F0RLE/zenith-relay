@@ -376,14 +376,6 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
     local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
 }
 
-pub fn set_local_gateway_websockets(
-    codex_home: &Path,
-    backup_root: &Path,
-    enabled: bool,
-) -> Result<()> {
-    set_local_gateway_websockets_with_previous(codex_home, backup_root, enabled).map(|_| ())
-}
-
 /// Updates the managed profile and returns the previous provider setting when
 /// the profile was managed. Callers that persist a second copy of this state
 /// can use the returned value to restore the profile if that later write fails.
@@ -391,14 +383,22 @@ pub fn set_local_gateway_websockets_with_previous(
     codex_home: &Path,
     backup_root: &Path,
     enabled: bool,
+    expected_credential_id: Option<&str>,
 ) -> Result<Option<bool>> {
-    set_local_gateway_websockets_with_backend(codex_home, backup_root, enabled, &OsSecretBackend)
+    set_local_gateway_websockets_with_backend(
+        codex_home,
+        backup_root,
+        enabled,
+        expected_credential_id,
+        &OsSecretBackend,
+    )
 }
 
 fn set_local_gateway_websockets_with_backend(
     codex_home: &Path,
     backup_root: &Path,
     enabled: bool,
+    expected_credential_id: Option<&str>,
     secrets: &impl SecretBackend,
 ) -> Result<Option<bool>> {
     let _profile_guard = lock_codex_profile();
@@ -420,6 +420,12 @@ fn set_local_gateway_websockets_with_backend(
         let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
             return Ok(None);
         };
+        if expected_credential_id.is_some_and(|id| {
+            backup.credential_kind() != ProfileCredentialKind::LocalGateway
+                || backup.managed_key_id != id
+        }) {
+            return Ok(None);
+        }
         let mut document = parse_config(config_text)?;
         if !managed_config_matches(&document, &backup) {
             return Ok(None);

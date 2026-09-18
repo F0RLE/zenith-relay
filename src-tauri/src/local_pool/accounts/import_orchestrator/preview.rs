@@ -21,6 +21,7 @@ use zenith_relay_core::accounts::{
     ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview, ImportPreviewStatus,
     ImportQuotaStatus,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::CodexQuotaClient;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -201,7 +202,7 @@ pub(super) async fn prepare_import_preview(
             });
             crate::diagnostics::record_error(
                 "account-import",
-                Some("proxy_unavailable"),
+                Some(error_codes::PROXY_UNAVAILABLE),
                 &error.message,
                 &[
                     ("session", session_hash.clone()),
@@ -276,7 +277,7 @@ pub(super) async fn prepare_import_preview(
             });
             crate::diagnostics::record_error(
                 "account-import",
-                Some("provider_account_id_missing"),
+                Some(error_codes::PROVIDER_ACCOUNT_ID_MISSING),
                 "ChatGPT account identity is missing",
                 &[
                     ("session", session_hash.clone()),
@@ -309,7 +310,7 @@ pub(super) async fn prepare_import_preview(
             });
             crate::diagnostics::record_error(
                 "account-import",
-                Some("duplicate_item"),
+                Some(error_codes::DUPLICATE_ITEM),
                 "duplicate authenticated account identity",
                 &[
                     ("session", session_hash.clone()),

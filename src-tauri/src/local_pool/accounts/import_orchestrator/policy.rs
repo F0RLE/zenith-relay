@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use zenith_relay_core::accounts::{
     AccountAuthMode, AccountHealthState, ImportAuthMode, ParsedImportItem,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::is_valid_model_id;
 
 pub(in crate::local_pool::accounts) fn ensure_account_import_item(
@@ -13,7 +14,7 @@ pub(in crate::local_pool::accounts) fn ensure_account_import_item(
 ) -> ItemResult<()> {
     if item.secrets().api_key().is_some() {
         Err(ImportItemError::new(
-            "use_source_import",
+            error_codes::USE_SOURCE_IMPORT,
             "API keys must be imported as compatible API sources",
         ))
     } else {
@@ -29,11 +30,11 @@ pub(in crate::local_pool::accounts) fn account_auth_mode(
         ImportAuthMode::AgentIdentity => Ok(AccountAuthMode::ImportedToken),
         ImportAuthMode::ImportedToken => Ok(AccountAuthMode::ImportedToken),
         ImportAuthMode::ApiKey => Err(ImportItemError::new(
-            "use_source_import",
+            error_codes::USE_SOURCE_IMPORT,
             "API keys must be imported as compatible API sources",
         )),
         ImportAuthMode::Unknown => Err(ImportItemError::new(
-            "unknown_auth_mode",
+            error_codes::UNKNOWN_AUTH_MODE,
             "imported account authentication mode is unknown",
         )),
     }

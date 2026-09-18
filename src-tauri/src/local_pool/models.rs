@@ -6,13 +6,12 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeHistory, WakeTask},
     deserialize_model_reasoning_allowed_levels, normalize_model_ids,
     normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
-    normalize_subscription_plan_order,
+    normalize_model_service_tier_overrides, normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
-    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
     ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, RuntimeCandidatePolicy,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding, WireApi,
-    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding,
+    SourceProtocolConfig, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
+    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
@@ -37,6 +36,8 @@ pub enum BindScope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     pub enabled: bool,
     pub bind_scope: BindScope,
     pub port: u16,
@@ -244,6 +245,8 @@ pub struct ProviderSourceRecord {
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    pub protocol_config: SourceProtocolConfig,
     pub models: Vec<String>,
     #[serde(default)]
     pub allowed_models: Vec<String>,
@@ -376,6 +379,7 @@ impl Default for GatewaySettings {
             cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
             keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
+            pool_routing: None,
             subscription_plan_order: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             image_base_model: None,
@@ -399,6 +403,36 @@ impl Default for GatewaySettings {
 }
 
 impl GatewaySettings {
+    pub fn pool_routing_for(
+        &self,
+        sources: &[ProviderSourceRecord],
+        accounts: &[LocalAccountRecord],
+    ) -> zenith_relay_core::PoolRoutingPolicy {
+        zenith_relay_core::resolve_pool_routing(
+            self.pool_routing.as_ref(),
+            sources
+                .iter()
+                .filter(|m| m.in_pool)
+                .map(|m| {
+                    (
+                        zenith_relay_core::PoolMemberKind::Source,
+                        m.id.clone(),
+                        m.priority,
+                        m.weight,
+                    )
+                })
+                .chain(accounts.iter().filter(|m| m.account.in_pool).map(|m| {
+                    (
+                        zenith_relay_core::PoolMemberKind::Account,
+                        m.account.id.clone(),
+                        m.priority,
+                        m.weight,
+                    )
+                }))
+                .collect(),
+        )
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
@@ -413,6 +447,9 @@ impl GatewaySettings {
             return Err("cooldown after failures must be between 1 and 8");
         }
         normalize_subscription_plan_order(self.subscription_plan_order.clone())?;
+        if let Some(policy) = &self.pool_routing {
+            policy.validate()?;
+        }
         if self
             .image_base_model
             .as_deref()
@@ -504,15 +541,21 @@ impl ProviderSourceRecord {
     /// Resolves the legacy single-protocol fields into the same shape used by
     /// current multi-protocol records without mutating persisted legacy data.
     pub fn effective_protocol_bindings(&self) -> Result<Vec<SourceProtocolBinding>, String> {
-        normalize_source_protocol_bindings(
-            self.protocol_bindings.clone(),
-            self.wire_api,
-            &self.models,
-        )
-        .map_err(|error| error.to_string())
+        self.protocol_config
+            .resolve(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn normalize_protocol_bindings(&mut self) -> Result<(), String> {
+        if self.protocol_config.mode == zenith_relay_core::ProtocolSelectionMode::Auto {
+            self.effective_protocol_bindings()?;
+            return Ok(());
+        }
         if self.protocol_bindings.is_empty() {
             return Ok(());
         }
@@ -537,17 +580,27 @@ impl ProviderSourceRecord {
     }
 
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        runtime_source_models_for_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .map_err(|error| error.to_string())
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                Some(wire_api),
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                None,
+            )
+            .map(|models| !models.is_empty())
             .map_err(|error| error.to_string())
     }
 }

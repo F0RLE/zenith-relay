@@ -33,8 +33,15 @@ mod history;
 mod policy;
 mod process;
 
+pub(in crate::local_pool) use catalog::CodexCatalogRefreshStatus;
 use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_direct_source};
-pub(in crate::local_pool) use catalog::{refresh_active_codex_catalog, CodexCatalogRefreshStatus};
+
+pub(in crate::local_pool) async fn refresh_active_client_catalogs(
+    state: &DesktopState,
+) -> LocalResult<CodexCatalogRefreshStatus> {
+    super::opencode::refresh_active_opencode_catalog(state).await?;
+    catalog::refresh_active_codex_catalog(state).await
+}
 pub(crate) use history::{
     discard_codex_history_backup, history_provider_changed, synchronize_codex_history,
     CodexHistoryProvider,
@@ -122,6 +129,9 @@ pub async fn attach_codex_to_local_gateway(
             store.gateway().codex_websockets_enabled,
         )
     };
+    let prepared = super::state::build_local_runtime_state(&state).await?;
+    let supports_websockets = supports_websockets
+        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&prepared.gateway.models);
     if !key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -219,12 +229,21 @@ pub async fn attach_codex_to_remote_gateway(
         .profile_credential()
         .await
         .map_err(super::remote_server::remote_error)?;
-    let supports_websockets = client
+    let mut remote_state = client
         .state()
         .await
-        .map_err(super::remote_server::remote_error)?
-        .gateway
-        .codex_websockets_enabled;
+        .map_err(super::remote_server::remote_error)?;
+    for model in &mut remote_state.gateway.models {
+        model.protocol_routes = zenith_relay_core::protocol::model_protocol_routes(
+            &model.id,
+            &remote_state.sources,
+            &remote_state.accounts,
+        );
+    }
+    let supports_websockets = remote_state.gateway.codex_websockets_enabled
+        && zenith_relay_core::protocol::codex_catalog_supports_websockets(
+            &remote_state.gateway.models,
+        );
     let rotate_profile_key = capabilities.supports(Feature::ProfileKeyRotation);
     let profile_dir = default_codex_home();
     let sync_history =
@@ -774,7 +793,7 @@ async fn set_runtime_pool_interface_reserve(
     }
 }
 
-fn verify_remote_profile_binding(
+pub(super) fn verify_remote_profile_binding(
     profile_dir: &std::path::Path,
     backup_root: &std::path::Path,
     key_id: &str,
@@ -909,6 +928,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["provider-model".into()],
             allowed_models: Vec::new(),

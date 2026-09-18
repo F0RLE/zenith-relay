@@ -30,6 +30,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use uuid::Uuid;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState, TokenSet},
     providers::chatgpt::{
@@ -366,7 +367,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
                 exhaustion_transitions: applied.exhaustion_transitions,
             },
             Err(_) => {
-                let failure = QuotaRefreshFailure::new("quota_invalid_response", false);
+                let failure = QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false);
                 apply_quota_failure(&mut record, &failure, now_ms);
                 AccountQuotaOutcome::Failed {
                     code: failure.code,

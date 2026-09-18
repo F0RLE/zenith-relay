@@ -14,7 +14,7 @@ use crate::local_pool::accounts::proxy::effective_proxy_config;
 use crate::local_pool::accounts::quota_service::apply_quota_failure;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::{
-    apply_account_policy_if_running, current_time_ms, sync_refreshed_account_or_rollback,
+    current_time_ms, sync_account_state_if_running, sync_refreshed_account_or_rollback,
 };
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
@@ -30,6 +30,7 @@ use tauri::State;
 use zenith_relay_core::accounts::{
     AccountAuthState, ReauthReason, TokenPersistenceAdapter, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     is_agent_identity_task_invalid_failure, merge_subscription_metadata_at,
     subscription_refresh_due, AgentIdentityCredential, CodexModelsClient, CodexQuotaClient,
@@ -321,13 +322,13 @@ async fn force_refresh_account_credentials(
             account_id,
             &current,
             ReauthReason::ExpiredRefreshToken,
-            "refresh_token_missing",
+            error_codes::REFRESH_TOKEN_MISSING,
         )
         .await?;
         return Ok(CredentialRefreshResult {
             account_id: account_id.to_string(),
             status: CredentialRefreshStatus::RequiresReauth,
-            code: "refresh_token_missing".to_string(),
+            code: error_codes::REFRESH_TOKEN_MISSING.to_string(),
             expires_at_ms: current.expires_at_ms(),
             generation: Some(current.generation()),
         });
@@ -490,7 +491,7 @@ async fn force_refresh_account_credentials(
             .await);
         }
     };
-    if !apply_account_policy_if_running(state, &account).await {
+    if !sync_account_state_if_running(state, &account.account.id).await {
         return Err(crate::local_pool::commands::fail_closed(
             state,
             "refreshed account state could not update the running account policy".to_string(),
@@ -646,11 +647,11 @@ fn token_set_is_newer(candidate: &TokenSet, current: &TokenSet) -> bool {
 fn is_credential_refresh_error_code(code: &str) -> bool {
     matches!(
         code,
-        "invalid_grant"
-            | "refresh_token_missing"
-            | "refresh_token_expired"
-            | "refresh_token_invalidated"
-            | "token_invalidated"
+        error_codes::INVALID_GRANT
+            | error_codes::REFRESH_TOKEN_MISSING
+            | error_codes::REFRESH_TOKEN_EXPIRED
+            | error_codes::REFRESH_TOKEN_INVALIDATED
+            | error_codes::TOKEN_INVALIDATED
     ) || code.starts_with("auth_")
 }
 
@@ -694,7 +695,7 @@ async fn persist_manual_refresh_failure(
     else {
         return Ok(());
     };
-    if !apply_account_policy_if_running(state, &account).await {
+    if !sync_account_state_if_running(state, &account.account.id).await {
         return Err(crate::local_pool::commands::fail_closed(
             state,
             "credential refresh failure could not update the running account policy".to_string(),
@@ -757,7 +758,7 @@ async fn persist_manual_refresh_failure(
         }
     };
     if let Some(account) = reconciled {
-        if !apply_account_policy_if_running(state, &account).await {
+        if !sync_account_state_if_running(state, &account.account.id).await {
             return Err(crate::local_pool::commands::fail_closed(
                 state,
                 "newer credential state could not update the running account policy".to_string(),
@@ -1102,7 +1103,7 @@ pub(crate) async fn sync_managed_account_profile(
             .await);
         }
     };
-    if !apply_account_policy_if_running(state, &account).await {
+    if !sync_account_state_if_running(state, &account.account.id).await {
         return Err(crate::local_pool::commands::fail_closed(
             state,
             "managed ChatGPT state could not update the running account policy".to_string(),
@@ -1375,7 +1376,7 @@ async fn refresh_account_quota_as_leader(
             }
             Err(_) if !account_requires_reauthentication(state, account_id)? => {
                 refreshed = Ok(QuotaRefreshOutcome::Failed {
-                    failure: QuotaRefreshFailure::new("quota_token_refresh", true),
+                    failure: QuotaRefreshFailure::new(error_codes::QUOTA_TOKEN_REFRESH, true),
                     subscription: subscription.clone(),
                 });
             }
@@ -1454,7 +1455,7 @@ async fn refresh_account_quota_as_leader(
                 (outcome, exhaustion_transitions)
             }
             Err(_) => {
-                let failure = QuotaRefreshFailure::new("quota_timeout", true);
+                let failure = QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true);
                 apply_quota_failure(&mut account, &failure, now_ms);
                 (
                     AccountQuotaOutcome::Failed {
@@ -1917,15 +1918,15 @@ pub(crate) fn record_quota_refresh_error(
         return Ok(());
     }
     let code = match error.code {
-        ErrorCode::SecretStoreUnavailable => "quota_secret_store",
-        ErrorCode::GatewayUnavailable => "quota_proxy_unavailable",
-        ErrorCode::Conflict => "quota_account_location",
-        ErrorCode::Io | ErrorCode::RecoveryRequired => "quota_storage",
+        ErrorCode::SecretStoreUnavailable => error_codes::QUOTA_SECRET_STORE,
+        ErrorCode::GatewayUnavailable => error_codes::QUOTA_PROXY_UNAVAILABLE,
+        ErrorCode::Conflict => error_codes::QUOTA_ACCOUNT_LOCATION,
+        ErrorCode::Io | ErrorCode::RecoveryRequired => error_codes::QUOTA_STORAGE,
         ErrorCode::InvalidState
         | ErrorCode::SourceTestFailed
         | ErrorCode::ProfileRestoreBlocked
-        | ErrorCode::UnsupportedSchema => "quota_prepare",
-        ErrorCode::NotFound => return Ok(()),
+        | ErrorCode::UnsupportedSchema => error_codes::QUOTA_PREPARE,
+        ErrorCode::NotFound | ErrorCode::SourceProbeStale => return Ok(()),
     };
     let mut store = state.store()?;
     let Some(mut account) = store.account(account_id).cloned() else {
@@ -1961,7 +1962,7 @@ pub(crate) fn record_model_refresh_error(
     // A token-expiry transition has a more actionable auth state than a
     // generic preparation error. Leave that state to the auth UI instead of
     // replacing it with `models_prepare`.
-    if account.account.auth_state.requires_fresh_login() && code == "models_prepare" {
+    if account.account.auth_state.requires_fresh_login() && code == error_codes::MODELS_PREPARE {
         return Ok(());
     }
     apply_model_discovery_failure(&mut account, code, retryable);
@@ -1970,15 +1971,15 @@ pub(crate) fn record_model_refresh_error(
 
 fn model_refresh_error_kind(code: ErrorCode) -> Option<(&'static str, bool)> {
     Some(match code {
-        ErrorCode::SecretStoreUnavailable => ("models_secret_store", true),
-        ErrorCode::GatewayUnavailable => ("models_proxy_unavailable", true),
-        ErrorCode::Conflict => ("models_account_location", false),
-        ErrorCode::Io | ErrorCode::RecoveryRequired => ("models_storage", true),
+        ErrorCode::SecretStoreUnavailable => (error_codes::MODELS_SECRET_STORE, true),
+        ErrorCode::GatewayUnavailable => (error_codes::MODELS_PROXY_UNAVAILABLE, true),
+        ErrorCode::Conflict => (error_codes::MODELS_ACCOUNT_LOCATION, false),
+        ErrorCode::Io | ErrorCode::RecoveryRequired => (error_codes::MODELS_STORAGE, true),
         ErrorCode::InvalidState | ErrorCode::SourceTestFailed | ErrorCode::UnsupportedSchema => {
-            ("models_prepare", true)
+            (error_codes::MODELS_PREPARE, true)
         }
-        ErrorCode::ProfileRestoreBlocked => ("models_profile_restore", false),
-        ErrorCode::NotFound => return None,
+        ErrorCode::ProfileRestoreBlocked => (error_codes::MODELS_PROFILE_RESTORE, false),
+        ErrorCode::NotFound | ErrorCode::SourceProbeStale => return None,
     })
 }
 

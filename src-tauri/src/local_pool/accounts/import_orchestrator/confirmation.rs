@@ -13,6 +13,7 @@ use crate::local_pool::state::DesktopState;
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter};
 use zenith_relay_core::accounts::{ImportAuthMode, ImportQuotaStatus};
+use zenith_relay_core::error_codes;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -127,17 +128,20 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         let result = match row_context.get(&item_id) {
             None => ImportItemResult::failure(
                 item_id,
-                ImportItemError::new("item_not_found", "import item was not found"),
+                ImportItemError::new(error_codes::ITEM_NOT_FOUND, "import item was not found"),
             ),
             Some(context) if !context.selectable => ImportItemResult::failure(
                 item_id,
-                ImportItemError::new("item_not_selectable", "import item cannot be selected"),
+                ImportItemError::new(
+                    error_codes::ITEM_NOT_SELECTABLE,
+                    "import item cannot be selected",
+                ),
             ),
             Some(context) => match items.remove(&item_id) {
                 None => ImportItemResult::failure(
                     item_id,
                     ImportItemError::new(
-                        "item_not_selectable",
+                        error_codes::ITEM_NOT_SELECTABLE,
                         "import item has no usable credentials",
                     ),
                 ),

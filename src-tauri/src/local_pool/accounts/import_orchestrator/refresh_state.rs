@@ -6,6 +6,7 @@ use zenith_relay_core::accounts::{
     apply_model_discovery_failure as apply_account_model_discovery_failure,
     recover_model_discovery_state,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome};
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition};
 
@@ -32,7 +33,7 @@ pub(in crate::local_pool::accounts) fn apply_quota_outcome_with_transitions(
                 applied.exhaustion_transitions,
             ),
             Err(_) => {
-                let failure = QuotaRefreshFailure::new("quota_invalid_response", false);
+                let failure = QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false);
                 apply_quota_failure(account, &failure, now_ms);
                 (
                     AccountQuotaOutcome::Failed {

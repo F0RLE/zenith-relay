@@ -8,6 +8,7 @@ use url::Url;
 use zenith_relay_core::automations::{
     WakeCompletion, WakeCompletionOutcome, WakeExecutionRequest, WakeVerificationOutcome,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{is_loopback_url, providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
 
 use super::{collect_limited, LimitedBodyError};
@@ -261,14 +262,16 @@ fn runtime_status_failure(
 ) -> WakeExecutionFailure {
     let (code, retryable) = match category {
         Some(
-            "all_sources_cooling_down"
-            | "all_sources_temporarily_unavailable"
-            | "no_eligible_source",
+            error_codes::ALL_SOURCES_COOLING_DOWN
+            | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE
+            | error_codes::NO_ELIGIBLE_SOURCE,
         ) => (WakeExecutionErrorCode::Upstream, true),
-        Some("model_not_found" | "invalid_request") => {
+        Some(error_codes::MODEL_NOT_FOUND | error_codes::INVALID_REQUEST) => {
             (WakeExecutionErrorCode::InvalidRequest, false)
         }
-        Some("upstream_body_too_large") => (WakeExecutionErrorCode::ResponseTooLarge, false),
+        Some(error_codes::UPSTREAM_BODY_TOO_LARGE) => {
+            (WakeExecutionErrorCode::ResponseTooLarge, false)
+        }
         _ => match status {
             reqwest::StatusCode::UNAUTHORIZED => (WakeExecutionErrorCode::Unauthorized, false),
             reqwest::StatusCode::FORBIDDEN => (WakeExecutionErrorCode::Forbidden, false),
@@ -342,21 +345,21 @@ pub enum WakeExecutionErrorCode {
 impl WakeExecutionErrorCode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::InvalidConfiguration => "wake_invalid_configuration",
-            Self::InvalidEndpoint => "wake_invalid_endpoint",
-            Self::InvalidAccessToken => "wake_invalid_access_token",
-            Self::InvalidProviderAccountId => "wake_invalid_provider_account_id",
-            Self::InvalidRequest => "wake_invalid_request",
-            Self::RequestTooLarge => "wake_request_too_large",
-            Self::Transport => "wake_transport",
-            Self::Timeout => "wake_timeout",
-            Self::Unauthorized => "wake_unauthorized",
-            Self::Forbidden => "wake_forbidden",
-            Self::RateLimited => "wake_rate_limited",
-            Self::Upstream => "wake_upstream",
-            Self::HttpStatus => "wake_http_status",
-            Self::ResponseTooLarge => "wake_response_too_large",
-            Self::InvalidResponse => "wake_invalid_response",
+            Self::InvalidConfiguration => error_codes::WAKE_INVALID_CONFIGURATION,
+            Self::InvalidEndpoint => error_codes::WAKE_INVALID_ENDPOINT,
+            Self::InvalidAccessToken => error_codes::WAKE_INVALID_ACCESS_TOKEN,
+            Self::InvalidProviderAccountId => error_codes::WAKE_INVALID_PROVIDER_ACCOUNT_ID,
+            Self::InvalidRequest => error_codes::WAKE_INVALID_REQUEST,
+            Self::RequestTooLarge => error_codes::WAKE_REQUEST_TOO_LARGE,
+            Self::Transport => error_codes::WAKE_TRANSPORT,
+            Self::Timeout => error_codes::WAKE_TIMEOUT,
+            Self::Unauthorized => error_codes::WAKE_UNAUTHORIZED,
+            Self::Forbidden => error_codes::WAKE_FORBIDDEN,
+            Self::RateLimited => error_codes::WAKE_RATE_LIMITED,
+            Self::Upstream => error_codes::WAKE_UPSTREAM,
+            Self::HttpStatus => error_codes::WAKE_HTTP_STATUS,
+            Self::ResponseTooLarge => error_codes::WAKE_RESPONSE_TOO_LARGE,
+            Self::InvalidResponse => error_codes::WAKE_INVALID_RESPONSE,
         }
     }
 }

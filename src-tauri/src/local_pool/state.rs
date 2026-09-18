@@ -728,6 +728,7 @@ mod tests {
                 pricing_provider: None,
                 official_provider_family: None,
                 wire_api: WireApi::Responses,
+                protocol_config: Default::default(),
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),
@@ -791,6 +792,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(3),
             total_tokens: Some(5),
+            upstream_error: None,
             quota_snapshot: None,
         });
 
@@ -1522,6 +1524,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: success.then_some(3),
             total_tokens: success.then_some(5),
+            upstream_error: None,
             quota_snapshot: None,
         }
     }
@@ -1567,6 +1570,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         }
     }
