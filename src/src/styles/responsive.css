@@ -3,7 +3,6 @@
   .relay-page { padding: 0 16px 24px; }
   .relay-page-header { min-height: 64px; }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pool-summary[data-has-provider-credits="true"] { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .pool-member-state {
     display: flex;
     align-items: center;
@@ -557,26 +556,6 @@
     grid-column: auto;
   }
 
-  .account-command-bar:has(.account-command-context > span) {
-    min-height: 0;
-    width: 100%;
-    align-items: stretch;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px;
-  }
-
-  .account-command-bar:has(.account-command-context > span) .account-command-context {
-    padding-right: 0;
-    padding-bottom: 6px;
-    border-right: 0;
-    border-bottom: 1px solid var(--relay-border);
-  }
-
-  .account-command-bar:has(.account-command-context > span) .account-command-actions {
-    justify-content: flex-start;
-  }
-
   .model-rules > header {
     padding-bottom: 10px;
   }
@@ -661,15 +640,7 @@
     justify-content: flex-start;
   }
   .metric-band,
-  .pool-summary,
-  .connections-account-summary,
   .runtime-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .pool-summary[data-has-provider-credits="true"] {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .connections-account-summary[data-has-provider-credits="true"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .overview-analytics-header {
@@ -905,9 +876,13 @@
 @media (prefers-reduced-motion: reduce) {
   .subscription-plan-order-row,
   .pool-speed-control,
-  .pool-speed-control .relay-option-trigger,
-  .pool-speed-control .relay-option-trigger > svg {
+  .pool-speed-selection,
+  .pool-speed-rail::after {
     transition: none;
+  }
+
+  .pool-speed-label {
+    animation: none;
   }
 
   .intro-mark { animation: none; }

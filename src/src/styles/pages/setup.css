@@ -1607,6 +1607,21 @@
   color: var(--relay-muted);
 }
 
+.source-price-field {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.source-price-fields {
+  display: contents;
+}
+
+.source-price-caption {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
 .source-price-input {
   min-width: 0;
   height: 34px;
@@ -1982,38 +1997,6 @@
   color: var(--relay-muted);
   font-size: 10px;
   line-height: 15px;
-}
-
-.relay-dialog.source-policy-dialog {
-  width: min(840px, 100%);
-}
-
-.source-policy-dialog .relay-dialog-body {
-  padding: 20px 24px 22px;
-}
-
-.source-policy-dialog .member-editor {
-  gap: 18px;
-}
-
-.source-policy-dialog .source-model-configuration {
-  border: 0;
-  border-top: 1px solid var(--relay-border);
-  border-radius: 0;
-  background: transparent;
-}
-
-.source-policy-dialog .source-model-configuration .source-editor-panel-summary {
-  min-height: 48px;
-  padding: 8px 0;
-}
-
-.source-policy-dialog .source-model-configuration .source-editor-panel-summary > span > small {
-  display: none;
-}
-
-.source-policy-dialog .source-model-configuration .source-price-content {
-  padding: 12px 0 0;
 }
 
 .relay-dialog .api-provider-options {

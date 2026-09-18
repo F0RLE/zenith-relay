@@ -14,6 +14,7 @@ import {
   type ApiSourceRole,
 } from "./routingOrder";
 import { groupModels } from "./modelGroups";
+import { compareOperationalStatus } from "./accountStatus";
 import {
   effectiveSourceProtocolBindings,
   normalizedAdapter,
@@ -286,7 +287,7 @@ function sourceHasOperationalModelRoute(
   return hasLiveRoute(
     routingOrder,
     "api_source",
-    matchingBindings.map((binding) => sourceCandidateId(source.id, binding, bindings.length)),
+    matchingBindings.map((binding) => sourceCandidateId(source.id, binding, source.wireApi)),
     modelId,
     nowMs,
   );
@@ -375,17 +376,11 @@ function hasLiveRoute(
 function sourceCandidateId(
   sourceId: string,
   binding: SourceProtocolBinding,
-  bindingCount: number,
+  legacyProtocol: SourceProtocolBinding["wireApi"],
 ) {
-  if (bindingCount === 1) return sourceId;
   const adapter = binding.adapter ?? "native";
-  const suffix = adapter === "responses_to_messages" && binding.wireApi === "responses"
-    ? "responses_to_messages"
-    : adapter === "responses_to_gemini" && binding.wireApi === "responses"
-      ? "responses_to_gemini"
-      : adapter === "native"
-        ? binding.wireApi
-        : "bridge";
+  if (adapter === "native" && binding.wireApi === legacyProtocol) return sourceId;
+  const suffix = adapter === "native" ? binding.wireApi : adapter;
   return `${sourceId}::${suffix}`;
 }
 
@@ -424,6 +419,7 @@ export function comparePoolMembers(
   order: Map<string, number>,
 ) {
   return (
+    compareOperationalStatus(left.operationalStatus, right.operationalStatus) ||
     compareRoutingOrder(left.id, right.id, order) ||
     compareStableText(memberName(left), memberName(right))
   );

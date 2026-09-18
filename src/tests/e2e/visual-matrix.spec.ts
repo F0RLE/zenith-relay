@@ -7,6 +7,45 @@ const locales = ["en", "ru"] as const;
 const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as const;
 const TITLE_BAR_HEIGHT = 36;
 
+for (const theme of themes) {
+  for (const locale of locales) {
+    for (const width of [1160, 840, 430]) {
+      test(`Help reading layout ${locale} ${theme} ${width}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 760 });
+        await installTauriMock(page, { mode: "local", locale, theme, populated: true });
+        await page.goto("/");
+        await page.getByRole("button", { name: locale === "ru" ? "Помощь" : "Help", exact: true }).click();
+        const article = page.locator(".help-document");
+        const contents = page.locator(".help-contents");
+        await expect(contents).toBeVisible();
+        await expect(contents.locator("a[aria-current]")).toHaveCount(1);
+        const [articleBox, contentsBox] = await Promise.all([article.boundingBox(), contents.boundingBox()]);
+        expect(articleBox).not.toBeNull();
+        expect(contentsBox).not.toBeNull();
+        if (width > 760) expect(articleBox!.x + articleBox!.width).toBeLessThan(contentsBox!.x);
+        else expect(contentsBox!.y + contentsBox!.height).toBeLessThan(articleBox!.y);
+        expect(await article.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        await page.screenshot({ path: `output/playwright/help-${locale}-${theme}-${width}.png` });
+        const errors = article.getByRole("heading", { name: locale === "ru" ? "8. Ошибки" : "8. Errors", exact: true });
+        await errors.evaluate((element) => element.scrollIntoView({ block: "start" }));
+        await expect(contents.locator("a[aria-current]")).toHaveText(locale === "ru" ? "Ошибки" : "Errors");
+        await expect(contents).toBeInViewport();
+        expect(await article.locator(".help-table-wrap, table, td").evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth))).toBe(true);
+        if (width <= 760) {
+          const [headingBox, menuBox] = await Promise.all([errors.boundingBox(), contents.boundingBox()]);
+          expect(headingBox!.y).toBeGreaterThanOrEqual(menuBox!.y + menuBox!.height);
+        }
+        await page.screenshot({ path: `output/playwright/help-errors-${locale}-${theme}-${width}.png` });
+        await article.getByRole("searchbox").fill("no_eligible_source");
+        await expect(article.locator(".help-error-group[open]")).toHaveCount(1);
+        await article.locator(".help-error-group").scrollIntoViewIfNeeded();
+        expect(await article.locator(".help-table-wrap, table, td").evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth))).toBe(true);
+        await page.screenshot({ path: `output/playwright/help-error-result-${locale}-${theme}-${width}.png` });
+      });
+    }
+  }
+}
+
 for (const viewport of viewports) {
   for (const theme of themes) {
     test(`provider credit rows stay balanced across account cards ${theme} ${viewport.width}`, async ({ page }) => {
@@ -65,7 +104,7 @@ test("connection account actions use full-width zones and centered dates", async
   const summary = page.locator(".connections-account-summary > div");
   await expect(summary).toHaveCount(4);
   await expect(page.locator(".connections-account-controls")).toBeVisible();
-  expect(await summary.evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().height)))).toEqual([42, 42, 42, 42]);
+  expect(await summary.evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().height)))).toEqual([20, 20, 20, 20]);
   await expect(actions).toHaveCount(3);
   const [cardBox, dateBox, actionBoxes] = await Promise.all([
     card.boundingBox(),
@@ -333,7 +372,7 @@ test("source prices are grouped by metadata and Messages models expose cache TTL
   await page.screenshot({ path: "output/playwright/source-pricing-groups-ru-dark-1280x900.png" });
 });
 
-test("source editor keeps each tab focused", async ({ page }) => {
+test("source editor keeps discovery compact and manual routes in advanced settings", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, mixedModels: true });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
@@ -341,49 +380,27 @@ test("source editor keeps each tab focused", async ({ page }) => {
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
-  await expect(dialog.getByRole("tab")).toHaveText(["General", "Models and formats", "Adapters", "Pricing"]);
+  await expect(dialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("API address", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("New API key (optional)", { exact: true })).toBeVisible();
-  await expect(dialog.locator(".source-price-section")).toHaveCount(0);
-  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  expect(await dialog.locator(".relay-dialog-body").evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-editor-general-en-light-1160x760.png" });
-
-  await dialog.getByRole("tab", { name: "Models and formats" }).click();
-  await expect(dialog.locator(".source-route-matrix")).toBeVisible();
-  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(4);
-  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(0);
-  expect(await dialog.locator(".source-route-matrix").evaluate((element) => ({
-    fitsDialog: element.getBoundingClientRect().bottom <= element.closest("[data-relay-dialog]")!.getBoundingClientRect().bottom,
-  }))).toEqual({ fitsDialog: true });
-  await page.screenshot({ path: "output/playwright/source-editor-routes-en-light-1160x760.png" });
-  await page.setViewportSize({ width: 840, height: 560 });
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-editor-routes-en-light-840x560.png" });
-
+  await expect(dialog.locator(".source-protocol-availability")).toBeVisible();
+  await expect(dialog.locator(".source-route-matrix")).toBeHidden();
+  for (const size of [{ width: 1160, height: 760 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(size);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/source-discovery-general-${size.width}.png` });
+  }
   await page.setViewportSize({ width: 1160, height: 760 });
-  await dialog.getByRole("tab", { name: "Adapters" }).click();
-  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(0);
-  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(2);
+  await dialog.locator(".source-add-adapters > summary").click();
+  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(4);
+  await dialog.getByRole("tab", { name: "Gemini", exact: true }).click();
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-editor-adapters-en-light-1160x760.png" });
-
-  await dialog.getByRole("tab", { name: "Pricing" }).click();
+  await page.screenshot({ path: "output/playwright/source-discovery-manual.png" });
+  await dialog.getByRole("tab", { name: "Pricing", exact: true }).click();
   await expect(dialog.locator(".source-price-tab-status")).toHaveText("API prices in use");
-  await page.screenshot({ path: "output/playwright/source-editor-pricing-en-light-1160x760.png" });
-
-  await dialog.getByRole("tab", { name: "General" }).click();
-  await page.setViewportSize({ width: 840, height: 560 });
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-  })).toBe(true);
-  await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
-  await page.screenshot({ path: "output/playwright/source-editor-general-en-light-840x560.png" });
+  await page.screenshot({ path: "output/playwright/source-discovery-pricing.png" });
 });
 
 test("reasoning modes stay balanced with the full backend level set", async ({ page }) => {
@@ -438,7 +455,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.getByRole("tab", { name: "Источники API" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
-  await dialog.getByRole("tab", { name: "Модели и форматы" }).click();
+  await dialog.locator(".source-add-adapters > summary").click();
 
   await expect(dialog.getByRole("button", { name: "Prompt-кэш: 1 час" })).toBeVisible();
   expect(await dialog.evaluate((element) => {
@@ -515,12 +532,12 @@ for (const viewport of viewports) {
 
     await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
     await expect(page.locator(".pool-priority-label")).toContainText("Порядок использования");
-    await expect(page.getByRole("button", { name: "Настройки распределения", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Настройки ротации пула", exact: true })).toBeVisible();
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
-    await expect(poolToolbarGroups.nth(0).locator(".pool-speed-control .relay-option-trigger")).toBeVisible();
-    await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Скорость запроса: Обычная", "Настройки распределения"]);
+    await expect(poolToolbarGroups.nth(0).getByRole("slider", { name: "Скорость запроса" })).toBeVisible();
+    await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки ротации пула"]);
     await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
@@ -544,23 +561,22 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
     const speed = page.locator(".pool-speed-control");
-    const speedTrigger = speed.locator(".relay-option-trigger");
-    await expect(speedTrigger).toHaveAttribute("aria-label", "Скорость запроса: Обычная");
-    await expect(speedTrigger).toBeVisible();
-    await expect(speedTrigger).toHaveAttribute("data-value", "standard");
-    await speedTrigger.click();
-    await expect(page.locator('[role="option"][data-value="ultrafast"]')).toHaveText("Сверхбыстрая");
-    await page.locator('[role="option"][data-value="fast"]').click();
-    await expect(speedTrigger).toHaveAttribute("data-value", "fast");
-    await page.screenshot({ path: `output/playwright/pool-speed-menu-ru-dark-${viewport.width}x${viewport.height}.png` });
-    await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
-    const distribution = page.getByRole("dialog", { name: "Распределение" });
+    const speedSlider = speed.getByRole("slider", { name: "Скорость запроса" });
+    await expect(speedSlider).toHaveAttribute("aria-valuetext", "Обычная");
+    await expect(speedSlider).toHaveValue("0");
+    await expect(speed.locator(".pool-speed-current")).toHaveText("Обычная");
+    await speedSlider.press("ArrowRight");
+    await expect(speedSlider).toBeEnabled();
+    await expect(speed).toHaveAttribute("data-speed-tier", "fast");
+    await expect(speed.locator(".pool-speed-current")).toHaveText("Быстрая");
+    await page.screenshot({ path: `output/playwright/pool-speed-slider-ru-dark-${viewport.width}x${viewport.height}.png` });
+    await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
+    const distribution = page.getByRole("dialog", { name: "Ротация пула" });
     await expect(distribution).not.toContainText("Скорость запроса");
-    await distribution.getByRole("button", { name: /^Стратегия распределения:/ }).click();
-    await page.locator('[role="option"][data-value="subscription_plan"]').click();
-    await expect(distribution.locator("[data-subscription-plan]")).toHaveCount(4);
+    await distribution.getByRole("radio", { name: "По порядку", exact: true }).click();
+    await expect(distribution.getByRole("listitem")).toHaveCount(6);
     expect(await distribution.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
-    await page.screenshot({ path: `output/playwright/pool-subscription-order-${viewport.width}x${viewport.height}.png` });
+    await page.screenshot({ path: `output/playwright/pool-member-order-${viewport.width}x${viewport.height}.png` });
     await distribution.getByRole("button", { name: "Отмена", exact: true }).click();
     await page.mouse.move(1, 1);
     await expect(page.getByRole("tooltip")).toHaveCount(0);
@@ -586,7 +602,7 @@ for (const viewport of viewports) {
     await expect(members.getByRole("button", { name: "Обновить", exact: true })).toHaveCount(5);
     expect(await members.locator(".pool-member-context").evaluateAll((items) => items.every((item) => getComputedStyle(item).justifyContent === "center" && getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members).not.toContainText("Доля");
-    expect(await page.getByRole("button", { name: "Настройки распределения", exact: true }).evaluate((control) => control.scrollWidth <= control.clientWidth)).toBe(true);
+    expect(await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).evaluate((control) => control.scrollWidth <= control.clientWidth)).toBe(true);
     await expect(page.getByRole("radio", { name: "Компактный вид пула" })).toHaveCount(0);
     await expect(members.locator(".pool-member-card-quota").first()).toBeVisible();
     await page.mouse.move(1, 1);
@@ -887,21 +903,15 @@ for (const viewport of viewports) {
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
-      await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
-      const dialog = page.getByRole("dialog", { name: "Распределение" });
-      const strategy = dialog.getByRole("button", { name: /^Стратегия распределения:/ });
-      await expect(strategy).toHaveAttribute("data-value", "adaptive");
-      await strategy.click();
-      await expect(page.getByRole("option", { name: "Автоматически", exact: true })).toBeVisible();
-      await expect(page.getByRole("option", { name: "По остатку квоты", exact: true })).toBeVisible();
-      await expect(page.getByRole("option", { name: "По сроку подписки", exact: true })).toBeVisible();
-      await expect(page.getByRole("option", { name: "По группам подписок", exact: true })).toBeVisible();
-      await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(4);
-      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Ротация пула" });
+      await expect(dialog.getByRole("radio")).toHaveCount(3);
+      await expect(dialog.getByRole("radio", { name: "Умный выбор", exact: true })).toHaveAttribute("aria-checked", "true");
+      await dialog.getByRole("radio", { name: "По кругу", exact: true }).click();
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
       await expect(dialog).not.toContainText("Скорость запроса");
-      await expect(dialog).toContainText("Выбирает наибольший доступный остаток, а при равных значениях распределяет запросы равномерно.");
+      await expect(dialog.getByRole("listitem")).toHaveCount(4);
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       await page.screenshot({ path: `output/playwright/routing-distribution-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -1494,9 +1504,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await expect(dialog).toBeVisible();
   await expect(dialog).not.toContainText("Приоритет при равенстве");
   await expect(dialog).not.toContainText("Доля трафика");
-  await expect(dialog.getByText("Не назначать запросы", { exact: true })).toBeVisible();
-  await dialog.locator(".member-model-rules > summary").click();
-  await expect(dialog.locator(".member-model-rules > summary")).toContainText("Модели");
+  await expect(dialog.getByRole("tab", { name: "Модели", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
   expect(await dialog.locator("[data-member-model-id]").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });

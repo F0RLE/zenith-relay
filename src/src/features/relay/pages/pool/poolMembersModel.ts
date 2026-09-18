@@ -5,6 +5,7 @@ import {
   activeModelCounts,
   activeRequestCount,
   applyRuntimeActivities,
+  currentRuntimeActivities,
   routingOrderPositions,
   runtimeCandidateForMember,
 } from "../../routingOrder";
@@ -77,7 +78,7 @@ function runtimeStateForMember(
   // The reserve event can be delivered before an old runtime snapshot lists a
   // newly active candidate. Do not hide real in-flight work merely because
   // that snapshot is behind; create the smallest display state from the event.
-  const activities = Object.values(activity?.candidates ?? {})
+  const activities = currentRuntimeActivities(runtimeOrder, Object.values(activity?.candidates ?? {}))
     .filter((candidate) => memberBelongsToCandidateId(member, candidate.candidateId));
   if (!activities.some((candidate) => candidate.activeRequestCount > 0)) return undefined;
 
@@ -137,14 +138,13 @@ export function poolActivityState(
 ): PoolActivityState {
   const effectiveOrder = activityRuntimeOrder(runtimeOrder, activity, members);
   const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
-  const activeMemberIds = new Set(activeMembers.map((member) => `${member.kind}:${member.id}`));
   const nextMember = effectiveOrder
-    .filter((candidate) => candidate.available && activeRequestCount(candidate) === 0)
+    .filter((candidate) => candidate.available && candidate.nextForNewRequest === true)
     .map((candidate) => members.find((member) =>
       candidateBelongsToMember(member, candidate)
       && memberCanRoute(member, visibleModelIds),
     ))
-    .find((member): member is PoolMember => member != null && !activeMemberIds.has(`${member.kind}:${member.id}`)) ?? null;
+    .find((member): member is PoolMember => member != null) ?? null;
   const activeRuntime = activeMembers.flatMap((member) => {
     const candidate = runtimeByMember.get(member.id);
     return candidate ? [candidate] : [];
@@ -158,9 +158,9 @@ export function poolActivityState(
       : latest
   ), null);
   const lastUsedMember = lastUsedRuntime
-    ? members.find((member) => runtimeByMember.get(member.id)?.lastUsedAtMs === lastUsedRuntime.lastUsedAtMs) ?? null
+    ? members.find((member) => candidateBelongsToMember(member, lastUsedRuntime)) ?? null
     : null;
-  const lastActivityMember = activity?.lastCandidateId
+  const lastActivityMember = activity?.lastCandidateId && (activity.runtimeId ?? 0) >= (runtimeOrder[0]?.runtimeId ?? 0)
     ? members.find((member) => memberBelongsToCandidateId(member, activity.lastCandidateId!)) ?? null
     : null;
   return {
@@ -187,7 +187,7 @@ function activityRuntimeOrder(
   members: readonly PoolMember[] = [],
 ) {
   if (!activity) return runtimeOrder;
-  const activities = Object.values(activity.candidates);
+  const activities = currentRuntimeActivities(runtimeOrder, Object.values(activity.candidates));
   const known = new Set(runtimeOrder.map((candidate) => candidate.candidateId));
   const missingActive = activities
     .filter((candidate) => candidate.activeRequestCount > 0 && !known.has(candidate.candidateId))
@@ -215,6 +215,19 @@ export function memberCanRoute(member: PoolMember, visibleModelIds?: readonly st
   if (visibleModelIds == null) return true;
   const visible = new Set(visibleModelIds.map((model) => model.toLowerCase()));
   return member.models.some((model) => visible.has(model.toLowerCase()));
+}
+
+/** Missing route telemetry is not a failure of the configured members.
+ * The exact next candidate remains a separate scheduler-owned preview. */
+export function poolRoutingAvailability(
+  members: readonly PoolMember[],
+  visibleModelIds: readonly string[],
+  activeRequestTotal: number,
+): "active" | "ready" | "noModels" | "unavailable" {
+  if (activeRequestTotal > 0) return "active";
+  if (members.some((member) => memberCanRoute(member, visibleModelIds))) return "ready";
+  if (members.some((member) => memberCanRoute(member))) return "noModels";
+  return "unavailable";
 }
 
 function candidateBelongsToMember(member: PoolMember, candidate: CandidateRuntimeSnapshot) {

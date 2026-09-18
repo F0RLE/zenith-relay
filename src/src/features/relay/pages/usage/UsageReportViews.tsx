@@ -255,6 +255,20 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
           <div><dt>{t("usage.errorCategory")}</dt><dd data-relay-tooltip={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
           <div><dt>{t("usage.endpoint")}</dt><dd><code>{routing?.endpointKind ?? formatWireApi(row.wireApi, t)}</code></dd></div>
         </dl>
+        <h3>{t("usage.upstreamError")}</h3>
+        {row.upstreamError ? <>
+          <dl className="request-details-list request-provider-fields">
+            <div><dt>{t("usage.upstreamHttpStatus")}</dt><dd>{row.upstreamError.httpStatus ?? t("common.unknown")}</dd></div>
+            {row.upstreamError.code ? <div><dt>{t("usage.upstreamErrorCode")}</dt><dd><code>{row.upstreamError.code}</code></dd></div> : null}
+            {row.upstreamError.errorType ? <div><dt>{t("usage.upstreamErrorType")}</dt><dd><code>{row.upstreamError.errorType}</code></dd></div> : null}
+          </dl>
+          {row.upstreamError.message ? <div className="request-upstream-message">
+            <pre>{row.upstreamError.message}</pre>
+            <CopyButton value={row.upstreamError.message} label={t("usage.copyUpstreamError")} />
+          </div> : <p className="form-note">{t("usage.upstreamErrorUnavailable")}</p>}
+          {row.upstreamError.redacted ? <p className="form-note">{t("usage.upstreamErrorRedacted")}</p> : null}
+          {row.upstreamError.truncated ? <p className="form-note">{t("usage.upstreamErrorTruncated")}</p> : null}
+        </> : <p className="form-note">{t("usage.upstreamErrorUnavailable")}</p>}
       </section> : null}
     </> : null}
     {section === "tokens" ? <dl className="request-details-list request-details-token-list">

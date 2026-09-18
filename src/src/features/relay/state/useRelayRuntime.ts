@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, reconcileRuntimeActivityOverlay } from "../routingOrder";
+import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
@@ -58,6 +58,7 @@ export function useRelayRuntime({
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
+  const runtimeActivityRuntimeId = useRef(0);
   const runtimeSnapshotRef = useRef<RuntimeSnapshot | null>(null);
   // Keep the scheduler order separate from the activity facts. The map also
   // retains the latest zero-count event: a routing poll can finish while a
@@ -80,6 +81,7 @@ export function useRelayRuntime({
     modeRef.current = next;
     stateRevision.current += 1;
     runtimeActivityOverlay.current.clear();
+    runtimeActivityRuntimeId.current = 0;
     runtimeRoutingOrderBase.current = [];
     runtimeSnapshotRef.current = null;
     setRuntimeActivity({ revision: 0, lastCandidateId: null, candidates: {} });
@@ -105,7 +107,7 @@ export function useRelayRuntime({
     if (modeRef.current !== requestedMode) return;
     if (requestedMode === "zenith") setReadyState(loaded.readyState);
     if (requestedMode === "local") {
-      runtimeRoutingOrderBase.current = loaded.snapshot?.gateway.routingOrder ?? [];
+      runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded.snapshot?.gateway.routingOrder ?? []);
       reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
     }
     const snapshot = loaded.snapshot && requestedMode === "local"
@@ -220,7 +222,7 @@ export function useRelayRuntime({
           : await relayCommands.remoteRuntimeOrder();
         if (!active || routingOrder == null) return;
         if (mode === "local") {
-          runtimeRoutingOrderBase.current = routingOrder;
+          runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, routingOrder);
           reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
         }
         const visibleRoutingOrder = mode === "local"
@@ -298,7 +300,7 @@ export function useRelayRuntime({
       pendingRuntimeActivity = null;
       if (pending) {
         const candidates = Object.fromEntries(runtimeActivityOverlay.current);
-        setRuntimeActivity((current) => pending.revision > current.revision
+        setRuntimeActivity((current) => compareRuntimeActivity(pending, current) > 0
           ? { ...pending, candidates }
           : current);
       }
@@ -364,14 +366,21 @@ export function useRelayRuntime({
     });
     void relayCommands.onRuntimeActivity((activity) => {
       if (!active || modeRef.current !== "local") return;
+      const runtimeId = activity.runtimeId ?? 0;
+      if (runtimeId < Math.max(runtimeActivityRuntimeId.current, runtimeRoutingOrderBase.current[0]?.runtimeId ?? 0)) return;
+      if (runtimeId > runtimeActivityRuntimeId.current) {
+        runtimeActivityOverlay.current.clear();
+        runtimeActivityRuntimeId.current = runtimeId;
+      }
       const previous = runtimeActivityOverlay.current.get(activity.candidateId);
-      if (previous && activity.revision <= previous.revision) return;
+      if (previous && compareRuntimeActivity(activity, previous) <= 0) return;
       // Keep both active and zero-count snapshots. A zero-count snapshot is a
       // tombstone for an older live poll state and must be applied to the next
       // base order as well as the current one.
       runtimeActivityOverlay.current.set(activity.candidateId, activity);
-      if (!pendingRuntimeActivity || activity.revision > pendingRuntimeActivity.revision) {
+      if (!pendingRuntimeActivity || compareRuntimeActivity(activity, pendingRuntimeActivity) > 0) {
         pendingRuntimeActivity = {
+          ...(activity.runtimeId == null ? {} : { runtimeId: activity.runtimeId }),
           revision: activity.revision,
           lastCandidateId: activity.candidateId,
           candidates: {},

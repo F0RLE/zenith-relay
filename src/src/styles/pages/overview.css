@@ -5,17 +5,9 @@
   box-shadow: var(--relay-shadow-soft);
 }
 
-.metric-band span,
-.pool-summary span {
+.metric-band span {
   color: var(--relay-muted);
   font-size: 12px;
-}
-
-.pool-summary i {
-  flex: 0 0 auto;
-  color: var(--relay-muted);
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
 }
 
 .endpoint-line code,
@@ -25,8 +17,7 @@
   white-space: nowrap;
 }
 
-.metric-band,
-.pool-summary {
+.metric-band {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin: 12px 0;
@@ -36,12 +27,7 @@
   background: var(--relay-surface);
 }
 
-.pool-summary[data-has-provider-credits="true"] {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.metric-band > div,
-.pool-summary > div {
+.metric-band > div {
   min-width: 0;
   min-height: 58px;
   display: flex;
@@ -52,16 +38,8 @@
   border-right: 1px solid var(--relay-border);
 }
 
-.metric-band > div:last-child,
-.pool-summary > div:last-child {
+.metric-band > div:last-child {
   border-right: 0;
-}
-
-.pool-summary > div > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .metric-band svg {
@@ -71,8 +49,7 @@
   color: var(--relay-info);
 }
 
-.metric-band strong,
-.pool-summary strong {
+.metric-band strong {
   min-width: 0;
   overflow: hidden;
   font-size: 20px;
@@ -222,6 +199,43 @@
 
 .overview-analytics-header h2 {
   margin: 0;
+}
+
+.source-stats-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.source-stats-metrics > div {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 4px;
+  text-align: left;
+}
+
+.source-stats-metrics dt {
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.source-stats-metrics dd {
+  grid-column: 2;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 26px;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-stats-metrics dd[data-muted="true"] {
+  color: var(--relay-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.source-stats-overview .source-stats-caption {
+  border: 0;
+  padding-top: 6px;
 }
 
 .overview-analytics-controls {

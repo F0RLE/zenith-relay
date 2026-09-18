@@ -1,4 +1,4 @@
-import type { ModelSummary } from "./api/types";
+import type { ModelSummary, RuntimeSnapshot } from "./api/types";
 
 export type ModelCatalogIdentity = Pick<
   ModelSummary,
@@ -18,6 +18,14 @@ type GroupModelsOptions<T> = {
 };
 
 const OTHER_PROVIDER = "other";
+
+/** Older servers expose metadata only on operational model rows. */
+export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefined) {
+  return new Map<string, ModelCatalogIdentity>([
+    ...(gateway?.models ?? []).map((model): [string, ModelCatalogIdentity] => [model.id.toLowerCase(), model]),
+    ...Object.entries(gateway?.modelCatalog ?? {}).map(([id, identity]): [string, ModelCatalogIdentity] => [id.toLowerCase(), identity]),
+  ]);
+}
 
 /**
  * Group models by company, never by the catalog's finer-grained families.

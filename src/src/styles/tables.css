@@ -556,23 +556,23 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 34px;
+  min-height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-top: 7px;
-  padding: 5px 9px;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 26%, var(--relay-border));
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--relay-accent) 6%, var(--relay-surface));
-  color: var(--relay-accent-hover);
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--relay-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--relay-text);
   cursor: pointer;
   font: inherit;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 16px;
   overflow: hidden;
-  transition: background 160ms ease, color 160ms ease;
+  transition: background 160ms ease, border-color 160ms ease;
 }
 
 .account-card-quota .reset-credits-control,
@@ -582,11 +582,10 @@
   grid-column: 1 / -1;
 }
 
-.reset-credits-control:hover,
+.reset-credits-control:hover:not(:disabled),
 .reset-credits-control:focus-visible {
-  border-color: color-mix(in srgb, var(--relay-accent) 58%, var(--relay-border));
-  background: color-mix(in srgb, var(--relay-accent) 13%, var(--relay-surface));
-  color: var(--relay-accent);
+  border-color: color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-accent) 6%, var(--relay-surface));
 }
 
 .reset-credits-control:disabled {
@@ -603,44 +602,41 @@
   min-width: 0;
   width: 100%;
   max-width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: center;
-  gap: 7px;
+  gap: 8px;
 }
 
 .reset-credits-status-icon {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
+  width: 14px;
+  height: 14px;
   color: var(--relay-accent-hover);
 }
 
 .reset-credits-action-label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.reset-credits-action-label {
-  color: var(--relay-accent-hover);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  color: inherit;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 500;
   line-height: 16px;
 }
 
 .reset-credits-count {
   display: inline-grid;
   min-width: 20px;
-  height: 20px;
+  height: 18px;
   place-items: center;
   padding: 0 4px;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border));
-  border-radius: 999px;
-  color: var(--relay-accent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--relay-text) 7%, transparent);
+  color: var(--relay-muted);
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 

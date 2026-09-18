@@ -1,14 +1,15 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, RefreshCw, Server, Square, Users } from "lucide-react";
+import { Activity, ArrowRight, CircleAlert, Play, RefreshCw, Server, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { SourceStats, SourceSummary } from "../../api/types";
+import type { SourceSummary } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
-import { formatProviderMicroUsd } from "../../poolFormatting";
+import { SourceStatsPanel } from "../../components/SourceStatsPanel";
+import { settledSourceStats, type SourceStatsState } from "../../sourceStatsModel";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useRelayUsageContext } from "../../state/relayStateContext";
-import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
+import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
 import { sourceHost } from "../../sourceUrl";
 import { getCachedOverviewAnalytics, isOverviewAnalyticsFresh, loadOverviewAnalytics } from "./overviewAnalyticsCache";
 import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
@@ -156,12 +157,10 @@ export function OverviewPage() {
   </section>;
 }
 function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean> }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { busy } = useRelayState();
   const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
-  const [stats, setStats] = useState<SourceStats | null>(null);
-  const [statsLoading, setStatsLoading] = useState(false);
-  const [statsError, setStatsError] = useState(false);
+  const [stats, setStats] = useState<SourceStatsState>({ value: null, loading: false, failed: false });
   const [statsRevision, setStatsRevision] = useState(0);
   const lastStatsSourceId = useRef<string | null>(null);
   const source = sources.find((item) => item.id === selection) ?? sources[0] ?? null;
@@ -169,23 +168,19 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
   useEffect(() => {
     if (!source) {
       lastStatsSourceId.current = null;
-      setStats(null);
-      setStatsError(false);
-      setStatsLoading(false);
+      setStats({ value: null, loading: false, failed: false });
       return;
     }
     let active = true;
-    const sourceChanged = lastStatsSourceId.current !== source.id;
-    lastStatsSourceId.current = source.id;
-    if (sourceChanged) setStats(null);
-    setStatsError(false);
-    setStatsLoading(true);
+    const identity = JSON.stringify([source.id, source.baseUrl, source.secretAvailable]);
+    const sourceChanged = lastStatsSourceId.current !== identity;
+    lastStatsSourceId.current = identity;
+    setStats((current) => ({ value: sourceChanged ? null : current.value, loading: true, failed: false }));
     void relayCommands.localSourceStats(source.id)
-      .then((value) => { if (active) setStats(value); })
-      .catch(() => { if (active) setStatsError(true); })
-      .finally(() => { if (active) setStatsLoading(false); });
+      .then((value) => { if (active) setStats((current) => settledSourceStats(current.value, value)); })
+      .catch(() => { if (active) setStats((current) => ({ ...current, loading: false, failed: true, error: "unavailable" })); });
     return () => { active = false; };
-  }, [source?.id, statsRevision]);
+  }, [source?.id, source?.baseUrl, source?.secretAvailable, statsRevision]);
 
   const select = (sourceId: string) => {
     localStorage.setItem("relay.directSourceId", sourceId);
@@ -196,19 +191,13 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
     await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed");
     setStatsRevision((value) => value + 1);
   };
-  const locale = i18n.resolvedLanguage ?? i18n.language;
-  const display = (value: string | null | undefined) => value || (statsLoading ? "…" : "—");
-  const money = (value: number | null | undefined) => value == null ? null : formatProviderMicroUsd(value, locale);
-  const requests = stats?.requests == null ? null : formatFullNumber(stats.requests, locale);
-  const totalTokens = stats?.totalTokens == null ? null : formatFullNumber(stats.totalTokens, locale);
   const sourceRefreshBusy = busy === "source-data-refresh";
-  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={statsLoading || sourceRefreshBusy} disabled={!source || sourceRefreshBusy} onClick={() => void refreshSourceData()}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
+  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={stats.loading || sourceRefreshBusy} disabled={!source || sourceRefreshBusy} onClick={() => void refreshSourceData()}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
     {!source ? <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>} /> : <div className="direct-api-overview">
       <div className="direct-api-toolbar"><div><strong>{source.name}</strong><code>{source.baseUrl}</code></div><OptionMenu className="direct-api-source-menu" label={t("overview.selectedSource")} value={source.id} onChange={select} options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))} /></div>
-      <div className="metric-band direct-api-metrics"><div><CreditCard aria-hidden /><span>{t("overview.balance")}</span><strong>{display(money(stats?.balanceMicroUsd))}</strong></div><div><Activity aria-hidden /><span>{t("usage.requests")}</span><strong>{display(requests)}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.spent")}</span><strong>{display(money(stats?.spentMicroUsd))}</strong></div><div><Gauge aria-hidden /><span>{t("overview.totalTokens")}</span><strong>{display(totalTokens)}</strong></div></div>
-      {statsError ? <p className="direct-api-stats-note error-text" role="alert">{t("overview.sourceStatsUnavailable")}</p> : stats?.provider === "unsupported" ? <p className="direct-api-stats-note">{t("overview.sourceStatsUnsupported")}</p> : null}
+      <SourceStatsPanel source={source} state={stats} overview />
       <section className="direct-api-models"><header><div><h2>{t("overview.availableModels")}</h2><p>{t("overview.availableModelsHint")}</p></div><strong>{source.models.length}</strong></header><ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul></section>
     </div>}
   </section>;

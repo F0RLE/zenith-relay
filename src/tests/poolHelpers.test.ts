@@ -415,11 +415,11 @@ describe("pool helpers", () => {
     expect(clampRoutingCount("bad")).toBe(1);
   });
 
-  test("keeps backend routing order even when a member is unavailable", () => {
+  test("shows ready members before unavailable ones even with an older runtime order", () => {
     const healthy = { ...account({ id: "healthy", label: "Z" }), kind: "account" as const };
     const unavailable = { ...account({ id: "unavailable", label: "A", operationalStatus: "unavailable" }), kind: "account" as const };
     const order = new Map([["unavailable", 0], ["healthy", 1]]);
-    expect(comparePoolMembers(unavailable, healthy, order)).toBeLessThan(0);
+    expect(comparePoolMembers(unavailable, healthy, order)).toBeGreaterThan(0);
   });
 
   test("sorts a multi-protocol source by its first protocol candidate", () => {

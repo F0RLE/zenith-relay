@@ -66,6 +66,19 @@ describe("account status policy", () => {
     }))).toBe("updated");
   });
 
+  test("keeps the account failure visible when quota monitoring also fails", () => {
+    for (const lastErrorCode of ["workspace_disabled", "upstream_unauthorized", "checkpoint", "captcha"]) {
+      const unavailable = account({
+        operationalStatus: "unavailable",
+        lastErrorCode,
+        quotaRefreshStatus: "failed",
+        quota: { error: { code: "quota_timeout" } },
+      });
+      expect(currentAccountErrorCode(unavailable)).toBe(lastErrorCode);
+      expect(accountQuotaRefreshState(unavailable)).toBe("failed");
+    }
+  });
+
   test("maps safe error codes to stable translation keys", () => {
     expect(accountErrorTranslationKey("HTTP 429 rate-limit")).toBe("accounts.errors.rateLimited");
     expect(accountErrorTranslationKey("INVALID_GRANT")).toBe("accounts.errors.invalidGrant");

@@ -2,7 +2,10 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Check,
   CircleAlert,
+  CircleCheck,
+  CirclePause,
   Clock3,
+  Coins,
   Copy,
   DollarSign,
   Download,
@@ -283,7 +286,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   return (
     <>
     <div className="connections-account-controls">
-    <div className="account-command-bar">
+    <div className="account-command-bar" data-selection={selectedCount > 0}>
       <div className="account-command-context">
         <input type="checkbox" aria-label={t("accounts.selectAll")} data-relay-tooltip={t("accounts.selectAll")} checked={allSelected} disabled={!accounts.length} onChange={(event) => toggleAllVisible(event.target.checked)} />
         {selectedCount ? <span>{t("accounts.selectedCount", { count: selectedCount })}</span> : <label className="search-field account-search"><span className="sr-only">{t("common.search")}</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} /></label>}
@@ -291,7 +294,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
       {!selectedCount ? <div className="account-filter-stack">
         <OptionMenu className="account-filter-menu" label={t("accounts.filterByParticipation")} value={participationFilter} options={participationOptions} onChange={(value) => { setSelected([]); setParticipationFilter(value as ParticipationFilter); }} />
         {plans.length > 1 ? <OptionMenu className="account-filter-menu" label={t("accounts.filterByPlan")} value={activePlan} options={planFilterOptions} onChange={(value) => { setSelected([]); setPlanFilter(value); }} /> : null}
-        {allAccounts.length > 1 ? <Button className="account-group-toggle" variant="secondary" icon={<Layers3 aria-hidden />} aria-label={t("accounts.groupByPlan")} aria-pressed={groupByPlan} onClick={togglePlanGrouping}>{t("accounts.groupByPlan")}</Button> : null}
+        {allAccounts.length > 1 ? <IconButton className="account-group-toggle" label={t("accounts.groupByPlan")} icon={<Layers3 aria-hidden />} aria-pressed={groupByPlan} onClick={togglePlanGrouping} /> : null}
       </div> : null}
       <div className="account-command-actions">
         {selectedCount ? <>
@@ -304,7 +307,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         </> : <>
           <IconButton className="account-calculation-toggle" label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<DollarSign aria-hidden />} aria-pressed={accountValueVisible} onClick={() => setAccountValueVisible(!accountValueVisible)} />
           {canRevealAccountIdentities && allAccounts.some((account) => account.secretAvailable) ? <IconButton label={t(accountIdentitiesVisible ? "accounts.hideAllIdentities" : "accounts.revealAllIdentities")} icon={accountIdentitiesBusy ? <Loader2 className="spin" aria-hidden /> : accountIdentitiesVisible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={accountIdentitiesBusy} onClick={() => setAccountIdentitiesVisible(!accountIdentitiesVisible)} /> : null}
-          {canRefreshQuota ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
+          {canRefreshQuota ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} aria-busy={busy === "quota-all"} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
             <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport} onClick={() => onExport(exportIds)}>{t("accounts.exportAll")}</ActionMenuItem>
             <ActionMenuItem icon={<Network aria-hidden />} disabled={!canManageProxies} onClick={() => onBulkProxies(accounts.map((account) => account.id))}>{t("proxies.assignBulk")}</ActionMenuItem>
@@ -312,11 +315,12 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
         </>}
       </div>
     </div>
-    <div className="connections-account-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"} aria-label={t("accounts.summary.label")}>
-      <div><span>{t("accounts.summary.total")}</span><i aria-hidden="true">—</i><strong>{allAccounts.length}</strong></div>
-      <div><span>{t("accounts.summary.inPool")}</span><i aria-hidden="true">—</i><strong>{inPoolCount}</strong></div>
-      <div><span>{t("accounts.summary.errors")}</span><i aria-hidden="true">—</i><strong>{errorCount}</strong></div>
-      <div><span>{t("accounts.summary.disabled")}</span><i aria-hidden="true">—</i><strong>{disabledCount}</strong></div>{providerCreditsValue != null ? <div className="connections-summary-provider-credits" data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><span>{t("pool.totalProviderCredits")}</span><i aria-hidden="true">—</i><strong>{providerCreditsValue}</strong></div> : null}
+    <div className="connections-account-summary connection-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"} aria-label={t("accounts.summary.label")}>
+      <div><UserRound aria-hidden /><strong>{allAccounts.length}</strong><span>{t("accounts.summary.total")}</span></div>
+      <div data-tone={inPoolCount ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{inPoolCount}</strong><span>{t("accounts.summary.inPool")}</span></div>
+      <div data-tone={errorCount ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{errorCount}</strong><span>{t("accounts.summary.errors")}</span></div>
+      <div data-tone="muted"><CirclePause aria-hidden /><strong>{disabledCount}</strong><span>{t("accounts.summary.disabled")}</span></div>
+      {providerCreditsValue != null ? <div className="connections-summary-provider-credits" data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
     </div>
     </div>
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><Check aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}

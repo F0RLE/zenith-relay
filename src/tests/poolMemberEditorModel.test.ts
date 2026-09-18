@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { AccountSummary, SourceSummary } from "../src/features/relay/api/types";
+import type { AccountSummary, RuntimeSnapshot, SourceSummary } from "../src/features/relay/api/types";
+import { groupModels, memberModelCatalog } from "../src/features/relay/modelGroups";
 import {
   modelSelectionForMember,
   modelSelectionPayload,
@@ -54,6 +55,22 @@ const account = (overrides: Partial<AccountSummary> = {}): AccountSummary => ({
 });
 
 describe("pool member editor model", () => {
+  test("complete metadata groups excluded models without guessing from IDs", () => {
+    const catalog = memberModelCatalog({
+      models: [{ id: "older", catalogProvider: "openai" }],
+      modelCatalog: { NEWER: { catalogProvider: "openai" }, unrelated: { catalogProvider: "anthropic" } },
+    } as RuntimeSnapshot["gateway"]);
+    const groups = groupModels(["newer", "older", "unrelated", "gpt-custom-alias"], {
+      metadata: (model) => catalog.get(model),
+    });
+    expect(groups.map((group) => [group.provider, group.items])).toEqual([
+      ["openai", ["newer", "older"]],
+      ["anthropic", ["unrelated"]],
+      ["other", ["gpt-custom-alias"]],
+    ]);
+    expect(memberModelCatalog(undefined).size).toBe(0);
+  });
+
   test("merges model sources case-insensitively and keeps explicit exclusions", () => {
     expect(modelSelectionForMember({ ...source({
       models: ["GPT-5.4", "custom"],
@@ -61,7 +78,7 @@ describe("pool member editor model", () => {
       excludedModels: ["CUSTOM"],
       modelPriceOverrides: { "model-x": { inputMicroUsdPerMillion: 1, outputMicroUsdPerMillion: 2 } },
     }), kind: "source" })).toEqual({
-      modelIds: ["model-x", "GPT-5.4", "custom"],
+      modelIds: ["GPT-5.4", "custom", "model-x"],
       enabledModels: ["GPT-5.4"],
     });
   });
@@ -69,6 +86,22 @@ describe("pool member editor model", () => {
   test("serializes a full selection as empty allow/deny lists", () => {
     expect(modelSelectionPayload(["A", "b"], ["a", "B"])).toEqual({ allowedModels: [], excludedModels: [] });
     expect(modelSelectionPayload(["A", "b"], ["a"])).toEqual({ allowedModels: ["A"], excludedModels: ["b"] });
+  });
+
+  test("account rules cannot reorder the complete backend inventory", () => {
+    const member = { ...account({
+      models: ["newer", "older", "alias"],
+      allowedModels: ["alias", "older"],
+      excludedModels: ["NEWER", "retired"],
+    }), kind: "account" as const };
+    const initial = modelSelectionForMember(member);
+    expect(initial.modelIds).toEqual(["newer", "older", "alias", "retired"]);
+    expect(initial.enabledModels).toEqual(["older", "alias"]);
+    const changed = modelSelectionPayload(initial.modelIds, ["newer", "alias"]);
+    expect(modelSelectionForMember({ ...member, ...changed })).toEqual({
+      modelIds: initial.modelIds,
+      enabledModels: ["newer", "alias"],
+    });
   });
 
   test("moves sources before or after a target without mutating the original order", () => {

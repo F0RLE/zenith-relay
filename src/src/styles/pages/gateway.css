@@ -17,33 +17,6 @@
   flex: 1;
 }
 
-.pool-summary {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin: 14px 0;
-}
-
-.pool-summary[data-has-provider-credits="true"] {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.pool-controls .pool-summary {
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--relay-border);
-  border-radius: 0;
-  background: var(--relay-subtle);
-}
-
-.pool-controls .pool-summary > div {
-  min-height: 42px;
-  padding: 7px 12px;
-}
-
-.pool-controls .pool-summary strong {
-  font-size: 17px;
-  line-height: 20px;
-}
-
 .model-rules header {
   align-items: flex-start;
   justify-content: flex-start;

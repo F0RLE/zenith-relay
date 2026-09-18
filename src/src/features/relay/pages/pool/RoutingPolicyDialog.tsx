@@ -1,96 +1,107 @@
-import { useState, type DragEvent } from "react";
-import { ArrowDown, ArrowUp, GripVertical, RotateCcw } from "lucide-react";
+import { useState, type DragEvent, type KeyboardEvent } from "react";
+import { ArrowDown, ArrowUp, Cloud, GripVertical, ListOrdered, Repeat2, Sparkles, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { RoutingStrategy } from "../../api/types";
-import { AccountPlanBadge, Button, Dialog, IconButton, OptionMenu } from "../../components/Ui";
-import { clampRoutingCount, mergeSubscriptionPlanOrder, subscriptionPlanGroups } from "../../poolHelpers";
-import { persistRoutingPolicy, type RoutingPolicy } from "../../routingPolicy";
+import type { PoolRoutingPolicy } from "../../api/types";
+import { Button, Dialog, IconButton, StatusBadge } from "../../components/Ui";
+import { compareOperationalStatus, operationalStatusTone } from "../../accountStatus";
+import { memberName } from "../../poolHelpers";
+import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { poolMembersFromRuntime } from "./poolMembersModel";
+
+const MODES = [
+  { value: "smart", icon: Sparkles },
+  { value: "in_order", icon: ListOrdered },
+  { value: "round_robin", icon: Repeat2 },
+] as const;
 
 export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
-  const planGroups = subscriptionPlanGroups(runtime?.accounts ?? [], t("common.unknown"));
-  const defaultPlanOrder = planGroups.map((group) => group.id);
-  const storedPlanOrder = runtime?.gateway.subscriptionPlanOrder ?? [];
-  const initialPlanOrder = mergeSubscriptionPlanOrder(planGroups, storedPlanOrder);
-  const initialStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
-  const [routingStrategy, setRoutingStrategy] = useState<RoutingStrategy>(initialStrategy);
-  const defaultServiceTier = runtime?.gateway.defaultServiceTier ?? "standard";
-  const [subscriptionPlanOrder, setSubscriptionPlanOrder] = useState(initialPlanOrder);
-  const [draggedPlan, setDraggedPlan] = useState<string | null>(null);
-  const [maxRetryCandidates, setMaxRetryCandidates] = useState(runtime?.gateway.maxRetryCandidates ?? 3);
-  const [cooldownAfterFailures, setCooldownAfterFailures] = useState(runtime?.gateway.cooldownAfterFailures ?? 3);
-  const [keepLastCandidateAvailable, setKeepLastCandidateAvailable] = useState(runtime?.gateway.keepLastCandidateAvailable ?? true);
-  const hasCustomPlanOrder = subscriptionPlanOrder.length !== defaultPlanOrder.length || subscriptionPlanOrder.some((plan, index) => plan !== defaultPlanOrder[index]);
-  const movePlan = (plan: string, target: string, after = false) => {
-    if (plan === target) return;
-    setSubscriptionPlanOrder((current) => {
-      const next = current.filter((value) => value !== plan);
-      const targetIndex = next.indexOf(target);
-      if (targetIndex < 0) return current;
-      next.splice(targetIndex + (after ? 1 : 0), 0, plan);
-      return next;
-    });
+  const [initial] = useState(runtime?.gateway.poolRouting);
+  const [policy, setPolicy] = useState<PoolRoutingPolicy>(initial ?? { version: 1, mode: "smart", members: [] });
+  const [dragged, setDragged] = useState<string | null>(null);
+  const members = new Map((runtime ? poolMembersFromRuntime(runtime) : []).map((member) => [`${member.kind}:${member.id}`, member]));
+  const manualOrder = policy.mode === "in_order";
+  const rows = policy.members.map((rule, index) => ({ rule, index, member: members.get(`${rule.kind}:${rule.id}`) }));
+  if (!manualOrder) rows.sort((left, right) => compareOperationalStatus(left.member?.operationalStatus ?? "unavailable", right.member?.operationalStatus ?? "unavailable"));
+  const listLabel = t(manualOrder ? "pool.memberOrder" : "pool.rotationMembers");
+  const saving = busy === "routing-policy";
+  const changedElsewhere = JSON.stringify(initial) !== JSON.stringify(runtime?.gateway.poolRouting);
+  const chooseModeWithKeyboard = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const offset = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[event.key];
+    if (offset === undefined && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? MODES.length - 1 : (index + (offset ?? 0) + MODES.length) % MODES.length;
+    const option = MODES[next];
+    if (!option) return;
+    setPolicy((current) => ({ ...current, mode: option.value }));
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
   };
-  const movePlanBy = (plan: string, offset: number) => {
-    const index = subscriptionPlanOrder.indexOf(plan);
-    const target = subscriptionPlanOrder[index + offset];
-    if (target) movePlan(plan, target, offset > 0);
-  };
-  const chooseStrategy = (value: string) => {
-    setRoutingStrategy(value as RoutingStrategy);
-  };
-  const resetPlanOrder = () => {
-    setSubscriptionPlanOrder(defaultPlanOrder);
+  const move = (from: number, to: number) => setPolicy((current) => {
+    if (saving || current.mode !== "in_order" || from === to || from < 0 || to < 0 || to >= current.members.length) return current;
+    const next = [...current.members];
+    const [member] = next.splice(from, 1);
+    if (!member) return current;
+    next.splice(to, 0, member);
+    return { ...current, members: next };
+  });
+  const updateMember = (index: number, field: "weight" | "maxConcurrency", value: number) => {
+    const min = field === "weight" ? 1 : 0;
+    const max = field === "weight" ? 100 : 1024;
+    if (!Number.isFinite(value)) return;
+    setPolicy((current) => ({ ...current, members: current.members.map((member, i) => i === index ? { ...member, [field]: Math.min(max, Math.max(min, Math.trunc(value))) } : member) }));
   };
   const save = async () => {
-    const savedPlanOrder = routingStrategy === "subscription_plan" ? subscriptionPlanOrder : [];
-    const payload: RoutingPolicy = {
-      maxRetryCandidates,
-      cooldownAfterFailures,
-      keepLastCandidateAvailable,
-      routingStrategy,
-      defaultServiceTier,
-      subscriptionPlanOrder: savedPlanOrder,
-    };
-    const ok = await perform("routing-policy", () => persistRoutingPolicy(mode, payload), "feedback.saved");
+    if (!initial || changedElsewhere || saving) return;
+    const ok = await perform("routing-policy", () => persistRoutingPolicy(mode, {
+      poolRouting: policy,
+      expectedPoolRouting: initial,
+      maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
+      cooldownAfterFailures: runtime?.gateway.cooldownAfterFailures ?? 3,
+      keepLastCandidateAvailable: runtime?.gateway.keepLastCandidateAvailable ?? true,
+      routingStrategy: runtime?.gateway.routingStrategy ?? "adaptive",
+      defaultServiceTier: runtime?.gateway.defaultServiceTier ?? "standard",
+      subscriptionPlanOrder: runtime?.gateway.subscriptionPlanOrder ?? [],
+    }), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}>
-    <div className="relay-form pool-policy-form">
-      <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{t(`pool.routingStrategyHints.${routingStrategy}`)}</small></div>
-        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} onChange={chooseStrategy} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "quota_highest", label: t("pool.routingStrategies.quotaHighest") }, { value: "subscription_expiry", label: t("pool.routingStrategies.subscriptionExpiry") }, { value: "subscription_plan", label: t("pool.routingStrategies.subscriptionPlan") }]} />
+  return <Dialog wide className="pool-routing-dialog" title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<>
+    <Button variant="secondary" disabled={saving} onClick={onClose}>{t("common.cancel")}</Button>
+    <Button variant="primary" busy={saving} disabled={!initial || changedElsewhere} onClick={() => void save()}>{t("common.save")}</Button>
+  </>}>
+    <div className="pool-routing-editor" data-manual-order={manualOrder} aria-busy={saving}>
+      <div className="pool-routing-modes" role="radiogroup" aria-label={t("pool.routingStrategy")}>
+        {MODES.map(({ value, icon: Icon }, index) => <button key={value} type="button" role="radio" aria-checked={policy.mode === value} tabIndex={policy.mode === value ? 0 : -1} disabled={saving} onKeyDown={(event) => chooseModeWithKeyboard(event, index)} onClick={() => setPolicy((current) => ({ ...current, mode: value }))}>
+          <Icon aria-hidden /><span>{t(`pool.rotationModes.${value}`)}</span>
+        </button>)}
       </div>
-      <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.maxRetryCandidates")}</strong><small>{t("pool.maxRetryCandidatesHint")}</small></div>
-        <input className="pool-policy-control" aria-label={t("pool.maxRetryCandidates")} type="number" min={1} max={8} value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(clampRoutingCount(event.target.value))} />
-      </div>
-      <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.cooldownAfterFailures")}</strong><small>{t("pool.cooldownAfterFailuresHint")}</small></div>
-        <input className="pool-policy-control" aria-label={t("pool.cooldownAfterFailures")} type="number" min={1} max={8} value={cooldownAfterFailures} onChange={(event) => setCooldownAfterFailures(clampRoutingCount(event.target.value))} />
-      </div>
-      <label className="pool-policy-toggle toggle-row"><input type="checkbox" checked={keepLastCandidateAvailable} onChange={(event) => setKeepLastCandidateAvailable(event.target.checked)} /><span>{t("pool.keepLastCandidateAvailable")}</span></label>
-      {routingStrategy === "subscription_plan" ? <div className="subscription-plan-policy">
-        <div className="subscription-plan-policy-heading"><div><strong>{t("pool.subscriptionPlanOrder")}</strong><small>{t("pool.subscriptionPlanOrderHint")}</small></div>{hasCustomPlanOrder ? <IconButton label={t("pool.resetSubscriptionPlanOrder")} icon={<RotateCcw aria-hidden />} onClick={resetPlanOrder} /> : null}</div>
-        {subscriptionPlanOrder.length ? <div className="subscription-plan-order" role="list" aria-label={t("pool.subscriptionPlanOrder")}>{subscriptionPlanOrder.map((plan, index) => {
-          const group = planGroups.find((candidate) => candidate.id === plan);
-          if (!group) return null;
+      {changedElsewhere ? <p role="alert" className="form-error">{t("pool.routingChanged")}</p> : null}
+      {!initial ? <p role="alert" className="form-error">{t("remote.capabilityUnavailable")}</p> : null}
+      <div className="pool-routing-columns" aria-hidden><span>{listLabel}</span>{!manualOrder ? <span>{t("pool.rotationWeight")}</span> : null}<span>{t("pool.rotationConcurrency")}</span>{manualOrder ? <span /> : null}</div>
+      <div className="pool-routing-order" role="list" aria-label={listLabel}>
+        {rows.map(({ rule, index, member }) => {
+          const key = `${rule.kind}:${rule.id}`;
+          const label = member ? memberName(member) : rule.id;
+          const status = member?.operationalStatus ?? "unavailable";
+          const Icon = rule.kind === "account" ? UserRound : Cloud;
           const drop = (event: DragEvent<HTMLDivElement>) => {
             event.preventDefault();
-            if (draggedPlan) movePlan(draggedPlan, plan, subscriptionPlanOrder.indexOf(draggedPlan) < index);
-            setDraggedPlan(null);
+            if (dragged) move(policy.members.findIndex((entry) => `${entry.kind}:${entry.id}` === dragged), index);
+            setDragged(null);
           };
-          return <div key={plan} className="subscription-plan-order-row" role="listitem" draggable onDragStart={() => setDraggedPlan(plan)} onDragEnd={() => setDraggedPlan(null)} onDragOver={(event) => event.preventDefault()} onDrop={drop} data-subscription-plan={plan} data-dragging={draggedPlan === plan ? "true" : "false"}>
-            <GripVertical aria-hidden />
-            <span className="subscription-plan-rank">{index + 1}</span>
-            <AccountPlanBadge planType={plan === "unknown" ? null : plan} unknown={t("common.unknown")} />
-            <small>{t("pool.subscriptionPlanAccountCount", { count: group.count })}</small>
-            <div className="inline-actions"><IconButton label={t("pool.moveSubscriptionPlanUp", { plan: group.label })} icon={<ArrowUp aria-hidden />} disabled={index === 0} onClick={() => movePlanBy(plan, -1)} /><IconButton label={t("pool.moveSubscriptionPlanDown", { plan: group.label })} icon={<ArrowDown aria-hidden />} disabled={index === subscriptionPlanOrder.length - 1} onClick={() => movePlanBy(plan, 1)} /></div>
+          return <div className="pool-routing-member" key={key} role="listitem" data-member-id={key} data-status={status} data-dragging={dragged === key || undefined} onDragOver={manualOrder ? (event) => event.preventDefault() : undefined} onDrop={manualOrder ? drop : undefined}>
+            <div className="pool-routing-identity">
+              {manualOrder ? <><button type="button" className="pool-routing-handle" disabled={saving} draggable={!saving} aria-label={t("pool.reorderMember", { name: label })} data-relay-tooltip={t("pool.reorderMember", { name: label })} onDragStart={() => setDragged(key)} onDragEnd={() => setDragged(null)}><GripVertical aria-hidden /></button><span className="pool-routing-rank">{index + 1}</span></> : null}
+              <Icon aria-hidden />
+              <span className="pool-routing-name"><strong>{label}</strong><span className="pool-routing-meta"><small>{t(rule.kind === "account" ? "pool.accountMember" : "pool.apiMember")}</small><StatusBadge status={operationalStatusTone(status)} label={t(`pool.memberStatus.${status}`)} /></span></span>
+            </div>
+            {!manualOrder ? <label className="pool-routing-number"><span>{t("pool.rotationWeight")}</span><input aria-label={t("pool.memberWeight", { name: label })} type="number" min={1} max={100} disabled={saving} value={rule.weight} onChange={(event) => updateMember(index, "weight", event.currentTarget.valueAsNumber)} /></label> : null}
+            <label className="pool-routing-number"><span>{t("pool.rotationConcurrency")}</span><input aria-label={t("pool.memberConcurrency", { name: label })} aria-valuetext={rule.maxConcurrency === 0 ? t("pool.unlimitedConcurrency") : undefined} placeholder={t("pool.unlimitedConcurrency")} type="number" min={1} max={1024} disabled={saving} value={rule.maxConcurrency || ""} onChange={(event) => updateMember(index, "maxConcurrency", event.currentTarget.value === "" ? 0 : event.currentTarget.valueAsNumber)} /></label>
+            {manualOrder ? <div className="inline-actions"><IconButton label={t("pool.moveMemberUp", { name: label })} icon={<ArrowUp aria-hidden />} disabled={saving || index === 0} onClick={() => move(index, index - 1)} /><IconButton label={t("pool.moveMemberDown", { name: label })} icon={<ArrowDown aria-hidden />} disabled={saving || index === policy.members.length - 1} onClick={() => move(index, index + 1)} /></div> : null}
           </div>;
-        })}</div> : <p className="form-note">{t("pool.noSubscriptionPlanGroups")}</p>}
-      </div> : null}
+        })}
+      </div>
     </div>
   </Dialog>;
 }

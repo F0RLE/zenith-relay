@@ -573,6 +573,30 @@
   font-size: 13px;
 }
 
+.request-upstream-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.request-provider-fields dd,
+.request-provider-fields code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+}
+
+.request-upstream-message pre {
+  flex: 1;
+  min-width: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .request-details-section .form-note { margin-top: 12px; }
 
 @media (max-width: 620px) {

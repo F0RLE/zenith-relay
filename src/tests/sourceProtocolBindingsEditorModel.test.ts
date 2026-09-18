@@ -14,7 +14,7 @@ const native = (wireApi: SourceProtocolBinding["wireApi"], modelIds: string[] = 
   adapter: "native",
   reasoningMode: "disabled",
   modelIds,
-  cacheWriteTtl: wireApi === "messages" ? "1h" : "provider",
+  cacheWriteTtl: "provider",
 });
 
 describe("source protocol bindings editor model", () => {
@@ -39,7 +39,7 @@ describe("source protocol bindings editor model", () => {
     })).toEqual([]);
   });
 
-  test("moves a model between incompatible routes while preserving a legacy final route", () => {
+  test("assigns a model independently to multiple routes while preserving a legacy final route", () => {
     const bindings = [native("responses", ["gpt-5.4"]), native("messages", ["claude-opus"])] as const;
     const moved = updateModelRoute({
       bindings,
@@ -50,7 +50,7 @@ describe("source protocol bindings editor model", () => {
       model: "claude-opus",
       selected: true,
     });
-    expect(moved.map((binding) => binding.modelIds)).toEqual([["gpt-5.4", "claude-opus"], []]);
+    expect(moved.map((binding) => binding.modelIds)).toEqual([["gpt-5.4", "claude-opus"], ["claude-opus"]]);
 
     const legacy = [native("responses", ["gpt-5.4"])] as const;
     expect(updateModelRoute({
@@ -105,7 +105,7 @@ describe("source protocol bindings editor model", () => {
       {
         wireApi: "responses",
         adapter: "responses_to_gemini",
-        reasoningMode: "disabled",
+        reasoningMode: "adaptive",
         modelIds: ["claude-opus"],
       },
     ]);
@@ -132,5 +132,19 @@ describe("source protocol bindings editor model", () => {
       },
     ], "5m");
     expect(next.map((binding) => binding.cacheWriteTtl)).toEqual(["provider", "5m", "5m"]);
+  });
+
+  test("keeps native and two converted paths for the same input and model", () => {
+    let bindings = [native("responses", ["gpt-5.4"])];
+    for (const adapter of ["responses_to_messages", "responses_to_gemini"] as const) {
+      bindings = updateModelRoute({ bindings, models, autoAssignModels: true,
+        wireApi: "responses", adapter, model: "gpt-5.4", selected: true });
+    }
+    expect(bindings.map((binding) => binding.modelIds)).toEqual([
+      ["gpt-5.4"], ["gpt-5.4"], ["gpt-5.4"],
+    ]);
+    const removed = updateModelRoute({ bindings, models, autoAssignModels: true,
+      wireApi: "responses", adapter: "responses_to_messages", model: "gpt-5.4", selected: false });
+    expect(removed.map((binding) => binding.adapter)).toEqual(["native", "responses_to_gemini"]);
   });
 });

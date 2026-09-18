@@ -7,7 +7,7 @@ import { operationalStatusTone, transientCandidateTone } from "../../accountStat
 import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolBindingsEditor";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
-import { effectiveSourceProtocolBindings, sourceSupportsAnyWireApi, sourceSupportsNativeResponses } from "../../sourceProtocolBindings";
+import { effectiveSourceProtocolBindings, sourceSupportsAnyWireApi, sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../../sourceProtocolBindings";
 import { sourceHost } from "../../sourceUrl";
 import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -131,12 +131,12 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
         <tbody>{sources.map((source) => {
           const launchBusy = busy === `launch-source-${source.id}`;
           const supportsAnyRoute = sourceSupportsAnyWireApi(source);
-          const supportsNativeResponses = sourceSupportsNativeResponses(source);
-          const launchDisabled = !localSource || !supportsNativeResponses || !source.enabled || !source.secretAvailable || launchBusy;
+          const supportsNative = sourceSupportsNativeProtocol(source);
+          const launchDisabled = !localSource || !supportsNative || !source.enabled || !source.secretAvailable || launchBusy;
           const launchTitle = !localSource
             ? t("sources.launchLocalOnly")
-            : !supportsNativeResponses
-              ? t("sources.launchResponsesOnly")
+            : !supportsNative
+              ? t("sources.launchNativeOnly")
               : !source.enabled || !source.secretAvailable
                 ? t("sources.launchUnavailable")
                 : t("sources.launch");
@@ -188,6 +188,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
       {launchSource ? <ApplicationPickerDialog
         title={t("sources.launchPickerTitle")}
         showLaunchToggle={false}
+        chatGPTDisabled={!sourceSupportsNativeResponses(launchSource)}
         onClose={() => setLaunchSourceId(null)}
         onChatGPT={() => {
           void activateCodexProfile(`launch-source-${launchSource.id}`, () => relayCommands.launchCodexSource(launchSource.id), true)

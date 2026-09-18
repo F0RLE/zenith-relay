@@ -1,5 +1,5 @@
 import type { AccountSummary } from "../../api/types";
-import { currentAccountErrorCode } from "../../accountStatus";
+import { compareOperationalStatus, currentAccountErrorCode } from "../../accountStatus";
 import { accountPlanOption, compareAccountPlans, compareRoutingOrder } from "../../routingOrder";
 import { compareStableText } from "../../poolHelpers";
 import { matchesQuery } from "./connectionHelpers";
@@ -53,9 +53,11 @@ export function filterAndSortAccounts(
     .filter((account) => participationFilter === "all" || (participationFilter === "included") === accountParticipates(account))
     .sort((left, right) => groupByPlan
       ? compareAccountPlans(accountPlanOption(left.subscription.planType, unknown), accountPlanOption(right.subscription.planType, unknown))
+        || compareOperationalStatus(left.operationalStatus, right.operationalStatus)
         || compareRoutingOrder(left.id, right.id, runtimePosition)
         || compareStableText(left.identityHint || left.label, right.identityHint || right.label)
-      : compareRoutingOrder(left.id, right.id, runtimePosition)
+      : compareOperationalStatus(left.operationalStatus, right.operationalStatus)
+        || compareRoutingOrder(left.id, right.id, runtimePosition)
         || compareStableText(left.identityHint || left.label, right.identityHint || right.label));
 }
 
