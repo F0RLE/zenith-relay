@@ -197,16 +197,19 @@ function GatewayRuntimePanel({ running }: { running: boolean }) {
 
 function GatewayChatGPTTab() {
   const { t } = useTranslation();
-  const { mode } = useRelayState();
+  const { mode, runtime } = useRelayState();
   if (mode === "zenith") return <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />;
+  const showSettings = mode === "local" || runtime?.capabilities.features.some((feature) =>
+    feature === "codex_background_tasks" || feature === "codex_websockets" || feature === "chatgpt_retry_until_available",
+  );
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.chatgpt")}>
     <div className="gateway-workspace">
-      <div className="gateway-settings-panel gateway-application-panel">
-        <ChatGPTSetup />
+      <ChatGPTSetup />
+      {showSettings ? <div className="gateway-settings-panel gateway-application-panel">
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
         <ChatgptRetryUntilAvailableControl className="gateway-setting-row" />
-      </div>
+      </div> : null}
     </div>
   </section>;
 }
@@ -240,7 +243,7 @@ function ChatGPTSetup() {
   if (mode === "remote") {
     const canAttach = Boolean(runtime?.capabilities.features.includes("profile_attach"));
     const switchRemote = () => activateCodexProfile("gateway-client-switch", relayCommands.attachCodexRemoteGateway, true);
-    return <section className="gateway-setting-row client-setup codex-client-setup client-oauth-binding remote-client-setup">
+    return <section className="gateway-account-panel client-setup codex-client-setup client-oauth-binding remote-client-setup">
       <header>
         <span className="gateway-config-icon"><UserRound aria-hidden /></span>
         <div><h2>{t("gateway.clientSetup")}</h2><p>{t("gateway.remoteClientHint")}</p></div>
@@ -267,7 +270,7 @@ function ChatGPTSetup() {
     true,
   );
 
-  return <section className="gateway-setting-row client-setup codex-client-setup client-oauth-binding">
+  return <section className="gateway-account-panel client-setup codex-client-setup client-oauth-binding">
     <header>
       <span className="gateway-config-icon"><UserRound aria-hidden /></span>
       <div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div>
@@ -278,7 +281,7 @@ function ChatGPTSetup() {
       </div>
       <Button className="oauth-binding-switch" variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")} onClick={() => void switchNow()}>{t("gateway.oauthBindingSwitch")}</Button>
       {automaticUnavailable ? <small className="oauth-binding-selection-hint warning"><CircleAlert aria-hidden /><span>{t("gateway.oauthBindingUnavailable")}</span></small> : null}
-      {codexPoolOauthSelection !== "none" ? <SettingToggle className="oauth-binding-reserve-toggle" label={t("gateway.oauthBindingReserve")} description={t("gateway.oauthBindingReserveHint")} checked={reserveEnabled} disabled={busy === "chatgpt-quota-reserve"} onChange={(checked) => void perform("chatgpt-quota-reserve", () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0), "feedback.saved")} /> : null}
     </div>
+    {codexPoolOauthSelection !== "none" ? <SettingToggle className="oauth-binding-reserve-toggle" label={t("gateway.oauthBindingReserve")} description={t("gateway.oauthBindingReserveHint")} checked={reserveEnabled} disabled={busy === "chatgpt-quota-reserve"} onChange={(checked) => void perform("chatgpt-quota-reserve", () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0), "feedback.saved")} /> : null}
   </section>;
 }

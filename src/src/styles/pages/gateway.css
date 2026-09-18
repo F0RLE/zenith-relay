@@ -78,191 +78,34 @@
   flex: 1;
 }
 
-.codex-background-tasks-control {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(240px, 0.8fr) minmax(280px, 1.2fr);
-  align-items: center;
-  gap: 24px;
-  padding: 14px 16px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
-}
-
-.codex-websockets-control,
-.chatgpt-retry-until-available-control {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(240px, 0.8fr) minmax(280px, 1.2fr);
-  align-items: center;
-  gap: 24px;
-  padding: 14px 16px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
-}
-
-.gateway-settings-panel > .codex-background-tasks-control,
-.gateway-settings-panel > .codex-websockets-control,
-.gateway-settings-panel > .chatgpt-retry-until-available-control {
-  border: 0;
-  border-bottom: 1px solid var(--relay-border);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.codex-background-tasks-heading {
+.codex-feature-heading {
   min-width: 0;
   display: flex;
   align-items: flex-start;
   gap: 10px;
 }
 
-.codex-background-tasks-heading > div {
+.codex-feature-heading > div {
   min-width: 0;
 }
 
-.codex-background-tasks-heading h2,
-.codex-background-tasks-heading p {
+.codex-feature-heading h2,
+.codex-feature-heading p {
   margin: 0;
 }
 
-.codex-background-tasks-heading h2 {
+.codex-feature-heading h2 {
   color: var(--relay-text);
   font-size: 13px;
   line-height: 18px;
 }
 
-.codex-background-tasks-heading p {
+.codex-feature-heading p {
   max-width: 620px;
   margin-top: 3px;
   color: var(--relay-muted);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.codex-background-tasks-icon {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  flex: 0 0 30px;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
-}
-
-.codex-background-tasks-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.codex-background-tasks-toggle {
-  min-height: 48px;
-}
-
-.codex-websockets-heading {
-  min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.codex-websockets-heading > div {
-  min-width: 0;
-}
-
-.codex-websockets-heading h2,
-.codex-websockets-heading p {
-  margin: 0;
-}
-
-.codex-websockets-heading h2 {
-  color: var(--relay-text);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 18px;
-}
-
-.codex-websockets-heading p {
-  max-width: 620px;
-  margin-top: 3px;
-  color: var(--relay-muted);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.codex-websockets-icon {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  flex: 0 0 30px;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
-}
-
-.codex-websockets-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.codex-websockets-toggle {
-  min-height: 48px;
-}
-
-.chatgpt-retry-until-available-heading {
-  min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.chatgpt-retry-until-available-heading > div {
-  min-width: 0;
-}
-
-.chatgpt-retry-until-available-heading h2,
-.chatgpt-retry-until-available-heading p {
-  margin: 0;
-}
-
-.chatgpt-retry-until-available-heading h2 {
-  color: var(--relay-text);
-  font-size: 13px;
-  line-height: 18px;
-}
-
-.chatgpt-retry-until-available-heading p {
-  max-width: 620px;
-  margin-top: 3px;
-  color: var(--relay-muted);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.chatgpt-retry-until-available-icon {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  flex: 0 0 30px;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
-}
-
-.chatgpt-retry-until-available-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.chatgpt-retry-until-available-toggle {
-  min-height: 48px;
 }
 
 .gateway-workspace > .gateway-runtime-panel {
@@ -273,7 +116,8 @@
   box-shadow: var(--relay-shadow-soft);
 }
 
-.gateway-settings-panel {
+.gateway-settings-panel,
+.gateway-account-panel {
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--relay-border);
@@ -399,18 +243,35 @@
   border-bottom: 1px solid var(--relay-border);
 }
 
+.gateway-setting-row.codex-feature-control {
+  min-height: 84px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  padding: 18px 20px;
+}
+
+.gateway-account-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  align-items: center;
+  gap: 16px 24px;
+  padding: 20px;
+}
+
 .gateway-setting-row:last-child {
   border-bottom: 0;
 }
 
-.gateway-setting-row > header {
+.gateway-setting-row > header,
+.gateway-account-panel > header {
   min-width: 0;
   display: flex;
   align-items: flex-start;
   gap: 10px;
 }
 
-.gateway-setting-row > header > div {
+.gateway-setting-row > header > div,
+.gateway-account-panel > header > div {
   min-width: 0;
   flex: 1;
 }
@@ -1335,14 +1196,9 @@
 }
 
 .oauth-binding-settings {
+  min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(230px, 280px);
-  align-items: start;
-  gap: 12px;
-}
-
-.gateway-settings-panel .oauth-binding-settings {
-  grid-template-columns: minmax(240px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px 12px;
 }
@@ -1450,6 +1306,41 @@
 .setting-toggle input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--relay-focus);
   outline-offset: 2px;
+}
+
+.setting-toggle.codex-feature-toggle,
+.setting-toggle.oauth-binding-reserve-toggle {
+  min-height: 36px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.setting-toggle.codex-feature-toggle:has(input:checked),
+.setting-toggle.oauth-binding-reserve-toggle:has(input:checked) {
+  border-color: var(--relay-border);
+  background: transparent;
+}
+
+.setting-toggle.codex-feature-toggle {
+  display: flex;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 6px 0;
+}
+
+.codex-feature-toggle strong {
+  display: none;
+}
+
+.codex-feature-toggle small {
+  max-width: 170px;
+  text-align: right;
+}
+
+.setting-toggle.oauth-binding-reserve-toggle {
+  padding: 14px 0 0 40px;
+  border-top: 1px solid var(--relay-border);
 }
 
 .remote-connect-options {

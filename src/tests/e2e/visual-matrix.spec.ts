@@ -1339,6 +1339,15 @@ for (const theme of themes) {
       expect(reserveBox!.y).toBeGreaterThanOrEqual(accountBox!.y + accountBox!.height + 8);
       expect(reserveBox!.width).toBeGreaterThanOrEqual(34);
       expect(reserveBox!.height).toBeGreaterThanOrEqual(20);
+      const switchEdges = await page.locator('.gateway-tab-panel input[type="checkbox"]').evaluateAll((inputs) =>
+        inputs.map((input) => input.getBoundingClientRect().right),
+      );
+      expect(Math.max(...switchEdges) - Math.min(...switchEdges)).toBeLessThanOrEqual(1);
+      expect(await page.locator(".codex-feature-control").evaluateAll((rows) => rows.every((row) => {
+        const heading = row.querySelector(".codex-feature-heading")!.getBoundingClientRect();
+        const control = row.querySelector(".setting-toggle")!.getBoundingClientRect();
+        return row.scrollWidth <= row.clientWidth && heading.right + 12 <= control.left;
+      }))).toBe(true);
       await setup.getByRole("button", { name: /^Аккаунт:/ }).click();
       await page.locator('[role="option"][data-value="account_synthetic_2"]').click();
       await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "account_synthetic_2");
@@ -1355,6 +1364,28 @@ for (const theme of themes) {
       await page.screenshot({ path: `output/playwright/codex-pool-account-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
+}
+
+for (const theme of themes) {
+  test(`ChatGPT flat controls stay aligned in a narrow ${theme} window`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "API", exact: true }).click();
+    await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+    const panel = page.getByRole("tabpanel", { name: "ChatGPT", exact: true });
+    const switches = panel.getByRole("checkbox");
+    await expect(switches).toHaveCount(4);
+    const edges = await switches.evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().right));
+    expect(Math.max(...edges) - Math.min(...edges)).toBeLessThanOrEqual(1);
+    expect(await panel.evaluate((element) => [...element.querySelectorAll<HTMLElement>(".gateway-account-panel, .gateway-setting-row, .oauth-binding-settings")]
+      .every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
+    const reserve = panel.getByRole("checkbox", { name: "Резерв 1%" });
+    await reserve.focus();
+    await reserve.press("Space");
+    await expect(reserve).not.toBeChecked();
+    await page.screenshot({ path: `output/playwright/chatgpt-settings-${theme}-390x844.png` });
+  });
 }
 
 test("remote connection choices use clear switches in a centered dialog", async ({ page }) => {

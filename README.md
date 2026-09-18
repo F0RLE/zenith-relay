@@ -74,6 +74,13 @@ The complete behavior and troubleshooting guidance are kept in the in-app
   </tr>
 </table>
 
+<details>
+<summary>ChatGPT account and connection settings</summary>
+
+![ChatGPT settings](docs/screenshots/chatgpt-settings.png)
+
+</details>
+
 ## Help
 
 The same user guide is available in the application and in the repository:

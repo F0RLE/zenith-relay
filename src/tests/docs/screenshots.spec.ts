@@ -34,6 +34,16 @@ const shots: Array<{ file: string; nav: string; mock: MockOptions; prepare?: (pa
     },
   },
   {
+    file: "chatgpt-settings.png",
+    nav: "API",
+    mock: { mode: "local", populated: true, accountCount: 4, gatewayRunning: true },
+    prepare: async (page) => {
+      await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+      await expect(page.locator(".gateway-account-panel")).toBeVisible();
+      await expect(page.locator(".gateway-settings-panel").getByRole("checkbox")).toHaveCount(3);
+    },
+  },
+  {
     file: "usage.png",
     nav: "Usage",
     mock: { mode: "local", populated: true, accountCount: 4, quotaAvailable: true, usageActive: true },

@@ -69,6 +69,31 @@ test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
   expect(websocketCalls).toEqual([false, true]);
 });
 
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} ChatGPT recovery switch saves and retains its state`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, remoteFeatures: ["chatgpt_retry_until_available"] });
+    await page.goto("/");
+    await openGatewayApplication(page);
+    const recovery = page.getByRole("checkbox", { name: "Wait for an available pool member", exact: true });
+    await expect(recovery).not.toBeChecked();
+    await recovery.click();
+    await expect(recovery).toBeChecked();
+    await expect(page.getByText("Waiting enabled", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "API", exact: true }).click();
+    await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+    await expect(recovery).toBeChecked();
+    await recovery.click();
+    await expect(recovery).not.toBeChecked();
+    await expect(page.getByText("Normal retries", { exact: true })).toBeVisible();
+    const values = await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean; action?: { type: string }; payload?: { enabled: boolean } } } }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_retry_until_available"
+      || call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_chatgpt_retry_until_available")
+      .map((call) => call.args.input?.enabled ?? call.args.input?.payload?.enabled));
+    expect(values).toEqual([true, false]);
+  });
+}
+
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, importDescription: "# Seller package\n\n- Two Business accounts" });
   await page.goto("/");
@@ -4493,6 +4518,7 @@ test("remote capability omissions disable or hide unsupported operations", async
 
   await openGatewayApplication(page);
   await expect(page.getByRole("button", { name: "Connect ChatGPT", exact: true })).toBeDisabled();
+  await expect(page.locator(".gateway-settings-panel")).toHaveCount(0);
   await expect(page.locator(".proxy-settings")).toHaveCount(0);
   await page.getByRole("tab", { name: "API", exact: true }).click();
   await page.locator(".relay-page-actions .relay-action-menu summary").click();

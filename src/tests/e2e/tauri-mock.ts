@@ -60,6 +60,7 @@ export type MockOptions = {
   gatewayRunning?: boolean;
   codexBackgroundTasksEnabled?: boolean;
   codexWebsocketsEnabled?: boolean;
+  chatgptRetryUntilAvailable?: boolean;
   poolMembers?: boolean;
   proxyCount?: number;
   importResult?: "success" | "item_failure" | "not_found";
@@ -320,7 +321,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { modelCatalog: modelMetadata, poolRouting: { version: 1, mode: "smart", members: [] } as import("../../src/features/relay/api/types").PoolRoutingPolicy, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { modelCatalog: modelMetadata, poolRouting: { version: 1, mode: "smart", members: [] } as import("../../src/features/relay/api/types").PoolRoutingPolicy, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
       capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "source_protocols_v1"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
       sources: populated ? sources : [],
@@ -745,6 +746,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "set_codex_profile_websockets": return null;
+          case "set_local_chatgpt_retry_until_available": {
+            const request = args.input as { enabled: boolean };
+            localRuntime.gateway.chatgptRetryUntilAvailable = request.enabled;
+            return structuredClone(localRuntime);
+          }
           case "update_local_routing": {
             const request = args.input as { poolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; expectedPoolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; maxRetryCandidates: number; cooldownAfterFailures: number; keepLastCandidateAvailable: boolean; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" | "ultrafast" };
             if (request.poolRouting) {
@@ -1289,6 +1295,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }
       if (type === "set_codex_websockets") {
         remoteRuntime.gateway.codexWebsocketsEnabled = Boolean(input.payload?.enabled);
+        return structuredClone(remoteRuntime);
+      }
+      if (type === "set_chatgpt_retry_until_available") {
+        remoteRuntime.gateway.chatgptRetryUntilAvailable = Boolean(input.payload?.enabled);
         return structuredClone(remoteRuntime);
       }
       if (type === "set_account_proxy") {

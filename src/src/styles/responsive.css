@@ -588,6 +588,7 @@
   }
 
   .gateway-setting-row,
+  .gateway-account-panel,
   .gateway-api-connection-panel {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
@@ -600,17 +601,21 @@
 }
 
 @media (max-width: 700px) {
-  .codex-background-tasks-control,
-  .codex-websockets-control,
-  .chatgpt-retry-until-available-control {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
+  .gateway-setting-row.codex-feature-control {
+    gap: 12px;
+    padding: 16px;
   }
 
-  .codex-background-tasks-toggle,
-  .codex-websockets-toggle,
-  .chatgpt-retry-until-available-toggle {
-    width: 100%;
+  .codex-feature-toggle > span {
+    display: none;
+  }
+
+  .gateway-account-panel {
+    padding: 16px;
+  }
+
+  .setting-toggle.oauth-binding-reserve-toggle {
+    padding-left: 0;
   }
 
   .profile-snapshot-create {
@@ -690,10 +695,6 @@
   }
   .client-oauth-binding {
     max-width: none;
-  }
-
-  .oauth-binding-settings {
-    grid-template-columns: 1fr;
   }
 
   .gateway-runtime-panel {

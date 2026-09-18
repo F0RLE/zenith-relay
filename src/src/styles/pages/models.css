@@ -989,9 +989,6 @@
 
 .member-editor-settings {
   display: grid;
-  border: 1px solid var(--relay-border);
-  border-radius: 8px;
-  background: var(--relay-surface);
 }
 
 .member-editor-setting {
@@ -1000,7 +997,7 @@
   align-items: center;
   gap: 16px;
   min-height: 72px;
-  padding: 16px;
+  padding: 14px 0;
   font-size: 13px;
 }
 
@@ -1164,7 +1161,7 @@
   .member-editor-setting {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
-    padding: 12px;
+    padding: 12px 0;
   }
 
   .member-editor-setting[data-member-setting="cost"] {
