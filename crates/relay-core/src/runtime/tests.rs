@@ -110,6 +110,66 @@ fn runtime_for_metadata_sources(server: &MetadataTestServer) -> GatewayRuntime {
     .unwrap()
 }
 
+#[test]
+fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
+    use crate::scheduler::CooldownReason;
+    let mut configured = RuntimeSource::unrestricted(source("multi", "synthetic", &["test"]));
+    configured.protocol_bindings = vec![
+        SourceProtocolBinding::legacy(WireApi::Responses, &["test".into()]),
+        SourceProtocolBinding {
+            wire_api: WireApi::ChatCompletions,
+            adapter: SourceAdapter::ChatCompletionsToResponses,
+            reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            model_ids: vec!["test".into()],
+        },
+        SourceProtocolBinding::legacy(WireApi::Messages, &["test".into()]),
+    ];
+    let runtime = GatewayRuntime::from_pool(
+        vec![configured],
+        vec![RuntimeLocalKey::unrestricted(key("key", "synthetic-pool"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    for (reason, scope, shared) in [
+        (CooldownReason::Mandatory, "test", false),
+        (CooldownReason::RateLimit, "test", true),
+        (CooldownReason::Mandatory, "*", true),
+    ] {
+        assert!(runtime.set_cooldown_with_reason_for_model_at(
+            "multi",
+            CooldownRequest {
+                scope,
+                policy_model: "test",
+                allowed_protocols: &WireApi::ALL,
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 1000,
+                reason,
+                now_ms: 100,
+            }
+        ));
+        let mut scheduler = runtime.lock_scheduler();
+        let cooled = |id: &str| {
+            scheduler
+                .candidate(id)
+                .unwrap()
+                .cooldowns
+                .contains_key(scope)
+        };
+        assert!(cooled("multi"));
+        assert!(cooled("multi::chat_completions_to_responses"));
+        assert_eq!(cooled("multi::messages"), shared);
+        for id in [
+            "multi",
+            "multi::chat_completions_to_responses",
+            "multi::messages",
+        ] {
+            scheduler.clear_cooldown(id, scope);
+        }
+    }
+}
+
 struct NeverRefresh;
 
 impl TokenRefreshAdapter for NeverRefresh {
@@ -396,6 +456,103 @@ async fn persistent_candidate_wait_does_not_expire_on_elapsed_retry_at() {
 }
 
 #[tokio::test]
+async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
+    let mut policy = crate::resolve_pool_routing(
+        None,
+        vec![
+            (crate::PoolMemberKind::Source, "source-a".into(), 0, 1),
+            (crate::PoolMemberKind::Source, "source-b".into(), 0, 1),
+        ],
+    );
+    policy.mode = crate::PoolRoutingMode::InOrder;
+    for member in &mut policy.members {
+        member.max_concurrency = 1;
+    }
+    let runtime = GatewayRuntime::from_pool(
+        ["source-a", "source-b"]
+            .into_iter()
+            .map(|id| RuntimeSource::unrestricted(source(id, "synthetic-upstream", &["gpt-test"])))
+            .collect(),
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions {
+            pool_routing: Some(policy.clone()),
+            ..Default::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let tried = HashSet::new();
+    let select = || {
+        runtime.select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            &tried,
+            (None, None),
+            100,
+        )
+    };
+    let (first, first_lease) = select().await.unwrap();
+    let (second, second_lease) = select().await.unwrap();
+    assert_eq!(first.candidate_id, "source-a");
+    assert_eq!(second.candidate_id, "source-b");
+
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    drop(first_lease);
+    let (released, released_lease) = tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.candidate_id, "source-a");
+
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    policy.members[1].max_concurrency = 2;
+    assert!(runtime
+        .set_pool_routing_policy(policy.clone(), 0, 3, true)
+        .is_err());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    runtime.set_pool_routing_policy(policy, 3, 3, true).unwrap();
+    let (expanded, expanded_lease) = tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expanded.candidate_id, "source-b");
+
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    assert!(runtime.update_key_scope(
+        "key-1",
+        CandidateScope {
+            source_ids: Some(Default::default()),
+            account_ids: Some(Default::default()),
+            ..Default::default()
+        }
+    ));
+    assert!(tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .map(|candidate| candidate.active_request_count)
+            .sum::<u32>(),
+        3
+    );
+    drop((second_lease, released_lease, expanded_lease));
+    assert!(runtime
+        .candidate_runtime_order()
+        .iter()
+        .all(|candidate| candidate.active_request_count == 0));
+}
+
+#[tokio::test]
 async fn bounded_candidate_wait_retries_when_the_cooldown_elapsed_before_waiting() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     let result = tokio::time::timeout(
@@ -410,6 +567,45 @@ async fn bounded_candidate_wait_retries_when_the_cooldown_elapsed_before_waiting
     .expect("an elapsed cooldown should be retried immediately");
 
     assert!(result);
+}
+
+#[tokio::test]
+async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_versions() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime.authenticated_key(&runtime.keys[0]);
+    let tried = HashSet::new();
+    let now = current_time_ms();
+    runtime.set_candidate_cooldown("account-1", "*", now - 1);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    runtime.set_activity_callback(move |event| captured.lock().unwrap().push(event));
+    let select = || {
+        runtime.select_and_reserve(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &tried,
+            (None, None),
+            now,
+        )
+    };
+    let (_, probe) = select().await.unwrap();
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    let snapshot = runtime.candidate_runtime_order();
+    let event = events.lock().unwrap()[0].clone();
+    assert_eq!(snapshot[0].activity_revision, event.revision);
+    assert_eq!(snapshot[0].runtime_id, event.runtime_id);
+    assert!(event.runtime_id > 0);
+    drop(probe);
+    let (_, next_probe) = tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(next_probe);
+    let rebuilt = quota_runtime(QuotaSnapshot::default());
+    assert!(rebuilt.candidate_runtime_order()[0].runtime_id > event.runtime_id);
+    assert_eq!(rebuilt.candidate_runtime_order()[0].activity_revision, 0);
 }
 
 #[test]
@@ -601,6 +797,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         },
         1_000,
@@ -706,6 +903,49 @@ fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
             .unwrap_or_else(std::sync::PoisonError::into_inner),
         vec![affinity_key]
     );
+}
+
+#[tokio::test]
+async fn incomplete_response_affinity_is_connection_scoped_and_never_persisted() {
+    let store = Arc::new(RecordedResponseAffinityStore::default());
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-a",
+            "secret-a",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions {
+            response_affinity_store: Some(store.clone()),
+            ..Default::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let normal_key = runtime.response_affinity_key(Some("resp_partial")).unwrap();
+    let connection_key = runtime
+        .bind_volatile_response_affinity(Some("resp_partial"), "source-a", "request-1", 123)
+        .unwrap();
+    assert!(!runtime.has_response_affinity_binding(&normal_key, 123));
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let (selection, lease) = runtime
+        .select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (Some(&connection_key), None),
+            124,
+        )
+        .await
+        .unwrap();
+    assert!(selection.response_affinity_hit);
+    drop(lease);
+    assert!(store.upserts.lock().unwrap().is_empty());
+    assert!(runtime.invalidate_response_affinity(Some(&connection_key)));
+    assert!(!runtime.has_response_affinity_binding(&normal_key, 125));
 }
 
 #[tokio::test]
@@ -922,7 +1162,7 @@ async fn selection_restores_persisted_prompt_affinity_before_reserving() {
         "source-a",
         true,
         CandidateHealth::Healthy,
-        CandidateQuota::Available(1_000),
+        CandidateQuota::Available(6_500),
         Some(123),
     ));
     assert!(runtime.update_candidate_availability_at(
@@ -1236,7 +1476,13 @@ fn optional_response_affinity_is_released_when_owner_needs_reauthentication() {
         2,
     ));
     assert!(optional_affinity.is_none());
-    assert!(!runtime.has_response_affinity_binding(&affinity_key, 2));
+    assert!(runtime.has_response_affinity_binding(&affinity_key, 2));
+    assert_eq!(
+        runtime
+            .response_affinity_candidate(&affinity_key, 2)
+            .as_deref(),
+        Some("source-a")
+    );
 }
 
 #[test]
@@ -1354,6 +1600,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         },
         now_ms,
@@ -2660,6 +2907,7 @@ fn management_model_rules_fall_back_to_catalog_for_empty_provider_modes() {
     );
 
     let source_summary = SourceSummary {
+        resolved_protocol_bindings: None,
         id: source.id,
         name: source.name,
         enabled: true,
@@ -2671,6 +2919,7 @@ fn management_model_rules_fall_back_to_catalog_for_empty_provider_modes() {
         official_provider_family: None,
         wire_api: source.wire_api,
         protocol_bindings: Vec::new(),
+        protocol_config: crate::SourceProtocolConfig::default(),
         models: source.models,
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),

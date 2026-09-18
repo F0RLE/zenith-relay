@@ -1,6 +1,7 @@
 use super::{
-    normalize_source_protocol_bindings, ProviderSource, SourceAdapter, SourceConnector,
-    SourceProtocolBinding, SourceProtocolBindingKey,
+    capabilities::catalog_capabilities, normalize_source_protocol_bindings, service_protocol,
+    ModelEndpointCapability, ProtocolSelectionMode, ProviderSource, SourceAdapter, SourceConnector,
+    SourceProtocolBinding, SourceProtocolBindingKey, SourceProtocolConfig,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
@@ -50,6 +51,29 @@ pub struct SourceDiscovery {
     /// Complete token prices declared by the source model catalog. These are
     /// refreshed with discovery and never replace a user-configured override.
     pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
+    pub capabilities: Vec<ModelEndpointCapability>,
+}
+
+/// Catalog refresh is read-only at the provider: it never sends a generation.
+pub async fn discover_source_with_protocol_config(
+    source: &ProviderSource,
+    bindings: &[SourceProtocolBinding],
+    config: &SourceProtocolConfig,
+) -> Result<SourceDiscovery> {
+    if config.mode == ProtocolSelectionMode::Manual {
+        return discover_source_models_and_protocol_bindings(source, bindings).await;
+    }
+    let mut catalog_source = source.clone();
+    catalog_source.wire_api = config
+        .endpoint_hint
+        .or_else(|| super::endpoint_url_protocol(&source.base_url))
+        .or_else(|| service_protocol(&source.base_url))
+        .unwrap_or(source.wire_api);
+    let mut discovery = discover_source_models_and_protocol_bindings(&catalog_source, &[]).await?;
+    // Stored bindings are manual assignments. Automatic routes are computed
+    // from evidence, and must never replace assignments when changing modes.
+    discovery.protocol_bindings = bindings.to_vec();
+    Ok(discovery)
 }
 
 /// Discovers models independently for every configured binding.
@@ -181,6 +205,7 @@ async fn discover_protocol_bindings_with_client(
     let mut detected_model_prices = BTreeMap::new();
     let mut conflicting_model_prices = HashSet::new();
     let mut successful_responses = 0usize;
+    let mut capabilities = Vec::new();
 
     for binding in bindings {
         let (authorization_name, authorization) = source.authorization_for_binding(binding);
@@ -251,6 +276,14 @@ async fn discover_protocol_bindings_with_client(
                 }
             };
         successful_responses += 1;
+        capabilities.extend(catalog_capabilities(&body, crate::unix_time_ms()));
+
+        // Inventory is independent of route allow-lists and compatibility.
+        for (model, _) in &upstream_models {
+            if discovered_model_keys.insert(model.to_ascii_lowercase()) {
+                discovered_models.push(model.clone());
+            }
+        }
 
         // An explicitly supplied model list is scoped to this protocol unless
         // the route is a source-wide catalog fallback. The normalized legacy
@@ -340,6 +373,7 @@ async fn discover_protocol_bindings_with_client(
         protocol_bindings: discovered_bindings,
         detected_model_prices,
         resolved_base_url,
+        capabilities,
     })
 }
 
@@ -395,10 +429,16 @@ fn parse_upstream_models(
     body: &Value,
 ) -> Option<Vec<(String, Option<ApiModelPriceOverride>)>> {
     let models = match protocol {
-        UpstreamProtocol::GeminiGenerateContent => body.get("models")?.as_array()?,
+        UpstreamProtocol::GeminiGenerateContent => body
+            .get("models")
+            .or_else(|| body.get("data"))?
+            .as_array()?,
         UpstreamProtocol::Responses
         | UpstreamProtocol::ChatCompletions
-        | UpstreamProtocol::Messages => body.get("data")?.as_array()?,
+        | UpstreamProtocol::Messages => body
+            .get("data")
+            .or_else(|| body.get("models"))?
+            .as_array()?,
     };
     let mut seen = HashSet::new();
     Some(
@@ -406,18 +446,24 @@ fn parse_upstream_models(
             .iter()
             .filter_map(|model| {
                 let id = match protocol {
-                    UpstreamProtocol::GeminiGenerateContent => {
-                        let name = model.get("name")?.as_str()?.strip_prefix("models/")?;
-                        let supported = model
-                            .get("supportedGenerationMethods")
-                            .and_then(Value::as_array)?
-                            .iter()
-                            .any(|method| method.as_str() == Some("generateContent"));
-                        supported.then_some(name)
-                    }
+                    UpstreamProtocol::GeminiGenerateContent => model
+                        .get("supportedGenerationMethods")
+                        .and_then(Value::as_array)
+                        .filter(|methods| {
+                            methods
+                                .iter()
+                                .any(|method| method.as_str() == Some("generateContent"))
+                        })
+                        .and_then(|_| model.get("name").or_else(|| model.get("id")))?
+                        .as_str()
+                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
                     UpstreamProtocol::Responses
                     | UpstreamProtocol::ChatCompletions
-                    | UpstreamProtocol::Messages => model.get("id")?.as_str(),
+                    | UpstreamProtocol::Messages => model
+                        .get("id")
+                        .or_else(|| model.get("name"))?
+                        .as_str()
+                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
                 }?;
                 seen.insert(id.to_ascii_lowercase()).then(|| {
                     (

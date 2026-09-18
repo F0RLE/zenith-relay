@@ -2,10 +2,11 @@ use super::{
     now_ms, AuthenticatedKey, ExecutorRoute, GatewayFailure, RESPONSES_LITE_METADATA_KEY,
     WEBSOCKET_PROTOCOLS,
 };
+use crate::error_codes;
+use crate::gateway::continuation;
 use crate::gateway::request::{
     client_context_fingerprint, codex_background_request_kind, is_managed_codex_client,
-    repair_legacy_responses_call_ids, response_tool_call_ids, tool_call_output_ids,
-    ServiceTierPolicy,
+    repair_legacy_responses_call_ids, ServiceTierPolicy,
 };
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
@@ -36,6 +37,16 @@ impl ClientRequest {
         key: &AuthenticatedKey,
         headers: &HeaderMap,
         payload: &[u8],
+    ) -> Result<Self, GatewayFailure> {
+        Self::parse_on_connection(runtime, key, headers, payload, None)
+    }
+
+    pub(super) fn parse_on_connection(
+        runtime: &GatewayRuntime,
+        key: &AuthenticatedKey,
+        headers: &HeaderMap,
+        payload: &[u8],
+        connection_response: Option<(&str, &str)>,
     ) -> Result<Self, GatewayFailure> {
         if payload.len() > super::MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::invalid_request(
@@ -135,33 +146,19 @@ impl ClientRequest {
             } else {
                 Default::default()
             };
-        let response_affinity_key = runtime
-            .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
-        let response_binding_known = response_affinity_key
-            .as_deref()
-            .is_some_and(|affinity_key| {
-                runtime.has_response_affinity_binding(affinity_key, now_ms())
-            });
-        let tool_output_ids = tool_call_output_ids(&value);
-        let tool_call_ids = response_tool_call_ids(&value);
-        let has_unpaired_tool_output = tool_output_ids
-            .iter()
-            .any(|output_id| !tool_call_ids.iter().any(|call_id| call_id == output_id));
-        let tool_affinity_key = tool_output_ids.iter().find_map(|call_id| {
-            let affinity_key = runtime.tool_call_affinity_key(&key.id, call_id)?;
-            runtime
-                .has_response_affinity_binding(&affinity_key, now_ms())
-                .then_some(affinity_key)
-        });
-        let has_previous_response_id = response_affinity_key.is_some();
-        // A model switch can make an old tool call lose its route affinity.
-        // Keep the current conversation alive and let normal pool selection
-        // continue it instead of asking the client to start a new one.
-        let response_affinity_key = if response_binding_known {
-            response_affinity_key
-        } else {
-            tool_affinity_key.or(response_affinity_key)
-        };
+        let connection_affinity_key = connection_response
+            .filter(|(id, _)| {
+                value.get("previous_response_id").and_then(Value::as_str) == Some(*id)
+            })
+            .map(|(_, affinity)| affinity);
+        let continuation = continuation::prepare_response_continuation(
+            runtime,
+            &key.id,
+            &mut value,
+            now_ms(),
+            connection_affinity_key,
+        )
+        .map_err(|()| GatewayFailure::continuation_unavailable())?;
         let client_context_id = client_context_fingerprint(headers);
         let prompt_affinity_key = runtime.prompt_affinity_key(
             &key.id,
@@ -178,9 +175,9 @@ impl ClientRequest {
             responses_lite,
             service_tier_policy,
             responses_lite_candidates,
-            response_affinity_key,
-            requires_affinity_owner: has_previous_response_id || has_unpaired_tool_output,
-            has_unpaired_tool_output,
+            response_affinity_key: continuation.response_affinity_key,
+            requires_affinity_owner: continuation.requires_affinity_owner,
+            has_unpaired_tool_output: continuation.has_unpaired_tool_output,
             prompt_affinity_key,
             background_kind,
             wait_for_candidate_availability,
@@ -242,7 +239,9 @@ impl ClientRequest {
         };
         let replayed = match replay.replay_request(&self.value, owner_model, true) {
             Ok(value) => value,
-            Err(error) if error.code() == "continuation_mismatch" => return Ok(false),
+            Err(error) if error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH => {
+                return Ok(false)
+            }
             Err(_) => {
                 return Err(GatewayFailure::invalid_request(
                     "native continuation state is invalid",
@@ -266,6 +265,28 @@ impl ClientRequest {
         object.insert("stream".to_string(), Value::Bool(true));
         serde_json::to_vec(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn replay_missing_response(
+        &mut self,
+        runtime: &GatewayRuntime,
+        local_key_id: &str,
+        route: &ExecutorRoute,
+        attempted: &mut bool,
+    ) -> Result<bool, GatewayFailure> {
+        if *attempted || !self.requires_affinity_owner {
+            return Ok(false);
+        }
+        if !self.replay_native_continuation(
+            runtime,
+            local_key_id,
+            &route.candidate_id,
+            &route.source_model,
+        )? {
+            return Ok(false);
+        }
+        *attempted = true;
+        Ok(true)
     }
 
     pub(super) fn reasoning_effort_for(&self, route: &ExecutorRoute) -> ReasoningEffortDiagnostics {
@@ -332,19 +353,22 @@ impl ClientRequest {
             .filter(|value| !value.is_empty())
     }
 
-    pub(super) fn has_tool_call_output(&self) -> bool {
-        crate::gateway::request::contains_tool_call_output(&self.value)
-    }
-
     pub(super) const fn has_unpaired_tool_output(&self) -> bool {
         self.has_unpaired_tool_output
     }
 
-    pub(super) fn drop_previous_response_id(&mut self) -> bool {
-        let Some(object) = self.value.as_object_mut() else {
-            return false;
-        };
-        if object.remove("previous_response_id").is_some() {
+    pub(super) fn drop_previous_response_id(
+        &mut self,
+        runtime: &GatewayRuntime,
+        local_key_id: &str,
+    ) -> bool {
+        if continuation::drop_materialized_previous_response_id(
+            runtime,
+            local_key_id,
+            &mut self.value,
+            &self.resolved_model,
+            now_ms(),
+        ) {
             self.response_affinity_key = None;
             self.requires_affinity_owner = false;
             self.has_unpaired_tool_output = false;
@@ -352,15 +376,6 @@ impl ClientRequest {
         } else {
             false
         }
-    }
-
-    pub(super) fn recover_invalid_encrypted_content(&mut self) -> bool {
-        let mut attempted = false;
-        crate::gateway::request::try_recover_encrypted_content(&mut self.value, &mut attempted)
-    }
-
-    pub(super) fn drop_unpaired_tool_calls(&mut self) -> bool {
-        crate::gateway::request::drop_unpaired_responses_tool_calls(&mut self.value)
     }
 
     pub(super) fn repair_custom_tool_item_ids(&mut self) -> bool {
@@ -379,11 +394,8 @@ impl ClientRequest {
         if !repair_legacy_responses_call_ids(&mut self.value) {
             return false;
         }
-        let output_ids = tool_call_output_ids(&self.value);
-        let call_ids = response_tool_call_ids(&self.value);
-        self.has_unpaired_tool_output = output_ids
-            .iter()
-            .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+        self.has_unpaired_tool_output =
+            !crate::gateway::request::unpaired_tool_output_ids(&self.value).is_empty();
         self.requires_affinity_owner =
             self.has_previous_response_id() || self.has_unpaired_tool_output;
         true

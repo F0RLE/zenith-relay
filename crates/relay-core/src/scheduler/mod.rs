@@ -1,4 +1,8 @@
 mod activity;
+mod policy;
+pub use policy::{
+    resolve_pool_routing, PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+};
 mod affinity;
 mod candidate;
 mod capacity;
@@ -13,6 +17,7 @@ pub use candidate::{
 pub use capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 pub(crate) use cooldown::CooldownReason;
 pub(crate) use selection::CooldownRequest;
+pub(crate) use selection::ReservationId;
 pub use selection::{
     normalize_subscription_plan_order, ActiveModelRuntime, CandidateRuntimeSnapshot,
     ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy, Selection,

@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub running: bool,
     pub base_url: String,
     pub candidate_count: usize,
@@ -27,6 +29,10 @@ pub struct GatewaySummary {
     pub image_base_model: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelSummary>,
+    /// Advisory identities for the complete member inventory, including models
+    /// excluded by member rules. This map never grants runtime eligibility.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_catalog: BTreeMap<String, ModelCatalogIdentity>,
     #[serde(default)]
     pub common_proxy_configured: bool,
     #[serde(default)]
@@ -61,6 +67,8 @@ fn default_codex_background_tasks_enabled() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
     pub id: String,
+    #[serde(default)]
+    pub protocol_routes: Vec<super::ModelProtocolRoute>,
     pub enabled: bool,
     pub member_count: usize,
     #[serde(default)]
@@ -181,6 +189,13 @@ pub fn apply_pool_model_configuration(
 ) {
     for model in models {
         let model_id = model.id.clone();
+        model.protocol_routes = super::model_protocol_routes(&model_id, sources, accounts);
+        model.codex_visible = model.enabled
+            && crate::codex_model_is_picker_eligible(&model_id)
+            && model
+                .protocol_routes
+                .iter()
+                .any(|route| route.client_wire_api == crate::WireApi::Responses);
         let cache_write_route = sources.iter().any(|source| {
             source
                 .models_with_cache_write_pricing()
@@ -198,9 +213,7 @@ pub fn apply_pool_model_configuration(
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
-        let has_api_source_route = model_has_api_source_route(sources, &model_id);
-        let has_pool_route =
-            has_api_source_route || super::model_has_native_account_route(accounts, &model_id);
+        let has_pool_route = !model.protocol_routes.is_empty();
         // A provider can return an explicit empty reasoning list when its
         // generic `/models` endpoint has no capability metadata. Treat that
         // as an absent declaration for the management projection so the
@@ -214,9 +227,17 @@ pub fn apply_pool_model_configuration(
                 (!model.catalog_reasoning_effort_levels.is_empty())
                     .then(|| model.catalog_reasoning_effort_levels.clone())
             });
+        for route in &mut model.protocol_routes {
+            route.project_reasoning(reported_reasoning_levels.as_deref().unwrap_or_default());
+        }
+        let executable_levels = model
+            .protocol_routes
+            .iter()
+            .flat_map(|route| route.reasoning_efforts.iter().cloned())
+            .collect();
         apply_model_reasoning_summary(
             model,
-            reported_reasoning_levels,
+            Some(executable_levels),
             crate::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
             has_pool_route,
         );
@@ -277,6 +298,70 @@ pub fn apply_model_display_order_with_catalog(
             .copied()
             .unwrap_or(usize::MAX)
     });
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogIdentity {
+    pub catalog_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_family: Option<String>,
+}
+
+/// Resolve only IDs present in member inventory or saved rules/prices. Keep
+/// this independent from the pool's filtered operational model summaries.
+pub fn member_model_catalog(
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    catalog: &ModelMetadataCatalog,
+) -> BTreeMap<String, ModelCatalogIdentity> {
+    let source_models = sources.iter().flat_map(|source| {
+        source
+            .models
+            .iter()
+            .chain(&source.allowed_models)
+            .chain(&source.excluded_models)
+            .chain(source.model_price_overrides.keys())
+            .chain(source.detected_model_prices.keys())
+    });
+    let account_models = accounts.iter().flat_map(|account| {
+        account
+            .models
+            .iter()
+            .chain(&account.allowed_models)
+            .chain(&account.excluded_models)
+    });
+    source_models
+        .chain(account_models)
+        .filter_map(|id| {
+            let metadata = catalog.resolve(id)?;
+            Some((
+                id.to_ascii_lowercase(),
+                ModelCatalogIdentity {
+                    catalog_provider: metadata.provider.clone(),
+                    catalog_family: metadata.family.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Order complete member inventories for the editors, including excluded models
+/// and members outside the pool. Do not use the filtered public catalog here.
+/// This changes only snapshot presentation, never discovery or routing rules.
+pub fn apply_member_model_display_order(
+    sources: &mut [SourceSummary],
+    accounts: &mut [AccountSummary],
+    saved_order: &[String],
+    catalog: &ModelMetadataCatalog,
+) {
+    for models in sources
+        .iter_mut()
+        .map(|source| &mut source.models)
+        .chain(accounts.iter_mut().map(|account| &mut account.models))
+    {
+        *models = catalog.merge_display_order(models.iter(), saved_order);
+    }
 }
 
 pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadataCatalog) {

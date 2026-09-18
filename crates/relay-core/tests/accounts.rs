@@ -37,6 +37,9 @@ const LOCAL_KEY: &str = "p3-local-key";
 const MODEL: &str = "gpt-p3";
 const OFFICIAL_CODEX_MODEL: &str = "gpt-5.6-terra";
 
+#[path = "support/compaction.rs"]
+mod compaction;
+
 #[derive(Clone, Debug)]
 struct ObservedRequest {
     path: String,
@@ -464,7 +467,7 @@ async fn passive_quota_headers_update_the_active_runtime_before_persistence() {
 }
 
 #[tokio::test]
-async fn invalid_encrypted_reasoning_is_stripped_once_before_semantic_output() {
+async fn invalid_encrypted_reasoning_is_preserved_without_retrying_a_different_conversation() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -497,28 +500,23 @@ async fn invalid_encrypted_reasoning_is_stripped_once_before_semantic_output() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["input"][0]["encrypted_content"], "invalid");
-    assert!(requests[1]
-        .body
-        .pointer("/input/0/encrypted_content")
-        .is_none());
-    assert!(requests[1].body.pointer("/input/0/id").is_none());
+    assert_eq!(requests[0].body["input"][0]["id"], "rs_1");
     drop(requests);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].error_category.as_deref(),
         Some("upstream_encrypted_content_invalid")
     );
-    assert!(events[1].success);
 }
 
 #[tokio::test]
-async fn invalid_encrypted_compaction_is_dropped_once_before_semantic_output() {
+async fn invalid_encrypted_compaction_is_not_discarded_to_retry_without_context() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -558,19 +556,13 @@ async fn invalid_encrypted_compaction_is_dropped_once_before_semantic_output() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].body["input"][0]["type"], "compaction");
-    assert_eq!(requests[0].body["input"][1]["type"], "compaction_summary");
-    assert_eq!(requests[1].body["input"].as_array().unwrap().len(), 2);
-    assert_eq!(requests[1].body["input"][0]["type"], "compaction");
-    assert!(requests[1].body["input"][0]
-        .get("encrypted_content")
-        .is_none());
-    assert_eq!(requests[1].body["input"][1]["role"], "user");
-    assert_eq!(requests[1].body["input"][1]["content"], "continue");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["encrypted_content"], "invalid");
+    assert_eq!(requests[0].body["input"][1]["encrypted_content"], "invalid");
+    assert_eq!(requests[0].body["input"].as_array().unwrap().len(), 4);
 }
 
 #[tokio::test]
@@ -2049,7 +2041,7 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 }
 
 #[tokio::test]
-async fn model_switch_releases_an_incompatible_http_response_owner_before_selection() {
+async fn model_switch_uses_materialized_http_history_before_selection() {
     let (old_model_upstream, old_state) =
         spawn_upstream(vec![success_reply("old-model-response")]).await;
     let (new_model_upstream, new_state) =
@@ -2099,7 +2091,11 @@ async fn model_switch_releases_an_incompatible_http_response_owner_before_select
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": "new-model",
-            "input": "continue with the new model",
+            "input": [
+                {"type": "message", "role": "user", "content": "start"},
+                {"type": "message", "role": "assistant", "content": "old-model response"},
+                {"type": "message", "role": "user", "content": "continue with the new model"}
+            ],
             "previous_response_id": first["id"]
         }))
         .send()
@@ -2132,7 +2128,11 @@ async fn http_continuation_materializes_the_full_chain_before_owner_transport_fa
         ),
     ])
     .await;
-    let (backup_upstream, backup_state) = spawn_upstream(vec![success_reply("backup-third")]).await;
+    let (backup_upstream, backup_state) = spawn_upstream(vec![
+        success_reply("backup-third"),
+        success_reply("backup-branch"),
+    ])
+    .await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "owner-account", "owner-access").await;
     register_ready(&authority, "backup-account", "backup-access").await;
@@ -2190,9 +2190,27 @@ async fn http_continuation_materializes_the_full_chain_before_owner_transport_fa
         .unwrap();
 
     assert_eq!(third["id"], "backup-third");
+    assert!(gateway
+        .runtime
+        .as_ref()
+        .unwrap()
+        .set_candidate_health("owner-account", CandidateHealth::ReauthRequired,));
+    let branch = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "alternate third",
+            "previous_response_id": second["id"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(branch.status(), StatusCode::OK);
+    assert_eq!(branch.json::<Value>().await.unwrap()["id"], "backup-branch");
     assert_eq!(owner_state.requests.lock().unwrap().len(), 3);
     let requests = backup_state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(requests[0].body.get("previous_response_id").is_none());
     let input = requests[0].body["input"].as_array().unwrap();
     assert_eq!(input.len(), 3);
@@ -2200,8 +2218,17 @@ async fn http_continuation_materializes_the_full_chain_before_owner_transport_fa
         assert_eq!(item["role"], "user");
         assert_eq!(item["content"][0]["text"], text);
     }
+    assert!(requests[1].body.get("previous_response_id").is_none());
+    let branch_input = requests[1].body["input"].as_array().unwrap();
+    assert_eq!(branch_input.len(), 3);
+    for (item, text) in branch_input
+        .iter()
+        .zip(["first", "second", "alternate third"])
+    {
+        assert_eq!(item["content"][0]["text"], text);
+    }
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 5);
     assert!(!events[2].success);
     assert!(events[3].success);
     assert_ne!(events[2].candidate_id, events[3].candidate_id);
@@ -2581,7 +2608,7 @@ async fn prompt_cache_key_keeps_sequential_http_requests_on_the_same_account() {
 }
 
 #[tokio::test]
-async fn unknown_http_response_owner_is_recovered_without_cooling_wrong_accounts() {
+async fn unknown_http_response_owner_is_rejected_before_candidate_selection() {
     let (wrong_upstream, wrong_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::BAD_REQUEST,
         json!({"error": {
@@ -2612,8 +2639,7 @@ async fn unknown_http_response_owner_is_recovered_without_cooling_wrong_accounts
     )
     .await;
 
-    let client = reqwest::Client::new();
-    let recovered: Value = client
+    let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -2623,39 +2649,18 @@ async fn unknown_http_response_owner_is_recovered_without_cooling_wrong_accounts
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-    assert_eq!(recovered["id"], "recovered-response");
-
-    let continued = client
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({
-            "model": MODEL,
-            "input": "continue again",
-            "previous_response_id": recovered["id"]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(continued.status(), StatusCode::OK);
-    assert_eq!(wrong_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(wrong_state.requests.lock().unwrap().is_empty());
+    assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("response_affinity_miss")
-    );
-    assert_eq!(events[0].retry_at_ms, None);
-    assert!(events[1].success);
-    assert_eq!(events[1].candidate_id, events[2].candidate_id);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
+async fn unknown_http_response_owner_never_reaches_an_arbitrary_candidate() {
     let (wrong_upstream, wrong_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::BAD_REQUEST,
         json!({"error": {
@@ -2694,19 +2699,17 @@ async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(wrong_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(wrong_state.requests.lock().unwrap().is_empty());
     assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_candidate_rejected")
-    );
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn orphaned_http_response_resets_once_without_tool_output() {
+async fn orphaned_http_response_is_rejected_without_materialized_history() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -2730,7 +2733,7 @@ async fn orphaned_http_response_resets_once_without_tool_output() {
     )
     .await;
 
-    let response: Value = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -2740,30 +2743,18 @@ async fn orphaned_http_response_resets_once_without_tool_output() {
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
 
-    assert_eq!(response["id"], "fresh-response");
-    let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].body["previous_response_id"],
-        "orphaned-response"
-    );
-    assert!(requests[1].body.get("previous_response_id").is_none());
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("response_affinity_miss")
-    );
-    assert!(events[1].success);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn model_switch_retries_a_safe_http_continuation_without_the_old_response() {
+async fn opaque_http_continuation_is_rejected_before_model_switch() {
     let (old_model_upstream, old_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::BAD_REQUEST,
         json!({"error": {
@@ -2796,7 +2787,7 @@ async fn model_switch_retries_a_safe_http_continuation_without_the_old_response(
     )
     .await;
 
-    let response: Value = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -2806,36 +2797,28 @@ async fn model_switch_retries_a_safe_http_continuation_without_the_old_response(
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
 
-    assert_eq!(response["id"], "switched-model-response");
-    assert_eq!(old_state.requests.lock().unwrap().len(), 1);
-    let requests = new_state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].body.get("previous_response_id").is_none());
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(old_state.requests.lock().unwrap().is_empty());
+    assert!(new_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_tool_call_mismatch")
-    );
-    assert!(events[1].success);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn model_switch_retry_uses_repaired_state_for_regular_responses() {
-    assert_model_switch_retry_uses_repaired_state("/v1/responses").await;
+async fn opaque_continuation_is_rejected_for_regular_responses() {
+    assert_opaque_continuation_is_rejected("/v1/responses").await;
 }
 
 #[tokio::test]
-async fn model_switch_retry_uses_repaired_state_for_compact_responses() {
-    assert_model_switch_retry_uses_repaired_state("/v1/responses/compact").await;
+async fn opaque_continuation_is_rejected_for_compact_responses() {
+    assert_opaque_continuation_is_rejected("/v1/responses/compact").await;
 }
 
-async fn assert_model_switch_retry_uses_repaired_state(path: &str) {
+async fn assert_opaque_continuation_is_rejected(path: &str) {
     let (old_model_upstream, old_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::BAD_REQUEST,
         json!({"error": {
@@ -2895,7 +2878,7 @@ async fn assert_model_switch_retry_uses_repaired_state(path: &str) {
     )
     .await;
 
-    let response: Value = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(format!("{}{path}", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -2905,43 +2888,21 @@ async fn assert_model_switch_retry_uses_repaired_state(path: &str) {
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
 
-    assert_eq!(response["id"], "repaired-continuation");
-    assert_eq!(old_state.requests.lock().unwrap().len(), 1);
-    let rejected_requests = rejected_state.requests.lock().unwrap();
-    assert_eq!(rejected_requests.len(), 1);
-    assert!(rejected_requests[0]
-        .body
-        .get("previous_response_id")
-        .is_none());
-    drop(rejected_requests);
-    let recovered_requests = recovered_state.requests.lock().unwrap();
-    assert_eq!(recovered_requests.len(), 1);
-    assert!(recovered_requests[0]
-        .body
-        .get("previous_response_id")
-        .is_none());
-    drop(recovered_requests);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(old_state.requests.lock().unwrap().is_empty());
+    assert!(rejected_state.requests.lock().unwrap().is_empty());
+    assert!(recovered_state.requests.lock().unwrap().is_empty());
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_tool_call_mismatch")
-    );
-    assert_eq!(
-        events[1].error_category.as_deref(),
-        Some("upstream_candidate_rejected")
-    );
-    assert!(events[2].success);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn model_switch_removes_incomplete_custom_tool_history_before_retrying() {
+async fn opaque_custom_tool_history_is_rejected_before_upstream_selection() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -2965,7 +2926,7 @@ async fn model_switch_removes_incomplete_custom_tool_history_before_retrying() {
     )
     .await;
 
-    let response: Value = reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -2988,35 +2949,19 @@ async fn model_switch_removes_incomplete_custom_tool_history_before_retrying() {
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
 
-    assert_eq!(response["id"], "switched-model-response");
-    let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].body["previous_response_id"],
-        "response-created-by-previous-model"
-    );
-    assert!(requests[1].body.get("previous_response_id").is_none());
-    let recovered_input = requests[1].body["input"].as_array().unwrap();
-    assert_eq!(recovered_input.len(), 1);
-    assert_eq!(recovered_input[0]["type"], "message");
-    drop(requests);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(state.requests.lock().unwrap().is_empty());
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_tool_call_mismatch")
-    );
-    assert!(events[1].success);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn orphaned_http_response_with_tool_output_is_not_reset() {
+async fn orphaned_http_tool_output_is_rejected_before_upstream_selection() {
     let (upstream, state) = spawn_upstream(vec![Reply::Json(
         StatusCode::BAD_REQUEST,
         json!({"error": {
@@ -3053,25 +2998,115 @@ async fn orphaned_http_response_with_tool_output_is_not_reset() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(state.requests.lock().unwrap().len(), 1);
-    assert_eq!(events.lock().unwrap().len(), 1);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(state.requests.lock().unwrap().is_empty());
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn compact_missing_owned_response_never_sends_opaque_id_to_another_account() {
+    for saved_history in [false, true] {
+        let mut first_reply = success_reply("compact-owner");
+        if !saved_history {
+            if let Reply::Json(_, body) = &mut first_reply {
+                body.as_object_mut().unwrap().remove("output");
+            }
+        }
+        let (owner, owner_state) = spawn_upstream(vec![
+            first_reply,
+            Reply::Json(
+                StatusCode::BAD_REQUEST,
+                json!({"error":{"code":"previous_response_not_found"}}),
+            ),
+            success_reply("compact-recovered"),
+        ])
+        .await;
+        let (backup, backup_state) = spawn_upstream(vec![success_reply("must-not-run")]).await;
+        let authority = Arc::new(TokenAuthority::new(2).unwrap());
+        register_ready(&authority, "owner", "owner-access").await;
+        register_ready(&authority, "backup", "backup-access").await;
+        let (gateway, _, _, _) = spawn_mixed_gateway(
+            Vec::new(),
+            vec![
+                account("owner", "owner-provider", &owner, 100),
+                account("backup", "backup-provider", &backup, 10),
+            ],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let first = request(&gateway, false).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: Value = first.json().await.unwrap();
+        let input = json!([{"role":"assistant","content":"synthetic answer"},
+            {"role":"user","content":"continue"}]);
+        let response = client
+            .post(format!("{}/v1/responses/compact", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model":MODEL,"previous_response_id":first["id"],"input":input}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if saved_history {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
+        let response: Value = response.json().await.unwrap();
+        assert!(backup_state.requests.lock().unwrap().is_empty());
+        let requests = owner_state.requests.lock().unwrap();
+        assert_eq!(requests.len(), if saved_history { 3 } else { 2 });
+        if saved_history {
+            assert!(requests[2].body.get("previous_response_id").is_none());
+            assert_eq!(requests[2].body["input"][0]["content"][0]["text"], "hello");
+            assert_eq!(
+                requests[2].body["input"].as_array().unwrap().last(),
+                input.as_array().unwrap().last()
+            );
+        } else {
+            assert_eq!(
+                response["error"]["code"],
+                "response_continuation_unavailable"
+            );
+        }
+    }
 }
 
 #[tokio::test]
 async fn stale_http_response_affinity_resets_before_quota_routing() {
+    assert_stale_http_continuation(false).await;
+}
+
+#[tokio::test]
+async fn stale_http_sse_response_replays_before_output() {
+    assert_stale_http_continuation(true).await;
+}
+
+async fn assert_stale_http_continuation(sse_failure: bool) {
     let (fallback_upstream, fallback_state) =
         spawn_upstream(vec![success_reply("fallback-response")]).await;
     let (owner_upstream, owner_state) = spawn_upstream(vec![
         success_reply("stale-response"),
-        Reply::Json(
+        if sse_failure {
+            Reply::Stream(vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"previous_response_not_found\",\"message\":\"Previous response not found\"}}}\n\n",
+            )])
+        } else { Reply::Json(
             StatusCode::BAD_REQUEST,
             json!({"error": {
                 "message": "Previous response with id 'stale-response' not found.",
                 "type": "invalid_request_error",
                 "code": "previous_response_not_found"
             }}),
-        ),
+        ) },
         success_reply("recovered-response"),
     ])
     .await;
@@ -3124,7 +3159,15 @@ async fn stale_http_response_affinity_resets_before_quota_routing() {
         .await
         .unwrap();
     assert_eq!(recovered["id"], "recovered-response");
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 3);
+    let requests = owner_state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].body.get("previous_response_id").is_none());
+    assert_eq!(requests[2].body["input"][0]["content"][0]["text"], "start");
+    assert_eq!(
+        requests[2].body["input"][1]["content"][0]["text"],
+        "continue after stale binding"
+    );
+    drop(requests);
     assert!(fallback_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
@@ -3269,7 +3312,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
 
 #[tokio::test]
 async fn websocket_model_switch_resets_incompatible_response_owner_before_reconnect() {
-    let (old_model_upstream, old_state) = spawn_websocket_upstream().await;
+    let (old_model_upstream, old_state) = spawn_replayable_websocket_upstream().await;
     let (new_model_upstream, new_state) = spawn_websocket_upstream().await;
     let authority = Arc::new(TokenAuthority::new(2).unwrap());
     register_ready(&authority, "old-model-account", "old-model-access").await;
@@ -3325,7 +3368,11 @@ async fn websocket_model_switch_resets_incompatible_response_owner_before_reconn
             json!({
                 "type": "response.create",
                 "model": "new-model",
-                "input": "continue after switching models",
+                "input": [
+                    {"type": "message", "role": "user", "content": "start"},
+                    {"type": "message", "role": "assistant", "content": "old-model response"},
+                    {"type": "message", "role": "user", "content": "continue after switching models"}
+                ],
                 "previous_response_id": first_response_id
             })
             .to_string(),
@@ -3348,7 +3395,7 @@ async fn websocket_model_switch_resets_incompatible_response_owner_before_reconn
 
 #[tokio::test]
 async fn websocket_model_switch_resets_incompatible_response_owner_on_new_connection() {
-    let (old_model_upstream, old_state) = spawn_websocket_upstream().await;
+    let (old_model_upstream, old_state) = spawn_replayable_websocket_upstream().await;
     let (new_model_upstream, new_state) = spawn_websocket_upstream().await;
     let authority = Arc::new(TokenAuthority::new(2).unwrap());
     register_ready(&authority, "old-model-account", "old-model-access").await;
@@ -3414,7 +3461,11 @@ async fn websocket_model_switch_resets_incompatible_response_owner_on_new_connec
             json!({
                 "type": "response.create",
                 "model": "new-model",
-                "input": "continue after switching models",
+                "input": [
+                    {"type": "message", "role": "user", "content": "start"},
+                    {"type": "message", "role": "assistant", "content": "old-model response"},
+                    {"type": "message", "role": "user", "content": "continue after switching models"}
+                ],
                 "previous_response_id": first_response_id
             })
             .to_string(),
@@ -3698,6 +3749,17 @@ async fn account_websocket_keeps_connection_after_max_output_incomplete() {
         incomplete["response"]["incomplete_details"]["reason"],
         "max_output_tokens"
     );
+
+    let foreign = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":MODEL,"input":"continue elsewhere",
+            "previous_response_id":incomplete["response"]["id"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::CONFLICT);
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
 
     socket
         .send(ClientWsMessage::Text(
@@ -5060,7 +5122,7 @@ async fn websocket_continuation_replays_to_another_candidate_after_owner_quota()
             json!({"type": "response.output_text.delta", "delta": "first"}),
             json!({
                 "type": "response.completed",
-                "response": {"id": "owner-response", "output": []}
+                "response": {"id": "owner-response", "output": [{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first"}]}]}
             }),
         ],
         vec![json!({
@@ -5152,8 +5214,13 @@ async fn websocket_continuation_replays_to_another_candidate_after_owner_quota()
         replacement_requests[0]["input"][0]["content"][0]["text"],
         "first"
     );
+    assert_eq!(replacement_requests[0]["input"][1]["role"], "assistant");
     assert_eq!(
         replacement_requests[0]["input"][1]["content"][0]["text"],
+        "first"
+    );
+    assert_eq!(
+        replacement_requests[0]["input"][2]["content"][0]["text"],
         "second"
     );
     drop(replacement_requests);
@@ -5177,7 +5244,7 @@ async fn websocket_continuation_replays_on_the_same_connection_when_another_chat
             json!({"type": "response.output_text.delta", "delta": "first"}),
             json!({
                 "type": "response.completed",
-                "response": {"id": "owner-response", "output": []}
+                "response": {"id": "owner-response", "output": [{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"first"}]}]}
             }),
         ])))
         .await;
@@ -5263,8 +5330,13 @@ async fn websocket_continuation_replays_on_the_same_connection_when_another_chat
         replacement_requests[0]["input"][0]["content"][0]["text"],
         "first"
     );
+    assert_eq!(replacement_requests[0]["input"][1]["role"], "assistant");
     assert_eq!(
         replacement_requests[0]["input"][1]["content"][0]["text"],
+        "first"
+    );
+    assert_eq!(
+        replacement_requests[0]["input"][2]["content"][0]["text"],
         "second"
     );
     drop(replacement_requests);
@@ -5537,7 +5609,7 @@ async fn prompt_cache_key_keeps_reconnected_websocket_on_the_same_account() {
 }
 
 #[tokio::test]
-async fn unknown_websocket_response_owner_is_recovered_before_output() {
+async fn unknown_websocket_response_owner_is_rejected_before_candidate_selection() {
     let (wrong_upstream, wrong_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
             "type": "error",
@@ -5586,31 +5658,18 @@ async fn unknown_websocket_response_owner_is_recovered_before_output() {
         ))
         .await
         .unwrap();
-    assert_eq!(
-        receive_websocket_json(&mut socket).await["type"],
-        "response.output_text.delta"
-    );
-    assert_eq!(
-        receive_websocket_completion(&mut socket).await["type"],
-        "response.completed"
-    );
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    let error = receive_websocket_json(&mut socket).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["error"]["code"], "response_continuation_unavailable");
 
-    assert_eq!(wrong_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+    assert!(wrong_state.requests.lock().unwrap().is_empty());
+    assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("response_affinity_miss")
-    );
-    assert_eq!(events[0].retry_at_ms, None);
-    assert_eq!(events[0].http_status, StatusCode::BAD_REQUEST.as_u16());
-    assert!(events[1].success);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn orphaned_websocket_response_resets_once_without_tool_output() {
+async fn orphaned_websocket_response_is_rejected_without_materialized_history() {
     let (missing_upstream, missing_state) = spawn_websocket_upstream_with_behavior(
         WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from(vec![
             vec![json!({
@@ -5695,34 +5754,33 @@ async fn orphaned_websocket_response_resets_once_without_tool_output() {
         .await
         .unwrap();
 
-    assert_eq!(receive_websocket_json(&mut socket).await["delta"], "fresh");
-    assert_eq!(
-        receive_websocket_completion(&mut socket).await["response"]["id"],
-        "fresh-ws-response"
-    );
-    let requests = missing_state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0]["previous_response_id"], "orphaned-response");
-    assert!(requests[1].get("previous_response_id").is_none());
-    assert_eq!(transport_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
+    let error = receive_websocket_json(&mut socket).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["error"]["code"], "response_continuation_unavailable");
+    assert!(missing_state.requests.lock().unwrap().is_empty());
+    assert!(transport_state.requests.lock().unwrap().is_empty());
+    assert!(limited_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 4);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("response_affinity_miss")
-    );
-    assert!(events[3].success);
+    assert!(events.is_empty());
 }
 
 #[tokio::test]
 async fn stale_websocket_response_affinity_resets_before_quota_routing() {
+    assert_stale_websocket_continuation(true).await;
+}
+
+#[tokio::test]
+async fn stale_websocket_response_replays_on_the_live_connection() {
+    assert_stale_websocket_continuation(false).await;
+}
+
+async fn assert_stale_websocket_continuation(reconnect: bool) {
     let (fallback_upstream, fallback_state) = spawn_websocket_upstream().await;
     let (owner_upstream, owner_state) = spawn_websocket_upstream_with_behavior(
         WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from(vec![
             vec![
                 json!({"type": "response.output_text.delta", "delta": "owner"}),
-                json!({"type": "response.completed", "response": {"id": "stale-ws-response"}}),
+                json!({"type": "response.completed", "response": {"id": "stale-ws-response", "output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"owner"}]}]}}),
             ],
             vec![json!({
                 "type": "error",
@@ -5782,17 +5840,19 @@ async fn stale_websocket_response_affinity_resets_before_quota_routing() {
         .as_str()
         .unwrap()
         .to_string();
-    drop(first_socket);
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let upgraded = client
-        .get(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .upgrade()
-        .send()
-        .await
-        .unwrap();
-    let mut second_socket = upgraded.into_websocket().await.unwrap();
+    let mut second_socket = if reconnect {
+        drop(first_socket);
+        let upgraded = client
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap();
+        upgraded.into_websocket().await.unwrap()
+    } else {
+        first_socket
+    };
     second_socket
         .send(ClientWsMessage::Text(
             json!({
@@ -5814,10 +5874,47 @@ async fn stale_websocket_response_affinity_resets_before_quota_routing() {
         "recovered-ws-response"
     );
 
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 3);
-    assert!(fallback_state.requests.lock().unwrap().is_empty());
+    assert!(gateway
+        .runtime
+        .as_ref()
+        .unwrap()
+        .set_candidate_health("owner-account", CandidateHealth::ReauthRequired,));
+    second_socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "branch from original",
+                "previous_response_id": response_id
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_completion(&mut second_socket).await["type"],
+        "response.completed"
+    );
+
+    let requests = owner_state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].get("previous_response_id").is_none());
+    assert_eq!(requests[2]["input"][1]["phase"], "final_answer");
+    assert_eq!(requests[2]["input"][1]["content"][0]["text"], "owner");
+    drop(requests);
+    let requests = fallback_state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("previous_response_id").is_none());
+    assert_eq!(requests[0]["input"].as_array().unwrap().len(), 3);
+    assert_eq!(requests[0]["input"][0]["content"][0]["text"], "start");
+    assert_eq!(requests[0]["input"][1]["content"][0]["text"], "owner");
+    assert_eq!(
+        requests[0]["input"][2]["content"][0]["text"],
+        "branch from original"
+    );
+    drop(requests);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert_eq!(
         events[1].error_category.as_deref(),
         Some("response_affinity_miss")
@@ -6138,15 +6235,18 @@ async fn retryable_oauth_failure_prefers_next_oauth_before_paid_source() {
 }
 
 #[tokio::test]
-async fn exhausted_and_reauth_accounts_are_filtered_before_account_source_fallback() {
+async fn unavailable_accounts_do_not_block_healthy_account_or_source_fallback() {
     let (exhausted_upstream, exhausted_state) =
         spawn_upstream(vec![success_reply("exhausted-must-not-run")]).await;
     let (reauth_upstream, reauth_state) =
         spawn_upstream(vec![success_reply("reauth-must-not-run")]).await;
-    let (eligible_upstream, eligible_state) = spawn_upstream(vec![Reply::Json(
-        StatusCode::SERVICE_UNAVAILABLE,
-        json!({"error": {"message": "synthetic"}}),
-    )])
+    let (eligible_upstream, eligible_state) = spawn_upstream(vec![
+        success_reply("healthy-account"),
+        Reply::Json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": {"message": "synthetic"}}),
+        ),
+    ])
     .await;
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("source-fallback")]).await;
@@ -6187,6 +6287,14 @@ async fn exhausted_and_reauth_accounts_are_filtered_before_account_source_fallba
     )
     .await;
 
+    let healthy_response = request(&gateway, false).await;
+    assert_eq!(healthy_response.status(), StatusCode::OK);
+    assert_eq!(
+        healthy_response.json::<Value>().await.unwrap()["id"],
+        "healthy-account"
+    );
+    assert!(source_state.requests.lock().unwrap().is_empty());
+
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -6195,12 +6303,16 @@ async fn exhausted_and_reauth_accounts_are_filtered_before_account_source_fallba
     );
     assert!(exhausted_state.requests.lock().unwrap().is_empty());
     assert!(reauth_state.requests.lock().unwrap().is_empty());
-    assert_eq!(eligible_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(eligible_state.requests.lock().unwrap().len(), 2);
     assert_eq!(source_state.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0].candidate_id.as_deref(), Some("oauth-eligible"));
-    assert_eq!(events[1].candidate_id.as_deref(), Some("source-fallback"));
+    assert!(events[0].success);
+    assert_eq!(events[1].candidate_id.as_deref(), Some("oauth-eligible"));
+    assert!(!events[1].success);
+    assert_eq!(events[2].candidate_id.as_deref(), Some("source-fallback"));
+    assert!(events[2].success);
 }
 
 #[tokio::test]
@@ -7084,6 +7196,7 @@ fn source(id: &str, server: &TestServer, key: &str, priority: i32) -> RuntimeSou
             wire_api: WireApi::Responses,
             models: vec![MODEL.to_string()],
         },
+        protocol_config: Default::default(),
         protocol_bindings: Vec::new(),
         enabled: true,
         draining: false,
@@ -7322,6 +7435,15 @@ async fn spawn_upstream_with_catalog_and_delay_and_barrier(
 
 async fn spawn_websocket_upstream() -> (TestServer, WebSocketUpstreamState) {
     spawn_websocket_upstream_with_behavior(WebSocketBehavior::Success).await
+}
+
+async fn spawn_replayable_websocket_upstream() -> (TestServer, WebSocketUpstreamState) {
+    spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+        json!({"type":"response.completed","response":{
+            "id":"replayable-ws-response",
+            "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}]
+        }}),
+    ]))).await
 }
 
 async fn spawn_websocket_upstream_with_behavior(

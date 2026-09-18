@@ -3,6 +3,7 @@ use self::request::AccountEndpoint;
 use self::request::{
     alpha_search, chat_completions, gemini, messages, models, responses, responses_compact,
 };
+use crate::error_codes;
 use crate::GatewayRuntime;
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
@@ -14,6 +15,8 @@ use std::sync::Arc;
 pub(crate) use crate::unix_time_ms as now_ms;
 
 mod auth;
+mod catalog;
+mod continuation;
 mod errors;
 mod execution;
 mod images;
@@ -55,21 +58,21 @@ pub async fn execute_account_wake(
         return errors::api_error(
             StatusCode::BAD_REQUEST,
             "invalid account wake request",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         );
     }
     let Some(key) = runtime.internal_account_key(local_key_id, account_id) else {
         return errors::api_error(
             StatusCode::NOT_FOUND,
             "account is not available in the managed pool",
-            "no_eligible_source",
+            error_codes::NO_ELIGIBLE_SOURCE,
         );
     };
     let Some(resolved_model) = runtime.resolve_configured_account_model(&key, model_id) else {
         return errors::api_error(
             StatusCode::NOT_FOUND,
             "model is not available for this account",
-            "model_not_found",
+            error_codes::MODEL_NOT_FOUND,
         );
     };
     let request = json!({
@@ -88,7 +91,6 @@ pub async fn execute_account_wake(
         client_headers: HeaderMap::new(),
         endpoint: AccountEndpoint::Wake,
         responses_lite: None,
-        response_affinity_key: None,
         rewrite_model: true,
         // A wake is a bounded background operation.  It must not hold a task
         // open indefinitely when this one account is cooling down; the next
@@ -114,8 +116,15 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
-        .route("/v1beta/models/{*model_action}", post(gemini))
-        .route("/v1/models/{*model_action}", post(gemini))
+        .route("/v1beta/models", get(catalog::gemini_models))
+        .route(
+            "/v1beta/models/{*model_action}",
+            get(catalog::native_model).post(gemini),
+        )
+        .route(
+            "/v1/models/{*model_action}",
+            get(catalog::native_model).post(gemini),
+        )
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .with_state(runtime)
@@ -161,6 +170,7 @@ mod test_support {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         }
     }

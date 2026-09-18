@@ -2,6 +2,7 @@ use super::super::auth::{invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::now_ms;
 use crate::catalog::{normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry};
+use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
 use crate::runtime::AuthenticatedKey;
@@ -31,6 +32,9 @@ pub(in crate::gateway) async fn models(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response<Body> {
+    if let Some(protocol) = crate::gateway::catalog::catalog_protocol(&headers) {
+        return crate::gateway::catalog::native_catalog(&runtime, &headers, protocol, None);
+    }
     if !valid_local_host(&headers) {
         return invalid_host();
     }
@@ -59,7 +63,7 @@ pub(in crate::gateway) async fn models(
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "client_version is invalid",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             );
         }
         if let Some(catalog) =

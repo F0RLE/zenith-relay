@@ -10,6 +10,7 @@ mod store;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod translation;
 
 pub(crate) use contracts::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,

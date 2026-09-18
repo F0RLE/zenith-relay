@@ -25,15 +25,23 @@ impl PoolScheduler {
         left: &RuntimeCandidate,
         right: &RuntimeCandidate,
         lane: InFlightLane,
+        now_ms: u64,
     ) -> Ordering {
+        if self.pool_routing.is_some() {
+            return self.compare_unified_preference(left, right, lane, now_ms);
+        }
         let left_in_flight = self.in_flight_count(&left.id, lane);
         let right_in_flight = self.in_flight_count(&right.id, lane);
         let left_dispatches = self.rotation_dispatch_count(left, lane);
         let right_dispatches = self.rotation_dispatch_count(right, lane);
-        let common = routing_tier(left)
-            .cmp(&routing_tier(right))
-            .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
-            .then_with(|| compare_api_source_priority(left, right));
+        let common = self.compare_member_routes(left, right).then_with(|| {
+            routing_tier(left)
+                .cmp(&routing_tier(right))
+                .then_with(|| {
+                    candidate_kind_preference(left).cmp(&candidate_kind_preference(right))
+                })
+                .then_with(|| compare_api_source_priority(left, right))
+        });
         // Parallel-load balancing protects OAuth accounts from being selected by
         // every concurrent chat. API sources are connection-based providers:
         // an active request must not make a different API source win selection.
@@ -85,6 +93,13 @@ impl PoolScheduler {
         runner_up: &RuntimeCandidate,
         lane: InFlightLane,
     ) -> SelectionReason {
+        if let Some(policy) = &self.pool_routing {
+            return match policy.mode {
+                crate::PoolRoutingMode::InOrder => SelectionReason::ManualPriority,
+                crate::PoolRoutingMode::RoundRobin => SelectionReason::FairRotation,
+                crate::PoolRoutingMode::Smart => SelectionReason::PoolPolicy,
+            };
+        }
         let selected_in_flight = self.in_flight_count(&selected.id, lane);
         let runner_up_in_flight = self.in_flight_count(&runner_up.id, lane);
         let selected_dispatches = self.rotation_dispatch_count(selected, lane);

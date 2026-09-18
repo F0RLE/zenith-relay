@@ -1,4 +1,5 @@
 use super::*;
+use crate::error_codes;
 
 impl AttemptFailure {
     pub(crate) fn authorized_request(error: AuthorizedRequestError) -> Self {
@@ -11,21 +12,27 @@ impl AttemptFailure {
 
     pub(crate) fn transport(error: &reqwest::Error) -> Self {
         let (category, message) = if error.is_timeout() {
-            ("upstream_transport_timeout", "upstream request timed out")
+            (
+                error_codes::UPSTREAM_TRANSPORT_TIMEOUT,
+                "upstream request timed out",
+            )
         } else if error.is_connect() {
             (
-                "upstream_transport_connect",
+                error_codes::UPSTREAM_TRANSPORT_CONNECT,
                 "upstream connection could not be established",
             )
         } else if error.is_body() {
             (
-                "upstream_transport_body",
+                error_codes::UPSTREAM_TRANSPORT_BODY,
                 "upstream request or response body failed",
             )
         } else if error.is_request() {
-            ("upstream_transport_request", "upstream request failed")
+            (
+                error_codes::UPSTREAM_TRANSPORT_REQUEST,
+                "upstream request failed",
+            )
         } else {
-            ("upstream_transport", "upstream transport failed")
+            (error_codes::UPSTREAM_TRANSPORT, "upstream transport failed")
         };
         Self {
             status: StatusCode::BAD_GATEWAY,
@@ -38,7 +45,7 @@ impl AttemptFailure {
     pub(crate) fn body() -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
-            category: "upstream_error",
+            category: error_codes::UPSTREAM_ERROR,
             message: "upstream response failed",
             cooldown_hint: RateLimitBodyHint::default(),
         }
@@ -47,7 +54,7 @@ impl AttemptFailure {
     pub(crate) fn invalid_request() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            category: "invalid_request",
+            category: error_codes::INVALID_REQUEST,
             message: "request cannot be translated for an eligible source",
             cooldown_hint: RateLimitBodyHint::default(),
         }
@@ -88,7 +95,7 @@ impl AttemptFailure {
     pub(crate) fn no_candidate() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            category: "no_eligible_source",
+            category: error_codes::NO_ELIGIBLE_SOURCE,
             message: "no eligible source is available for this model",
             cooldown_hint: RateLimitBodyHint::default(),
         }
@@ -99,20 +106,20 @@ impl AttemptFailure {
             ExecutorPrepareError::Authentication | ExecutorPrepareError::InvalidCredential => {
                 Self {
                     status: StatusCode::UNAUTHORIZED,
-                    category: "account_auth",
+                    category: error_codes::ACCOUNT_AUTH,
                     message: "account authorization is unavailable",
                     cooldown_hint: RateLimitBodyHint::default(),
                 }
             }
             ExecutorPrepareError::Persistence => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
-                category: "account_token_persistence",
+                category: error_codes::ACCOUNT_TOKEN_PERSISTENCE,
                 message: "refreshed account authorization could not be persisted",
                 cooldown_hint: RateLimitBodyHint::default(),
             },
             ExecutorPrepareError::Transient => Self {
                 status: StatusCode::BAD_GATEWAY,
-                category: "account_refresh",
+                category: error_codes::ACCOUNT_REFRESH,
                 message: "account authorization refresh failed",
                 cooldown_hint: RateLimitBodyHint::default(),
             },
@@ -141,82 +148,76 @@ pub(crate) fn retryable_failure(
     if !failure_category_requires_cooldown(category) {
         return false;
     }
-    if matches!(
-        category,
-        "upstream_unauthorized"
-            | "upstream_account_disabled"
-            | "upstream_forbidden"
-            | "upstream_region_unsupported"
-            | "upstream_model_not_found"
-            | "upstream_content_policy"
-            | "upstream_invalid_request"
-    ) {
-        return false;
-    }
-    if category == "upstream_candidate_rejected" {
-        // A new request may safely try another source. Responses continuations
-        // are bound to their creator, so retrying an unclassified rejection
-        // elsewhere can corrupt its upstream conversation state.
-        return !has_previous_response_id;
+    if category == error_codes::UPSTREAM_CANDIDATE_REJECTED {
+        // Selection preserves opaque ownership; only a complete local replay
+        // can release it. A generic rejection must not prevent that recovery.
+        return true;
     }
     retryable_status(status, has_previous_response_id)
         || matches!(
             category,
-            "upstream_usage_not_included"
-                | "upstream_quota_exhausted"
-                | "upstream_model_unsupported"
-                | "upstream_model_capacity"
-                | "upstream_websocket_connection_limit"
-                | "upstream_rate_limited"
-                | "upstream_refresh_token_reused"
-                | "upstream_request_timeout"
-                | "upstream_overloaded"
-                | "upstream_edge_challenge"
-                | "upstream_server_error"
-                | "upstream_bad_gateway"
-                | "upstream_unavailable"
-                | "upstream_gateway_timeout"
-                | "upstream_transport_timeout"
-                | "upstream_transport_connect"
-                | "upstream_transport_body"
-                | "upstream_transport_request"
-                | "upstream_transport"
-                | "upstream_error"
+            error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                | error_codes::UPSTREAM_FORBIDDEN
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_MODEL_UNAVAILABLE
+                | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                | error_codes::UPSTREAM_QUOTA_EXHAUSTED
+                | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_CAPACITY
+                | error_codes::UPSTREAM_WEBSOCKET_CONNECTION_LIMIT
+                | error_codes::UPSTREAM_RATE_LIMITED
+                | error_codes::UPSTREAM_REFRESH_TOKEN_REUSED
+                | error_codes::UPSTREAM_REQUEST_TIMEOUT
+                | error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_EDGE_CHALLENGE
+                | error_codes::UPSTREAM_SERVER_ERROR
+                | error_codes::UPSTREAM_BAD_GATEWAY
+                | error_codes::UPSTREAM_UNAVAILABLE
+                | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+                | error_codes::UPSTREAM_TRANSPORT_TIMEOUT
+                | error_codes::UPSTREAM_TRANSPORT_CONNECT
+                | error_codes::UPSTREAM_TRANSPORT_BODY
+                | error_codes::UPSTREAM_TRANSPORT_REQUEST
+                | error_codes::UPSTREAM_TRANSPORT
+                | error_codes::UPSTREAM_ERROR
         )
 }
 
 pub(crate) fn failure_category_requires_cooldown(category: &str) -> bool {
     !matches!(
         category,
-        "client_cancelled"
-            | "response_affinity_miss"
-            | "response_incomplete"
-            | "upstream_cancelled"
-            | "upstream_previous_response_not_found"
-            | "upstream_tool_call_mismatch"
-            | "upstream_context_too_large"
-            | "upstream_encrypted_content_invalid"
-            | "upstream_instructions_required"
-            | "upstream_content_policy"
-            | "upstream_payload_too_large"
-            | "upstream_unsupported_request"
-            | "upstream_websocket_unsupported"
-            | "upstream_invalid_request"
+        error_codes::CLIENT_CANCELLED
+            | error_codes::RESPONSE_AFFINITY_MISS
+            | error_codes::RESPONSE_INCOMPLETE
+            | error_codes::UPSTREAM_CANCELLED
+            | error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+            | error_codes::UPSTREAM_TOOL_CALL_MISMATCH
+            | error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+            | error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID
+            | error_codes::UPSTREAM_INSTRUCTIONS_REQUIRED
+            | error_codes::UPSTREAM_CONTENT_POLICY
+            | error_codes::UPSTREAM_PAYLOAD_TOO_LARGE
+            | error_codes::UPSTREAM_UNSUPPORTED_REQUEST
+            | error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
+            | error_codes::UPSTREAM_INVALID_REQUEST
     )
 }
 
 pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
     matches!(
         category,
-        "upstream_tool_call_mismatch"
-            | "upstream_context_too_large"
-            | "upstream_encrypted_content_invalid"
-            | "upstream_instructions_required"
-            | "upstream_content_policy"
-            | "upstream_payload_too_large"
-            | "upstream_unsupported_request"
-            | "upstream_websocket_unsupported"
-            | "upstream_invalid_request"
+        error_codes::UPSTREAM_TOOL_CALL_MISMATCH
+            | error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+            | error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID
+            | error_codes::UPSTREAM_INSTRUCTIONS_REQUIRED
+            | error_codes::UPSTREAM_CONTENT_POLICY
+            | error_codes::UPSTREAM_PAYLOAD_TOO_LARGE
+            | error_codes::UPSTREAM_UNSUPPORTED_REQUEST
+            | error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
+            | error_codes::UPSTREAM_INVALID_REQUEST
     )
 }
 
@@ -232,17 +233,6 @@ pub(crate) fn recoverable_response_affinity_miss(
             status,
             StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::CONFLICT
         )
-}
-
-pub(crate) fn retry_candidate_limit(
-    max_retry_candidates: usize,
-    owner_recovery_confirmed: bool,
-) -> usize {
-    if owner_recovery_confirmed {
-        MAX_RESPONSE_OWNER_CANDIDATES
-    } else {
-        max_retry_candidates
-    }
 }
 
 pub(crate) fn previous_response_not_found(payload: &[u8]) -> bool {
@@ -461,7 +451,7 @@ pub(crate) fn recoverable_response_model_switch(
         return false;
     }
 
-    category == "upstream_tool_call_mismatch" || {
+    category == error_codes::UPSTREAM_TOOL_CALL_MISMATCH || {
         let text = normalized_error_text(payload);
         (text.contains("previous_response_id")
             && text_has_any(&text, &["model", "mismatch", "switch"]))
@@ -502,7 +492,7 @@ pub(crate) fn previous_response_not_found_value(value: &Value) -> bool {
                 .eq_ignore_ascii_case("previous_response_not_found")
                 || value
                     .trim()
-                    .eq_ignore_ascii_case("response_continuation_unavailable")
+                    .eq_ignore_ascii_case(error_codes::RESPONSE_CONTINUATION_UNAVAILABLE)
         })
         || [value.pointer("/error/message"), value.get("message")]
             .into_iter()

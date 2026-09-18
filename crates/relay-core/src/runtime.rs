@@ -66,6 +66,7 @@ const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 8 * 60 * 60 * 1_000;
 const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
+static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A request activity delta for hosts that render the pool while requests are
 /// in flight. It intentionally contains only routing identifiers and counts;
@@ -73,6 +74,8 @@ const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeActivitySnapshot {
+    #[serde(default)]
+    pub runtime_id: u64,
     pub revision: u64,
     pub candidate_id: String,
     pub in_flight: u32,
@@ -90,9 +93,9 @@ pub(crate) struct CodexSourceModelMetadata {
 fn source_candidate_id(
     source_id: &str,
     binding: &SourceProtocolBinding,
-    binding_count: usize,
+    legacy_protocol: WireApi,
 ) -> String {
-    if binding_count == 1 {
+    if binding.adapter.is_passthrough() && binding.wire_api == legacy_protocol {
         return source_id.to_string();
     }
     let suffix = binding.adapter.route_suffix(binding.wire_api);
@@ -111,7 +114,7 @@ fn source_reasoning_for_route(
         return Some(capabilities);
     }
     capabilities
-        .retain_efforts(|effort| reasoning_mode.supports_effort(effort))
+        .retain_efforts(|effort| adapter.supports_reasoning_effort(reasoning_mode, effort))
         .then_some(())?;
     capabilities.clear_summary_capabilities();
     Some(capabilities)
@@ -159,6 +162,7 @@ pub struct RuntimeSource {
     /// verified for each route. An empty list preserves the legacy source-wide
     /// `wire_api`.
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    pub protocol_config: crate::SourceProtocolConfig,
     pub enabled: bool,
     pub draining: bool,
     pub priority: i32,
@@ -172,6 +176,7 @@ pub struct RuntimeSource {
 impl RuntimeSource {
     pub fn unrestricted(source: ProviderSource) -> Self {
         Self {
+            protocol_config: crate::SourceProtocolConfig::default(),
             protocol_bindings: vec![SourceProtocolBinding::legacy(
                 source.wire_api,
                 &source.models,
@@ -383,6 +388,7 @@ pub struct GatewayRuntimeOptions {
     pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     pub subscription_plan_order: Vec<String>,
+    pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub quota_stale_after_ms: u64,
@@ -447,6 +453,7 @@ impl Default for GatewayRuntimeOptions {
             keep_last_candidate_available: crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
             subscription_plan_order: Vec::new(),
+            pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
@@ -465,6 +472,7 @@ pub struct GatewayRuntime {
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    source_capabilities: BTreeMap<String, Vec<crate::ModelEndpointCapability>>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
@@ -485,11 +493,12 @@ pub struct GatewayRuntime {
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     codex_turn_state_store: CodexTurnStateStore,
     control: RuntimeControl,
-    max_retry_candidates: usize,
+    max_retry_candidates: std::sync::atomic::AtomicUsize,
     quota_stale_after_ms: u64,
     default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
+    activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
     chatgpt_team_breaker_callback: Arc<Mutex<RuntimeTeamBreakerCallback>>,
     pub(crate) usage: UsageCallback,
@@ -567,9 +576,9 @@ pub(crate) struct CandidateLease {
     scheduler: Arc<Mutex<PoolScheduler>>,
     availability: Arc<tokio::sync::Notify>,
     candidate_id: String,
-    model: String,
-    lane: CandidateLeaseLane,
+    reservation_id: crate::scheduler::ReservationId,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
+    activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
     released: AtomicBool,
 }
@@ -596,20 +605,14 @@ impl CandidateLease {
                 .scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let released = match self.lane {
-                CandidateLeaseLane::Text => {
-                    scheduler.release_for(&self.candidate_id, Some(&self.model))
-                }
-                CandidateLeaseLane::Image => {
-                    scheduler.release_image_for(&self.candidate_id, Some(&self.model))
-                }
-            };
+            let released = scheduler.release_reservation(self.reservation_id);
             if !released {
                 None
             } else {
                 let (in_flight, active_request_count, active_models) =
                     scheduler.runtime_activity_for(&self.candidate_id);
                 Some(RuntimeActivitySnapshot {
+                    runtime_id: self.activity_runtime_id,
                     revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
                     candidate_id: self.candidate_id.clone(),
                     in_flight,
@@ -904,6 +907,12 @@ impl GatewayRuntime {
             &mut scheduler,
         )?;
         let hidden_models = normalized_set(options.hidden_models.iter());
+        // Desktop and server resolve the versioned policy from the complete
+        // configured inventory. `None` keeps the legacy core compatibility
+        // path for direct callers and older saved runtimes.
+        if let Some(policy) = options.pool_routing.clone() {
+            scheduler.set_pool_routing(policy)?;
+        }
         let key_parts = build_keys(keys, &hidden_models)?;
         validate_reachability(
             reachability_requirement,
@@ -947,6 +956,7 @@ impl GatewayRuntime {
             discovery_client,
             sources: source_parts.executors,
             source_candidate_bindings: source_parts.candidate_bindings,
+            source_capabilities: source_parts.capabilities,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
             chatgpt_team_members: account_parts.team_members,
@@ -967,11 +977,12 @@ impl GatewayRuntime {
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             codex_turn_state_store: CodexTurnStateStore::default(),
             control: RuntimeControl::default(),
-            max_retry_candidates: options.max_retry_candidates,
+            max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),
             quota_stale_after_ms: options.quota_stale_after_ms,
             default_service_tier_value: AtomicU8::new(options.default_service_tier.atomic_value()),
             response_affinity_store: affinity_store,
             activity_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+            activity_runtime_id: NEXT_ACTIVITY_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
             activity_revision: Arc::new(AtomicU64::new(0)),
             chatgpt_team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
             usage,
@@ -1471,6 +1482,12 @@ impl GatewayRuntime {
         scope: &CandidateScope,
         allowed_protocols: &[WireApi],
     ) -> ExecutorRoute {
+        let wire_api = allowed_protocols
+            .first()
+            .copied()
+            .unwrap_or(WireApi::Responses);
+        let adapter =
+            SourceAdapter::between(wire_api, WireApi::Responses).expect("registered account route");
         ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
@@ -1479,9 +1496,13 @@ impl GatewayRuntime {
             client_context_id: None,
             scope: scope.clone(),
             allowed_protocols: allowed_protocols.to_vec(),
-            wire_api: WireApi::Responses,
-            adapter: SourceAdapter::Native,
-            reasoning_mode: MessagesReasoningMode::Disabled,
+            wire_api,
+            adapter,
+            reasoning_mode: if adapter.is_passthrough() {
+                MessagesReasoningMode::Disabled
+            } else {
+                MessagesReasoningMode::Adaptive
+            },
             cache_write_ttl: CacheWriteTtl::Provider,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
@@ -1540,7 +1561,43 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
+        let scheduler = self.lock_scheduler();
+        if scheduler.automatic_recovery_enabled() {
+            // Cover the whole configured pool and one recovery attempt per
+            // route. Selection still enforces the key, model and owner scope.
+            scheduler.candidates().count().saturating_mul(2).max(1)
+        } else {
+            self.max_retry_candidates.load(Ordering::Relaxed)
+        }
+    }
+
+    pub(crate) fn automatic_recovery_enabled(&self) -> bool {
+        self.lock_scheduler().automatic_recovery_enabled()
+    }
+
+    pub fn set_pool_routing_policy(
+        &self,
+        policy: crate::PoolRoutingPolicy,
+        max_retry_candidates: u8,
+        cooldown_after_failures: u8,
+        keep_last_candidate_available: bool,
+    ) -> Result<()> {
+        policy
+            .validate()
+            .map_err(|message| Error::Validation(message.into()))?;
+        if !(1..=8).contains(&max_retry_candidates) || !(1..=8).contains(&cooldown_after_failures) {
+            return Err(Error::Validation(
+                "routing retry limits must be between 1 and 8".into(),
+            ));
+        }
+        let mut scheduler = self.lock_scheduler();
+        scheduler.set_pool_routing(policy)?;
+        scheduler.set_cooldown_policy(cooldown_after_failures, keep_last_candidate_available);
         self.max_retry_candidates
+            .store(usize::from(max_retry_candidates), Ordering::Relaxed);
+        drop(scheduler);
+        self.candidate_availability.notify_waiters();
+        Ok(())
     }
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
@@ -1639,8 +1696,32 @@ impl GatewayRuntime {
         candidate_id: &str,
         request: CooldownRequest<'_>,
     ) -> bool {
-        self.lock_scheduler()
-            .set_cooldown_with_reason_for_model_at(candidate_id, request)
+        let mut scheduler = self.lock_scheduler();
+        let applied = scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request);
+        if applied {
+            if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+                let resource_failure = request.reason
+                    == crate::scheduler::CooldownReason::RateLimit
+                    || (request.scope == "*"
+                        && request.reason == crate::scheduler::CooldownReason::Mandatory);
+                let upstream = binding.adapter.upstream_protocol(binding.wire_api);
+                for (id, sibling) in &self.source_candidate_bindings {
+                    if id != candidate_id
+                        && sibling.source_id == binding.source_id
+                        && (resource_failure
+                            || sibling.adapter.upstream_protocol(sibling.wire_api) == upstream)
+                    {
+                        scheduler.set_cooldown_with_reason(
+                            id,
+                            request.scope,
+                            request.retry_at_ms,
+                            request.reason,
+                        );
+                    }
+                }
+            }
+        }
+        applied
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {

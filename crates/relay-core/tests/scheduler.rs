@@ -22,6 +22,9 @@ use zenith_relay_core::{
 const LOCAL_KEY: &str = "p2-local-key";
 const MODEL: &str = "gpt-p2";
 
+#[path = "support/automatic_recovery.rs"]
+mod automatic_recovery;
+
 #[derive(Clone, Debug)]
 struct ObservedRequest {
     path: String,
@@ -168,6 +171,7 @@ async fn pool_does_not_inject_unconfirmed_fast_without_overriding_client_service
         GatewayRuntimeOptions {
             model_metadata_catalog: None,
             max_retry_candidates: 3,
+            pool_routing: None,
             default_service_tier: DefaultServiceTier::Fast,
             ..GatewayRuntimeOptions::default()
         },
@@ -300,6 +304,15 @@ async fn assert_server_error_fallback(status: StatusCode) {
 
 #[tokio::test]
 async fn function_tool_output_stays_on_its_creator_after_a_transient_failure() {
+    assert_tool_output_owner_after_failure(false).await;
+}
+
+#[tokio::test]
+async fn successful_tool_output_without_predecessor_does_not_create_portable_history() {
+    assert_tool_output_owner_after_failure(true).await;
+}
+
+async fn assert_tool_output_owner_after_failure(complete_tool_turn: bool) {
     let call_id = "call_stateful_01";
     let (source_a, state_a) = spawn_upstream(
         "source-a-key",
@@ -326,6 +339,13 @@ async fn function_tool_output_stays_on_its_creator_after_a_transient_failure() {
         ],
     )
     .await;
+    if complete_tool_turn {
+        state_a
+            .replies
+            .lock()
+            .unwrap()
+            .insert(1, response_reply("resp-tool-result", "owner"));
+    }
     let (source_b, state_b) = spawn_upstream(
         "source-b-key",
         vec![response_reply("resp-wrong-owner", "fallback")],
@@ -344,7 +364,7 @@ async fn function_tool_output_stays_on_its_creator_after_a_transient_failure() {
     let first = request(&gateway, false).await;
     assert_eq!(first.status(), StatusCode::OK);
 
-    let continuation = reqwest::Client::new()
+    let mut continuation = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
@@ -359,13 +379,31 @@ async fn function_tool_output_stays_on_its_creator_after_a_transient_failure() {
         .await
         .unwrap();
 
+    if complete_tool_turn {
+        assert_eq!(continuation.status(), StatusCode::OK);
+        let response: Value = continuation.json().await.unwrap();
+        continuation = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({
+                "model": MODEL,
+                "previous_response_id": response["id"],
+                "input": "continue with the original constraints"
+            }))
+            .send()
+            .await
+            .unwrap();
+    }
     assert_eq!(continuation.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(state_a.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        state_a.requests.lock().unwrap().len(),
+        2 + usize::from(complete_tool_turn)
+    );
     assert!(state_b.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn orphaned_function_tool_output_continues_through_pool_selection() {
+async fn orphaned_function_tool_output_is_rejected_before_pool_selection() {
     let (upstream, state) = spawn_upstream(
         "source-key",
         vec![response_reply("resp-continued", "unused")],
@@ -393,12 +431,12 @@ async fn orphaned_function_tool_output_continues_through_pool_selection() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(
-        response.json::<Value>().await.unwrap()["id"],
-        "resp-continued"
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "response_continuation_unavailable"
     );
-    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert!(state.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -826,16 +864,29 @@ async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
 
 #[tokio::test]
 async fn generic_provider_rejection_falls_back_and_cools_only_the_model() {
+    assert_candidate_rejection_falls_back(json!({
+        "code": "vendor_route_42",
+        "message": "this route cannot serve the request"
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn disabled_model_with_generic_request_error_still_falls_back() {
+    assert_candidate_rejection_falls_back(json!({
+        "type": "invalid_request_error",
+        "code": "model_disabled",
+        "message": "Requested model is disabled"
+    }))
+    .await;
+}
+
+async fn assert_candidate_rejection_falls_back(error: Value) {
     let (source_a, state_a) = spawn_upstream(
         "source-a-key",
         vec![Reply::Json {
             status: StatusCode::BAD_REQUEST,
-            body: json!({
-                "error": {
-                    "code": "vendor_route_42",
-                    "message": "this route cannot serve the request"
-                }
-            }),
+            body: json!({"error": error}),
             cache_control: "rejected",
             retry_after: None,
         }],
@@ -978,8 +1029,7 @@ async fn unmapped_candidate_is_tried_without_spending_the_execution_budget() {
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": MODEL,
-            "input": "hello",
-            "previous_response_id": "resp_previous"
+            "input": "hello"
         }))
         .send()
         .await
@@ -1152,7 +1202,7 @@ async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_acco
 }
 
 #[tokio::test]
-async fn streaming_gateway_bad_request_is_terminal_and_does_not_spend_the_fallback() {
+async fn streaming_gateway_rejection_tries_the_fallback_before_output() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -1166,8 +1216,8 @@ async fn streaming_gateway_bad_request_is_terminal_and_does_not_spend_the_fallba
     let (source_b, state_b) = spawn_upstream(
         "b-key",
         vec![Reply::Stream {
-            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
-            cache_control: "must-not-run",
+            chunks: vec![StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fallback\",\"status\":\"completed\",\"output\":[]}}\n\n")],
+            cache_control: "fallback",
         }],
     )
     .await;
@@ -1182,26 +1232,20 @@ async fn streaming_gateway_bad_request_is_terminal_and_does_not_spend_the_fallba
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = response.text().await.unwrap();
-    assert!(body.contains("invalid_request_error"), "body={body}");
-    assert!(body.contains("bad_request"), "body={body}");
-    assert!(
-        body.contains(
-            "Zenith AI request is invalid. Check the model, messages, tools, and parameters.",
-        ),
-        "body={body}"
-    );
+    assert!(body.contains("resp_fallback"), "body={body}");
+    assert!(!body.contains("bad_request"), "body={body}");
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert_eq!(
         events[0].error_category.as_deref(),
-        Some("upstream_invalid_request")
+        Some("upstream_candidate_rejected")
     );
-    assert!(events[0].cooldown_scope.is_none());
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -1355,7 +1399,7 @@ async fn invalid_sse_after_a_native_prelude_falls_back_before_a_source_switch() 
 }
 
 #[tokio::test]
-async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use() {
+async fn chat_completions_preserves_native_tools_and_complete_tool_history() {
     let chat = json!({
         "id": "chat-1",
         "object": "chat.completion",
@@ -1374,6 +1418,24 @@ async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use()
             Reply::Json {
                 status: StatusCode::OK,
                 body: chat.clone(),
+                cache_control: "chat",
+                retry_after: None,
+            },
+            Reply::Json {
+                status: StatusCode::OK,
+                body: chat.clone(),
+                cache_control: "chat",
+                retry_after: None,
+            },
+            Reply::Json {
+                status: StatusCode::OK,
+                body: json!({
+                    "id": "chat-tools", "object": "chat.completion", "model": "chat-model",
+                    "choices": [{"index":0,"finish_reason":"tool_calls","message":{
+                        "role":"assistant","content":null,
+                        "tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]
+                    }}]
+                }),
                 cache_control: "chat",
                 retry_after: None,
             },
@@ -1467,14 +1529,18 @@ async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use()
         .json(&json!({
             "model": "chat-model",
             "messages": [{"role": "user", "content": "hello"}],
-            "tools": [{"type": "function", "function": {"name": "shell"}}]
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters":{"type":"object"}}}],
+            "tool_choice": {"type":"function","function":{"name":"lookup"}}
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "tool_use_not_supported");
+    assert_eq!(
+        body["choices"][0]["message"]["tool_calls"][0]["id"],
+        "call_1"
+    );
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/chat/completions", gateway.base_url))
@@ -1496,20 +1562,37 @@ async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use()
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": "chat-model",
-            "messages": [{"role": "tool", "tool_call_id": "call_1", "content": "result"}]
+            "messages": [
+                {"role":"user","content":"hello"},
+                {"role":"assistant","content":null,"tool_calls":[
+                    {"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "result"}
+            ]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "tool_use_not_supported");
+    assert_eq!(body["choices"][0]["message"]["content"], "translated");
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     assert_eq!(
         requests[1].body["messages"][0]["content"][1]["type"],
         "image_url"
     );
+    assert_eq!(requests[2].body["tools"][0]["function"]["name"], "lookup");
+    assert_eq!(
+        requests[2].body["tool_choice"]["function"]["name"],
+        "lookup"
+    );
+    assert_eq!(
+        requests[3].body["messages"][1]["tool_calls"][0]["id"],
+        "call_1"
+    );
+    assert_eq!(requests[3].body["messages"][2]["tool_call_id"], "call_1");
+    assert_eq!(requests[3].body["messages"][2]["content"], "result");
 }
 
 #[tokio::test]
@@ -1864,8 +1947,7 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
     assert!(events.iter().any(|event| {
-        event.wire_api == WireApi::Responses
-            && event.candidate_id.as_deref() == Some("mixed::responses")
+        event.wire_api == WireApi::Responses && event.candidate_id.as_deref() == Some("mixed")
     }));
     assert!(events.iter().any(|event| {
         event.wire_api == WireApi::Messages
@@ -1920,6 +2002,7 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
         GatewayRuntimeOptions {
             model_metadata_catalog: None,
             max_retry_candidates: 3,
+            pool_routing: None,
             routing_strategy: Default::default(),
             subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
@@ -1972,6 +2055,7 @@ fn source(
             wire_api: WireApi::Responses,
             models: models.iter().map(|model| (*model).to_string()).collect(),
         },
+        protocol_config: Default::default(),
         protocol_bindings: Vec::new(),
         enabled: true,
         draining: false,
@@ -2026,6 +2110,7 @@ async fn spawn_gateway(
         GatewayRuntimeOptions {
             model_metadata_catalog: None,
             max_retry_candidates,
+            pool_routing: None,
             routing_strategy: Default::default(),
             subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),

@@ -40,7 +40,13 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
     );
     error.insert(
         "type".to_string(),
-        Value::String(api_error_type(preserved.status, &preserved.code).to_string()),
+        Value::String(
+            preserved
+                .error_type
+                .as_deref()
+                .unwrap_or_else(|| api_error_type(preserved.status, &preserved.code))
+                .to_string(),
+        ),
     );
     let Some(payload) = terminal.payload else {
         return bytes;
@@ -63,6 +69,7 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
 
 #[derive(Default)]
 pub(in crate::gateway) struct TerminalEvent {
+    pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(in crate::gateway) has_data: bool,
     pub(in crate::gateway) valid: bool,
     pub(in crate::gateway) has_output_delta: bool,
@@ -121,6 +128,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         return TerminalEvent {
             has_data: true,
             valid: true,
+            upstream_error: None,
             has_output_delta: false,
             semantic_output: false,
             is_compaction: false,
@@ -161,7 +169,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     let event_type = value.get("type").and_then(Value::as_str);
     let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
         || is_compaction_payload(&value, event_type);
-    let outcome = match event_type {
+    let mut outcome = match event_type {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
         }
@@ -172,6 +180,9 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         _ => None,
     };
     let error_category = upstream_event_failure_category(event_type, &value);
+    if error_category.is_some() && !matches!(outcome, Some(TerminalOutcome::Incomplete)) {
+        outcome = Some(TerminalOutcome::Failure);
+    }
     let error_status = error_category.map(|category| {
         let status = upstream_status_from_value(&value)
             .filter(|status| !status.is_success())
@@ -191,6 +202,8 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     .then(|| value.get("item").cloned())
     .flatten();
     TerminalEvent {
+        upstream_error: error_category
+            .map(|_| crate::usage::UpstreamErrorDetails::from_value(None, &value)),
         has_data: true,
         valid: true,
         has_output_delta,

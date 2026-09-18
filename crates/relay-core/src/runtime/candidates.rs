@@ -2,6 +2,7 @@ use super::{
     apply_candidate_policy, declared_source_reasoning_levels, model_rules, runtime_now_ms,
     ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
 };
+use crate::error_codes;
 use crate::quota::QuotaSnapshot;
 use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateScope, UsageEvent,
@@ -265,7 +266,7 @@ impl GatewayRuntime {
         }
 
         let category = event.error_category.as_deref().unwrap_or_default();
-        let model = if category == "image_generation_not_enabled" {
+        let model = if category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
             event.requested_model.as_deref()
         } else {
             event
@@ -297,14 +298,14 @@ impl GatewayRuntime {
             // treating it as `Exhausted` keeps an otherwise healthy slot out
             // of rotation until a separate refresh happens to run. Only an
             // actual quota snapshot above may mark the candidate exhausted.
-            "upstream_quota_exhausted" => {}
-            "upstream_unauthorized" | "account_auth" => {
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED => {}
+            error_codes::UPSTREAM_UNAUTHORIZED | error_codes::ACCOUNT_AUTH => {
                 self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
             }
-            "upstream_account_disabled" => {
+            error_codes::UPSTREAM_ACCOUNT_DISABLED => {
                 self.set_candidate_health(candidate_id, CandidateHealth::Blocked);
             }
-            "upstream_account_verification_required" => {
+            error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED => {
                 self.set_candidate_health(candidate_id, CandidateHealth::Checkpoint);
             }
             _ => {}
@@ -619,7 +620,51 @@ impl GatewayRuntime {
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
-        self.lock_scheduler().runtime_order(runtime_now_ms())
+        let scheduler = self.lock_scheduler();
+        let mut order = scheduler.runtime_order(runtime_now_ms());
+        let revision = self.activity_revision.load(Ordering::Acquire);
+        for candidate in &mut order {
+            candidate.runtime_id = self.activity_runtime_id;
+            candidate.activity_revision = revision;
+        }
+        order
+    }
+
+    pub fn candidate_runtime_order_for_key(
+        &self,
+        key_id: &str,
+    ) -> Vec<crate::CandidateRuntimeSnapshot> {
+        let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == key_id) else {
+            let mut order = self.candidate_runtime_order();
+            for candidate in &mut order {
+                candidate.next_for_new_request = false;
+            }
+            return order;
+        };
+        let scope = key
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let protocols = key.client_wire_apis.as_deref().map_or_else(
+            super::all_native_wire_apis,
+            super::client_wire_apis_to_native,
+        );
+        let scheduler = self.lock_scheduler();
+        let mut models = key.model_rules.clone();
+        models.excluded.extend(
+            scheduler
+                .candidates()
+                .flat_map(|candidate| &candidate.models)
+                .filter(|model| super::is_image_model_id(model))
+                .cloned(),
+        );
+        let mut order = scheduler.runtime_order_for(&scope, &models, &protocols, runtime_now_ms());
+        let revision = self.activity_revision.load(Ordering::Acquire);
+        for candidate in &mut order {
+            candidate.runtime_id = self.activity_runtime_id;
+            candidate.activity_revision = revision;
+        }
+        order
     }
 
     pub(crate) fn account_candidate_is_active(&self, candidate_id: &str) -> bool {
@@ -672,10 +717,10 @@ impl GatewayRuntime {
 fn is_model_capability_failure(category: &str) -> bool {
     matches!(
         category,
-        "upstream_model_not_found"
-            | "upstream_model_unsupported"
-            | "upstream_usage_not_included"
-            | "image_generation_not_enabled"
+        error_codes::UPSTREAM_MODEL_NOT_FOUND
+            | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+            | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+            | error_codes::IMAGE_GENERATION_NOT_ENABLED
     )
 }
 

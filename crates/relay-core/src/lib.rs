@@ -21,6 +21,8 @@ macro_rules! define_usage_request_contract {
             pub success: bool,
             pub http_status: u16,
             pub error_category: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub upstream_error: Option<crate::usage::UpstreamErrorDetails>,
             $($fields)*
         }
     };
@@ -31,6 +33,7 @@ pub mod automations;
 pub mod catalog;
 mod catalog_io;
 mod error;
+pub mod error_codes;
 pub mod gateway;
 pub mod model_metadata;
 pub mod pricing;
@@ -88,22 +91,27 @@ pub use runtime::{
     RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
 };
 pub use scheduler::{
-    account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateRuntimeSnapshot,
-    CandidateScope, ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, RoutingStrategy,
+    account_candidate_health, normalize_subscription_plan_order, resolve_pool_routing,
+    ActiveModelRuntime, CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState,
+    CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PoolMemberKind, PoolRoutingMember,
+    PoolRoutingMode, PoolRoutingPolicy, PoolScheduler, RoutingDiagnostics, RoutingStrategy,
     RuntimeCandidate, Selection, SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS,
     QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, fetch_source_provider_stats, is_loopback_url,
-    normalize_source_protocol_bindings, runtime_source_models_for_any_wire_api,
-    runtime_source_models_for_wire_api, runtime_source_models_with_cache_write_pricing,
-    runtime_source_protocol_bindings, runtime_source_supports_any_wire_api,
-    runtime_source_supports_wire_api, source_models_for_wire_api, source_points_to_gateway,
-    CacheWriteTtl, LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery,
-    SourceProtocolBinding, SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider,
-    WireApi,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    endpoint_url_protocol, fetch_source_provider_stats, is_loopback_url,
+    normalize_source_protocol_bindings, probe_source_generation,
+    runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
+    runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
+    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, service_protocol,
+    source_models_for_wire_api, source_points_to_gateway, CacheWriteTtl, CapabilityOrigin,
+    CapabilityStatus, LocalGatewayKey, ModelEndpointCapability, ProtocolFeature,
+    ProtocolSelectionMode, ProviderSource, SourceBalanceKind, SourceConnector, SourceDiscovery,
+    SourceProbeInput, SourceProbeResult, SourceProtocolBinding, SourceProtocolBindingKey,
+    SourceProtocolConfig, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
+    SourceStatsProvider, SourceStatsStatus, WireApi,
 };
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{

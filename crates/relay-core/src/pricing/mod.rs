@@ -6,6 +6,7 @@ mod resolver;
 mod schedule;
 
 use catalog::validate_litellm_payload;
+pub(crate) use decimal::decimal_to_scaled_allow_zero;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;

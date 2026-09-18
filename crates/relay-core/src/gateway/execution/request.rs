@@ -1,3 +1,7 @@
+use super::super::continuation::{
+    drop_materialized_previous_response_id, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+};
 use super::super::errors::{
     api_error, api_error_with_origin, api_error_with_origin_and_category,
     apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
@@ -9,23 +13,21 @@ use super::super::errors::{
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
-    retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,
-    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    retryable_failure, retryable_status, zenith_gateway_invalid_request, AttemptFailure,
+    CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 #[cfg(test)]
 use super::super::request::requested_reasoning_effort;
 use super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
-    drop_unpaired_responses_tool_calls, forwarded_bridge_gemini_headers,
-    forwarded_bridge_messages_headers, normalize_account_request, normalize_responses_lite_request,
-    repair_legacy_responses_call_ids, response_tool_call_ids,
-    responses_lite_parallel_tool_calls_valid, tool_call_output_ids, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, ServiceTierPolicy,
-    CODEX_RESPONSES_LITE_HEADER,
+    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
+    normalize_responses_lite_request, repair_legacy_responses_call_ids, response_tool_call_ids,
+    responses_lite_parallel_tool_calls_valid, tool_use_diagnostics, unpaired_tool_output_ids,
+    with_forwarded_tool_diagnostics, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
-    completed_account_response, emit_usage, populate_tokens, proxy_error_response,
+    completed_upstream_response, emit_usage, populate_tokens, proxy_error_response,
     proxy_json_response, proxy_response, response_id_from_bytes, route_error_origin,
     upstream_body_error_response, usage_event,
 };
@@ -34,7 +36,8 @@ use super::super::turn_state::{
     guard_account_request, relay_account_response_header, CODEX_TURN_STATE_HEADER,
 };
 use super::finish_request_failure;
-use super::{wait_for_candidate_retry, CandidateRetryContext};
+use super::{wait_for_candidate_retry, AutomaticRecovery, CandidateRetryContext};
+use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids, AdapterError, AdapterRequestContext, AdapterResponse,
@@ -42,7 +45,7 @@ use crate::protocol::{
 };
 use crate::runtime::AuthenticatedKey;
 use crate::usage::ReasoningEffortDiagnostics;
-use crate::{Error, GatewayRuntime, SourceAdapter, WireApi};
+use crate::{Error, GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -115,9 +118,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     let mut tried: HashSet<String> = Default::default();
     let mut attempt = attempt_offset;
     let mut attempts_this_run = 0_usize;
-    let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
-    let mut encrypted_content_recovered = false;
     let mut native_replay_attempted = false;
     let mut function_item_id_repair_attempted = false;
     let mut custom_tool_item_id_repair_attempted = false;
@@ -134,6 +135,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     });
     let mut retry_wait_attempt = 0u32;
     let mut retry_window_expired = false;
+    let mut automatic_recovery = AutomaticRecovery::new();
     // Automatic Lite is safe only when every configured route in this key
     // scope is an official account with confirmed Lite support. Explicit
     // client Lite headers remain authoritative, but a mixed or partly unknown
@@ -141,13 +143,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     // contract.
     let automatic_responses_lite = wire_api == WireApi::Responses
         && runtime.codex_model_responses_routes_all_support_lite(&key, &resolved_model);
-    let mut has_unpaired_tool_output = {
-        let outputs = tool_call_output_ids(&request);
-        let calls = response_tool_call_ids(&request);
-        outputs
-            .iter()
-            .any(|output| !calls.iter().any(|call| call == output))
-    };
+    let mut has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
     let prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
@@ -159,6 +155,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         key: &key,
         resolved_model: &resolved_model,
         protocols: candidate_protocols(wire_api),
+        exclusions: &HashSet::new(),
     };
 
     loop {
@@ -179,13 +176,9 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         }
         let wait_for_candidate_availability =
             wait_for_candidate_availability && retry_until_available;
-        let attempt_limit =
-            retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
-                + usize::from(encrypted_content_recovered)
-                + usize::from(native_replay_attempted)
-                + usize::from(model_switch_reset_attempted)
-                + usize::from(stale_tool_history_recovered)
-                + usize::from(legacy_call_id_repair_attempted);
+        let attempt_limit = runtime
+            .max_retry_candidates()
+            .saturating_sub(usize::from(attempt_offset));
         if attempts_this_run >= attempt_limit {
             if should_wait_for_candidate_availability(
                 wait_for_candidate_availability,
@@ -221,15 +214,29 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 .as_ref()
                 .is_some_and(|failure| failure_category_requires_cooldown(failure.category))
         {
-            runtime.invalidate_response_affinity(response_affinity_key.as_deref());
             response_affinity_key = None;
+        }
+        let (incompatible, admission_error) = super::compatibility::incompatible_routes(
+            &runtime,
+            &key,
+            &resolved_model,
+            wire_api,
+            &request,
+            stream,
+            &service_tier_policy,
+            now_ms(),
+        );
+        let mut selection_exclusions = tried.clone();
+        selection_exclusions.extend(incompatible.iter().cloned());
+        if admission_error.is_some() {
+            last_adapter_error = admission_error;
         }
         let selected = runtime
             .select_and_reserve(
                 &key,
                 &resolved_model,
                 candidate_protocols(wire_api),
-                &tried,
+                &selection_exclusions,
                 (
                     response_affinity_key.as_deref(),
                     prompt_affinity_key.as_deref(),
@@ -269,12 +276,15 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         now_ms(),
                     )
                 }) == Some(false)
-                && request
-                    .as_object_mut()
-                    .is_some_and(|object| object.remove("previous_response_id").is_some())
+                && drop_materialized_previous_response_id(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    &resolved_model,
+                    now_ms(),
+                )
             {
                 model_switch_reset_attempted = true;
-                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                 response_affinity_key = None;
                 requires_affinity_owner = false;
                 continue;
@@ -301,9 +311,9 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                         response_affinity_key = None;
                         requires_affinity_owner = false;
+                        has_unpaired_tool_output = false;
                         continue;
                     }
                     Ok(false) => {}
@@ -329,14 +339,47 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         now_ms(),
                     )
                 }) == Some(false)
-                && request
-                    .as_object_mut()
-                    .is_some_and(|object| object.remove("previous_response_id").is_some())
+                && drop_materialized_previous_response_id(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    &resolved_model,
+                    now_ms(),
+                )
             {
                 model_switch_reset_attempted = true;
-                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                 response_affinity_key = None;
                 requires_affinity_owner = false;
+                continue;
+            }
+            if requires_affinity_owner
+                && response_affinity_key.as_deref().and_then(|affinity_key| {
+                    runtime.response_affinity_owner_supports_route(
+                        &key,
+                        affinity_key,
+                        &resolved_model,
+                        candidate_protocols(wire_api),
+                        now_ms(),
+                    )
+                }) == Some(false)
+            {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+                    RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+                );
+            }
+            if automatic_recovery
+                .retry(
+                    &CandidateRetryContext {
+                        exclusions: &incompatible,
+                        ..retry_context
+                    },
+                    &mut tried,
+                    response_affinity_key.as_deref(),
+                )
+                .await
+            {
                 continue;
             }
             if should_wait_for_candidate_availability(
@@ -432,14 +475,14 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 return api_error(
                     StatusCode::BAD_REQUEST,
                     "request body must be a JSON object",
-                    "invalid_request",
+                    error_codes::INVALID_REQUEST,
                 );
             };
             if !responses_lite_parallel_tool_calls_valid(object) {
                 return api_error(
                     StatusCode::BAD_REQUEST,
                     "responses Lite requires parallel_tool_calls to be a boolean",
-                    "invalid_request",
+                    error_codes::INVALID_REQUEST,
                 );
             }
             // Apply the shared Lite contract before adapter translation. This
@@ -485,17 +528,12 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             Err(error) => return adapter_error_response(error),
         };
-        if let Some(upstream_body) = adapter_request.native_upstream_body_mut() {
+        if account_route {
+            let upstream_body = adapter_request.upstream_body_mut();
             let Value::Object(object) = upstream_body else {
                 unreachable!("request object was validated before execution")
             };
-            // Lite was normalized before adapter preparation. Account
-            // normalization adds only the native ChatGPT fields here.
-            if account_route {
-                normalize_account_request(object, route_responses_lite.is_some());
-            }
-        } else if account_route {
-            return adapter_error_response(AdapterError::unsupported_binding());
+            normalize_account_request(object, route_responses_lite.is_some());
         }
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
             &request,
@@ -507,25 +545,25 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "request body could not be serialized",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             );
         };
         let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
-        let upstream_stream = stream;
+        let upstream_stream = stream || account_route;
         attempt = attempt.saturating_add(1);
         attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
         let client = runtime.request_client(&route.candidate_id, upstream_stream);
         let mut upstream_headers = if adapter_request.requires_bridge_headers() {
-            match route.adapter {
-                SourceAdapter::ResponsesToMessages => {
+            match route.adapter.upstream_protocol(wire_api) {
+                crate::UpstreamProtocol::Messages => {
                     forwarded_bridge_messages_headers(&forwarded_headers)
                 }
-                SourceAdapter::ResponsesToGemini => {
+                crate::UpstreamProtocol::GeminiGenerateContent => {
                     forwarded_bridge_gemini_headers(&forwarded_headers)
                 }
-                SourceAdapter::Native => HeaderMap::new(),
+                _ => HeaderMap::new(),
             }
         } else {
             forwarded_headers.clone()
@@ -544,7 +582,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         } else {
             upstream_headers.remove(CODEX_TURN_STATE_HEADER);
         }
-        if account_route && wire_api == WireApi::Responses {
+        if account_route {
             apply_codex_routing_hint(
                 &mut upstream_headers,
                 &route.source_model,
@@ -705,6 +743,10 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
+            event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_body(
+                Some(status.as_u16()),
+                &bytes,
+            ));
             event.error_category = Some(failure.category.to_string());
             let cache_write_rejected = prompt_cache_write_rejected(&bytes);
             if wire_api == WireApi::Responses
@@ -726,6 +768,9 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut native_replay_attempted,
                 ) {
                     Ok(true) => {
+                        response_affinity_key = None;
+                        requires_affinity_owner = false;
+                        has_unpaired_tool_output = false;
                         tried.remove(&route.candidate_id);
                         emit_usage(&runtime, event);
                         last_failure = Some(failure);
@@ -737,21 +782,16 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 }
             }
             if wire_api == WireApi::Responses
-                && failure.category == "upstream_encrypted_content_invalid"
-                && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
-            {
-                tried.remove(&route.candidate_id);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                last_failure_origin = selected_error_origin;
-                continue;
-            }
-            if wire_api == WireApi::Responses
                 && has_previous_response_id
                 && responses_tool_call_is_missing_output(&bytes)
-                && recover_stale_tool_history(&mut request, &mut stale_tool_history_recovered)
+                && recover_stale_tool_history(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    &resolved_model,
+                    &mut stale_tool_history_recovered,
+                )
             {
-                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                 response_affinity_key = None;
                 requires_affinity_owner = false;
                 tried.remove(&route.candidate_id);
@@ -770,12 +810,15 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     has_unpaired_tool_output,
                     &bytes,
                 )
-                && request
-                    .as_object_mut()
-                    .is_some_and(|object| object.remove("previous_response_id").is_some())
+                && drop_materialized_previous_response_id(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    &resolved_model,
+                    now_ms(),
+                )
             {
                 model_switch_reset_attempted = true;
-                runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                 response_affinity_key = None;
                 requires_affinity_owner = false;
                 emit_usage(&runtime, event);
@@ -792,7 +835,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             );
             // A Responses continuation normally has to stay on the creator
             // of `previous_response_id`.  When that owner is temporarily
-            // unavailable, use the durable native replay captured from the
+            // unavailable, use the volatile native replay captured from the
             // successful turn before selecting another candidate.  This is
             // the safe hand-off path: the new candidate receives the
             // materialized conversation, never a foreign opaque response id.
@@ -802,7 +845,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 && response_affinity_hit
                 && requires_affinity_owner
                 && !native_replay_attempted
-                && retryable_failure(status, failure.category, has_previous_response_id)
+                && (retryable_failure(status, failure.category, has_previous_response_id)
+                    || (affinity_miss && response_missing))
             {
                 match replay_native_tool_continuation(
                     &runtime,
@@ -813,12 +857,34 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                         response_affinity_key = None;
                         requires_affinity_owner = false;
-                        // Keep the failed owner in `tried`: replay has
-                        // materialized the conversation specifically so the
-                        // next attempt can be handed to a different slot.
+                        has_unpaired_tool_output = false;
+                        if response_missing {
+                            // The owner is healthy but has lost its opaque
+                            // response id. It can safely accept the
+                            // materialized conversation on the next attempt.
+                            tried.remove(&route.candidate_id);
+                            event.error_category =
+                                Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
+                        } else {
+                            let state = apply_failure_cooldown_with_body(
+                                &runtime,
+                                &route.candidate_id,
+                                &source_model,
+                                status,
+                                failure.category,
+                                &response_headers,
+                                Some(&bytes),
+                                &cooldown_context,
+                                route.half_open_probe,
+                            );
+                            apply_failure_state(&mut event, state);
+                        }
+                        // A retryable transport/availability failure leaves
+                        // the owner in `tried`: replay has materialized the
+                        // conversation specifically so the next attempt can
+                        // be handed to a different slot.
                         emit_usage(&runtime, event);
                         last_failure = Some(failure);
                         last_failure_origin = selected_error_origin;
@@ -837,9 +903,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             {
                 if affinity_miss {
                     confirmed_response_missing |= response_missing;
-                    owner_recovery_confirmed |= !response_affinity_hit;
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
-                    event.error_category = Some("response_affinity_miss".to_string());
+                    event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
                 } else {
                     let state = apply_failure_cooldown_with_body(
                         &runtime,
@@ -908,7 +973,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             return response;
         }
 
-        if !upstream_stream {
+        // Managed ChatGPT accounts request the upstream Responses stream even
+        // for a buffered client request.  Buffer based on the client contract,
+        // then normalize either a JSON response or the completed SSE stream
+        // into the same response path.
+        if !stream {
             let bytes = match crate::transport::collect_limited(
                 upstream,
                 crate::runtime::MAX_NON_STREAM_BODY_BYTES,
@@ -938,9 +1007,9 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         false,
                         StatusCode::BAD_GATEWAY.as_u16(),
                         Some(if too_large {
-                            "upstream_body_too_large".to_string()
+                            error_codes::UPSTREAM_BODY_TOO_LARGE.to_string()
                         } else {
-                            "upstream_body".to_string()
+                            error_codes::UPSTREAM_BODY.to_string()
                         }),
                         started.elapsed().as_millis() as u64,
                         tool_use.clone(),
@@ -952,10 +1021,12 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     continue;
                 }
             };
-            let bytes = if account_route {
-                match completed_account_response(&bytes) {
+            let bytes = {
+                match completed_upstream_response(&bytes, account_route) {
                     Ok(bytes) => bytes,
-                    Err(failure) => {
+                    Err(upstream_failure) => {
+                        let failure = upstream_failure.failure;
+                        last_preserved_upstream_error = upstream_failure.preserved;
                         let state =
                             failure_category_requires_cooldown(failure.category).then(|| {
                                 apply_attempt_failure_cooldown(
@@ -981,18 +1052,40 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                             started.elapsed().as_millis() as u64,
                             tool_use.clone(),
                         );
+                        event.upstream_error =
+                            upstream_failure.upstream_error.map(|mut details| {
+                                details.http_status = Some(status.as_u16());
+                                details
+                            });
                         if wire_api == WireApi::Responses
-                            && failure.category == "upstream_encrypted_content_invalid"
-                            && try_recover_encrypted_content(
-                                &mut request,
-                                &mut encrypted_content_recovered,
-                            )
+                            && response_affinity_hit
+                            && has_previous_response_id
+                            && !native_replay_attempted
+                            && failure.category == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
                         {
-                            tried.remove(&route.candidate_id);
-                            emit_usage(&runtime, event);
-                            last_failure = Some(failure);
-                            last_failure_origin = selected_error_origin;
-                            continue;
+                            match replay_native_tool_continuation(
+                                &runtime,
+                                &key.id,
+                                &mut request,
+                                &route,
+                                stream,
+                                &mut native_replay_attempted,
+                            ) {
+                                Ok(true) => {
+                                    response_affinity_key = None;
+                                    requires_affinity_owner = false;
+                                    has_unpaired_tool_output = false;
+                                    tried.remove(&route.candidate_id);
+                                    event.error_category =
+                                        Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
+                                    emit_usage(&runtime, event);
+                                    last_failure = Some(failure);
+                                    last_failure_origin = selected_error_origin;
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(error) => return adapter_error_response(error),
+                            }
                         }
                         if let Some(state) = state {
                             apply_failure_state(&mut event, state);
@@ -1027,32 +1120,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         continue;
                     }
                 }
-            } else {
-                bytes
             };
-            let (bytes, bridge_response) =
-                match translate_completed_response(adapter_request, bytes) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        let mut event = usage_event(
-                            &request_id,
-                            attempt,
-                            &key.id,
-                            &route,
-                            Some(&reasoning_effort),
-                            &requested_model,
-                            false,
-                            StatusCode::BAD_GATEWAY.as_u16(),
-                            Some(error.code().to_string()),
-                            started.elapsed().as_millis() as u64,
-                            tool_use.clone(),
-                        );
-                        event.error_category = Some(error.code().to_string());
-                        emit_usage(&runtime, event);
-                        drop(lease);
-                        return adapter_error_response_for_origin(error, selected_error_origin);
-                    }
-                };
             let mut event = usage_event(
                 &request_id,
                 attempt,
@@ -1066,7 +1134,20 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 started.elapsed().as_millis() as u64,
                 tool_use.clone(),
             );
+            // Accounting reads the actual upstream counters before translation.
             populate_tokens(&mut event, &bytes);
+            let (bytes, bridge_response) =
+                match translate_completed_response(adapter_request, bytes) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        event.success = false;
+                        event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+                        event.error_category = Some(error.code().to_string());
+                        emit_usage(&runtime, event);
+                        drop(lease);
+                        return adapter_error_response_for_origin(error, selected_error_origin);
+                    }
+                };
             let recovered = runtime.record_success_with_metrics(
                 &route.candidate_id,
                 &source_model,
@@ -1195,6 +1276,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 let missing_call_id = bootstrap_failure.responses_call_id_is_missing;
                 let failure = bootstrap_failure.failure;
                 last_preserved_upstream_error = bootstrap_failure.preserved;
+                let upstream_error = bootstrap_failure.upstream_error;
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -1208,6 +1290,10 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     started.elapsed().as_millis() as u64,
                     tool_use.clone(),
                 );
+                event.upstream_error = upstream_error.map(|mut details| {
+                    details.http_status = Some(status.as_u16());
+                    details
+                });
                 if try_repair_legacy_responses_call_ids(
                     &mut request,
                     wire_api,
@@ -1227,8 +1313,10 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     && adapter_is_passthrough
                     && has_previous_response_id
                     && !native_replay_attempted
-                    && contains_tool_call_output(&request)
-                    && zenith_gateway_invalid_request
+                    && ((contains_tool_call_output(&request) && zenith_gateway_invalid_request)
+                        || (response_affinity_hit
+                            && failure.category
+                                == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND))
                 {
                     match replay_native_tool_continuation(
                         &runtime,
@@ -1239,6 +1327,14 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         &mut native_replay_attempted,
                     ) {
                         Ok(true) => {
+                            if failure.category == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+                            {
+                                event.error_category =
+                                    Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
+                            }
+                            response_affinity_key = None;
+                            requires_affinity_owner = false;
+                            has_unpaired_tool_output = false;
                             tried.remove(&route.candidate_id);
                             emit_usage(&runtime, event);
                             last_failure = Some(failure);
@@ -1252,21 +1348,16 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 if wire_api == WireApi::Responses
                     && has_previous_response_id
                     && missing_tool_output
-                    && recover_stale_tool_history(&mut request, &mut stale_tool_history_recovered)
+                    && recover_stale_tool_history(
+                        &runtime,
+                        &key.id,
+                        &mut request,
+                        &resolved_model,
+                        &mut stale_tool_history_recovered,
+                    )
                 {
-                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     response_affinity_key = None;
                     requires_affinity_owner = false;
-                    tried.remove(&route.candidate_id);
-                    emit_usage(&runtime, event);
-                    last_failure = Some(failure);
-                    last_failure_origin = selected_error_origin;
-                    continue;
-                }
-                if wire_api == WireApi::Responses
-                    && failure.category == "upstream_encrypted_content_invalid"
-                    && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
-                {
                     tried.remove(&route.candidate_id);
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
@@ -1321,11 +1412,15 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     if allow_previous_response_reset
         && request_has_previous_response_id(wire_api, &request)
         && confirmed_response_missing
-        && !contains_tool_call_output(&request)
     {
         let mut reset_request = request;
-        if let Some(object) = reset_request.as_object_mut() {
-            object.remove("previous_response_id");
+        if drop_materialized_previous_response_id(
+            &runtime,
+            &key.id,
+            &mut reset_request,
+            &resolved_model,
+            now_ms(),
+        ) {
             return Box::pin(execute_request(RequestExecution {
                 runtime,
                 key,
@@ -1347,6 +1442,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }))
             .await;
         }
+        return api_error(
+            StatusCode::CONFLICT,
+            RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+            RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+        );
     }
 
     if last_failure.is_none() {
@@ -1357,7 +1457,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     let failure = if retry_window_expired {
         AttemptFailure::classified_with_hint(
             StatusCode::SERVICE_UNAVAILABLE,
-            "upstream_unavailable",
+            error_codes::UPSTREAM_UNAVAILABLE,
             Default::default(),
         )
     } else {
@@ -1389,16 +1489,17 @@ pub(super) fn should_wait_for_candidate_availability(
             retryable_failure(failure.status, failure.category, has_previous_response_id)
                 && !matches!(
                     failure.category,
-                    "upstream_unauthorized"
-                        | "upstream_account_disabled"
-                        | "upstream_usage_not_included"
-                        | "upstream_region_unsupported"
-                        | "upstream_model_not_found"
-                        | "upstream_model_unsupported"
-                        | "upstream_forbidden"
-                        | "upstream_content_policy"
-                        | "upstream_invalid_request"
-                        | "upstream_candidate_rejected"
+                    error_codes::UPSTREAM_UNAUTHORIZED
+                        | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                        | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                        | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                        | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                        | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                        | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                        | error_codes::UPSTREAM_FORBIDDEN
+                        | error_codes::UPSTREAM_CONTENT_POLICY
+                        | error_codes::UPSTREAM_INVALID_REQUEST
+                        | error_codes::UPSTREAM_CANDIDATE_REJECTED
                 )
         })
 }
@@ -1412,12 +1513,15 @@ fn retry_backoff(attempt: u32) -> Duration {
     Duration::from_millis((base_ms + jitter_ms).min(5_000))
 }
 
-fn recover_stale_tool_history(request: &mut Value, recovered: &mut bool) -> bool {
+fn recover_stale_tool_history(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    model: &str,
+    recovered: &mut bool,
+) -> bool {
     if *recovered
-        || !drop_unpaired_responses_tool_calls(request)
-        || !request
-            .as_object_mut()
-            .is_some_and(|object| object.remove("previous_response_id").is_some())
+        || !drop_materialized_previous_response_id(runtime, local_key_id, request, model, now_ms())
     {
         return false;
     }
@@ -1464,11 +1568,7 @@ fn try_repair_legacy_responses_call_ids(
     *attempt = attempt.saturating_sub(1);
     *attempts_this_run = attempts_this_run.saturating_sub(1);
     tried.remove(candidate_id);
-    let output_ids = tool_call_output_ids(request);
-    let call_ids = response_tool_call_ids(request);
-    *has_unpaired_tool_output = output_ids
-        .iter()
-        .any(|output_id| !call_ids.iter().any(|call_id| call_id == output_id));
+    *has_unpaired_tool_output = !unpaired_tool_output_ids(request).is_empty();
     *requires_affinity_owner =
         request_has_previous_response_id(wire_api, request) || *has_unpaired_tool_output;
     true
@@ -1533,7 +1633,13 @@ fn replay_native_affinity_continuation(
     ) else {
         return Ok(false);
     };
-    *request = replay.replay_request(request, model, stream)?;
+    *request = match replay.replay_request(request, model, stream) {
+        Ok(request) => request,
+        Err(error) if error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error),
+    };
     *attempted = true;
     Ok(true)
 }

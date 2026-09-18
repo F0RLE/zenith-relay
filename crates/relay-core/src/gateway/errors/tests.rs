@@ -3,6 +3,8 @@ use crate::ErrorOrigin;
 use axum::body::{to_bytes, Body};
 use std::time::Duration;
 
+mod retry_hints;
+
 #[tokio::test]
 async fn generated_errors_keep_the_original_diagnostic_category() {
     let response = api_error_with_origin_and_category(
@@ -456,6 +458,21 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 "upstream_candidate_rejected",
             ),
             (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"error":{"type":"invalid_request_error","code":"model_disabled"}}"#.as_slice(),
+                "upstream_candidate_rejected",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"status":"INVALID_ARGUMENT"}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"error":{"code":"validation_error"}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
                 StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"websocket_not_supported"}}"#.as_slice(),
                 "upstream_websocket_unsupported",
@@ -507,19 +524,19 @@ fn deactivated_workspace_detection_requires_the_exact_structured_code() {
 }
 
 #[test]
-fn delayed_gateway_invalid_request_event_does_not_cool_down_source() {
+fn generic_gateway_rejection_remains_a_candidate_failure() {
     let value: Value = serde_json::from_slice(
             br#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
         )
         .unwrap();
 
     let classification = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &value);
-    assert_eq!(classification.category, "upstream_invalid_request");
+    assert_eq!(classification.category, "upstream_candidate_rejected");
     assert_eq!(
         upstream_event_failure_category(Some("error"), &value),
-        Some("upstream_invalid_request")
+        Some("upstream_candidate_rejected")
     );
-    assert!(!failure_category_requires_cooldown(classification.category));
+    assert!(failure_category_requires_cooldown(classification.category));
 }
 
 #[test]
@@ -555,21 +572,57 @@ fn preserved_upstream_error_keeps_only_safe_structured_messages() {
     assert_eq!(nested.code, "bad_request");
     assert_eq!(nested.message, "Zenith AI request is invalid.");
 
-    assert!(preserved_upstream_error(
+    let redacted = preserved_upstream_error(
             &failure,
             br#"{"error":{"code":"service_unavailable","message":"request failed at https://gateway.example.invalid/v1; bearer secret"}}"#,
         )
-        .is_none());
-    assert!(preserved_upstream_error(
+        .unwrap();
+    assert!(!redacted.message.contains("https://"));
+    assert!(!redacted.message.contains("secret"));
+    let redacted = preserved_upstream_error(
             &failure,
             br#"{"error":{"code":"service_unavailable","message":"quota exceeded for org-acme; contact admin@acme.test"}}"#,
         )
-        .is_none());
-    assert!(preserved_upstream_error(
+        .unwrap();
+    assert!(!redacted.message.contains("org-acme"));
+    assert!(!redacted.message.contains("admin@"));
+    let unknown = preserved_upstream_error(
         &failure,
         br#"{"error":{"code":"provider_error","message":"upstream diagnostic"}}"#,
     )
-    .is_none());
+    .unwrap();
+    assert_eq!(unknown.code, "provider_error");
+    assert_eq!(unknown.message, "upstream diagnostic");
+}
+
+#[test]
+fn quota_rate_and_validation_failures_keep_distinct_effects() {
+    for (code, category, cooldown) in [
+        ("slow_down", "upstream_rate_limited", true),
+        (
+            "organization_spend_limit_exceeded",
+            "upstream_quota_exhausted",
+            true,
+        ),
+        (
+            "project_spend_limit_exceeded",
+            "upstream_quota_exhausted",
+            true,
+        ),
+        ("INVALID_ARGUMENT", "upstream_invalid_request", false),
+        ("validation_error", "upstream_invalid_request", false),
+    ] {
+        let classification = classify_upstream_error_value(
+            StatusCode::BAD_GATEWAY,
+            &json!({"error": {"code": code}}),
+        );
+        assert_eq!(classification.category, category, "{code}");
+        assert_eq!(
+            failure_category_requires_cooldown(category),
+            cooldown,
+            "{code}"
+        );
+    }
 }
 
 #[test]
@@ -594,7 +647,7 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         "upstream_candidate_rejected",
         false
     ));
-    assert!(!retryable_failure(
+    assert!(retryable_failure(
         StatusCode::BAD_REQUEST,
         "upstream_candidate_rejected",
         true
@@ -609,7 +662,7 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         "upstream_usage_not_included",
         false
     ));
-    assert!(!retryable_failure(
+    assert!(retryable_failure(
         StatusCode::UNAUTHORIZED,
         "upstream_unauthorized",
         false

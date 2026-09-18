@@ -1,4 +1,7 @@
 use super::*;
+mod preview;
+mod recovery;
+mod unified;
 use crate::scheduler::{CandidateKind, CandidateQuota, CandidateQuotaState};
 use crate::ModelRules;
 use std::collections::{BTreeSet, HashSet};
@@ -104,6 +107,9 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         candidate_id: "source".into(),
         kind: CandidateKind::ApiSource,
         available: true,
+        next_for_new_request: false,
+        activity_revision: 0,
+        runtime_id: 0,
         in_flight: 0,
         active_request_count: 0,
         active_models: Vec::new(),

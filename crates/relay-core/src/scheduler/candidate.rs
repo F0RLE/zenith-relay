@@ -1,5 +1,6 @@
 use super::capacity::CandidateQuota;
 use super::cooldown::active_retry_at;
+use crate::error_codes;
 use crate::{
     accounts::{AccountAuthState, AccountHealthState},
     quota::SubscriptionStatus,
@@ -62,7 +63,7 @@ pub fn account_candidate_health(
         return CandidateHealth::Unhealthy;
     }
     match last_error_code {
-        Some("checkpoint" | "upstream_account_verification_required") => {
+        Some("checkpoint" | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED) => {
             return CandidateHealth::Checkpoint
         }
         Some("captcha") => return CandidateHealth::Captcha,
@@ -179,7 +180,10 @@ impl RuntimeCandidate {
         self.enabled
             && !self.draining
             && self.secret_available
-            && allowed_protocols.contains(&self.protocol)
+            && (allowed_protocols.contains(&self.protocol)
+                || (self.kind == CandidateKind::OAuthAccount
+                    && self.protocol == WireApi::Responses
+                    && !allowed_protocols.is_empty()))
             && self.supports_model(model)
             && self.model_rules.allows(model)
             && scope.includes(self)

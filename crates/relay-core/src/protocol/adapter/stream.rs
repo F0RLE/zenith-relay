@@ -14,6 +14,52 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub enum AdapterStreamBridge {
     Messages(Box<MessagesStreamBridge>),
     Gemini(Box<GeminiStreamBridge>),
+    Translated(Box<super::translation::TranslationStream>),
+}
+
+impl AdapterStreamBridge {
+    pub fn push(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Messages(bridge) => bridge.push(bytes),
+            Self::Gemini(bridge) => bridge.push(bytes),
+            Self::Translated(bridge) => bridge.push(bytes),
+        }
+    }
+    pub fn finish(&mut self) {
+        match self {
+            Self::Messages(bridge) => bridge.finish(),
+            Self::Gemini(bridge) => bridge.finish(),
+            Self::Translated(bridge) => bridge.finish(),
+        }
+    }
+    pub fn pop_output(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Self::Messages(bridge) => bridge.pop_output(),
+            Self::Gemini(bridge) => bridge.pop_output(),
+            Self::Translated(bridge) => bridge.pop_output(),
+        }
+    }
+    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+        match self {
+            Self::Messages(bridge) => bridge.completed(),
+            Self::Gemini(bridge) => bridge.completed(),
+            Self::Translated(bridge) => bridge.completed(),
+        }
+    }
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Messages(bridge) => bridge.is_terminal(),
+            Self::Gemini(bridge) => bridge.is_terminal(),
+            Self::Translated(bridge) => bridge.is_terminal(),
+        }
+    }
+    pub fn take_upstream_error(&mut self) -> Option<Value> {
+        match self {
+            Self::Messages(bridge) => bridge.take_upstream_error(),
+            Self::Gemini(bridge) => bridge.take_upstream_error(),
+            Self::Translated(bridge) => bridge.take_upstream_error(),
+        }
+    }
 }
 
 /// Incremental Messages-to-Responses state machine. It owns no network

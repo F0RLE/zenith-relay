@@ -1,17 +1,18 @@
 use crate::accounts::TokenRefreshFailureKind;
+use crate::error_codes;
 use crate::normalize_error_code;
 use serde_json::Value;
 
 pub fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
     match code.trim().to_ascii_lowercase().as_str() {
-        "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
+        error_codes::INVALID_GRANT => TokenRefreshFailureKind::InvalidGrant,
         // This may be emitted after another concurrent refresh already
         // rotated the token. It is retriable, not a fresh-login condition.
-        "refresh_token_reused" => TokenRefreshFailureKind::Transient,
-        "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
-        "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
-            TokenRefreshFailureKind::InvalidatedRefreshToken
-        }
+        error_codes::REFRESH_TOKEN_REUSED => TokenRefreshFailureKind::Transient,
+        error_codes::REFRESH_TOKEN_EXPIRED => TokenRefreshFailureKind::ExpiredRefreshToken,
+        error_codes::INVALID_REFRESH_TOKEN
+        | error_codes::REFRESH_TOKEN_INVALIDATED
+        | error_codes::TOKEN_INVALIDATED => TokenRefreshFailureKind::InvalidatedRefreshToken,
         _ => TokenRefreshFailureKind::Transient,
     }
 }

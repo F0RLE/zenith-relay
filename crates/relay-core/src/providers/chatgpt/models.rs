@@ -2,6 +2,7 @@ use super::{
     is_agent_identity_task_invalid_response, valid_access_token, valid_codex_client_version,
     CodexIdentityEnvelope,
 };
+use crate::error_codes;
 use crate::{transport::collect_limited, Error, ProxyConfig};
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
@@ -173,19 +174,19 @@ impl ModelDiscoveryFailureCode {
     /// Stable management identifier shared by desktop and server account flows.
     pub fn management_code(self) -> &'static str {
         match self {
-            Self::AgentTaskInvalid => "models_agent_task_invalid",
-            Self::Forbidden => "models_forbidden",
-            Self::HttpStatus => "models_http_status",
-            Self::InvalidAccessToken => "models_invalid_access_token",
-            Self::InvalidAccountId => "models_invalid_account_id",
-            Self::InvalidClientVersion => "models_invalid_client_version",
-            Self::InvalidEndpoint => "models_invalid_endpoint",
-            Self::InvalidResponse => "models_invalid_response",
-            Self::RateLimited => "models_rate_limited",
-            Self::ResponseTooLarge => "models_response_too_large",
-            Self::Transport => "models_transport",
-            Self::Unauthorized => "models_unauthorized",
-            Self::Upstream => "models_upstream",
+            Self::AgentTaskInvalid => error_codes::MODELS_AGENT_TASK_INVALID,
+            Self::Forbidden => error_codes::MODELS_FORBIDDEN,
+            Self::HttpStatus => error_codes::MODELS_HTTP_STATUS,
+            Self::InvalidAccessToken => error_codes::MODELS_INVALID_ACCESS_TOKEN,
+            Self::InvalidAccountId => error_codes::MODELS_INVALID_ACCOUNT_ID,
+            Self::InvalidClientVersion => error_codes::MODELS_INVALID_CLIENT_VERSION,
+            Self::InvalidEndpoint => error_codes::MODELS_INVALID_ENDPOINT,
+            Self::InvalidResponse => error_codes::MODELS_INVALID_RESPONSE,
+            Self::RateLimited => error_codes::MODELS_RATE_LIMITED,
+            Self::ResponseTooLarge => error_codes::MODELS_RESPONSE_TOO_LARGE,
+            Self::Transport => error_codes::MODELS_TRANSPORT,
+            Self::Unauthorized => error_codes::MODELS_UNAUTHORIZED,
+            Self::Upstream => error_codes::MODELS_UPSTREAM,
         }
     }
 

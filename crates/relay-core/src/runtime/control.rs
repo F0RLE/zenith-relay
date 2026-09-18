@@ -131,6 +131,7 @@ impl RuntimeControl {
             reasoning_tokens: Some(0),
             output_tokens: Some(0),
             total_tokens: Some(0),
+            upstream_error: None,
             quota_snapshot: None,
         };
         usage(event);

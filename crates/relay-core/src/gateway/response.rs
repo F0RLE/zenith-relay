@@ -1,6 +1,7 @@
 use super::errors::{upstream_failure_status, AttemptFailure, RateLimitBodyHint};
 use super::now_ms;
-use super::streaming::{parse_sse_event, TerminalOutcome};
+use super::streaming::{parse_sse_event, StreamBootstrapFailure, TerminalOutcome};
+use crate::error_codes;
 use crate::protocol::sse_event_end;
 use crate::runtime::ExecutorRoute;
 use crate::usage::ReasoningEffortDiagnostics;
@@ -28,9 +29,9 @@ pub(super) fn upstream_body_error_response(
     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
     let category = if too_large {
-        "upstream_body_too_large"
+        error_codes::UPSTREAM_BODY_TOO_LARGE
     } else {
-        "upstream_body"
+        error_codes::UPSTREAM_BODY
     };
     event.error_category = Some(category.to_string());
     event.latency_ms = started.elapsed().as_millis() as u64;
@@ -44,7 +45,7 @@ pub(super) fn upstream_body_error_response(
         } else {
             "upstream response failed"
         },
-        "upstream_error",
+        error_codes::UPSTREAM_ERROR,
         category,
         origin,
         Some(&request_id),
@@ -80,6 +81,7 @@ pub(super) fn attach_error_diagnostics(
     category: &str,
     request_id: Option<&str>,
 ) {
+    let origin = origin.for_category(category);
     response.headers_mut().insert(
         "x-zenith-relay-error-origin",
         HeaderValue::from_static(origin.as_str()),
@@ -245,6 +247,7 @@ pub(super) fn usage_event(
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
+        upstream_error: None,
         quota_snapshot: None,
     };
     if let Some(reasoning_effort) = reasoning_effort {
@@ -302,8 +305,26 @@ pub(super) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
 }
 
-pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
-    if serde_json::from_slice::<Value>(bytes).is_ok() {
+pub(super) fn completed_upstream_response(
+    bytes: &[u8],
+    account_stream: bool,
+) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
+    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+        let response = value.get("response").unwrap_or(&value);
+        if response.get("error").is_some_and(|error| !error.is_null())
+            || value.get("type").and_then(Value::as_str) == Some("error")
+            || response.get("status").and_then(Value::as_str) == Some("failed")
+        {
+            let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(bytes));
+            return Err(Box::new(StreamBootstrapFailure {
+                upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(None, &value)),
+                preserved: super::errors::preserved_upstream_error_value(&failure, &value),
+                ..failure.into()
+            }));
+        }
+        return Ok(bytes.to_vec());
+    }
+    if !account_stream {
         return Ok(bytes.to_vec());
     }
     let mut offset = 0;
@@ -311,21 +332,30 @@ pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, Attemp
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
         if terminal.has_data && !terminal.valid {
-            return Err(AttemptFailure::stream("stream_invalid"));
+            return Err(Box::new(
+                AttemptFailure::stream(error_codes::STREAM_INVALID).into(),
+            ));
         }
         if let Some(item) = terminal.output_item {
             output.push(item);
         }
         match terminal.outcome {
             Some(TerminalOutcome::Failure) => {
-                let category = terminal.error_category.unwrap_or("upstream_terminal");
-                return Err(AttemptFailure::classified_with_hint(
+                let category = terminal
+                    .error_category
+                    .unwrap_or(error_codes::UPSTREAM_TERMINAL);
+                let failure = AttemptFailure::classified_with_hint(
                     terminal
                         .error_status
                         .unwrap_or_else(|| upstream_failure_status(category)),
                     category,
                     terminal.cooldown_hint,
-                ));
+                );
+                return Err(Box::new(StreamBootstrapFailure {
+                    upstream_error: terminal.upstream_error,
+                    preserved: terminal.preserved_error,
+                    ..failure.into()
+                }));
             }
             Some(TerminalOutcome::Success | TerminalOutcome::Incomplete) => {
                 if let Some(mut response) = terminal.response {
@@ -336,15 +366,18 @@ pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, Attemp
                     {
                         response["output"] = Value::Array(output);
                     }
-                    return serde_json::to_vec(&response)
-                        .map_err(|_| AttemptFailure::stream("stream_invalid"));
+                    return serde_json::to_vec(&response).map_err(|_| {
+                        Box::new(AttemptFailure::stream(error_codes::STREAM_INVALID).into())
+                    });
                 }
             }
             None => {}
         }
         offset += end;
     }
-    Err(AttemptFailure::stream("stream_incomplete"))
+    Err(Box::new(
+        AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into(),
+    ))
 }
 
 pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
@@ -360,20 +393,29 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .and_then(Value::as_u64);
     let input_tokens =
         if anthropic_cache_read_tokens.is_some() || anthropic_cache_write_tokens.is_some() {
-            Some(
-                reported_input_tokens
-                    .unwrap_or_default()
+            reported_input_tokens.map(|input| {
+                input
                     .saturating_add(anthropic_cache_read_tokens.unwrap_or_default())
-                    .saturating_add(anthropic_cache_write_tokens.unwrap_or_default()),
-            )
+                    .saturating_add(anthropic_cache_write_tokens.unwrap_or_default())
+            })
         } else {
             reported_input_tokens
         };
-    let output_tokens = usage
+    let mut output_tokens = usage
         .get("output_tokens")
         .or_else(|| usage.get("completion_tokens"))
         .or_else(|| gemini.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
+    if gemini.get("candidatesTokenCount").is_some() {
+        output_tokens = output_tokens.map(|output| {
+            output.saturating_add(
+                gemini
+                    .get("thoughtsTokenCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        });
+    }
     if let Some(input_tokens) = input_tokens {
         event.input_tokens = Some(input_tokens);
     }
@@ -489,6 +531,7 @@ pub(super) fn find_usage(value: &Value) -> Option<&Value> {
     value
         .get("usage")
         .or_else(|| value.get("usageMetadata"))
+        .or_else(|| value.pointer("/message/usage"))
         .or_else(|| {
             let response = value.get("response")?;
             response.get("usage").or_else(|| {
@@ -519,6 +562,21 @@ pub(super) fn response_id_from_bytes(body: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::gateway::test_support::test_usage_event;
+
+    #[test]
+    fn buffered_json_and_account_stream_keep_original_failure_details() {
+        for (body, account_stream) in [
+            (br#"{"status":"failed","error":{"code":"future_constraint","message":"Constraint check failed"},"input":"synthetic-private"}"#.as_slice(), false),
+            (b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"future_constraint\",\"message\":\"Constraint check failed\"}}}\n\n".as_slice(), true),
+        ] {
+            let failure = completed_upstream_response(body, account_stream).unwrap_err();
+            let details = failure.upstream_error.unwrap();
+            assert_eq!(details.code.as_deref(), Some("future_constraint"));
+            assert_eq!(details.message.as_deref(), Some("Constraint check failed"));
+            assert!(!serde_json::to_string(&details).unwrap().contains("synthetic-private"));
+            assert_eq!(failure.preserved.unwrap().message, "Constraint check failed");
+        }
+    }
 
     #[test]
     fn non_stream_usage_normalizes_cached_reasoning_and_total_tokens() {

@@ -388,9 +388,7 @@ fn canonical_codex_number(value: &Number) -> String {
     let (sign, unsigned) = mantissa
         .strip_prefix('-')
         .map_or(("", mantissa), |unsigned| ("-", unsigned));
-    let (whole, fraction) = unsigned
-        .split_once('.')
-        .map_or((unsigned, ""), |parts| parts);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
     let mut digits = format!("{whole}{fraction}");
     let first_non_zero = digits.find(|digit| digit != '0');
     let Some(first_non_zero) = first_non_zero else {
@@ -439,68 +437,6 @@ fn sanitize_unstored_reasoning_items(object: &mut Map<String, Value>) {
             item.remove("encrypted_content");
         }
     }
-}
-
-pub(in crate::gateway) fn try_recover_encrypted_content(
-    request: &mut Value,
-    attempted: &mut bool,
-) -> bool {
-    if *attempted {
-        return false;
-    }
-    let mut recovered = request.clone();
-    let mut changed = false;
-    strip_encrypted_reasoning(&mut recovered, &mut changed);
-    if !changed {
-        return false;
-    }
-    *request = recovered;
-    *attempted = true;
-    true
-}
-
-fn strip_encrypted_reasoning(value: &mut Value, changed: &mut bool) {
-    match value {
-        Value::Array(values) => {
-            values.retain_mut(|value| {
-                if is_encrypted_compaction(value) {
-                    *changed = true;
-                    return false;
-                }
-                strip_encrypted_reasoning(value, changed);
-                true
-            });
-        }
-        Value::Object(object) => {
-            if object.get("type").and_then(Value::as_str) == Some("reasoning")
-                && object
-                    .get("encrypted_content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|content| !content.trim().is_empty())
-            {
-                object.remove("encrypted_content");
-                object.remove("id");
-                *changed = true;
-            }
-            for value in object.values_mut() {
-                strip_encrypted_reasoning(value, changed);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_encrypted_compaction(value: &Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    matches!(
-        object.get("type").and_then(Value::as_str),
-        Some("compaction" | "compaction_summary")
-    ) && object
-        .get("encrypted_content")
-        .and_then(Value::as_str)
-        .is_some_and(|content| !content.trim().is_empty())
 }
 
 #[cfg(test)]

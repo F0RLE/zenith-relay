@@ -4,6 +4,7 @@ use super::{
     Subscription, SubscriptionInput, SupplementalQuotaWindow,
 };
 use crate::error::{normalize_error_code, safe_error_code};
+use crate::error_codes;
 use crate::DefaultServiceTier;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -223,11 +224,11 @@ pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFail
     let retryable = status == 429 || status >= 500;
     let code = provider_error_code(body).unwrap_or_else(|| {
         match status {
-            401 => "quota_unauthorized",
-            403 => "quota_forbidden",
-            429 => "quota_rate_limited",
-            500..=599 => "quota_upstream",
-            _ => "quota_http_status",
+            401 => error_codes::QUOTA_UNAUTHORIZED,
+            403 => error_codes::QUOTA_FORBIDDEN,
+            429 => error_codes::QUOTA_RATE_LIMITED,
+            500..=599 => error_codes::QUOTA_UPSTREAM,
+            _ => error_codes::QUOTA_HTTP_STATUS,
         }
         .to_string()
     });

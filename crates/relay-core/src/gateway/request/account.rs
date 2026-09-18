@@ -8,6 +8,7 @@ use super::{
     CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES, MAX_CLIENT_REQUEST_BODY_BYTES,
     MAX_CLIENT_REQUEST_BODY_ERROR,
 };
+use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::GatewayRuntime;
 use axum::body::Body;
@@ -40,7 +41,7 @@ pub(in crate::gateway) async fn responses_compact(
         return api_error(
             StatusCode::BAD_REQUEST,
             "streaming is not supported for compact responses",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         );
     }
     let Some(requested_model) = request
@@ -52,7 +53,7 @@ pub(in crate::gateway) async fn responses_compact(
         return api_error(
             StatusCode::BAD_REQUEST,
             "model must be a non-empty string",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         );
     };
     let resolved_model = runtime
@@ -67,7 +68,7 @@ pub(in crate::gateway) async fn responses_compact(
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available in this managed pool",
-            "model_not_found",
+            error_codes::MODEL_NOT_FOUND,
         );
     };
     let responses_lite = headers.get(CODEX_RESPONSES_LITE_HEADER).cloned();
@@ -75,11 +76,9 @@ pub(in crate::gateway) async fn responses_compact(
         return api_error(
             StatusCode::BAD_REQUEST,
             "responses Lite requires parallel_tool_calls to be a boolean",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         );
     }
-    let response_affinity_key =
-        runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
     // The endpoint is ChatGPT-specific. Keep eligibility with the request and
     // read the mutable retry setting in the execution loop.
     let wait_for_candidate_availability = true;
@@ -93,7 +92,6 @@ pub(in crate::gateway) async fn responses_compact(
         client_headers: headers,
         endpoint: AccountEndpoint::Compact,
         responses_lite,
-        response_affinity_key,
         rewrite_model: true,
         wait_for_candidate_availability,
         allow_automatic_responses_lite: true,
@@ -135,7 +133,7 @@ pub(in crate::gateway) async fn alpha_search(
         return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "no OAuth account model is available for search",
-            "no_eligible_source",
+            error_codes::NO_ELIGIBLE_SOURCE,
         );
     };
     let resolved_model = runtime
@@ -150,7 +148,7 @@ pub(in crate::gateway) async fn alpha_search(
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available in this managed pool",
-            "model_not_found",
+            error_codes::MODEL_NOT_FOUND,
         );
     };
     if !model_was_provided {
@@ -184,7 +182,6 @@ pub(in crate::gateway) async fn alpha_search(
         client_headers: headers,
         endpoint: AccountEndpoint::AlphaSearch,
         responses_lite: None,
-        response_affinity_key: None,
         rewrite_model: model_was_provided,
         wait_for_candidate_availability,
         allow_automatic_responses_lite: true,
@@ -212,6 +209,10 @@ impl AccountEndpoint {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The bounded Axum response is the existing account-request short-circuit contract."
+)]
 async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Body>> {
     let body = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES)
         .await
@@ -219,7 +220,7 @@ async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Bod
             api_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 MAX_CLIENT_REQUEST_BODY_ERROR,
-                "request_too_large",
+                error_codes::REQUEST_TOO_LARGE,
             )
         })?;
     match serde_json::from_slice(&body) {
@@ -227,7 +228,7 @@ async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Bod
         _ => Err(api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         )),
     }
 }

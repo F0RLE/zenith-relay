@@ -4,6 +4,7 @@ use super::{
     quota_subscription::{merge_subscription_metadata_at, CodexSubscriptionClient},
     valid_access_token, ResponseBodyError,
 };
+use crate::error_codes;
 use crate::quota::{
     QuotaAdapter, QuotaAdapterCapabilities, QuotaAdapterContext, QuotaRefreshData,
     QuotaRefreshFailure, QuotaRefreshResult, QuotaWindowInput, QuotaWindowKind, ResetTime,
@@ -50,7 +51,7 @@ impl CodexQuotaClient {
         request_timeout: Duration,
     ) -> Result<Self, QuotaRefreshFailure> {
         let usage_endpoint = Url::parse(CODEX_QUOTA_ENDPOINT)
-            .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+            .map_err(|_| QuotaRefreshFailure::new(error_codes::INVALID_CONFIGURATION, false))?;
         Self::with_endpoint_proxy_and_timeout(usage_endpoint, proxy, request_timeout)
     }
 
@@ -73,7 +74,7 @@ impl CodexQuotaClient {
             None => builder,
         }
         .build()
-        .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::INVALID_CONFIGURATION, false))?;
         let subscription = CodexSubscriptionClient::new(http.clone())?;
         Ok(Self {
             http,
@@ -185,12 +186,13 @@ impl CodexQuotaClient {
     ) -> Result<QuotaRefreshResult, QuotaRefreshFailure> {
         if chatgpt_account_id.is_empty() || chatgpt_account_id.len() > MAX_ACCOUNT_ID_BYTES {
             return Err(QuotaRefreshFailure::new(
-                "invalid_chatgpt_account_id",
+                error_codes::INVALID_CHATGPT_ACCOUNT_ID,
                 false,
             ));
         }
-        let identity = CodexIdentityEnvelope::standard(chatgpt_account_id)
-            .map_err(|_| QuotaRefreshFailure::new("invalid_chatgpt_account_id", false))?;
+        let identity = CodexIdentityEnvelope::standard(chatgpt_account_id).map_err(|_| {
+            QuotaRefreshFailure::new(error_codes::INVALID_CHATGPT_ACCOUNT_ID, false)
+        })?;
         let response = identity
             .apply(
                 self.http
@@ -200,14 +202,16 @@ impl CodexQuotaClient {
             )
             .send()
             .await
-            .map_err(|_| QuotaRefreshFailure::new("quota_transport", true))?;
+            .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true))?;
         let status = response.status();
         let body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
-                ResponseBodyError::Transport => QuotaRefreshFailure::new("quota_transport", true),
+                ResponseBodyError::Transport => {
+                    QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true)
+                }
                 ResponseBodyError::TooLarge => {
-                    QuotaRefreshFailure::new("quota_response_too_large", false)
+                    QuotaRefreshFailure::new(error_codes::QUOTA_RESPONSE_TOO_LARGE, false)
                 }
             })?;
         if !status.is_success() {
@@ -330,23 +334,27 @@ pub fn is_agent_identity_task_invalid_failure(failure: &QuotaRefreshFailure) -> 
     failure.http_status() == Some(401)
         && matches!(
             failure.code.as_str(),
-            "invalid_task_id" | "task_not_found" | "task_expired"
+            error_codes::INVALID_TASK_ID | "task_not_found" | "task_expired"
         )
 }
 
 fn classify_quota_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
     if is_agent_identity_task_invalid_response(status, body) {
-        return QuotaRefreshFailure::new("invalid_task_id", false).with_http_status(status);
+        return QuotaRefreshFailure::new(error_codes::INVALID_TASK_ID, false)
+            .with_http_status(status);
     }
     crate::quota::classify_quota_http_failure(status, body)
 }
 
 fn bearer_authorization(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {
     if !valid_access_token(access_token) {
-        return Err(QuotaRefreshFailure::new("invalid_access_token", false));
+        return Err(QuotaRefreshFailure::new(
+            error_codes::INVALID_ACCESS_TOKEN,
+            false,
+        ));
     }
     shared_bearer_authorization(access_token)
-        .map_err(|_| QuotaRefreshFailure::new("invalid_access_token", false))
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::INVALID_ACCESS_TOKEN, false))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -447,7 +455,7 @@ pub fn parse_codex_usage(
     observed_at_ms: u64,
 ) -> Result<QuotaRefreshResult, QuotaRefreshFailure> {
     let payload: UsagePayload = serde_json::from_slice(body)
-        .map_err(|_| QuotaRefreshFailure::new("quota_invalid_response", false))?;
+        .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false))?;
     let supplemental = collect_supplemental_windows(&payload, observed_at_ms);
     let provider_credits = provider_credits(&payload);
     let explicit_limit_reached = payload.rate_limit_reached_type.is_some();
@@ -699,7 +707,7 @@ fn map_window(
     let used_percent = window
         .used_percent
         .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-        .ok_or_else(|| QuotaRefreshFailure::new("quota_invalid_percentage", false))?;
+        .ok_or_else(|| QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_PERCENTAGE, false))?;
     let reset = window
         .reset_at
         .filter(|value| *value > 0)

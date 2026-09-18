@@ -13,6 +13,7 @@ use crate::{
 };
 mod account;
 mod model;
+mod model_protocols;
 mod routing;
 mod usage;
 
@@ -21,15 +22,19 @@ pub use account::{
     QuotaWindowUsage, RemoteAccountLocation, RevealedAccountIdentity, SourceSummary,
 };
 pub use model::{
-    apply_model_display_order, apply_model_display_order_with_catalog, apply_model_metadata,
-    apply_model_reasoning_summary, apply_model_speed_summary, apply_pool_model_configuration,
+    apply_member_model_display_order, apply_model_display_order,
+    apply_model_display_order_with_catalog, apply_model_metadata, apply_model_reasoning_summary,
+    apply_model_speed_summary, apply_pool_model_configuration, member_model_catalog,
     model_has_api_source_route, pool_candidate_count, pooled_source_runtime_available,
-    source_runtime_available, GatewaySummary, ModelSummary,
+    source_runtime_available, GatewaySummary, ModelCatalogIdentity, ModelSummary,
+};
+pub use model_protocols::{
+    codex_catalog_supports_websockets, model_protocol_routes, ModelProtocolRoute,
 };
 pub use routing::{
-    account_candidate_enabled, account_operational_state, operational_status, quota_refresh_status,
-    AccountOperationalInput, AccountOperationalState, AccountRoutingBlockReason, OperationalStatus,
-    ProxyMode, QuotaRefreshStatus,
+    account_candidate_enabled, account_operational_state, operational_status, pool_routing_summary,
+    quota_refresh_status, AccountOperationalInput, AccountOperationalState,
+    AccountRoutingBlockReason, OperationalStatus, ProxyMode, QuotaRefreshStatus,
 };
 pub use usage::{
     UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown,
@@ -106,7 +111,7 @@ impl fmt::Debug for ProfileKeyRotation {
 }
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
-pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 3;
+pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 4;
 const MIN_CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESET_MEMBERS: usize = 2_048;
 const MAX_PRESET_MODELS: usize = 4_096;
@@ -143,6 +148,9 @@ pub fn normalize_configuration_preset(
     }
     normalize_source_preset_rules(&mut preset.settings.sources)?;
     normalize_account_preset_rules(&mut preset.settings.accounts)?;
+    if let Some(policy) = &preset.settings.routing.pool_routing {
+        policy.validate().map_err(str::to_string)?;
+    }
     preset.settings.routing.subscription_plan_order =
         normalize_subscription_plan_order(preset.settings.routing.subscription_plan_order)
             .map_err(str::to_string)?;
@@ -195,6 +203,7 @@ pub fn merge_configuration_preset_settings(
         "account",
     )?;
     merged.routing.clone_from(&requested.routing);
+    merged.routing.pool_routing = Some(merged.resolved_pool_routing());
     merged.quota.clone_from(&requested.quota);
     merged.hidden_models.clone_from(&requested.hidden_models);
     merged
@@ -232,7 +241,50 @@ pub fn validate_resolved_configuration_preset_members(
     settings: &ConfigurationPresetSettings,
 ) -> Result<(), String> {
     validate_unique_preset_member_ids(&settings.sources, |rule| &rule.id, "source")?;
-    validate_unique_preset_member_ids(&settings.accounts, |rule| &rule.id, "account")
+    validate_unique_preset_member_ids(&settings.accounts, |rule| &rule.id, "account")?;
+    if let Some(policy) = &settings.routing.pool_routing {
+        policy.validate().map_err(str::to_string)?;
+        if policy.members.iter().any(|member| match member.kind {
+            crate::PoolMemberKind::Source => !settings
+                .sources
+                .iter()
+                .any(|m| m.id == member.id && m.in_pool),
+            crate::PoolMemberKind::Account => !settings
+                .accounts
+                .iter()
+                .any(|m| m.id == member.id && m.in_pool),
+        }) {
+            return Err("pool routing references a member outside the preset pool".into());
+        }
+    }
+    Ok(())
+}
+
+impl ConfigurationPresetSettings {
+    pub fn resolved_pool_routing(&self) -> crate::PoolRoutingPolicy {
+        let members = self
+            .sources
+            .iter()
+            .filter(|m| m.in_pool)
+            .map(|m| {
+                (
+                    crate::PoolMemberKind::Source,
+                    m.id.clone(),
+                    m.priority,
+                    m.weight,
+                )
+            })
+            .chain(self.accounts.iter().filter(|m| m.in_pool).map(|m| {
+                (
+                    crate::PoolMemberKind::Account,
+                    m.id.clone(),
+                    m.priority,
+                    m.weight,
+                )
+            }))
+            .collect();
+        crate::resolve_pool_routing(self.routing.pool_routing.as_ref(), members)
+    }
 }
 
 fn validate_unique_preset_member_ids<T, F>(members: &[T], id: F, kind: &str) -> Result<(), String>
@@ -499,6 +551,11 @@ pub struct SourcePresetRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::ProtocolSelectionMode::is_manual"
+    )]
+    pub protocol_mode: crate::ProtocolSelectionMode,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub enabled: bool,
@@ -532,6 +589,8 @@ pub struct AccountPresetRule {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PresetRoutingPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub max_retry_candidates: u8,
     #[serde(default = "default_cooldown_after_failures")]
     pub cooldown_after_failures: u8,
@@ -760,6 +819,7 @@ fn model_summary(
         });
     ModelSummary {
         enabled,
+        protocol_routes: Vec::new(),
         codex_visible: enabled && codex_model_is_picker_eligible(&id),
         codex_display_name: codex_model_display_name(&id),
         id,
@@ -930,6 +990,9 @@ mod tests {
             candidate_id: candidate_id.into(),
             kind,
             available,
+            next_for_new_request: false,
+            activity_revision: 0,
+            runtime_id: 0,
             in_flight: 0,
             active_request_count: 0,
             active_models: Vec::<ActiveModelRuntime>::new(),
@@ -978,6 +1041,7 @@ mod tests {
 
     fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
         SourceSummary {
+            resolved_protocol_bindings: None,
             id: id.into(),
             name: id.into(),
             enabled: true,
@@ -989,6 +1053,7 @@ mod tests {
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
+            protocol_config: crate::SourceProtocolConfig::default(),
             models: models.iter().map(ToString::to_string).collect(),
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1067,6 +1132,7 @@ mod tests {
     fn model_reasoning_summary_does_not_invent_unsupported_manual_levels() {
         let mut model = ModelSummary {
             enabled: true,
+            protocol_routes: Vec::new(),
             codex_visible: true,
             codex_display_name: String::new(),
             id: "gpt-test".into(),
@@ -1164,6 +1230,7 @@ mod tests {
     fn anthropic_modes_are_limited_to_provider_reported_levels() {
         let mut model = ModelSummary {
             enabled: true,
+            protocol_routes: Vec::new(),
             codex_visible: true,
             codex_display_name: String::new(),
             id: "claude-opus-4-8".into(),
@@ -1217,6 +1284,7 @@ mod tests {
     #[test]
     fn api_source_reasoning_route_requires_an_active_responses_source() {
         let source = SourceSummary {
+            resolved_protocol_bindings: None,
             id: "source_1".into(),
             name: "Synthetic".into(),
             enabled: true,
@@ -1228,6 +1296,7 @@ mod tests {
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
+            protocol_config: crate::SourceProtocolConfig::default(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1274,6 +1343,7 @@ mod tests {
     #[test]
     fn model_summaries_apply_member_rules_hidden_state_and_discovery_order() {
         let source = SourceSummary {
+            resolved_protocol_bindings: None,
             id: "source_1".into(),
             name: "Synthetic".into(),
             enabled: true,
@@ -1285,6 +1355,7 @@ mod tests {
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
+            protocol_config: crate::SourceProtocolConfig::default(),
             models: vec![
                 "gpt-old".into(),
                 "gpt-5.4-mini".into(),
@@ -1318,6 +1389,61 @@ mod tests {
         assert_eq!(models[1].member_count, 1);
         assert!(models[1].output_micro_usd_per_million.is_some());
         assert!(models[2].output_micro_usd_per_million.is_none());
+    }
+
+    #[test]
+    fn member_model_order_uses_complete_inventory_independently_of_rules() {
+        let metadata = ModelMetadataCatalog::from_models_dev_json(
+            r#"{
+                "test/newer":{"release_date":"2026-01-01"},
+                "test/older":{"release_date":"2025-01-01"},
+                "test/catalog-only":{"release_date":"2026-02-01"}
+            }"#,
+        )
+        .unwrap();
+        let inventory = ["unknown-z", "older", "newer", "unknown-a"];
+        let mut sources = vec![source_summary("source", &inventory)];
+        let mut accounts = vec![account_summary(false, &inventory)];
+        sources[0].excluded_models = vec!["newer".into()];
+        sources[0].enabled = false;
+        accounts[0].allowed_models = vec!["older".into()];
+        let original_source = sources[0].clone();
+        let original_account = accounts[0].clone();
+
+        apply_member_model_display_order(&mut sources, &mut accounts, &[], &metadata);
+        let expected = ["newer", "older", "unknown-z", "unknown-a"];
+        assert_eq!(sources[0].models, expected);
+        assert_eq!(accounts[0].models, expected);
+        let mut expected_source = original_source;
+        expected_source.models = expected.iter().map(ToString::to_string).collect();
+        let mut expected_account = original_account;
+        expected_account.models = expected_source.models.clone();
+        assert_eq!(sources[0], expected_source);
+        assert_eq!(accounts[0], expected_account);
+        let identities = member_model_catalog(&sources, &accounts, &metadata);
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities["newer"].catalog_provider, "test");
+        assert_eq!(identities["older"].catalog_provider, "test");
+        assert!(!identities.contains_key("unknown-z"));
+        assert!(!identities.contains_key("catalog-only"));
+
+        sources[0].excluded_models.clear();
+        accounts[0].excluded_models = vec!["older".into()];
+        apply_member_model_display_order(&mut sources, &mut accounts, &[], &metadata);
+        assert_eq!(sources[0].models, expected);
+        assert_eq!(accounts[0].models, expected);
+
+        apply_member_model_display_order(
+            &mut sources,
+            &mut accounts,
+            &["stale".into(), "older".into(), "NEWER".into()],
+            &metadata,
+        );
+        assert_eq!(
+            sources[0].models,
+            ["older", "newer", "unknown-z", "unknown-a"]
+        );
+        assert_eq!(accounts[0].models, sources[0].models);
     }
 
     #[test]
@@ -1647,6 +1773,7 @@ mod tests {
     fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
         let mut settings = ConfigurationPresetSettings {
             sources: vec![SourcePresetRule {
+                protocol_mode: crate::ProtocolSelectionMode::Manual,
                 id: "source".into(),
                 name: "Source".into(),
                 base_url: "https://example.test/v1".into(),
@@ -1665,6 +1792,7 @@ mod tests {
             }],
             accounts: Vec::new(),
             routing: PresetRoutingPolicy {
+                pool_routing: None,
                 max_retry_candidates: 3,
                 cooldown_after_failures: 3,
                 keep_last_candidate_available: true,
@@ -1814,6 +1942,7 @@ mod tests {
     #[test]
     fn pool_snapshot_configuration_hides_speed_without_runtime_evidence() {
         let source = SourceSummary {
+            resolved_protocol_bindings: None,
             id: "source_1".into(),
             name: "Synthetic".into(),
             enabled: true,
@@ -1825,6 +1954,7 @@ mod tests {
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
+            protocol_config: crate::SourceProtocolConfig::default(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1881,6 +2011,7 @@ mod tests {
     #[test]
     fn pool_snapshot_does_not_infer_speed_from_a_runtime_default() {
         let source = SourceSummary {
+            resolved_protocol_bindings: None,
             id: "source_1".into(),
             name: "Synthetic".into(),
             enabled: true,
@@ -1892,6 +2023,7 @@ mod tests {
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
+            protocol_config: crate::SourceProtocolConfig::default(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1944,6 +2076,7 @@ mod tests {
     #[test]
     fn pool_model_summaries_include_the_runtime_messages_bridge() {
         let source = SourceSummary {
+            resolved_protocol_bindings: None,
             id: "source_1".into(),
             name: "Mixed source".into(),
             enabled: true,
@@ -1954,6 +2087,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: crate::SourceProtocolConfig::default(),
             protocol_bindings: vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
@@ -2009,6 +2143,7 @@ mod tests {
     #[test]
     fn source_summary_preserves_legacy_and_native_protocol_model_boundaries() {
         let legacy = SourceSummary {
+            resolved_protocol_bindings: None,
             id: "legacy".into(),
             name: "Legacy".into(),
             enabled: true,
@@ -2020,6 +2155,7 @@ mod tests {
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
+            protocol_config: crate::SourceProtocolConfig::default(),
             models: vec!["gpt-legacy".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),

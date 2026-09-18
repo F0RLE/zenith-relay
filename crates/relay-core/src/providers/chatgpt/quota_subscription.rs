@@ -1,5 +1,6 @@
 use super::{collect_response_body, valid_access_token, ResponseBodyError};
 use crate::accounts::decode_unverified_jwt_payload;
+use crate::error_codes;
 use crate::quota::QuotaRefreshFailure;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::{
@@ -37,9 +38,9 @@ impl CodexSubscriptionClient {
         Self::with_endpoints(
             http,
             Url::parse(CODEX_ACCOUNTS_CHECK_ENDPOINT)
-                .map_err(|_| failure("subscription_configuration", false))?,
+                .map_err(|_| failure(error_codes::SUBSCRIPTION_CONFIGURATION, false))?,
             Url::parse(CODEX_SUBSCRIPTIONS_ENDPOINT)
-                .map_err(|_| failure("subscription_configuration", false))?,
+                .map_err(|_| failure(error_codes::SUBSCRIPTION_CONFIGURATION, false))?,
         )
     }
 
@@ -54,7 +55,7 @@ impl CodexSubscriptionClient {
                 || !endpoint.username().is_empty()
                 || endpoint.password().is_some()
             {
-                return Err(failure("subscription_configuration", false));
+                return Err(failure(error_codes::SUBSCRIPTION_CONFIGURATION, false));
             }
         }
         Ok(Self {
@@ -113,7 +114,7 @@ impl CodexSubscriptionClient {
             )?)
             .send()
             .await
-            .map_err(|_| failure("subscription_transport", true))?;
+            .map_err(|_| failure(error_codes::SUBSCRIPTION_TRANSPORT, true))?;
         let payload = response_json(response).await?;
         let mut metadata = parse_accounts_check(&payload, preferred_account_id)?;
         if metadata
@@ -137,7 +138,7 @@ impl CodexSubscriptionClient {
             )?)
             .send()
             .await
-            .map_err(|_| failure("subscription_transport", true))?;
+            .map_err(|_| failure(error_codes::SUBSCRIPTION_TRANSPORT, true))?;
         let payload = response_json(response).await?;
         let fallback = parse_subscriptions(&payload, account_id);
         metadata.account_id = fallback.account_id.or(metadata.account_id);
@@ -202,10 +203,13 @@ pub fn merge_subscription_metadata_at(
 
 fn authorization_header(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {
     if !valid_access_token(access_token) {
-        return Err(failure("subscription_access_token_invalid", false));
+        return Err(failure(
+            error_codes::SUBSCRIPTION_ACCESS_TOKEN_INVALID,
+            false,
+        ));
     }
     HeaderValue::from_str(&format!("Bearer {access_token}"))
-        .map_err(|_| failure("subscription_access_token_invalid", false))
+        .map_err(|_| failure(error_codes::SUBSCRIPTION_ACCESS_TOKEN_INVALID, false))
 }
 
 fn validate_account_id(value: &str) -> Result<&str, QuotaRefreshFailure> {
@@ -214,7 +218,7 @@ fn validate_account_id(value: &str) -> Result<&str, QuotaRefreshFailure> {
         || value.len() > MAX_ACCOUNT_ID_BYTES
         || value.bytes().any(|byte| byte.is_ascii_control())
     {
-        Err(failure("subscription_account_id_invalid", false))
+        Err(failure(error_codes::SUBSCRIPTION_ACCOUNT_ID_INVALID, false))
     } else {
         Ok(value)
     }
@@ -230,7 +234,7 @@ fn subscription_headers(
     headers.insert(REFERER, HeaderValue::from_static("https://chatgpt.com/"));
     headers.insert(USER_AGENT, HeaderValue::from_static(CHATGPT_WEB_USER_AGENT));
     let target = HeaderValue::from_str(target_path)
-        .map_err(|_| failure("subscription_configuration", false))?;
+        .map_err(|_| failure(error_codes::SUBSCRIPTION_CONFIGURATION, false))?;
     headers.insert("x-openai-target-path", target.clone());
     headers.insert("x-openai-target-route", target);
     Ok(headers)
@@ -241,22 +245,25 @@ async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefres
     let body = collect_response_body(response, MAX_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
-            ResponseBodyError::Transport => failure("subscription_transport", true),
-            ResponseBodyError::TooLarge => failure("subscription_response_too_large", false),
+            ResponseBodyError::Transport => failure(error_codes::SUBSCRIPTION_TRANSPORT, true),
+            ResponseBodyError::TooLarge => {
+                failure(error_codes::SUBSCRIPTION_RESPONSE_TOO_LARGE, false)
+            }
         })?;
     if !status.is_success() {
         return Err(http_failure(status));
     }
-    serde_json::from_slice(&body).map_err(|_| failure("subscription_invalid_response", false))
+    serde_json::from_slice(&body)
+        .map_err(|_| failure(error_codes::SUBSCRIPTION_INVALID_RESPONSE, false))
 }
 
 fn http_failure(status: StatusCode) -> QuotaRefreshFailure {
     match status.as_u16() {
-        401 => failure("subscription_unauthorized", false),
-        403 => failure("subscription_forbidden", false),
-        429 => failure("subscription_rate_limited", true),
-        _ if status.is_server_error() => failure("subscription_upstream", true),
-        _ => failure("subscription_http_status", false),
+        401 => failure(error_codes::SUBSCRIPTION_UNAUTHORIZED, false),
+        403 => failure(error_codes::SUBSCRIPTION_FORBIDDEN, false),
+        429 => failure(error_codes::SUBSCRIPTION_RATE_LIMITED, true),
+        _ if status.is_server_error() => failure(error_codes::SUBSCRIPTION_UPSTREAM, true),
+        _ => failure(error_codes::SUBSCRIPTION_HTTP_STATUS, false),
     }
 }
 
@@ -266,7 +273,7 @@ fn parse_accounts_check(
 ) -> Result<CodexSubscriptionMetadata, QuotaRefreshFailure> {
     let records = account_records(payload);
     if records.is_empty() {
-        return Err(failure("subscription_account_missing", false));
+        return Err(failure(error_codes::SUBSCRIPTION_ACCOUNT_MISSING, false));
     }
     let ordered_key = payload
         .get("account_ordering")
@@ -290,7 +297,7 @@ fn parse_accounts_check(
     let record = selected
         .node
         .as_object()
-        .ok_or_else(|| failure("subscription_invalid_response", false))?;
+        .ok_or_else(|| failure(error_codes::SUBSCRIPTION_INVALID_RESPONSE, false))?;
     let account = record
         .get("account")
         .and_then(Value::as_object)

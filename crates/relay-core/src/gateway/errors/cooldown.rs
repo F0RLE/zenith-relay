@@ -1,4 +1,5 @@
 use super::*;
+use crate::error_codes;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_failure_cooldown_with_body(
@@ -55,7 +56,7 @@ pub(crate) struct RateLimitBodyHint {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_status_cooldown_with_hint(
+pub(crate) fn apply_failure_cooldown_with_hint(
     runtime: &GatewayRuntime,
     candidate_id: &str,
     model: &str,
@@ -66,22 +67,64 @@ pub(crate) fn apply_status_cooldown_with_hint(
     context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
+    let status = canonical_upstream_status(status, category);
     let consecutive_failures = runtime.record_failure(candidate_id);
     let now_system = SystemTime::now();
     let now = crate::unix_time_ms_at(now_system);
     let header_retry_after_ms = retry_after_ms(headers, now_system);
     let has_explicit_retry_after = header_retry_after_ms.is_some() || hint.retry_after_ms.is_some();
+    let automatic = runtime.automatic_recovery_enabled();
+    let transient_delay = if automatic {
+        automatic_recovery_delay_ms(consecutive_failures)
+    } else {
+        TRANSIENT_COOLDOWN_MS
+    };
     let (scope, automatic_duration_ms) = match status {
+        // Model rejection and interrupted streams do not disable the other
+        // models on this route. Explicit retry hints still apply to this scope.
+        _ if matches!(
+            category,
+            error_codes::UPSTREAM_STREAM
+                | error_codes::STREAM_INCOMPLETE
+                | error_codes::STREAM_IDLE_TIMEOUT
+                | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_MODEL_UNAVAILABLE
+                | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_CAPACITY
+                | error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_CANDIDATE_REJECTED
+        ) =>
+        {
+            let delay = if matches!(
+                category,
+                error_codes::UPSTREAM_MODEL_NOT_FOUND
+                    | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                    | error_codes::UPSTREAM_CANDIDATE_REJECTED
+            ) {
+                TRANSIENT_COOLDOWN_MS
+            } else {
+                transient_delay
+            };
+            (model, delay)
+        }
         StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => {
             ("*", 30 * 60_000)
         }
         StatusCode::NOT_FOUND => (model, TRANSIENT_COOLDOWN_MS),
         StatusCode::TOO_MANY_REQUESTS => {
-            let duration_ms = rate_limit_cooldown_ms(
-                header_retry_after_ms,
-                hint.retry_after_ms,
-                consecutive_failures,
-            );
+            let duration_ms = if automatic && !has_explicit_retry_after {
+                if category == error_codes::UPSTREAM_QUOTA_EXHAUSTED {
+                    MAX_RATE_LIMIT_COOLDOWN_MS
+                } else {
+                    transient_delay
+                }
+            } else {
+                rate_limit_cooldown_ms(
+                    header_retry_after_ms,
+                    hint.retry_after_ms,
+                    consecutive_failures,
+                )
+            };
             // An explicit quota-exhausted classification is account-wide even
             // when the upstream body omits a machine-readable global marker.
             // OpenAI OAuth 429 responses can carry only a reset signal (or a
@@ -89,14 +132,23 @@ pub(crate) fn apply_status_cooldown_with_hint(
             // let the same exhausted account be selected for another model.
             (rate_limit_scope(category, hint.global, model), duration_ms)
         }
-        _ => ("*", TRANSIENT_COOLDOWN_MS),
+        _ => ("*", transient_delay),
     };
+    let hinted_duration_ms = header_retry_after_ms
+        .into_iter()
+        .chain(hint.retry_after_ms)
+        .max()
+        .unwrap_or(automatic_duration_ms);
     let duration_ms = source_cooldown_ms(
-        automatic_duration_ms,
+        hinted_duration_ms,
         runtime.source_recovery_delay_ms(candidate_id),
-        has_explicit_retry_after,
+        has_explicit_retry_after || automatic,
     );
-    let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
+    let duration_ms = if automatic {
+        duration_ms.max(5_000)
+    } else {
+        half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe)
+    };
     let retry_at_ms = now.saturating_add(duration_ms);
     let reason = failure_cooldown_reason(status, category, has_explicit_retry_after);
     let applied = runtime.set_cooldown_with_reason_for_model_at(
@@ -119,73 +171,11 @@ pub(crate) fn apply_status_cooldown_with_hint(
 }
 
 pub(super) fn rate_limit_scope<'a>(category: &str, global_hint: bool, model: &'a str) -> &'a str {
-    if global_hint || category == "upstream_quota_exhausted" {
+    if global_hint || category == error_codes::UPSTREAM_QUOTA_EXHAUSTED {
         "*"
     } else {
         model
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_failure_cooldown_with_hint(
-    runtime: &GatewayRuntime,
-    candidate_id: &str,
-    model: &str,
-    status: StatusCode,
-    category: &str,
-    headers: &reqwest::header::HeaderMap,
-    hint: RateLimitBodyHint,
-    context: &CooldownContext<'_>,
-    half_open_probe: bool,
-) -> FailureState {
-    let status = canonical_upstream_status(status, category);
-    // Once bytes have started flowing, the response cannot be retried for the
-    // current client. Keep the next request away from this exact slot/model,
-    // rather than opening a candidate-wide circuit for every model it serves.
-    if matches!(
-        category,
-        "upstream_stream" | "stream_incomplete" | "stream_idle_timeout"
-    ) {
-        return apply_cooldown(
-            runtime,
-            candidate_id,
-            model,
-            TRANSIENT_COOLDOWN_MS,
-            context,
-            half_open_probe,
-        );
-    }
-    if matches!(
-        category,
-        "upstream_model_not_found"
-            | "upstream_model_unsupported"
-            | "upstream_model_capacity"
-            | "upstream_overloaded"
-            | "upstream_candidate_rejected"
-    ) {
-        let has_explicit_retry_after =
-            retry_after_ms(headers, SystemTime::now()).is_some() || hint.retry_after_ms.is_some();
-        return apply_cooldown_with_reason(
-            runtime,
-            candidate_id,
-            model,
-            TRANSIENT_COOLDOWN_MS,
-            context,
-            half_open_probe,
-            failure_cooldown_reason(status, category, has_explicit_retry_after),
-        );
-    }
-    apply_status_cooldown_with_hint(
-        runtime,
-        candidate_id,
-        model,
-        status,
-        category,
-        headers,
-        hint,
-        context,
-        half_open_probe,
-    )
 }
 
 pub(crate) fn failure_cooldown_reason(
@@ -203,15 +193,15 @@ pub(crate) fn failure_cooldown_reason(
         )
         || matches!(
             category,
-            "upstream_unauthorized"
-                | "upstream_account_disabled"
-                | "upstream_usage_not_included"
-                | "upstream_quota_exhausted"
-                | "upstream_region_unsupported"
-                | "upstream_model_not_found"
-                | "upstream_model_unsupported"
-                | "upstream_model_capacity"
-                | "upstream_websocket_connection_limit"
+            error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                | error_codes::UPSTREAM_QUOTA_EXHAUSTED
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_CAPACITY
+                | error_codes::UPSTREAM_WEBSOCKET_CONNECTION_LIMIT
         )
     {
         CooldownReason::Mandatory
@@ -449,12 +439,22 @@ pub(crate) fn apply_cooldown_with_reason_for_model(
     reason: CooldownReason,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
+    let automatic = runtime.automatic_recovery_enabled();
+    let duration_ms = if automatic && reason == CooldownReason::Transient {
+        automatic_recovery_delay_ms(consecutive_failures)
+    } else {
+        duration_ms
+    };
     let duration_ms = source_cooldown_ms(
         duration_ms,
         runtime.source_recovery_delay_ms(candidate_id),
-        false,
+        automatic,
     );
-    let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
+    let duration_ms = if automatic {
+        duration_ms.max(5_000)
+    } else {
+        half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe)
+    };
     let now = now_ms();
     let retry_at_ms = now.saturating_add(duration_ms);
     let applied = runtime.set_cooldown_with_reason_for_model_at(
@@ -520,6 +520,16 @@ pub(crate) fn exponential_backoff_ms(consecutive_failures: u32) -> u64 {
     let exponent = consecutive_failures.saturating_sub(1).min(31);
     1_000_u64
         .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
+        .min(MAX_RATE_LIMIT_COOLDOWN_MS)
+}
+
+fn automatic_recovery_delay_ms(consecutive_failures: u32) -> u64 {
+    if consecutive_failures <= 1 {
+        return 5_000;
+    }
+    let exponent = consecutive_failures.saturating_sub(2).min(31);
+    TRANSIENT_COOLDOWN_MS
+        .saturating_mul(1_u64 << exponent)
         .min(MAX_RATE_LIMIT_COOLDOWN_MS)
 }
 

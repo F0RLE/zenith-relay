@@ -1,3 +1,4 @@
+use crate::error_codes;
 use crate::quota::{QuotaSnapshot, Subscription};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,11 +30,11 @@ pub enum ProviderAccountFailure {
 
 pub fn provider_account_failure(code: &str) -> Option<ProviderAccountFailure> {
     match code {
-        "invalid_grant"
-        | "invalid_refresh_token"
-        | "refresh_token_expired"
-        | "refresh_token_invalidated"
-        | "token_invalidated"
+        error_codes::INVALID_GRANT
+        | error_codes::INVALID_REFRESH_TOKEN
+        | error_codes::REFRESH_TOKEN_EXPIRED
+        | error_codes::REFRESH_TOKEN_INVALIDATED
+        | error_codes::TOKEN_INVALIDATED
         | "token_revoked" => Some(ProviderAccountFailure::Authentication),
         "account_deactivated"
         | "account_disabled"
@@ -96,9 +97,37 @@ pub fn apply_model_discovery_failure(
     code: &str,
     retryable: bool,
 ) {
+    if auth_state.requires_fresh_login() && *health != AccountHealthState::Blocked {
+        *health = AccountHealthState::Unhealthy;
+    }
+    let discovery_owned_error = last_error_code
+        .as_deref()
+        .is_some_and(|code| code.starts_with("models_"));
+    let terminal_state = auth_state.requires_fresh_login()
+        || *auth_state == AccountAuthState::Error
+        || matches!(
+            *health,
+            AccountHealthState::Blocked | AccountHealthState::Unhealthy
+        )
+        || matches!(
+            last_error_code.as_deref(),
+            Some("checkpoint" | "captcha" | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED)
+        );
+    // Catalog availability cannot disprove an independent account failure.
+    // A softer discovery failure cannot clear a terminal discovery failure either.
+    if terminal_state
+        && (!discovery_owned_error
+            || *health == AccountHealthState::Blocked
+            || retryable
+            || code == error_codes::MODELS_FORBIDDEN)
+    {
+        return;
+    }
     *last_error_code = Some(code.to_string());
     match code {
-        "models_unauthorized" | "models_invalid_access_token" | "models_invalid_account_id" => {
+        error_codes::MODELS_UNAUTHORIZED
+        | error_codes::MODELS_INVALID_ACCESS_TOKEN
+        | error_codes::MODELS_INVALID_ACCOUNT_ID => {
             // A user-actionable reauthentication state must survive a later
             // model probe while the last good catalog remains available.
             if !auth_state.requires_fresh_login() {
@@ -106,7 +135,7 @@ pub fn apply_model_discovery_failure(
             }
             *health = AccountHealthState::Unhealthy;
         }
-        "models_forbidden" => {
+        error_codes::MODELS_FORBIDDEN => {
             // A model catalog endpoint can be forbidden while the account's
             // normal inference and quota endpoints remain usable. Keep this
             // scoped to discovery so a catalog permission issue does not
@@ -133,7 +162,7 @@ pub fn recover_model_discovery_state(
     let recovered = last_error_code
         .as_deref()
         .is_some_and(|code| code.starts_with("models_"));
-    if !recovered {
+    if !recovered || *health == AccountHealthState::Blocked {
         return false;
     }
 
@@ -215,7 +244,7 @@ pub fn reduce_account_usage(
         state.auth_state.requires_fresh_login() || state.health == AccountHealthState::Blocked;
     let failure_category = observation
         .error_category
-        .filter(|category| *category != "upstream_status");
+        .filter(|category| *category != error_codes::UPSTREAM_STATUS);
     match observation.http_status {
         401 => match access_state {
             Some(AccountAccessState::Refreshable) => {
@@ -224,7 +253,7 @@ pub fn reduce_account_usage(
                 }
                 state.last_error_code = Some(
                     failure_category
-                        .unwrap_or("upstream_unauthorized")
+                        .unwrap_or(error_codes::UPSTREAM_UNAUTHORIZED)
                         .to_string(),
                 );
             }
@@ -235,7 +264,7 @@ pub fn reduce_account_usage(
                 state.health = AccountHealthState::Unhealthy;
                 state.last_error_code = Some(
                     failure_category
-                        .unwrap_or("upstream_unauthorized")
+                        .unwrap_or(error_codes::UPSTREAM_UNAUTHORIZED)
                         .to_string(),
                 );
             }
@@ -247,13 +276,13 @@ pub fn reduce_account_usage(
             Some(AccountAccessState::Failed) | None => {}
         },
         403 => {
-            let category = failure_category.unwrap_or("upstream_forbidden");
+            let category = failure_category.unwrap_or(error_codes::UPSTREAM_FORBIDDEN);
             if matches!(
                 category,
-                "upstream_quota_exhausted"
-                    | "upstream_usage_not_included"
-                    | "upstream_region_unsupported"
-                    | "upstream_edge_challenge"
+                error_codes::UPSTREAM_QUOTA_EXHAUSTED
+                    | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                    | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                    | error_codes::UPSTREAM_EDGE_CHALLENGE
             ) {
                 if !explicit_state {
                     state.health = AccountHealthState::Degraded;
@@ -269,7 +298,7 @@ pub fn reduce_account_usage(
             }
             state.last_error_code = Some(
                 failure_category
-                    .unwrap_or("upstream_rate_limited")
+                    .unwrap_or(error_codes::UPSTREAM_RATE_LIMITED)
                     .to_string(),
             );
         }
@@ -280,7 +309,7 @@ pub fn reduce_account_usage(
             state.last_error_code = Some(
                 observation
                     .error_category
-                    .unwrap_or("upstream_failure")
+                    .unwrap_or(error_codes::UPSTREAM_FAILURE)
                     .to_string(),
             );
         }
@@ -293,7 +322,7 @@ pub fn reduce_account_usage(
             || (observation.http_status == 401
                 && access_state == Some(AccountAccessState::Refreshable))
             || (observation.http_status == 403
-                && failure_category == Some("upstream_quota_exhausted")),
+                && failure_category == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)),
     }
 }
 
@@ -495,6 +524,8 @@ mod tests {
         assert!(last_error_code.is_none());
 
         auth_state = AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant);
+        health = AccountHealthState::Unhealthy;
+        last_error_code = Some("invalid_grant".into());
         apply_model_discovery_failure(
             &mut auth_state,
             &mut health,
@@ -504,12 +535,13 @@ mod tests {
         );
         assert!(auth_state.requires_fresh_login());
         assert_eq!(health, AccountHealthState::Unhealthy);
-        assert!(recover_model_discovery_state(
+        assert!(!recover_model_discovery_state(
             &mut auth_state,
             &mut health,
             &mut last_error_code,
         ));
         assert_eq!(health, AccountHealthState::Unhealthy);
+        assert_eq!(last_error_code.as_deref(), Some("invalid_grant"));
 
         auth_state = AccountAuthState::Active;
         health = AccountHealthState::Healthy;
@@ -543,6 +575,129 @@ mod tests {
             last_error_code: None,
             last_used_at_ms: None,
         }
+    }
+
+    #[test]
+    fn model_discovery_preserves_independent_account_failures() {
+        use crate::{account_candidate_health, quota::SubscriptionStatus};
+
+        for (initial_auth, initial_health, initial_error) in [
+            (
+                AccountAuthState::Active,
+                AccountHealthState::Blocked,
+                "workspace_disabled",
+            ),
+            (
+                AccountAuthState::Active,
+                AccountHealthState::Unhealthy,
+                "token_invalidated",
+            ),
+            (
+                AccountAuthState::Error,
+                AccountHealthState::Unhealthy,
+                "upstream_unauthorized",
+            ),
+            (
+                AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+                AccountHealthState::Unhealthy,
+                "invalid_grant",
+            ),
+            (
+                AccountAuthState::Active,
+                AccountHealthState::Degraded,
+                "checkpoint",
+            ),
+            (
+                AccountAuthState::Active,
+                AccountHealthState::Degraded,
+                "captcha",
+            ),
+            (
+                AccountAuthState::Active,
+                AccountHealthState::Degraded,
+                "upstream_account_verification_required",
+            ),
+        ] {
+            for (code, retryable) in [
+                ("models_transport", true),
+                ("models_forbidden", false),
+                ("models_unauthorized", false),
+            ] {
+                let mut auth_state = initial_auth;
+                let mut health = initial_health;
+                let mut last_error_code = Some(initial_error.to_string());
+                apply_model_discovery_failure(
+                    &mut auth_state,
+                    &mut health,
+                    &mut last_error_code,
+                    code,
+                    retryable,
+                );
+                assert_eq!(auth_state, initial_auth, "{initial_error}: {code}");
+                assert_eq!(health, initial_health, "{initial_error}: {code}");
+                assert_eq!(last_error_code.as_deref(), Some(initial_error));
+                assert!(!recover_model_discovery_state(
+                    &mut auth_state,
+                    &mut health,
+                    &mut last_error_code,
+                ));
+                assert!(!account_candidate_health(
+                    auth_state,
+                    health,
+                    SubscriptionStatus::Active,
+                    last_error_code.as_deref(),
+                )
+                .is_eligible());
+            }
+        }
+    }
+
+    #[test]
+    fn model_discovery_transient_failure_preserves_terminal_catalog_failure() {
+        let mut auth_state = AccountAuthState::Active;
+        let mut health = AccountHealthState::Healthy;
+        let mut last_error_code = None;
+        apply_model_discovery_failure(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+            "models_unauthorized",
+            false,
+        );
+        for (code, retryable) in [("models_transport", true), ("models_forbidden", false)] {
+            apply_model_discovery_failure(
+                &mut auth_state,
+                &mut health,
+                &mut last_error_code,
+                code,
+                retryable,
+            );
+            assert_eq!(auth_state, AccountAuthState::Error);
+            assert_eq!(health, AccountHealthState::Unhealthy);
+            assert_eq!(last_error_code.as_deref(), Some("models_unauthorized"));
+        }
+        assert!(recover_model_discovery_state(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+        ));
+        assert_eq!(auth_state, AccountAuthState::Active);
+        assert_eq!(health, AccountHealthState::Healthy);
+        assert!(last_error_code.is_none());
+    }
+
+    #[test]
+    fn model_discovery_success_does_not_clear_persisted_block() {
+        let mut auth_state = AccountAuthState::Active;
+        let mut health = AccountHealthState::Blocked;
+        let mut last_error_code = Some("models_forbidden".to_string());
+        assert!(!recover_model_discovery_state(
+            &mut auth_state,
+            &mut health,
+            &mut last_error_code,
+        ));
+        assert_eq!(health, AccountHealthState::Blocked);
+        assert_eq!(last_error_code.as_deref(), Some("models_forbidden"));
     }
 
     #[test]

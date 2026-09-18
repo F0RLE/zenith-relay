@@ -4,6 +4,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CODEX_TURN_STATE_TTL_MS: u64 = 60 * 60 * 1_000;
+const VOLATILE_RESPONSE_PREFIX: &str = "volatile-response:";
 
 #[derive(Default)]
 pub(super) struct CodexTurnStateStore {
@@ -331,7 +332,9 @@ impl GatewayRuntime {
         if owner_is_eligible != Some(false) && supports_route != Some(false) {
             return false;
         }
-        self.invalidate_response_affinity(affinity_key.take().as_deref());
+        // Other branches may still need this owner or its cached replay.
+        // Only this self-contained request releases the routing constraint.
+        *affinity_key = None;
         true
     }
 
@@ -402,6 +405,24 @@ impl GatewayRuntime {
         }
     }
 
+    /// Keeps an incomplete Responses turn on its current live WebSocket
+    /// without writing an ownership record to durable storage. A completed
+    /// response uses `bind_response_affinity`; an incomplete one may only be
+    /// continued while that same client connection remains alive.
+    pub(crate) fn bind_volatile_response_affinity(
+        &self,
+        response_id: Option<&str>,
+        candidate_id: &str,
+        request_id: &str,
+        now_ms: u64,
+    ) -> Option<String> {
+        let response_key = self.response_affinity_key(response_id)?;
+        let key = format!("{VOLATILE_RESPONSE_PREFIX}{request_id}:{response_key}");
+        self.lock_scheduler()
+            .bind_response_affinity(key.clone(), candidate_id, now_ms)
+            .then_some(key)
+    }
+
     pub(crate) fn bind_tool_call_affinity(
         &self,
         local_key_id: &str,
@@ -448,6 +469,9 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn persist_response_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
+        if key.starts_with(VOLATILE_RESPONSE_PREFIX) {
+            return;
+        }
         if let Some(store) = self.response_affinity_store.as_ref() {
             let _ = store.upsert(&ResponseAffinityBinding {
                 key: key.to_string(),

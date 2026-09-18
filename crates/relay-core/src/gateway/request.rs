@@ -1,3 +1,4 @@
+use crate::error_codes;
 mod account;
 mod codex_models;
 mod headers;
@@ -21,7 +22,7 @@ pub(super) use headers::{
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
 pub(super) use normalization::{
     normalize_account_request, normalize_compact_account_request, normalize_responses_lite_request,
-    responses_lite_parallel_tool_calls_valid, try_recover_encrypted_content, ServiceTierPolicy,
+    responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
 };
 
 use super::execution::execute_client_request;
@@ -34,6 +35,7 @@ use axum::http::{HeaderMap, Request, Response};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,13 +178,12 @@ fn collect_request_strings(value: Option<&Value>, output: &mut Vec<String>) {
     }
 }
 
-#[cfg(test)]
 pub(super) fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
     let effort = match wire_api {
         WireApi::Responses => request.pointer("/reasoning/effort"),
         WireApi::ChatCompletions => request.get("reasoning_effort"),
-        WireApi::Messages => None,
-        WireApi::Gemini => None,
+        WireApi::Messages => request.pointer("/output_config/effort"),
+        WireApi::Gemini => request.pointer("/generationConfig/thinkingConfig/thinkingLevel"),
     };
     effort
         .and_then(Value::as_str)
@@ -224,7 +225,7 @@ pub(super) async fn gemini(
         return super::errors::api_error(
             axum::http::StatusCode::NOT_FOUND,
             "Gemini endpoint must end with :generateContent or :streamGenerateContent",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         );
     };
     super::execution::execute_gemini_client_request(runtime, request, model, stream).await
@@ -238,62 +239,39 @@ fn parse_gemini_model_action(value: &str) -> Option<(String, bool)> {
         (model, false)
     };
     let model = model.strip_prefix("models/").unwrap_or(model).trim();
-    (!model.is_empty()
-        && model
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
-    .then(|| (model.to_string(), stream))
+    crate::is_valid_model_id(model).then(|| (model.to_string(), stream))
 }
 
 pub(super) fn contains_tool_call_output(value: &Value) -> bool {
-    match value {
-        Value::Array(items) => items.iter().any(contains_tool_call_output),
-        Value::Object(object) => {
-            object
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind == "tool_search_output" || kind.ends_with("_call_output"))
-                || object.values().any(contains_tool_call_output)
-        }
-        _ => false,
-    }
+    let mut found = false;
+    visit_response_items(value, &mut |object| {
+        found |= object
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "tool_search_output" || kind.ends_with("_call_output"));
+    });
+    found
 }
 
 /// Returns the stable ids carried by Responses tool outputs. These ids are
 /// stateful when the matching call is not included in the same request: the
-/// provider that emitted the call is then the only safe owner. Keep this
-/// extraction bounded and do not retain the tool payload itself.
+/// provider that emitted the call is then the only safe owner.
+/// IDs are length-bounded, but ownership checks must include the whole request.
+/// Do not retain the tool payload itself.
 pub(super) fn tool_call_output_ids(value: &Value) -> Vec<String> {
     let mut ids = Vec::new();
-    collect_tool_call_output_ids(value, &mut ids);
-    ids
-}
-
-fn collect_tool_call_output_ids(value: &Value, ids: &mut Vec<String>) {
-    if ids.len() >= 16 {
-        return;
-    }
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .for_each(|item| collect_tool_call_output_ids(item, ids)),
-        Value::Object(object) => {
-            let kind = object.get("type").and_then(Value::as_str);
-            if kind
-                .is_some_and(|kind| kind == "tool_search_output" || kind.ends_with("_call_output"))
-            {
-                if let Some(call_id) = bounded_tool_call_id(object.get("call_id")) {
-                    if !ids.iter().any(|known| known == &call_id) {
-                        ids.push(call_id);
-                    }
+    let mut seen = HashSet::new();
+    visit_response_items(value, &mut |object| {
+        let kind = object.get("type").and_then(Value::as_str);
+        if kind.is_some_and(|kind| kind == "tool_search_output" || kind.ends_with("_call_output")) {
+            if let Some(call_id) = bounded_tool_call_id(object.get("call_id")) {
+                if seen.insert(call_id.clone()) {
+                    ids.push(call_id);
                 }
             }
-            object
-                .values()
-                .for_each(|item| collect_tool_call_output_ids(item, ids));
         }
-        _ => {}
-    }
+    });
+    ids
 }
 
 /// Returns tool-call ids from a successful Responses response. Binding these
@@ -301,29 +279,28 @@ fn collect_tool_call_output_ids(value: &Value, ids: &mut Vec<String>) {
 /// even when a client changes the selected model between turns.
 pub(super) fn response_tool_call_ids(value: &Value) -> Vec<String> {
     let mut ids = Vec::new();
-    collect_response_tool_call_ids(value, &mut ids);
+    let mut seen = HashSet::new();
+    visit_response_items(value, &mut |object| {
+        let kind = object.get("type").and_then(Value::as_str);
+        if kind.is_some_and(|kind| kind.ends_with("_call")) {
+            for field in ["call_id", "id"] {
+                if let Some(call_id) = bounded_tool_call_id(object.get(field)) {
+                    if seen.insert(call_id.clone()) {
+                        ids.push(call_id);
+                    }
+                }
+            }
+        }
+    });
     ids
 }
 
-/// Drops incomplete Responses tool-call items from an imported conversation
-/// history. This is only safe after an upstream has explicitly rejected the
-/// missing result: Relay must never invent a tool output or remove a completed
-/// tool turn during normal request processing.
-pub(super) fn drop_unpaired_responses_tool_calls(request: &mut Value) -> bool {
-    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let output_ids = input
-        .iter()
-        .filter_map(response_tool_output_call_id)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let original_len = input.len();
-    input.retain(|item| {
-        response_tool_call_call_id(item)
-            .is_none_or(|call_id| output_ids.iter().any(|output_id| output_id == call_id))
-    });
-    input.len() != original_len
+pub(super) fn unpaired_tool_output_ids(value: &Value) -> Vec<String> {
+    let calls: HashSet<_> = response_tool_call_ids(value).into_iter().collect();
+    tool_call_output_ids(value)
+        .into_iter()
+        .filter(|id| !calls.contains(id))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -542,50 +519,26 @@ pub(super) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
     changed
 }
 
-fn response_tool_output_call_id(item: &Value) -> Option<&str> {
-    let object = item.as_object()?;
-    let kind = object.get("type")?.as_str()?;
-    (kind == "tool_search_output" || kind.ends_with("_call_output"))
-        .then(|| object.get("call_id"))
-        .flatten()
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|call_id| !call_id.is_empty() && call_id.len() <= 256)
-}
-
-fn response_tool_call_call_id(item: &Value) -> Option<&str> {
-    let object = item.as_object()?;
-    let kind = object.get("type")?.as_str()?;
-    (kind == "function_call" || kind.ends_with("_call"))
-        .then(|| object.get("call_id"))
-        .flatten()
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|call_id| !call_id.is_empty() && call_id.len() <= 256)
-}
-
-fn collect_response_tool_call_ids(value: &Value, ids: &mut Vec<String>) {
-    if ids.len() >= 16 {
-        return;
-    }
+fn visit_response_items(value: &Value, inspect: &mut impl FnMut(&serde_json::Map<String, Value>)) {
     match value {
         Value::Array(items) => items
             .iter()
-            .for_each(|item| collect_response_tool_call_ids(item, ids)),
+            .for_each(|item| visit_response_items(item, inspect)),
         Value::Object(object) => {
             let kind = object.get("type").and_then(Value::as_str);
-            if kind.is_some_and(|kind| kind == "function_call" || kind.ends_with("_call")) {
-                for field in ["call_id", "id"] {
-                    if let Some(call_id) = bounded_tool_call_id(object.get(field)) {
-                        if !ids.iter().any(|known| known == &call_id) {
-                            ids.push(call_id);
-                        }
+            if !object.contains_key("role")
+                && kind.is_none_or(|kind| kind == "response" || kind.starts_with("response."))
+            {
+                // Only protocol envelopes contain history. Tool schemas,
+                // arguments and result content are data, even with call IDs.
+                for field in ["input", "output", "response", "item"] {
+                    if let Some(item) = object.get(field) {
+                        visit_response_items(item, inspect);
                     }
                 }
+            } else {
+                inspect(object);
             }
-            object
-                .values()
-                .for_each(|item| collect_response_tool_call_ids(item, ids));
         }
         _ => {}
     }
@@ -686,19 +639,6 @@ pub(super) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
     }
 }
 
-pub(super) fn chat_request_uses_tools(value: &Value) -> bool {
-    let Some(request) = value.as_object() else {
-        return false;
-    };
-    ["tools", "functions", "tool_choice", "parallel_tool_calls"]
-        .iter()
-        .any(|field| request.contains_key(*field))
-        || request
-            .get("messages")
-            .and_then(Value::as_array)
-            .is_some_and(|messages| messages.iter().any(chat_message_uses_tools))
-}
-
 pub(super) fn chat_request_is_text_or_image_only(value: &Value) -> bool {
     let Some(request) = value.as_object() else {
         return false;
@@ -721,18 +661,6 @@ pub(super) fn chat_request_is_text_or_image_only(value: &Value) -> bool {
         .get("messages")
         .and_then(Value::as_array)
         .is_none_or(|messages| messages.iter().all(chat_message_is_text_or_image_only))
-}
-
-fn chat_message_uses_tools(message: &Value) -> bool {
-    let Some(message) = message.as_object() else {
-        return false;
-    };
-    matches!(
-        message.get("role").and_then(Value::as_str),
-        Some("tool" | "function")
-    ) || ["tool_calls", "tool_call_id", "function_call"]
-        .iter()
-        .any(|field| message.contains_key(*field))
 }
 
 fn chat_message_is_text_or_image_only(message: &Value) -> bool {
@@ -996,6 +924,12 @@ mod tests {
         assert!(!contains_tool_call_output(&json!({
             "input": [{"type": "custom_tool_call", "call_id": "call_custom"}]
         })));
+        assert!(!contains_tool_call_output(&json!({
+            "tools": [{"type":"function", "name":"inspect", "parameters":{
+                "type":"object", "examples":[{"type":"function_call_output", "call_id":"example"}]
+            }}],
+            "input": "Inspect the provided example"
+        })));
     }
 
     #[test]
@@ -1020,10 +954,16 @@ mod tests {
                 "input": "Get-ChildItem"
             }]
         });
-        assert_eq!(
-            response_tool_call_ids(&response),
-            vec!["call_custom", "ctc_item"]
-        );
+        for envelope in [
+            response.clone(),
+            json!({"type":"response.completed", "response":response}),
+            json!({"type":"response.output_item.done", "item":response["output"][0]}),
+        ] {
+            assert_eq!(
+                response_tool_call_ids(&envelope),
+                vec!["call_custom", "ctc_item"]
+            );
+        }
 
         let paired = json!({
             "input": [
@@ -1036,42 +976,6 @@ mod tests {
             vec!["computer_call", "computer_item"]
         );
         assert_eq!(tool_call_output_ids(&paired), vec!["computer_call"]);
-    }
-
-    #[test]
-    fn stale_responses_tool_calls_are_removed_only_when_their_output_is_missing() {
-        let mut request = json!({
-            "input": [
-                {"type": "message", "role": "user", "content": "Continue"},
-                {
-                    "type": "custom_tool_call",
-                    "id": "ctc_stale",
-                    "call_id": "call_stale",
-                    "name": "PowerShell",
-                    "input": "Get-ChildItem"
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc_completed",
-                    "call_id": "call_completed",
-                    "name": "pwd",
-                    "arguments": "{}"
-                },
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_completed",
-                    "output": "C:\\workspace"
-                }
-            ]
-        });
-
-        assert!(drop_unpaired_responses_tool_calls(&mut request));
-        let input = request["input"].as_array().unwrap();
-        assert_eq!(input.len(), 3);
-        assert!(input.iter().all(|item| item["call_id"] != "call_stale"));
-        assert!(input.iter().any(|item| item["call_id"] == "call_completed"));
-
-        assert!(!drop_unpaired_responses_tool_calls(&mut request));
     }
 
     #[test]

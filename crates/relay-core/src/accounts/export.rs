@@ -1,3 +1,4 @@
+use crate::error_codes;
 use crate::{Error, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -366,7 +367,7 @@ fn cpa_account_value(values: &AccountExportValues<'_>) -> Value {
         "access_token": account.access_token,
         "refresh_token": account.refresh_token.as_deref().unwrap_or(""),
         "last_refresh": values.exported_at,
-        "expired": values.expires_at,
+        error_codes::EXPIRED: values.expires_at,
         "disabled": (!account.enabled).then_some(true),
     })
 }
@@ -404,7 +405,7 @@ fn cockpit_account_value(values: &AccountExportValues<'_>) -> Value {
         "account_id": account.account_id,
         "last_refresh": values.exported_at,
         "email": account.email,
-        "expired": values.expires_at,
+        error_codes::EXPIRED: values.expires_at,
     });
     if let Value::Object(object) = &mut value {
         // Cockpit v1.3.52+ uses account_name/tags as portable, optional
