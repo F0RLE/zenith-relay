@@ -1632,6 +1632,9 @@
   border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
 }
 
 .source-price-input:focus-within {
@@ -1641,17 +1644,21 @@
 
 .source-price-input > span:not(.sr-only) {
   text-align: center;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .source-price-input input {
   width: 100%;
   min-width: 0;
+  min-height: 0;
   height: 32px;
+  margin: 0;
   padding: 0 7px 0 0;
   border: 0;
+  border-radius: 0;
   outline: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--relay-text);
   font: inherit;
 }

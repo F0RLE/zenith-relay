@@ -110,6 +110,26 @@ async function expectDialogFits(dialog: Locator) {
   expect(metrics.scrollCount).toBeLessThanOrEqual(1);
 }
 
+async function expectPriceInputsFit(dialog: Locator) {
+  const fields = await dialog.locator(".source-price-input").evaluateAll((items) => items.map((item) => {
+    const field = item.getBoundingClientRect();
+    const input = item.querySelector("input")!.getBoundingClientRect();
+    const currency = item.querySelector("span")!.getBoundingClientRect();
+    return {
+      contained: input.top >= field.top && input.bottom <= field.bottom
+        && input.left >= currency.right && input.right <= field.right,
+      inputOffset: Math.abs((input.top + input.bottom - field.top - field.bottom) / 2),
+      currencyOffset: Math.abs((currency.top + currency.bottom - field.top - field.bottom) / 2),
+    };
+  }));
+  expect(fields.length).toBeGreaterThan(0);
+  for (const field of fields) {
+    expect(field.contained).toBe(true);
+    expect(field.inputOffset).toBeLessThanOrEqual(1);
+    expect(field.currencyOffset).toBeLessThanOrEqual(1);
+  }
+}
+
 for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], [390, 844]]) {
   for (const theme of ["light", "dark"] as const) {
     test(`member policy dialogs fit ${theme} ${width}x${height}`, async ({ page }) => {
@@ -137,6 +157,7 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           await expect(cache).toHaveCount(1);
           await cache.scrollIntoViewIfNeeded();
           await expectDialogFits(dialog);
+          await expectPriceInputsFit(dialog);
           const rows = await dialog.locator(".source-price-row").evaluateAll((items) => items.map((item) => {
             const name = item.querySelector(".source-price-model")!.getBoundingClientRect();
             const fields = item.querySelector(".source-price-fields")!.getBoundingClientRect();
@@ -161,6 +182,14 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           }
           await dialog.locator(".member-editor-identity").scrollIntoViewIfNeeded();
           await dialog.screenshot({ path: `output/playwright/member-prices-${theme}-${width}.png` });
+          const input = dialog.locator(".source-price-input input").first();
+          await input.fill("12.75");
+          await expect(input).toBeFocused();
+          await expect(input).toHaveValue("12.75");
+          await expectPriceInputsFit(dialog);
+          await expect(input).toHaveCSS("outline-style", "none");
+          await expect(dialog.locator(".source-price-input").first()).not.toHaveCSS("box-shadow", "none");
+          await dialog.screenshot({ path: `output/playwright/member-prices-focused-${theme}-${width}.png` });
         }
         await dialog.getByRole("tab", { name: "Настройки", exact: true }).click();
         await expectDialogFits(dialog);

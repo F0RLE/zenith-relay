@@ -99,6 +99,8 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Provider price fields keep currency symbols and values vertically centered,
+  including while editing, without an overflowing inner input. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Multiple routes for one member share rotation weight and request capacity.
   An unsupported endpoint does not disable the member's other formats; quota
   and authentication failures remain shared. Continuation retries preserve
