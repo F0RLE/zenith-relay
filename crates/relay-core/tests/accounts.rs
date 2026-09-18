@@ -104,6 +104,7 @@ struct WebSocketUpstreamState {
 enum WebSocketBehavior {
     #[default]
     Success,
+    GatedSuccess(Arc<Barrier>),
     Events(Arc<Vec<Value>>),
     Sequence(Arc<Mutex<VecDeque<Vec<Value>>>>),
     Hold(Arc<Notify>),
@@ -4864,8 +4865,18 @@ async fn websocket_transport_concurrency_matrix_balances_and_releases_all_leases
 }
 
 async fn assert_websocket_concurrency(requests: usize) {
-    let (first_upstream, first_state) = spawn_websocket_upstream().await;
-    let (second_upstream, second_state) = spawn_websocket_upstream().await;
+    // Match the SSE matrix: keep every lease live until all requests have
+    // selected a route. Fast completions must not turn arrival timing into
+    // an apparent distribution failure on shared CI runners.
+    let request_barrier = Arc::new(Barrier::new(requests + 1));
+    let (first_upstream, first_state) = spawn_websocket_upstream_with_behavior(
+        WebSocketBehavior::GatedSuccess(request_barrier.clone()),
+    )
+    .await;
+    let (second_upstream, second_state) = spawn_websocket_upstream_with_behavior(
+        WebSocketBehavior::GatedSuccess(request_barrier.clone()),
+    )
+    .await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "first-account", "first-access").await;
     register_ready(&authority, "second-account", "second-access").await;
@@ -4884,41 +4895,40 @@ async fn assert_websocket_concurrency(requests: usize) {
 
     let client = reqwest::Client::new();
     let url = format!("{}/v1/responses", gateway.base_url);
-    // OAuth accounts serialize text chats, so a large connection burst can wait
-    // behind the accounts already serving a response.
+    // Allow the largest burst time to open its upgrades on a shared runner.
     let queue_timeout =
         Duration::from_secs((u64::try_from(requests).unwrap_or(u64::MAX) / 10).saturating_add(5));
-    let completed = tokio::time::timeout(
-        queue_timeout,
-        join_all((0..requests).map(|index| {
-            let client = client.clone();
-            let url = url.clone();
-            async move {
-                let upgraded = client
-                    .get(url)
-                    .bearer_auth(LOCAL_KEY)
-                    .upgrade()
-                    .send()
-                    .await
-                    .unwrap();
-                assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
-                let mut socket = upgraded.into_websocket().await.unwrap();
-                socket
-                    .send(ClientWsMessage::Text(
-                        json!({
-                            "type": "response.create",
-                            "model": MODEL,
-                            "input": format!("parallel chat {index}")
-                        })
-                        .to_string(),
-                    ))
-                    .await
-                    .unwrap();
-                receive_websocket_completion_with_timeout(&mut socket, queue_timeout).await["type"]
-                    == "response.completed"
-            }
-        })),
-    )
+    let requests_complete = join_all((0..requests).map(|index| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            let upgraded = client
+                .get(url)
+                .bearer_auth(LOCAL_KEY)
+                .upgrade()
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+            let mut socket = upgraded.into_websocket().await.unwrap();
+            socket
+                .send(ClientWsMessage::Text(
+                    json!({
+                        "type": "response.create",
+                        "model": MODEL,
+                        "input": format!("parallel chat {index}")
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+            receive_websocket_completion_with_timeout(&mut socket, queue_timeout).await["type"]
+                == "response.completed"
+        }
+    }));
+    let (completed, _) = tokio::time::timeout(queue_timeout, async {
+        tokio::join!(requests_complete, request_barrier.wait())
+    })
     .await
     .expect("parallel websocket requests timed out");
 
@@ -7773,6 +7783,9 @@ async fn upstream_websocket(
                 break;
             };
             state.requests.lock().unwrap().push(request);
+            if let WebSocketBehavior::GatedSuccess(barrier) = &state.behavior {
+                barrier.wait().await;
+            }
             let setup_only =
                 if let WebSocketBehavior::SuccessThenSetupClose(attempts) = &state.behavior {
                     attempts.fetch_add(1, Ordering::SeqCst) > 0
@@ -7780,7 +7793,9 @@ async fn upstream_websocket(
                     false
                 };
             let events = match &state.behavior {
-                WebSocketBehavior::Success | WebSocketBehavior::UnauthorizedOnce(_) => vec![
+                WebSocketBehavior::Success
+                | WebSocketBehavior::GatedSuccess(_)
+                | WebSocketBehavior::UnauthorizedOnce(_) => vec![
                     json!({"type": "response.output_text.delta", "delta": "hello"}),
                     json!({
                         "type": "response.completed",
