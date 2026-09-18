@@ -593,7 +593,8 @@ mod tests {
                 }),
             ))
             .await;
-            let client = RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
+            let client =
+                RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
             let error = client
                 .mutate(Method::POST, "/routing/settings", None)
                 .await
