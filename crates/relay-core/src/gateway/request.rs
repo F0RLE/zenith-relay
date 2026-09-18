@@ -1269,6 +1269,55 @@ mod tests {
     }
 
     #[test]
+    fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
+        let runtime = capability_test_runtime(
+            &[
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-future",
+                "provider/gpt-6-astra",
+                "claude-future",
+                "gpt-hidden",
+            ],
+            GatewayRuntimeOptions {
+                hidden_models: vec!["gpt-hidden".into()],
+                ..GatewayRuntimeOptions::default()
+            },
+        );
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let mut unrelated = crate::routed_codex_catalog_entry(None, "gpt-not-in-pool", 1_000, None);
+        unrelated["slug"] = json!("gpt-not-in-pool");
+        unrelated["supports_parallel_tool_calls"] = json!(true);
+        unrelated["use_responses_lite"] = json!(true);
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&json!({"models": [unrelated]})),
+        )
+        .unwrap();
+        let models = response["models"].as_array().unwrap();
+        assert_eq!(models.len(), 5);
+        for id in ["gpt-6-astra", "gpt-5.6-sol", "gpt-future"] {
+            let model = models.iter().find(|model| model["slug"] == id).unwrap();
+            assert!(codex_catalog_entry_is_compatible(model));
+            assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
+            assert_eq!(model["supports_parallel_tool_calls"], false);
+            assert_eq!(model["supported_reasoning_levels"], json!([]));
+            assert!(model.get("use_responses_lite").is_none());
+        }
+        for id in ["provider/gpt-6-astra", "claude-future"] {
+            assert!(models
+                .iter()
+                .any(|model| model["slug"] == crate::codex_model_alias(id)));
+        }
+    }
+
+    #[test]
     fn known_model_uses_catalog_capabilities_without_overriding_codex_context() {
         use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
         let catalog = ModelMetadataCatalog::from_models_dev_json(

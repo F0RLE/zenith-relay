@@ -350,6 +350,11 @@ points are separate explicit restores of configuration/authentication.
 
 Codex attachment writes a validated bounded catalog from the selected live
 endpoint/key with reversible model IDs. Native rows keep native capabilities.
+Account models and unqualified GPT IDs retain their public spelling even when
+an account lacks a native catalog card. Explicit key prefixes stay intact and
+old Relay aliases remain accepted. Identity does not grant capabilities: only
+the owning account's matching card supplies native fields; fallback rows use
+their own model metadata and retain the Relay ownership marker.
 Refresh writes before invalidating the client cache; failure retains the prior
 verified profile and exposes a warning. OpenCode preserves the original JSON/
 JSONC configuration and restores with a semantic merge of compatible user edits.

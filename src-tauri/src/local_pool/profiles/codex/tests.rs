@@ -1100,6 +1100,55 @@ fn managed_catalog_preserves_native_model_settings() {
 }
 
 #[test]
+fn managed_gpt_catalog_refresh_keeps_native_ids_without_copying_cached_capabilities() {
+    let (root, home, _backups) = profile_dirs("managed-gpt-identity-refresh");
+    let mut cached = routed_codex_catalog_entry(None, "gpt-6-astra", 1_000, None);
+    cached["slug"] = json!("gpt-6-astra");
+    cached["comp_hash"] = json!("official");
+    cached["default_reasoning_level"] = json!("ultra");
+    cached["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
+    cached["supports_parallel_tool_calls"] = json!(true);
+    fs::write(
+        home.join(MODELS_CACHE_FILE),
+        json!({"models": [cached]}).to_string(),
+    )
+    .unwrap();
+    let ids = ["gpt-6-astra", "gpt-5.6-sol"];
+    let previous = json!({"models": ids.iter().map(|id|
+        routed_codex_catalog_entry(None, id, 1_000, None)
+    ).collect::<Vec<_>>()})
+    .to_string();
+    let expected = ids
+        .iter()
+        .map(|id| {
+            let mut model = routed_codex_catalog_entry(None, id, 1_000, None);
+            model["slug"] = json!(id);
+            zenith_relay_core::model_metadata::ModelCapabilities::unknown_model()
+                .apply_to_codex(&mut model);
+            model
+        })
+        .collect::<Vec<_>>();
+    let catalog = json!({"models": expected}).to_string();
+
+    let managed =
+        catalog::build_managed_model_catalog(&home, None, Some(previous.as_bytes()), &catalog)
+            .unwrap();
+    let document: Value = serde_json::from_str(&managed).unwrap();
+    let models = document["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    for (model, id) in models.iter().zip(ids) {
+        assert_eq!(model["slug"], id);
+        assert_eq!(model["comp_hash"], CODEX_RELAY_CATALOG_HASH);
+        assert_eq!(model["supported_reasoning_levels"], json!([]));
+        assert_eq!(model["supports_parallel_tool_calls"], false);
+        assert!(model.get("context_window").is_none());
+        assert!(model.get("default_reasoning_level").is_none());
+        assert!(!catalog::is_native_catalog_entry(model));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn generated_catalogs_do_not_require_cached_native_metadata() {
     let (root, home, _backups) = profile_dirs("catalog-metadata-fallback");
 

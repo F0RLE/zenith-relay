@@ -246,6 +246,11 @@ cannot be repaired by trying more members.
 
 ### Models and member policies
 
+ChatGPT/Codex shows GPT models under their original IDs, including models
+available through an API provider when the signed-in account lacks them.
+The pool and request key still determine access. A missing native catalog card
+does not rename a model or grant it additional tools or reasoning modes.
+
 In **Pool member policy → Models**, a switch allows the model for that
 specific account or API. It is permission, not a quota indicator. Search and
 expandable groups help locate models.

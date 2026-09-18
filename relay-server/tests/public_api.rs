@@ -1537,7 +1537,7 @@ async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .find(|model| model["slug"] == "gpt-test")
         .unwrap();
     assert_eq!(
         catalog_model["supported_reasoning_levels"]
@@ -1594,7 +1594,7 @@ async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .find(|model| model["slug"] == "gpt-test")
         .unwrap();
     assert_eq!(filtered_model["supported_reasoning_levels"], json!([]));
     assert!(filtered_model.get("default_reasoning_level").is_none());
@@ -1652,7 +1652,7 @@ async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .find(|model| model["slug"] == "gpt-test")
         .unwrap();
     assert!(cleared_model.get("default_reasoning_level").is_none());
     assert_eq!(cleared_model["supported_reasoning_levels"], json!([]));

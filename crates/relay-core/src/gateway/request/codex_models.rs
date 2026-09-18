@@ -7,8 +7,8 @@ use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
 use crate::runtime::AuthenticatedKey;
 use crate::{
-    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, is_valid_model_id,
-    routed_codex_catalog_entry, GatewayRuntime, WireApi,
+    codex_model_is_picker_eligible, is_valid_model_id, routed_codex_catalog_entry, GatewayRuntime,
+    WireApi,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -281,12 +281,6 @@ fn build_codex_models_response_from_manifests(
         }
     }
 
-    let template = upstream_manifests
-        .iter()
-        .filter_map(|(_, manifest)| upstream_codex_models(manifest))
-        .flatten()
-        .find(|model| codex_catalog_entry_is_compatible(model))
-        .and_then(Value::as_object);
     let mut models = Vec::with_capacity(visible.len());
     for (index, (normalized, (upstream_id, display_id))) in visible.into_iter().enumerate() {
         if !codex_model_is_picker_eligible(&upstream_id) {
@@ -306,14 +300,9 @@ fn build_codex_models_response_from_manifests(
                         .any(|account_id| account_id == candidate_id)
             })
         });
-        // A bare model slug makes Codex choose its native client contract.
-        // The account's broad model inventory alone cannot prove that
-        // contract: it can contain models visible to an account without a
-        // compatible native card for the current plan or client version.
-        // Preserve native identity and capabilities only when the exact
-        // owning account supplied a valid card. Otherwise use Relay's alias
-        // and conservative API projection, even if the account can still be
-        // tried later by the scheduler.
+        // Only the exact owning account's card can supply native capabilities.
+        // Model identity is independent: a missing card must not rename a GPT
+        // model or copy another account/model's client capabilities.
         let native_catalog_model = has_native_account_route
             .then(|| {
                 native_entry.and_then(|(_, entry)| {
@@ -325,7 +314,17 @@ fn build_codex_models_response_from_manifests(
             .flatten();
         let native_account_model = native_catalog_model.is_some();
         let mut model = native_catalog_model
-            .unwrap_or_else(|| routed_codex_catalog_entry(template, &display_id, priority, None));
+            .unwrap_or_else(|| routed_codex_catalog_entry(None, &display_id, priority, None));
+        // Account models and unqualified GPT IDs retain their public spelling,
+        // including an explicitly configured key prefix. Qualified provider
+        // IDs keep reversible aliases; a similar leaf is not the same model.
+        // The GPT family rule changes only picker identity, never inventory,
+        // route eligibility, or capability evidence.
+        if has_native_account_route
+            || (normalized.starts_with("gpt-") && !upstream_id.contains('/'))
+        {
+            model["slug"] = Value::String(display_id.clone());
+        }
         for candidate_id in &native_account_ids {
             let uses_responses_lite = upstream_by_model
                 .get(&normalized)
@@ -825,28 +824,80 @@ mod tests {
     }
 
     #[test]
-    fn unverified_native_account_model_uses_a_routed_alias() {
+    fn missing_native_card_keeps_identity_without_inheriting_capabilities() {
+        for prefix in [None, Some("local")] {
+            let runtime = native_catalog_test_runtime(prefix, None);
+            let key = runtime
+                .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+                .unwrap();
+            let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+            let display_id = prefix.map_or_else(
+                || "gpt-native".to_string(),
+                |prefix| format!("{prefix}/gpt-native"),
+            );
+            let mut foreign = routed_codex_catalog_entry(None, "gpt-native", 1_000, None);
+            foreign["slug"] = json!("gpt-native");
+            foreign["supports_parallel_tool_calls"] = json!(true);
+            foreign["use_responses_lite"] = json!(true);
+            foreign["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
+            foreign["future_native_capability"] = json!(true);
+            for manifests in [
+                Vec::new(),
+                vec![(
+                    "unrelated-account".into(),
+                    json!({"models": [foreign.clone()]}),
+                )],
+            ] {
+                let response =
+                    build_codex_models_response_from_manifests(&runtime, &key, &visible, manifests)
+                        .expect("native catalog");
+                let model = &response["models"][0];
+                assert_eq!(model["slug"], display_id);
+                assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
+                assert_eq!(model["supports_parallel_tool_calls"], false);
+                assert_eq!(model["supported_reasoning_levels"], json!([]));
+                for field in [
+                    "use_responses_lite",
+                    "context_window",
+                    "future_native_capability",
+                ] {
+                    assert!(model.get(field).is_none(), "unexpected capability: {field}");
+                }
+                assert!(crate::codex_catalog_entry_is_compatible(model));
+            }
+            let alias = crate::codex_model_alias(&display_id);
+            for requested in [&display_id, &alias] {
+                assert_eq!(
+                    runtime.resolve_configured_account_model(&key, requested),
+                    Some("gpt-native".into()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_card_preserves_the_key_model_prefix() {
         let runtime = native_catalog_test_runtime(Some("local"), None);
         let key = runtime
             .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
             .unwrap();
-        assert_eq!(
-            runtime.resolve_configured_account_model(&key, "local/gpt-native"),
-            Some("gpt-native".into())
-        );
         let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
-        assert!(runtime.codex_model_has_chatgpt_account(&key, "local/gpt-native"));
-        let response =
-            build_codex_models_response(&runtime, &key, &visible, &Default::default(), None)
-                .expect("native catalog");
-
+        let mut native = routed_codex_catalog_entry(None, "gpt-native", 1_000, None);
+        native["slug"] = json!("gpt-native");
+        native["supports_parallel_tool_calls"] = json!(true);
+        let response = build_codex_models_response_from_manifests(
+            &runtime,
+            &key,
+            &visible,
+            [("native-account".into(), json!({"models": [native]}))],
+        )
+        .unwrap();
+        let model = &response["models"][0];
+        assert_eq!(model["slug"], "local/gpt-native");
+        assert_eq!(model["supports_parallel_tool_calls"], true);
         assert_eq!(
-            response["models"][0]["slug"],
-            json!(crate::codex_model_alias("local/gpt-native"))
-        );
-        assert_eq!(
-            response["models"][0]["description"],
-            "Available through Zenith Relay."
+            runtime.resolve_configured_account_model(&key, model["slug"].as_str().unwrap()),
+            Some("gpt-native".into()),
         );
     }
 }

@@ -99,6 +99,10 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- GPT model names in ChatGPT and Codex keep their original IDs even when the
+  selected account has no matching catalog card. Explicit key prefixes and
+  existing aliases remain supported; capabilities come from the matching model.
+  ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Responses tool-history recovery preserves call/result links when a client
   references an item ID or omits a call ID. Results are matched by kind and
   namespace without deleting history or guessing between parallel calls.

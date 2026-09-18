@@ -1864,7 +1864,7 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
     assert_eq!(
         catalog_models,
         [
-            zenith_relay_core::codex_model_alias("gpt-5.4"),
+            "gpt-5.4".to_string(),
             zenith_relay_core::codex_model_alias("shared-model"),
         ]
     );
@@ -1957,6 +1957,68 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
         event.wire_api == WireApi::Responses
             && event.candidate_id.as_deref() == Some("mixed::responses_to_messages")
     }));
+}
+
+#[tokio::test]
+async fn native_gpt_picker_ids_and_legacy_aliases_keep_key_scope_and_upstream_identity() {
+    let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
+    let mut key = local_key("key", LOCAL_KEY, None);
+    key.model_prefix = Some("local".into());
+    key.allowed_models = vec!["gpt-6-astra".into()];
+    let (gateway, _) = spawn_gateway(
+        vec![source(
+            "api",
+            &upstream,
+            "source-key",
+            &["gpt-6-astra", "gpt-5.6-sol"],
+            0,
+        )],
+        vec![key],
+        3,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let catalog: Value = client
+        .get(format!(
+            "{}/v1/models?client_version=1.97.0",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = catalog["models"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["slug"], "local/gpt-6-astra");
+    for (model, expected) in [
+        ("local/gpt-6-astra".to_string(), StatusCode::OK),
+        (
+            zenith_relay_core::codex_model_alias("local/gpt-6-astra"),
+            StatusCode::OK,
+        ),
+        ("local/gpt-5.6-sol".to_string(), StatusCode::NOT_FOUND),
+        (
+            zenith_relay_core::codex_model_alias("local/gpt-5.6-sol"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let response = client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model": model, "input": "synthetic"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "model: {model}");
+    }
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.body["model"] == "gpt-6-astra"));
 }
 
 #[tokio::test]
