@@ -9,12 +9,13 @@ use super::super::errors::{
     failure_category_requires_cooldown, preserved_upstream_error, previous_response_not_found,
     previous_response_requires_websocket, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_call_id_is_missing, responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
-    retryable_failure, retryable_status, zenith_gateway_invalid_request, AttemptFailure,
-    CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    responses_tool_call_links_rejected, retryable_failure, retryable_status,
+    zenith_gateway_invalid_request, AttemptFailure, CooldownContext, PreservedUpstreamError,
+    TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 #[cfg(test)]
@@ -694,7 +695,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 &mut request,
                 wire_api,
                 adapter_is_passthrough,
-                status.is_client_error() && responses_call_id_is_missing(&bytes),
+                status.is_client_error() && responses_tool_call_links_rejected(&bytes),
                 &mut legacy_call_id_repair_attempted,
                 &mut attempt,
                 &mut attempts_this_run,
@@ -1273,7 +1274,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     bootstrap_failure.preserved.as_ref().is_some_and(|error| {
                         responses_tool_call_is_missing_output_message(&error.message)
                     });
-                let missing_call_id = bootstrap_failure.responses_call_id_is_missing;
+                let tool_links_rejected = bootstrap_failure.responses_tool_call_links_rejected;
                 let failure = bootstrap_failure.failure;
                 last_preserved_upstream_error = bootstrap_failure.preserved;
                 let upstream_error = bootstrap_failure.upstream_error;
@@ -1298,7 +1299,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut request,
                     wire_api,
                     adapter_is_passthrough,
-                    missing_call_id,
+                    tool_links_rejected,
                     &mut legacy_call_id_repair_attempted,
                     &mut attempt,
                     &mut attempts_this_run,
@@ -1546,7 +1547,7 @@ fn try_repair_legacy_responses_call_ids(
     request: &mut Value,
     wire_api: WireApi,
     adapter_is_passthrough: bool,
-    upstream_rejected_missing_call_id: bool,
+    upstream_rejected_tool_links: bool,
     repair_attempted: &mut bool,
     attempt: &mut u16,
     attempts_this_run: &mut usize,
@@ -1558,7 +1559,7 @@ fn try_repair_legacy_responses_call_ids(
     if wire_api != WireApi::Responses
         || !adapter_is_passthrough
         || *repair_attempted
-        || !upstream_rejected_missing_call_id
+        || !upstream_rejected_tool_links
         || !repair_legacy_responses_call_ids(request)
     {
         return false;

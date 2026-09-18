@@ -208,6 +208,35 @@ fn missing_responses_call_ids_are_detected_without_matching_invalid_ids() {
 }
 
 #[test]
+fn tool_link_rejection_is_consistent_for_json_and_stream_envelopes() {
+    for message in [
+        "Missing required field: call_id",
+        "No tool output found for custom tool call call_test.",
+        "No tool output found for function call call_test.",
+        "Invalid call_id for function_call_output",
+    ] {
+        let error = json!({"message": message});
+        let buffered = json!({"error": error});
+        let stream = json!({"type":"response.failed", "response":{"error":error}});
+        assert!(responses_tool_call_links_rejected(
+            &serde_json::to_vec(&buffered).unwrap()
+        ));
+        assert!(responses_tool_call_links_rejected_value(&stream));
+    }
+    for message in [
+        "Invalid request",
+        "Missing field: model",
+        "Invalid tool arguments",
+    ] {
+        let error = json!({"error":{"message":message}});
+        assert!(!responses_tool_call_links_rejected(
+            &serde_json::to_vec(&error).unwrap()
+        ));
+        assert!(!responses_tool_call_links_rejected_value(&error));
+    }
+}
+
+#[test]
 fn zenith_gateway_invalid_request_is_detected_without_matching_generic_bad_requests() {
     assert!(zenith_gateway_invalid_request(
         br#"{"error":{"code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,

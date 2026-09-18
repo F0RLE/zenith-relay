@@ -373,8 +373,11 @@ fn next_legacy_responses_call_id(
 
 #[derive(Clone, Debug)]
 struct PendingLegacyResponsesCall {
-    id: String,
+    index: usize,
+    id: Option<String>,
+    item_id: Option<String>,
     name: Option<String>,
+    namespace: Option<String>,
     family: LegacyResponsesCallFamily,
 }
 
@@ -382,17 +385,14 @@ fn legacy_responses_output_can_stand_alone(item_type: &str, name: Option<&str>) 
     item_type == "function_call_output" && name.is_some()
 }
 
-/// Repairs historical Responses input items after a strict upstream has
-/// explicitly rejected a missing `call_id`.
+/// Repairs historical Responses links only after an explicit upstream rejection.
 ///
-/// Calls receive a collision-free bounded synthetic ID; a following output is
-/// matched by name and then FIFO order. Existing IDs, item IDs, namespaces,
-/// and named standalone `function_call_output` items are preserved. Anonymous
-/// orphan outputs are removed because assigning them a new ID would create a
-/// different, invalid tool turn. The operation is idempotent and does not
-/// touch non-tool input items.
+/// A result must identify exactly one earlier call of the same kind. Its item
+/// ID may identify that call, but the result must use the call's `call_id`.
+/// Plan every change before applying it: ambiguity or an anonymous orphan must
+/// never delete results, cross namespaces, or leave a partially repaired turn.
 pub(super) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
-    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
+    let Some(input) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
     if input.is_empty() || input.len() > MAX_LEGACY_RESPONSES_REPAIR_ITEMS {
@@ -414,17 +414,19 @@ pub(super) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
 
     let mut used = std::collections::HashSet::with_capacity(relevant_count);
     for item in input.iter() {
-        if let Some(call_id) = legacy_responses_call_id(item) {
-            used.insert(call_id.to_string());
+        for field in ["call_id", "id"] {
+            if let Some(id) = bounded_tool_call_id(item.get(field)) {
+                used.insert(id);
+            }
         }
     }
 
     let mut pending = Vec::<PendingLegacyResponsesCall>::with_capacity(relevant_count);
-    let mut drop_indices = Vec::new();
-    let mut changed = false;
+    let mut assigned = HashSet::new();
+    let mut edits = Vec::new();
 
-    for (index, item) in input.iter_mut().enumerate() {
-        let Some(object) = item.as_object_mut() else {
+    for (index, item) in input.iter().enumerate() {
+        let Some(object) = item.as_object() else {
             continue;
         };
         let Some(item_type) = object
@@ -437,18 +439,23 @@ pub(super) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
         let Some(family) = legacy_responses_call_family(&item_type) else {
             continue;
         };
+        if ["call_id", "id", "name", "namespace"].iter().any(|field| {
+            object.get(*field).is_some_and(|value| {
+                !value.is_null()
+                    && value.as_str().is_none_or(|value| {
+                        value != value.trim() || value.len() > MAX_LEGACY_RESPONSES_NAME_CHARS
+                    })
+            })
+        }) {
+            return false;
+        }
         let is_call = item_type == family.call_type();
         let is_output = item_type == family.output_type();
         if !is_call && !is_output {
             continue;
         }
 
-        let existing_id = object
-            .get("call_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && value.len() <= 256)
-            .map(str::to_string);
+        let existing_id = legacy_responses_call_id(item).map(str::to_owned);
         let name = object
             .get("name")
             .and_then(Value::as_str)
@@ -457,66 +464,79 @@ pub(super) fn repair_legacy_responses_call_ids(request: &mut Value) -> bool {
                 !value.is_empty() && value.chars().count() <= MAX_LEGACY_RESPONSES_NAME_CHARS
             })
             .map(str::to_string);
+        let namespace = object
+            .get("namespace")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
 
         if is_call {
-            let call_id = if let Some(call_id) = existing_id {
-                call_id
-            } else {
-                changed = true;
-                let call_id = next_legacy_responses_call_id(index, &mut used);
-                object.insert("call_id".to_string(), Value::String(call_id.clone()));
-                call_id
-            };
+            if existing_id
+                .as_ref()
+                .is_some_and(|id| !assigned.insert(id.clone()))
+            {
+                return false;
+            }
             pending.push(PendingLegacyResponsesCall {
-                id: call_id,
+                index,
+                id: existing_id,
+                item_id: bounded_tool_call_id(object.get("id")),
                 name,
+                namespace,
                 family,
             });
             continue;
         }
 
-        let Some(call_id) = existing_id else {
-            let matched = name.as_deref().and_then(|name| {
-                pending.iter().position(|pending_call| {
-                    pending_call.family == family && pending_call.name.as_deref() == Some(name)
+        let mut matches = pending.iter().enumerate().filter(|(_, call)| {
+            call.family == family
+                && name
+                    .as_ref()
+                    .is_none_or(|name| call.name.as_ref() == Some(name))
+                && namespace
+                    .as_ref()
+                    .is_none_or(|namespace| call.namespace.as_ref() == Some(namespace))
+                && existing_id.as_ref().is_none_or(|id| {
+                    call.id.as_ref() == Some(id) || call.item_id.as_ref() == Some(id)
                 })
-            });
-            let matched = matched.or_else(|| {
-                pending
-                    .iter()
-                    .position(|pending_call| pending_call.family == family)
-            });
-            let matched = matched.or_else(|| {
-                pending
-                    .iter()
-                    .position(|pending_call| pending_call.name.as_deref() == name.as_deref())
-            });
-            let matched = matched.or_else(|| (!pending.is_empty()).then_some(0));
-            if let Some(position) = matched {
-                let pending_call = pending.remove(position);
-                object.insert("call_id".to_string(), Value::String(pending_call.id));
-                changed = true;
-            } else if legacy_responses_output_can_stand_alone(&item_type, name.as_deref()) {
+        });
+        let position = matches.next().map(|(position, _)| position);
+        if matches.next().is_some() {
+            return false;
+        }
+        let Some(position) = position else {
+            if existing_id.is_some()
+                || legacy_responses_output_can_stand_alone(&item_type, name.as_deref())
+            {
                 continue;
-            } else {
-                drop_indices.push(index);
-                changed = true;
             }
-            continue;
+            return false;
         };
-
-        if let Some(position) = pending
-            .iter()
-            .position(|pending_call| pending_call.id == call_id)
-        {
-            pending.remove(position);
+        let call = pending.remove(position);
+        let call_id = call
+            .id
+            .clone()
+            .or_else(|| existing_id.clone())
+            .or(call.item_id)
+            .unwrap_or_else(|| next_legacy_responses_call_id(call.index, &mut used));
+        if call.id.is_none() {
+            if !assigned.insert(call_id.clone()) {
+                return false;
+            }
+            edits.push((call.index, call_id.clone()));
+        }
+        if existing_id.as_ref() != Some(&call_id) {
+            edits.push((index, call_id));
         }
     }
 
-    for index in drop_indices.into_iter().rev() {
-        input.remove(index);
+    if !pending.is_empty() || edits.is_empty() {
+        return false;
     }
-    changed
+    let input = request["input"].as_array_mut().expect("validated input");
+    for (index, call_id) in edits {
+        input[index]["call_id"] = Value::String(call_id);
+    }
+    true
 }
 
 fn visit_response_items(value: &Value, inspect: &mut impl FnMut(&serde_json::Map<String, Value>)) {
@@ -979,11 +999,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_responses_call_id_repair_pairs_calls_and_drops_anonymous_orphans() {
+    fn legacy_responses_call_id_repair_preserves_items_and_tool_namespaces() {
         let mut request = json!({
             "input": [
                 {"type": "message", "role": "user", "content": "continue"},
-                {"type": "function_call_output", "output": "orphan"},
                 {"type": "function_call", "id": "fc_existing", "name": "lookup", "namespace": "functions", "arguments": "{}"},
                 {"type": "function_call_output", "name": "lookup", "output": "lookup result"},
                 {"type": "custom_tool_call", "name": "patch", "namespace": "tools", "input": "{}"},
@@ -996,9 +1015,7 @@ mod tests {
         let input = request["input"].as_array().expect("input array");
         assert_eq!(input.len(), 6);
         assert_eq!(input[1]["type"], "function_call");
-        assert!(input[1]["call_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("call_missing_")));
+        assert_eq!(input[1]["call_id"], "fc_existing");
         assert_eq!(input[1]["id"], "fc_existing");
         assert_eq!(input[1]["namespace"], "functions");
         assert_eq!(input[2]["call_id"], input[1]["call_id"]);
@@ -1009,6 +1026,78 @@ mod tests {
         assert_eq!(input[4]["call_id"], input[3]["call_id"]);
         assert_eq!(input[5]["name"], "heartbeat");
         assert!(input[5].get("call_id").is_none());
+    }
+
+    #[test]
+    fn tool_link_repair_keeps_explicit_ids_and_resolves_item_id_references() {
+        for kind in ["function_call", "custom_tool_call"] {
+            for call_id in [None, Some("call_stable")] {
+                let mut call = json!({"type":kind,"id":"item_legacy","name":"lookup"});
+                if let Some(id) = call_id {
+                    call["call_id"] = json!(id);
+                }
+                let mut request = json!({"input":[
+                    call,
+                    {"type":format!("{kind}_output"),"call_id":"item_legacy","output":"synthetic result"}
+                ]});
+                assert!(repair_legacy_responses_call_ids(&mut request));
+                let expected = call_id.unwrap_or("item_legacy");
+                assert_eq!(request["input"][0]["call_id"], expected);
+                assert_eq!(request["input"][1]["call_id"], expected);
+                assert_eq!(request["input"][0]["id"], "item_legacy");
+                assert_eq!(request["input"][1]["output"], "synthetic result");
+                assert!(!repair_legacy_responses_call_ids(&mut request));
+            }
+        }
+    }
+
+    #[test]
+    fn tool_link_repair_is_atomic_for_orphans_ambiguous_and_mismatched_results() {
+        let call = json!({"type":"function_call","name":"lookup","arguments":"{}"});
+        for invalid in [
+            json!([{ "type":"function_call_output","output":"orphan" }]),
+            json!([call, {"type":"custom_tool_call_output","output":"wrong kind"}]),
+            json!([call, {"type":"function_call_output","name":"different","output":"wrong name"}]),
+            json!([call, {"type":"function_call_output","namespace":"different","output":"wrong namespace"}]),
+            json!([call, call, {"type":"function_call_output","output":"ambiguous"}]),
+            json!([{"type":"function_call","id":"alias","call_id":"canonical"},
+                {"type":"function_call","id":"other","call_id":"alias"},
+                {"type":"function_call_output","call_id":"alias","output":"ambiguous alias"}]),
+        ] {
+            let mut input = vec![
+                call.clone(),
+                json!({"type":"function_call_output","output":"paired"}),
+            ];
+            input.extend(invalid.as_array().unwrap().iter().cloned());
+            let mut request = json!({"input": input});
+            let original = request.clone();
+            assert!(!repair_legacy_responses_call_ids(&mut request));
+            assert_eq!(request, original);
+        }
+    }
+
+    #[test]
+    fn tool_link_repair_matches_parallel_results_by_namespace_without_reordering() {
+        let mut request = json!({"input":[
+            {"type":"function_call","name":"lookup","namespace":"first","arguments":"{}"},
+            {"type":"function_call","name":"lookup","namespace":"second","arguments":"{}"},
+            {"type":"function_call_output","name":"lookup","namespace":"second","output":"second result"},
+            {"type":"function_call_output","name":"lookup","namespace":"first","output":"first result"}
+        ]});
+        assert!(repair_legacy_responses_call_ids(&mut request));
+        assert_eq!(
+            request["input"][0]["call_id"],
+            request["input"][3]["call_id"]
+        );
+        assert_eq!(
+            request["input"][1]["call_id"],
+            request["input"][2]["call_id"]
+        );
+        assert_ne!(
+            request["input"][0]["call_id"],
+            request["input"][1]["call_id"]
+        );
+        assert_eq!(request["input"][2]["output"], "second result");
     }
 
     #[test]

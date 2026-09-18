@@ -255,9 +255,12 @@ pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8])
     let Ok(value) = serde_json::from_slice::<Value>(payload) else {
         return false;
     };
-    let text = upstream_error_text(&value);
+    responses_function_call_output_has_invalid_call_id_text(&upstream_error_text(&value))
+}
+
+fn responses_function_call_output_has_invalid_call_id_text(text: &str) -> bool {
     text_has_any(
-        &text,
+        text,
         &[
             "invalid call_id for function_call_output",
             "invalid call id for function_call_output",
@@ -265,6 +268,19 @@ pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8])
             "invalid_function_call_output_call_id",
         ],
     )
+}
+
+pub(crate) fn responses_tool_call_links_rejected(payload: &[u8]) -> bool {
+    responses_call_id_is_missing(payload)
+        || responses_tool_call_is_missing_output(payload)
+        || responses_function_call_output_has_invalid_call_id(payload)
+}
+
+pub(crate) fn responses_tool_call_links_rejected_value(value: &Value) -> bool {
+    let text = upstream_error_text(value);
+    responses_call_id_is_missing_value(value)
+        || responses_tool_call_is_missing_output_message(&text)
+        || responses_function_call_output_has_invalid_call_id_text(&text)
 }
 
 /// Detects the narrow Responses validation failure caused by a historical

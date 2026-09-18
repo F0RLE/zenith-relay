@@ -1843,7 +1843,6 @@ async fn native_responses_repair_legacy_call_ids_after_explicit_strict_rejection
         .json(&json!({
             "model": "gpt-test",
             "input": [
-                {"type": "function_call_output", "output": "orphan"},
                 {"type": "function_call", "id": "fc_legacy", "name": "lookup", "namespace": "functions", "arguments": "{}"},
                 {"type": "function_call_output", "output": "lookup result"},
                 {"type": "function_call_output", "name": "heartbeat", "output": "standalone"}
@@ -1861,7 +1860,7 @@ async fn native_responses_repair_legacy_call_ids_after_explicit_strict_rejection
 
     let bodies = state.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
-    assert_eq!(bodies[0]["input"].as_array().unwrap().len(), 4);
+    assert_eq!(bodies[0]["input"].as_array().unwrap().len(), 3);
     let repaired = bodies[1]["input"].as_array().unwrap();
     assert_eq!(repaired.len(), 3);
     assert_eq!(repaired[0]["type"], "function_call");
@@ -1915,6 +1914,64 @@ async fn native_responses_stream_repairs_legacy_call_ids_after_terminal_error() 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
+}
+
+#[tokio::test]
+async fn native_tool_links_recover_item_ids_without_losing_results_in_json_and_sse() {
+    for streaming in [false, true] {
+        for kind in ["function_call", "custom_tool_call"] {
+            for call_id in [None, Some("call_stable")] {
+                let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+                let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+                let mut call = json!({"type":kind,"id":"ctc_item","name":"patch","input":"synthetic","arguments":"{}"});
+                if let Some(id) = call_id {
+                    call["call_id"] = json!(id);
+                }
+                let input = json!([call,
+                    {"type":format!("{kind}_output"),"call_id":"ctc_item","output":"synthetic result"}
+                ]);
+                let response = reqwest::Client::new()
+                    .post(format!("{}/v1/responses", gateway.base_url))
+                    .bearer_auth(LOCAL_KEY)
+                    .json(&json!({"model":"gpt-test","stream":streaming,"input":input}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(response.text().await.unwrap().contains("History accepted"));
+                let bodies = state.bodies.lock().unwrap();
+                assert_eq!(bodies.len(), 2);
+                assert_eq!(bodies[0]["input"], input);
+                let mut expected = input;
+                expected[0]["call_id"] = json!(call_id.unwrap_or("ctc_item"));
+                expected[1]["call_id"] = expected[0]["call_id"].clone();
+                assert_eq!(bodies[1]["input"], expected);
+                assert!(events.lock().unwrap().iter().all(|event| event.success));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_tool_repair_never_drops_an_orphan_result_to_make_a_retry_succeed() {
+    let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let input = json!([
+        {"type":"function_call","name":"lookup","arguments":"{}"},
+        {"type":"function_call_output","output":"paired"},
+        {"type":"custom_tool_call_output","output":"unresolved"}
+    ]);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-test","input":input}))
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["input"], input);
 }
 
 #[tokio::test]
@@ -3743,11 +3800,39 @@ async fn strict_missing_call_id_upstream_responses(
                     .is_none_or(|call_id| call_id.trim().is_empty())
         })
     });
-    if has_missing_call_id {
+    let missing_output = input.and_then(|input| {
+        input.iter().find(|call| {
+            let kind = call.get("type").and_then(Value::as_str).unwrap_or_default();
+            matches!(kind, "function_call" | "custom_tool_call")
+                && !input.iter().any(|result| {
+                    result.get("type").and_then(Value::as_str)
+                        == Some(format!("{kind}_output").as_str())
+                        && result.get("call_id").is_some()
+                        && result.get("call_id") == call.get("call_id")
+                })
+        })
+    });
+    let message = if has_missing_call_id {
+        Some("Missing required field: call_id".to_string())
+    } else {
+        missing_output.map(|call| {
+            format!(
+                "No tool output found for {} call {}.",
+                if call["type"] == "custom_tool_call" {
+                    "custom tool"
+                } else {
+                    "function"
+                },
+                call["call_id"].as_str().unwrap_or_default()
+            )
+        })
+    };
+    if let Some(message) = message {
         if request.get("stream").and_then(Value::as_bool) == Some(true) {
-            let chunks = stream::iter([Ok::<_, Infallible>(Bytes::from_static(
-                b"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"},\"error\":{\"message\":\"Missing required field: call_id\"}}\n\n",
-            ))]);
+            let error = json!({"type":"response.failed","response":{"status":"failed"},"error":{"message":message}});
+            let chunks = stream::iter([Ok::<_, Infallible>(Bytes::from(format!(
+                "data: {error}\n\n"
+            )))]);
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "text/event-stream")
@@ -3756,7 +3841,7 @@ async fn strict_missing_call_id_upstream_responses(
         }
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"message": "Missing required field: call_id"}})),
+            Json(json!({"error": {"message": message}})),
         )
             .into_response();
     }

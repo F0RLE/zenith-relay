@@ -99,6 +99,10 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Responses tool-history recovery preserves call/result links when a client
+  references an item ID or omits a call ID. Results are matched by kind and
+  namespace without deleting history or guessing between parallel calls.
+  HTTP, streaming and WebSocket use the same bounded recovery. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Provider price fields keep currency symbols and values vertically centered,
   including while editing, without an overflowing inner input. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Multiple routes for one member share rotation weight and request capacity.

@@ -252,6 +252,11 @@ Plaintext recovery requires a saved predecessor scoped to the same local key
 and owner; it materializes that history before removing the reference. An
 unpaired tool output needs a known owner, while paired tool history without an
 opaque reference may rotate. Recovery never deletes incomplete tool calls.
+After an explicit upstream tool-link rejection, native HTTP/SSE and WebSocket
+may repair one unambiguous call/result mapping before visible output. Call IDs
+remain distinct from item IDs; matching respects tool kind and namespace.
+Repairs apply atomically and never discard results or guess between parallel
+calls. Missing history stays an error.
 Ownership checks inspect every tool identifier. Without a predecessor reference,
 all unpaired outputs must share a known owner; completed historic calls cannot
 choose that owner or authorize an unknown output.

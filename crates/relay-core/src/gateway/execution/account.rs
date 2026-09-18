@@ -7,10 +7,10 @@ use super::super::errors::{
     apply_failure_cooldown_with_body, apply_failure_state, is_deactivated_workspace,
     preserved_upstream_error, previous_response_not_found, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_call_id_is_missing, responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
-    responses_tool_call_is_missing_output, retryable_failure, AttemptFailure, CooldownContext,
-    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    responses_tool_call_is_missing_output, responses_tool_call_links_rejected, retryable_failure,
+    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 use super::super::request::{
@@ -455,7 +455,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         };
         if !status.is_success() {
             if !legacy_call_id_repair_attempted
-                && responses_call_id_is_missing(&bytes)
+                && responses_tool_call_links_rejected(&bytes)
                 && repair_legacy_responses_call_ids(&mut request)
             {
                 legacy_call_id_repair_attempted = true;

@@ -840,7 +840,7 @@ async fn connect_upstream(
             if !legacy_call_id_repair_attempted
                 && body
                     .as_deref()
-                    .is_some_and(super::errors::responses_call_id_is_missing)
+                    .is_some_and(super::errors::responses_tool_call_links_rejected)
                 && request.repair_legacy_call_ids()
             {
                 legacy_call_id_repair_attempted = true;
@@ -1074,7 +1074,7 @@ async fn connect_upstream(
                     .filter(|status| !status.is_success())
                     .unwrap_or_else(|| super::errors::upstream_failure_status(category));
                 if !legacy_call_id_repair_attempted
-                    && terminal_body.is_some_and(super::errors::responses_call_id_is_missing)
+                    && terminal_body.is_some_and(super::errors::responses_tool_call_links_rejected)
                     && request.repair_legacy_call_ids()
                 {
                     legacy_call_id_repair_attempted = true;
@@ -2134,7 +2134,7 @@ fn repairable_terminal_request(
         UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
         _ => None,
     }?;
-    if !super::errors::responses_call_id_is_missing(body) {
+    if !super::errors::responses_tool_call_links_rejected(body) {
         return None;
     }
     let in_flight = state.in_flight.as_mut()?;
@@ -3469,7 +3469,6 @@ mod tests {
                 "type": "response.create",
                 "model": "relay/upstream-model",
                 "input": [
-                    {"type":"function_call_output","output":"orphan"},
                     {"type":"function_call","name":"lookup","arguments":"{}"},
                     {"type":"function_call_output","output":"result"}
                 ]
