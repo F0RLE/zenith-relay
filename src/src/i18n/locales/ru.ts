@@ -1117,7 +1117,7 @@ const relayRu = {
     routingSettings: "Настройки ротации пула",
     routingSettingsTitle: "Ротация пула",
     rotationModes: { smart: "Умный выбор", in_order: "По порядку", round_robin: "По кругу" },
-    routingChanged: "Настройки пула изменились. Откройте окно заново перед сохранением.",
+    routingChanged: "Настройки пула изменились во время сохранения. Показаны текущие значения; повторите правку.",
     memberOrder: "Порядок участников",
     rotationMembers: "Участники",
     rotationWeight: "Доля запросов",

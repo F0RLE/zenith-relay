@@ -2,7 +2,7 @@ import { expect, test } from "../bun-playwright";
 import type { OperationalStatus, RuntimeSnapshot } from "../../src/features/relay/api/types";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
-test("rotation modes support keyboard selection without saving the draft", async ({ page }) => {
+test("rotation modes apply keyboard selection immediately", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -26,9 +26,12 @@ test("rotation modes support keyboard selection without saving the draft", async
   await expect(roundRobin).toBeFocused();
   await page.keyboard.press("Home");
   await expect(smart).toBeFocused();
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await expect(dialog).toBeHidden();
   const saves = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "update_local_routing").length);
-  expect(saves).toBe(0);
+  expect(saves).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+  await expect(smart).toHaveAttribute("aria-checked", "true");
 });
 
 for (const [width, height] of [[1160, 844], [1160, 540], [600, 844], [390, 844], [360, 640]]) {
@@ -54,10 +57,13 @@ for (const [width, height] of [[1160, 844], [1160, 540], [600, 844], [390, 844],
       await expect(dialog.getByRole("listitem").last().getByRole("spinbutton").last()).toBeVisible();
       await expect(dialog.getByText("Восстановление после ошибок", { exact: true })).toHaveCount(0);
       await expect(dialog.getByRole("checkbox")).toHaveCount(0);
-      await expect(dialog.getByRole("button", { name: "Сохранить", exact: true })).toBeInViewport();
-      expect(await dialog.evaluate((element) => [...element.querySelectorAll<HTMLElement>("*")]
+      await expect(dialog.getByRole("button", { name: "Закрыть", exact: true }).last()).toBeInViewport();
+      const scrollContainers = await dialog.evaluate((element) => [...element.querySelectorAll<HTMLElement>("*")]
         .filter((item) => /^(auto|scroll)$/.test(getComputedStyle(item).overflowY) && item.scrollHeight > item.clientHeight + 1)
-        .map((item) => item.className))).toEqual(["relay-dialog-body"]);
+        .map((item) => item.className));
+      expect(scrollContainers.length).toBeLessThanOrEqual(1);
+      expect(scrollContainers.every((name) => name === "relay-dialog-body")).toBe(true);
+      if (width <= 600 || height <= 540) expect(scrollContainers).toEqual(["relay-dialog-body"]);
       await dialog.getByRole("radio", { name: "По порядку", exact: true }).click();
       expect(await dialog.getByRole("listitem").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1))).toBe(true);
       await page.screenshot({ path: testInfo.outputPath("rotation-manual.png"), animations: "disabled" });
@@ -110,7 +116,7 @@ for (const mode of ["local", "remote"] as const) {
     expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-member-id"))))
       .toEqual(initial.members.map((member) => `${member.kind}:${member.id}`));
     await dialog.getByRole("radio", { name: "Smart", exact: true }).click();
-    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(dialog).toBeHidden();
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     await expect(edited.getByRole("spinbutton").first()).toHaveValue("7");
@@ -120,7 +126,7 @@ for (const mode of ["local", "remote"] as const) {
       .toEqual(initial.members.map((member) => `${member.kind}:${member.id}`));
     await edited.getByRole("spinbutton").fill("");
     await expect(edited.getByRole("spinbutton")).toHaveAttribute("aria-valuetext", "Unlimited");
-    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(dialog).toBeHidden();
     const savedLimit = await page.evaluate(async (mode) => {
       const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke;
@@ -134,18 +140,22 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("rotation refuses to overwrite a concurrent membership change", async ({ page }) => {
+test("rotation refreshes concurrent membership changes without blocking edits", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
   await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await page.evaluate(async () => {
     const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke;
     await invoke("set_local_pool_membership", { input: { accountIds: ["account_synthetic"], sourceIds: [], inPool: false } });
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
-  await expect(dialog.getByRole("alert")).toContainText("Pool settings changed");
-  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect(dialog.locator('[data-member-id="account:account_synthetic"]')).toHaveCount(0);
+  await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+  await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect(dialog.getByRole("listitem")).toHaveCount(1);
 });

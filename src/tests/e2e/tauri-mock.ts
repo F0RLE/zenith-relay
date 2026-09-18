@@ -748,7 +748,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "update_local_routing": {
             const request = args.input as { poolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; expectedPoolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; maxRetryCandidates: number; cooldownAfterFailures: number; keepLastCandidateAvailable: boolean; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" | "ultrafast" };
             if (request.poolRouting) {
-              if (JSON.stringify(request.expectedPoolRouting) !== JSON.stringify(localRuntime.gateway.poolRouting)) throw new Error("pool routing changed");
+              if (JSON.stringify(request.expectedPoolRouting) !== JSON.stringify(localRuntime.gateway.poolRouting)) throw { code: "conflict", message: "pool routing changed" };
               localRuntime.gateway.poolRouting = structuredClone(request.poolRouting);
             }
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
@@ -1366,7 +1366,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }
       if (type === "set_routing_policy") {
         if (input.payload?.poolRouting) {
-          if (JSON.stringify(input.payload.expectedPoolRouting) !== JSON.stringify(remoteRuntime.gateway.poolRouting)) throw new Error("pool routing changed");
+          if (JSON.stringify(input.payload.expectedPoolRouting) !== JSON.stringify(remoteRuntime.gateway.poolRouting)) throw { code: "conflict", message: "pool routing changed" };
           remoteRuntime.gateway.poolRouting = structuredClone(input.payload.poolRouting) as typeof remoteRuntime.gateway.poolRouting;
         }
         remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);

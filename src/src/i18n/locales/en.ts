@@ -1117,7 +1117,7 @@ const relayEn = {
     routingSettings: "Pool rotation settings",
     routingSettingsTitle: "Pool rotation",
     rotationModes: { smart: "Smart", in_order: "In order", round_robin: "Round robin" },
-    routingChanged: "Pool settings changed. Reopen this window before saving.",
+    routingChanged: "Pool settings changed during saving. Current values are shown; repeat your change.",
     memberOrder: "Member order",
     rotationMembers: "Members",
     rotationWeight: "Request share",

@@ -577,7 +577,7 @@ for (const viewport of viewports) {
     await expect(distribution.getByRole("listitem")).toHaveCount(6);
     expect(await distribution.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-member-order-${viewport.width}x${viewport.height}.png` });
-    await distribution.getByRole("button", { name: "Отмена", exact: true }).click();
+    await distribution.getByRole("button", { name: "Закрыть", exact: true }).last().click();
     await page.mouse.move(1, 1);
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     const members = page.locator(".pool-member-list");

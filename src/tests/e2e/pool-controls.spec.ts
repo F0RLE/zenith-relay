@@ -73,7 +73,7 @@ test("pool controls keep icon commands labelled and show quota refresh progress"
   await expect(panel.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
   await panel.getByRole("button", { name: "Pool rotation settings" }).click();
   await expect(page.getByRole("dialog", { name: "Pool rotation", exact: true })).toBeVisible();
-  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).last().click();
   await page.evaluate(() => {
     const scope = window as unknown as {
       __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };

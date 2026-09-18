@@ -198,6 +198,11 @@ single model does not necessarily block the member's other models.
 In every mode, a chat continuation may need its previous member. Rotation does
 not promise a different account for every message in the same conversation.
 
+Mode, order, request share and concurrency changes save immediately. Drag a
+member by its handle or use the arrows in **In order**. **Close** waits for
+pending changes. The list follows changes to pool membership automatically;
+if saving fails, an error appears and the stored values are shown again.
+
 **Request share** is a ratio for Smart and Round robin. For example, 2 and 1
 give roughly two parts of traffic to the first member and one to the second
 when they are equally available. It is not a percentage, requests per second,
@@ -588,7 +593,7 @@ such as 429, explains why. More retries do not replenish quota.
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
-| `pool_routing_conflict`, `configuration_revision_stale` | Settings changed after the editor opened. | Close the editor, refresh state, and reapply changes to the current configuration. |
+| `pool_routing_conflict`, `configuration_revision_stale` | Settings changed during saving or after a preset preview. | Rotation automatically retries against current settings. If the error remains, wait for other edits to finish and repeat your change using the displayed values. For a preset, refresh its preview before applying. |
 | `pool_members_empty`, `pool_members_too_many` | No members were selected or the operation exceeds its limit. | Select existing members and split very large operations. |
 | `account_not_found`, `account_missing`, `source_not_found`, `source_priority_target_not_found`, `not_found` | A record was removed or belongs to another pool. | Refresh and select an existing connection in the correct environment. An old editor cannot restore a deleted record. |
 | `max_retry_candidates_invalid`, `cooldown_after_failures_invalid`, `source_recovery_delay_invalid` | An imported legacy retry value or member recovery delay is outside supported bounds. | Correct the imported value or the delay in member **Settings**. Pool recovery is automatic. |

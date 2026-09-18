@@ -8,7 +8,7 @@ use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError},
     remote::{
         self,
-        client::RemoteClient,
+        client::{RemoteClient, RemoteClientError},
         deployment::{self, DeploymentPlan},
         RemoteTargetRecord,
     },
@@ -693,7 +693,7 @@ pub async fn execute_remote_server_action(
     client
         .mutate(method, &path, input.payload.as_ref())
         .await
-        .map_err(remote_error)
+        .map_err(remote_action_error)
 }
 
 pub(super) fn active_client(
@@ -854,6 +854,14 @@ fn object_path(collection: &str, id: &str) -> Result<String, CommandError> {
 
 pub(super) fn remote_error(error: impl std::fmt::Display) -> CommandError {
     LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string()).into()
+}
+
+fn remote_action_error(error: RemoteClientError) -> CommandError {
+    if matches!(error, RemoteClientError::PoolRoutingConflict) {
+        LocalPoolError::new(ErrorCode::Conflict, error.to_string()).into()
+    } else {
+        remote_error(error)
+    }
 }
 
 #[cfg(test)]

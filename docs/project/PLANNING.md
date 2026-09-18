@@ -188,6 +188,11 @@ remain import compatibility data. Desktop and server always install the unified
 policy; direct core callers without `pool_routing` retain legacy compatibility.
 Policy saves compare the previous policy and membership before applying
 atomically. Hot policy changes preserve leases, cooldowns, and response ownership.
+The rotation editor applies edits immediately through a serialized queue. Each
+batch reads current settings and reapplies only identity-based user edits, with
+at most three CAS attempts. Membership updates cannot resurrect removed members;
+failed writes restore the stored values. Remote routing conflicts retain their
+typed code, including the HTTP 400 response of older servers.
 Server membership updates reconcile and install the same policy as a restart
 before refreshing internal request-key scopes.
 Portable presets remap tagged member IDs before validation and application.

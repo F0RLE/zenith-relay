@@ -335,7 +335,7 @@ for (const mode of ["local", "remote"] as const) {
     await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
     await dialog.getByLabel("Request share: Example compatible API", { exact: true }).fill("3");
     await dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true }).fill("2");
-    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(dialog).toBeHidden();
     await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
     await expect(dialog.getByRole("radio", { name: "Round robin", exact: true })).toHaveAttribute("aria-checked", "true");
@@ -344,7 +344,7 @@ for (const mode of ["local", "remote"] as const) {
     await dialog.getByRole("radio", { name: "In order", exact: true }).click();
     await expect(order.getByRole("listitem").first()).toContainText("Example compatible API");
     await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveCount(0);
-    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   });
 }
 
@@ -2136,7 +2136,7 @@ for (const mode of ["local", "remote"] as const) {
       await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
       const editor = page.getByRole("dialog", { name: "Pool rotation", exact: true });
       await editor.getByRole("radio", { name, exact: true }).click();
-      await editor.getByRole("button", { name: "Save", exact: true }).click();
+      await editor.getByRole("button", { name: "Close", exact: true }).last().click();
       await expect(member).toContainText(name);
     }
 
@@ -2474,7 +2474,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await dialog.getByRole("radio", { name: "In order", exact: true }).click();
   await expect(dialog.getByLabel("Retry candidates")).toHaveCount(0);
   await expect(dialog.getByLabel("Failures before cooldown")).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   await expect(subscription.locator("span").first()).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
   await expect(subscription.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
@@ -2513,7 +2513,7 @@ test("pool card grid preserves scheduler order at every width", async ({ page })
   expect(await page.evaluate(() => localStorage.getItem("relay.poolLayout"))).toBeNull();
 });
 
-test("cancelling mixed rotation leaves the stored order unchanged", async ({ page }) => {
+test("closing mixed rotation retains the immediately applied order", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -2524,11 +2524,11 @@ test("cancelling mixed rotation leaves the stored order unchanged", async ({ pag
   const original = await ids();
   await dialog.getByRole("listitem").first().getByRole("button", { name: / down$/ }).click();
   expect(await ids()).not.toEqual(original);
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  const reordered = await ids();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-  await expect(dialog.getByRole("radio", { name: "Smart", exact: true })).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
-  expect(await ids()).toEqual(original);
+  await expect(dialog.getByRole("radio", { name: "In order", exact: true })).toHaveAttribute("aria-checked", "true");
+  expect(await ids()).toEqual(reordered);
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
@@ -2544,7 +2544,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Request speed");
   await dialog.getByRole("radio", { name: "In order", exact: true }).click();
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toMatchObject({

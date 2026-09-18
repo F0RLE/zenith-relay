@@ -99,6 +99,9 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Pool rotation now saves mode, order and member settings immediately. Dragging
+  works consistently, concurrent membership updates refresh the editor, and
+  conflicting saves retry without restoring removed members. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Responses tool-history recovery preserves call/result links when a client
   references an item ID or omits a call ID. Results are matched by kind and
   namespace without deleting history or guessing between parallel calls.
