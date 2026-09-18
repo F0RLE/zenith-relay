@@ -106,6 +106,8 @@ release entries are kept concise and link to the corresponding tag.
   references an item ID or omits a call ID. Results are matched by kind and
   namespace without deleting history or guessing between parallel calls.
   HTTP, streaming and WebSocket use the same bounded recovery. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Model rule actions share one aligned group with consistently sized format,
+  reasoning, speed and enable controls. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Provider price fields keep currency symbols and values vertically centered,
   including while editing, without an overflowing inner input. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - Multiple routes for one member share rotation weight and request capacity.

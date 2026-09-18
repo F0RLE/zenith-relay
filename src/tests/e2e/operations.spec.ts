@@ -3134,11 +3134,13 @@ for (const mode of ["local", "remote"] as const) {
     const speedTrigger = speed.locator(".relay-option-trigger");
     await expect(speedTrigger).toBeVisible();
     await expect(speed).toBeVisible();
-    await expect(model.locator(".model-rule-secondary-actions")).toHaveCSS("opacity", "1");
-    expect(await model.locator(".model-rule-secondary-actions > *").evaluateAll((controls) => controls.map((control) => {
+    await expect(model.locator(".model-rule-actions")).toHaveCSS("opacity", "1");
+    expect(await model.locator(".model-rule-actions > *").evaluateAll((controls) => controls.map((control) => {
+      if (control.matches(".model-protocol-button")) return "protocol";
+      if (control.matches(".model-toggle")) return "enabled";
       if (control.matches(".model-speed-toggle")) return "speed";
       return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
-    }))).toEqual(["reasoning", "speed"]);
+    }))).toEqual(["protocol", "reasoning", "speed", "enabled"]);
     await expect(speed).toHaveAttribute("data-speed-tier", "standard");
     await expect(speedTrigger).toHaveAttribute("data-value", "standard");
     await speedTrigger.click();

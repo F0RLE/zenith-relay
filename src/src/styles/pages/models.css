@@ -50,8 +50,7 @@
   table-layout: fixed;
 }
 
-.model-rules-table col[data-column="model"] { width: 72%; }
-.model-rules-table col[data-column="actions"] { width: 28%; }
+.model-rules-table col[data-column="actions"] { width: 318px; }
 
 .model-rules-table th,
 .model-rules-table td {
@@ -189,7 +188,7 @@
 
 .model-rule-drag-handle + .model-rule-identity {
   display: inline-grid;
-  width: calc(100% - 72px);
+  width: calc(100% - 32px);
   vertical-align: middle;
 }
 
@@ -391,17 +390,13 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 7px;
-}
-
-.model-rule-secondary-actions {
-  display: inline-flex;
-  gap: 5px;
+  gap: 6px;
 }
 
 .model-rule-actions .relay-icon-button {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
   border-radius: 6px;
 }
 
@@ -640,13 +635,13 @@
 
 .model-speed-select,
 .model-speed-select .relay-option-trigger {
-  width: 124px;
+  width: 164px;
   min-width: 0;
 }
 
 .model-speed-select .relay-option-trigger {
-  min-height: 30px;
-  height: 30px;
+  min-height: 34px;
+  height: 34px;
   padding: 3px 6px;
   border-radius: 6px;
   border-color: var(--relay-border-strong);
@@ -720,30 +715,34 @@
     font-size: 11px;
   }
 
-  .model-rule-actions {
-    gap: 3px;
-  }
+}
 
-  .model-rule-secondary-actions {
-    gap: 3px;
+@media (max-width: 600px) {
+  .relay-shell[data-page="pool"] .model-rules .model-rules-table { display: block; min-width: 0; }
+  .model-rules-table colgroup,
+  .model-rules-table thead { display: none; }
+  .model-rules-table tbody,
+  .model-rules-table tbody tr,
+  .model-rules-table .model-group-row th { display: block; min-height: 0; }
+  .model-rules-table tbody tr[data-model-id] td {
+    display: block;
+    height: auto;
+    min-height: 0;
+    padding: 10px 12px;
   }
-
-  .model-rule-actions .relay-icon-button {
-    width: 28px;
-    height: 28px;
-  }
+  .model-rules-table tbody tr[data-model-id] td:first-child { border-bottom: 0; }
+  .model-rules-table tbody tr[data-model-id] td:last-child { padding-top: 0; }
+  .model-speed-select,
+  .model-speed-select .relay-option-trigger { width: 34px; }
+  .model-speed-select .relay-option-trigger { justify-content: center; padding: 0; }
+  .model-speed-select .relay-option-trigger > span,
+  .model-speed-select .relay-option-trigger > svg:last-child { display: none; }
 }
 
 .relay-dialog.member-policy-dialog {
   width: min(640px, 100%);
 }
 
-.model-protocol-button {
-  width: 28px;
-  height: 28px;
-  margin-left: 8px;
-  vertical-align: middle;
-}
 
 .relay-dialog.model-protocol-dialog {
   width: min(680px, 100%);
