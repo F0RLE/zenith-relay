@@ -33,6 +33,13 @@ its WebView while tray/background runtime survives; explicitly quitting the
 process stops the local pool. Distributed multi-server coordination is not
 implemented.
 
+Renderer snapshot reads accept only the latest requested result. Mode changes
+and explicit refreshes retire previous background reads and retries without
+blocking new updates; events arriving during a read trigger one coalesced
+follow-up. Visible remote runtime pages also poll once per minute and on focus
+because server changes do not emit desktop events. Inactive pages do not poll
+full runtime snapshots.
+
 `relay-core/error_codes` defines stable error identifiers and upstream defaults
 for public codes, HTTP status, and safe messages. Desktop and server reuse these
 definitions; domain modules retain classification, retry, and recovery decisions.

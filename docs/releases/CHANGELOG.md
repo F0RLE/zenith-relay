@@ -8,6 +8,12 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Background refresh can no longer replace saved settings with an older
+  snapshot. Switching away from a connection and back also clears pending
+  refresh work, so a slow earlier request cannot stall the current view.
+  Visible remote pool pages now pick up server changes periodically and when
+  returning to the window without requiring a local state-change event.
+
 - Pool catalog refresh now resolves each member's routes once for all its models,
   avoiding repeated discovery-policy work as model inventories grow. Offline
   models retain their editable metadata and cache-price fields. (`3e6e174`)

@@ -8,6 +8,7 @@ import {
   readRelayPreference,
   writeRelayPreference,
 } from "./relayPreferences";
+import { LatestRequestGate } from "./latestRequestGate";
 import {
   ROUTING_REFRESH_INTERVAL_MS,
   RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
@@ -52,8 +53,9 @@ export function useRelayRuntime({
   const pageRef = useRef(page);
   const stateRevision = useRef(1);
   const refreshedRevision = useRef(0);
-  const backgroundRefreshPending = useRef(new Set<RelayMode>());
-  const backgroundRefreshRetryTimers = useRef(new Map<RelayMode, number>());
+  const snapshotRequest = useRef(new LatestRequestGate());
+  const backgroundRefreshPending = useRef<symbol | null>(null);
+  const backgroundRefreshRetryTimer = useRef<number | undefined>(undefined);
   const runtimeRefreshPage = useRef<PageId>("overview");
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
@@ -75,8 +77,18 @@ export function useRelayRuntime({
     setPageState(next);
   }, []);
 
+  const invalidateRefreshes = useCallback(() => {
+    snapshotRequest.current.invalidate();
+    backgroundRefreshPending.current = null;
+    if (backgroundRefreshRetryTimer.current !== undefined) {
+      window.clearTimeout(backgroundRefreshRetryTimer.current);
+      backgroundRefreshRetryTimer.current = undefined;
+    }
+  }, []);
+
   const setMode = useCallback((next: RelayMode) => {
     if (modeRef.current === next) return;
+    invalidateRefreshes();
     modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
     modeRef.current = next;
     stateRevision.current += 1;
@@ -91,53 +103,68 @@ export function useRelayRuntime({
     setModeState(next);
     setPage("overview");
     cancelOperations();
-  }, [cancelOperations, resetUsage, setPage]);
+  }, [cancelOperations, invalidateRefreshes, resetUsage, setPage]);
 
-  const refresh = useCallback(async (force = true) => {
+  const loadSnapshot = useCallback(async (force: boolean) => {
     const requestedMode = mode;
-    const requestedRevision = stateRevision.current;
-    if (
-      !force
-      && modeRef.current === requestedMode
-      && refreshedRevision.current === requestedRevision
-    ) return;
-    const startedAt = performance.now();
-    const loaded = await loadRuntimeSnapshot(requestedMode, relayCommands);
-    void recordPerformance("full_snapshot", performance.now() - startedAt, requestedMode);
     if (modeRef.current !== requestedMode) return;
-    if (requestedMode === "zenith") setReadyState(loaded.readyState);
-    if (requestedMode === "local") {
-      runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded.snapshot?.gateway.routingOrder ?? []);
-      reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
-    }
-    const snapshot = loaded.snapshot && requestedMode === "local"
-      ? {
-        ...loaded.snapshot,
-        gateway: {
-          ...loaded.snapshot.gateway,
-          routingOrder: visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current),
-        },
-      }
-      : loaded.snapshot;
-    runtimeSnapshotRef.current = snapshot;
-    setRuntime(snapshot);
-    clearInactiveUsage(requestedMode);
-    refreshedRevision.current = requestedRevision;
-    setRuntimeRevision((current) => current + 1);
+    const requestedRevision = stateRevision.current;
+    if (!force && refreshedRevision.current === requestedRevision) return;
+    const startedAt = performance.now();
+    await snapshotRequest.current.run(
+      async () => {
+        const loaded = await loadRuntimeSnapshot(requestedMode, relayCommands);
+        void recordPerformance("full_snapshot", performance.now() - startedAt, requestedMode);
+        return loaded;
+      },
+      (loaded) => {
+        if (requestedMode === "zenith") setReadyState(loaded.readyState);
+        if (requestedMode === "local") {
+          runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, loaded.snapshot?.gateway.routingOrder ?? []);
+          reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
+        }
+        const snapshot = loaded.snapshot && requestedMode === "local"
+          ? {
+            ...loaded.snapshot,
+            gateway: {
+              ...loaded.snapshot.gateway,
+              routingOrder: visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current),
+            },
+          }
+          : loaded.snapshot;
+        runtimeSnapshotRef.current = snapshot;
+        setRuntime(snapshot);
+        clearInactiveUsage(requestedMode);
+        refreshedRevision.current = requestedRevision;
+        setRuntimeRevision((current) => current + 1);
+      },
+    );
   }, [clearInactiveUsage, mode]);
 
-  const runBackgroundRefresh = useCallback(() => {
+  const refresh = useCallback(async (force = true) => {
+    if (modeRef.current !== mode) return;
+    // Explicit refreshes, including those following a mutation, replace any
+    // older background work instead of keeping its pending marker alive.
+    invalidateRefreshes();
+    await loadSnapshot(force);
+  }, [invalidateRefreshes, loadSnapshot, mode]);
+
+  const runBackgroundRefresh = useCallback((force = false) => {
     const refreshMode = mode;
     if (
       !isRuntimeRefreshPage(pageRef.current)
-      || backgroundRefreshPending.current.has(refreshMode)
-      || backgroundRefreshRetryTimers.current.has(refreshMode)
+      || backgroundRefreshPending.current !== null
+      || backgroundRefreshRetryTimer.current !== undefined
       || modeRef.current !== refreshMode
     ) return;
-    backgroundRefreshPending.current.add(refreshMode);
+    const request = Symbol();
+    backgroundRefreshPending.current = request;
     void (async () => {
       try {
-        await refresh(false);
+        await loadSnapshot(force);
+        // A previous visit to this mode must not schedule retries or release
+        // the pending marker belonging to the current visit.
+        if (backgroundRefreshPending.current !== request) return;
         // A state event may arrive while the snapshot is in flight. Keep one
         // trailing retry, but let a short settling window coalesce a burst of
         // writes instead of spinning through full snapshots back-to-back.
@@ -146,10 +173,10 @@ export function useRelayRuntime({
           && isRuntimeRefreshPage(pageRef.current)
           && document.visibilityState === "visible"
           && refreshedRevision.current !== stateRevision.current
-          && !backgroundRefreshRetryTimers.current.has(refreshMode)
+          && backgroundRefreshRetryTimer.current === undefined
         ) {
-          const timer = window.setTimeout(() => {
-            backgroundRefreshRetryTimers.current.delete(refreshMode);
+          backgroundRefreshRetryTimer.current = window.setTimeout(() => {
+            backgroundRefreshRetryTimer.current = undefined;
             if (
               modeRef.current === refreshMode
               && isRuntimeRefreshPage(pageRef.current)
@@ -158,15 +185,14 @@ export function useRelayRuntime({
               runBackgroundRefresh();
             }
           }, RUNTIME_EVENT_REFRESH_DEBOUNCE_MS);
-          backgroundRefreshRetryTimers.current.set(refreshMode, timer);
         }
       } catch {
         // The next state event, focus, or periodic refresh retries the snapshot.
       } finally {
-        backgroundRefreshPending.current.delete(refreshMode);
+        if (backgroundRefreshPending.current === request) backgroundRefreshPending.current = null;
       }
     })();
-  }, [mode, refresh]);
+  }, [loadSnapshot, mode]);
 
   useEffect(() => {
     let active = true;
@@ -252,13 +278,15 @@ export function useRelayRuntime({
     if (!isRuntimeRefreshPage(page)) return;
 
     const refreshVisibleRuntime = () => {
-      if (document.visibilityState === "visible" && refreshedRevision.current !== stateRevision.current) {
-        runBackgroundRefresh();
+      if (document.visibilityState === "visible" && (mode === "remote" || refreshedRevision.current !== stateRevision.current)) {
+        runBackgroundRefresh(mode === "remote");
       }
     };
     if (enteredRuntimeRefreshPage) refreshVisibleRuntime();
     const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") runBackgroundRefresh();
+      // Remote changes do not emit desktop state events. Poll their snapshot
+      // while visible; local snapshots can continue relying on revisions.
+      if (document.visibilityState === "visible") runBackgroundRefresh(mode === "remote");
     }, RUNTIME_REFRESH_INTERVAL_MS);
     window.addEventListener("focus", refreshVisibleRuntime);
     document.addEventListener("visibilitychange", refreshVisibleRuntime);
@@ -267,14 +295,9 @@ export function useRelayRuntime({
       window.removeEventListener("focus", refreshVisibleRuntime);
       document.removeEventListener("visibilitychange", refreshVisibleRuntime);
     };
-  }, [page, runBackgroundRefresh]);
+  }, [mode, page, runBackgroundRefresh]);
 
-  useEffect(() => () => {
-    for (const timer of backgroundRefreshRetryTimers.current.values()) {
-      window.clearTimeout(timer);
-    }
-    backgroundRefreshRetryTimers.current.clear();
-  }, []);
+  useEffect(() => invalidateRefreshes, [invalidateRefreshes]);
 
   useEffect(() => {
     let active = true;
