@@ -52,6 +52,7 @@ pub struct AssignFreeProxiesInput {
 pub struct ProxyPoolImportResult {
     pub added: usize,
     pub duplicates: usize,
+    pub added_proxy_ids: Vec<String>,
     pub pool: ProxyPoolSummary,
 }
 
@@ -89,13 +90,39 @@ pub async fn import_local_proxy_pool(
     let _mutation = state.setup_guard().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let mut pool = load_reconciled_pool(&state, &credentials)?;
+    let previous_ids: HashSet<_> = pool
+        .summary()
+        .entries
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
     let (added, duplicates) = pool.import(&input.proxy_urls, current_time_ms())?;
     pool.save()?;
+    let summary = pool.summary();
     Ok(ProxyPoolImportResult {
         added,
         duplicates,
-        pool: pool.summary(),
+        added_proxy_ids: summary
+            .entries
+            .iter()
+            .filter(|entry| !previous_ids.contains(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect(),
+        pool: summary,
     })
+}
+
+#[tauri::command]
+pub async fn check_local_stored_proxy(
+    proxy_id: String,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<crate::local_pool::accounts::proxy::check::ProxyCheckResult, CommandError>
+{
+    let proxy = {
+        let _mutation = state.setup_guard().await;
+        ProxyPool::load()?.config(proxy_id.trim())?
+    };
+    Ok(crate::local_pool::accounts::proxy::check::check(proxy_id, &proxy, current_time_ms()).await)
 }
 
 #[tauri::command]

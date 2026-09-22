@@ -1238,6 +1238,67 @@ mod tests {
     }
 
     #[test]
+    fn reopening_migrates_manual_rules_and_their_pending_cycles_to_automatic() {
+        let root = temp_root("wake-automatic-migration");
+        let task = wake_task("task-legacy", WakeExecutionPolicy::RequireConfirmation);
+        let mut disabled = wake_task("task-disabled", WakeExecutionPolicy::RequireConfirmation);
+        disabled.enabled = false;
+        let state = DesktopState::open(root.clone()).unwrap();
+        let account = account_record("account-1");
+        {
+            let mut store = state.store().unwrap();
+            let mut automations = store.automations().clone();
+            automations.tasks = vec![task.clone(), disabled];
+            store
+                .replace_account_state(vec![account.clone()], Vec::new(), automations)
+                .unwrap();
+        }
+        assert!(matches!(
+            state
+                .evaluate_wake_transition(
+                    &task,
+                    &account.account,
+                    &wake_transition(),
+                    &wake_policy(),
+                    110,
+                )
+                .unwrap(),
+            WakeDecision::Scheduled(_)
+        ));
+        let pending = state.wake_snapshot().unwrap().pending();
+        assert!(state.claim_due_automatic_wakes(110, 1).unwrap().is_empty());
+        drop(state);
+
+        for _ in 0..2 {
+            let reopened = DesktopState::open(root.clone()).unwrap();
+            let store = reopened.store().unwrap();
+            let mut automatic = task.clone();
+            automatic.execution_policy = WakeExecutionPolicy::Automatic;
+            assert_eq!(store.automations().tasks[0], automatic);
+            assert!(!store.automations().tasks[1].enabled);
+            assert_eq!(
+                store.automations().tasks[1].execution_policy,
+                WakeExecutionPolicy::Automatic
+            );
+            assert_eq!(reopened.wake_snapshot().unwrap().pending(), pending);
+            assert_eq!(reopened.next_automatic_wake_due().unwrap(), Some(110));
+            drop(store);
+            drop(reopened);
+        }
+        let reopened = DesktopState::open(root.clone()).unwrap();
+        let permits = reopened.claim_due_automatic_wakes(110, 2).unwrap();
+        assert_eq!(permits.len(), 1);
+        assert_eq!(permits[0].task_id, task.id);
+        assert!(!permits[0].requires_confirmation);
+        assert!(reopened
+            .claim_due_automatic_wakes(110, 2)
+            .unwrap()
+            .is_empty());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn automatic_wake_claim_does_not_claim_confirmation_cycle() {
         let root = temp_root("wake-confirmation");
         let automatic = wake_task("task-auto", WakeExecutionPolicy::Automatic);

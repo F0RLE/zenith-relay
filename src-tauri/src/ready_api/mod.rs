@@ -328,6 +328,7 @@ pub fn run() {
             local_pool::accounts::mutations::update_local_account,
             local_pool::accounts::mutations::set_local_account_proxy,
             local_pool::commands::proxies::get_local_proxy_pool,
+            local_pool::commands::proxies::check_local_stored_proxy,
             local_pool::commands::proxies::import_local_proxy_pool,
             local_pool::commands::proxies::delete_local_stored_proxy,
             local_pool::commands::proxies::delete_local_stored_proxies,

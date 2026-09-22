@@ -20,7 +20,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zenith_relay_core::{normalize_image_base_model, normalize_subscription_plan_order};
+use zenith_relay_core::{
+    automations::WakeExecutionPolicy, normalize_image_base_model, normalize_subscription_plan_order,
+};
 
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
@@ -71,7 +73,20 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let accounts = state.accounts;
-        let automations = state.automations;
+        let mut automations = state.automations;
+        let mut automation_policy_changed = false;
+        for task in &mut automations.tasks {
+            if task.execution_policy == WakeExecutionPolicy::RequireConfirmation {
+                task.execution_policy = WakeExecutionPolicy::Automatic;
+                automations
+                    .state
+                    .clear_task_confirmation_requirement(&task.id);
+                automation_policy_changed = true;
+            }
+        }
+        if automation_policy_changed {
+            database.replace_state_json(&[(STATE_AUTOMATIONS, serialize_state(&automations)?)])?;
+        }
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
