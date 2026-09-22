@@ -95,27 +95,19 @@ impl TranslationStream {
     }
 
     fn consume(&mut self, bytes: &[u8]) -> AdapterResult<()> {
-        let text =
-            std::str::from_utf8(bytes).map_err(|_| AdapterError::upstream_stream_invalid())?;
-        let data = text
-            .lines()
-            .filter_map(|line| {
-                line.strip_prefix("data:")
-                    .map(|value| value.strip_prefix(' ').unwrap_or(value))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        std::str::from_utf8(bytes).map_err(|_| AdapterError::upstream_stream_invalid())?;
+        let data = crate::protocol::sse_data(bytes);
         if data.is_empty() {
             return Ok(());
         }
-        if data == "[DONE]" {
+        if data == b"[DONE]" {
             if self.request.upstream != WireApi::ChatCompletions || self.finish_reason.is_none() {
                 return Err(AdapterError::upstream_stream_invalid());
             }
             return self.complete();
         }
         let value: Value =
-            serde_json::from_str(&data).map_err(|_| AdapterError::upstream_stream_invalid())?;
+            serde_json::from_slice(&data).map_err(|_| AdapterError::upstream_stream_invalid())?;
         if value.get("error").is_some_and(|error| !error.is_null())
             || value.get("type").and_then(Value::as_str) == Some("error")
         {

@@ -3,6 +3,8 @@
 //! Keeping these boundaries explicit prevents the gateway from acquiring
 //! provider-specific behavior.
 
+#[cfg(test)]
+mod codex_controls;
 mod contracts;
 mod gemini;
 mod messages;

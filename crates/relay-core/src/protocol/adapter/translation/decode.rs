@@ -201,6 +201,15 @@ fn block(part: &Value, protocol: WireApi, _index: usize) -> AdapterResult<Block>
         return Err(AdapterError::parameter_unsupported());
     }
     match required_text(part, "type")? {
+        "thinking" if protocol == WireApi::Messages => {
+            checked(part, &["type", "thinking"])?;
+            Ok(Block::Reasoning(
+                part.get("thinking")
+                    .and_then(Value::as_str)
+                    .ok_or_else(AdapterError::invalid_request)?
+                    .into(),
+            ))
+        }
         "text" | "input_text" | "output_text" => {
             checked(part, &["type", "text", "annotations"])?;
             if part
@@ -504,39 +513,7 @@ fn output_format(value: &Value) -> AdapterResult<Option<OutputFormat>> {
 }
 
 fn responses(value: &Value) -> AdapterResult<Request> {
-    checked(
-        value,
-        &[
-            "model",
-            "stream",
-            "input",
-            "instructions",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "max_output_tokens",
-            "temperature",
-            "top_p",
-            "stop",
-            "text",
-            "reasoning",
-            "previous_response_id",
-            "store",
-            "background",
-            "include",
-        ],
-    )?;
-    super::super::contracts::validate_bridge_compaction(value)?;
-    if value
-        .get("background")
-        .is_some_and(|v| !v.is_null() && v != false)
-        || optional_bool(value, "store")? == Some(true)
-        || value
-            .get("include")
-            .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|values| !values.is_empty()))
-    {
-        return Err(AdapterError::parameter_unsupported());
-    }
+    super::super::contracts::validate_responses_bridge_request(value, WireApi::ChatCompletions)?;
     let mut request = Request::default();
     if let Some(instructions) = value.get("instructions").filter(|v| !v.is_null()) {
         request.instructions = Some(Message {
@@ -600,6 +577,34 @@ fn responses(value: &Value) -> AdapterResult<Request> {
                         }],
                     });
                 }
+                "reasoning" => {
+                    // Public summaries are portable. Encrypted state is not:
+                    // `checked` rejects it instead of dropping its ownership.
+                    checked(item, &["type", "id", "status", "summary"])?;
+                    let blocks = item
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .ok_or_else(AdapterError::invalid_request)?
+                        .iter()
+                        .map(|summary| {
+                            checked(summary, &["type", "text"])?;
+                            if required_text(summary, "type")? != "summary_text" {
+                                return Err(AdapterError::parameter_unsupported());
+                            }
+                            Ok(Block::Reasoning(
+                                summary
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .ok_or_else(AdapterError::invalid_request)?
+                                    .into(),
+                            ))
+                        })
+                        .collect::<AdapterResult<Vec<_>>>()?;
+                    request.messages.push(Message {
+                        role: Role::Assistant,
+                        blocks,
+                    });
+                }
                 _ => return Err(AdapterError::parameter_unsupported()),
             }
         }
@@ -613,10 +618,14 @@ fn responses(value: &Value) -> AdapterResult<Request> {
         request.output_format = output_format(text.get("format").unwrap_or(&Value::Null))?;
     }
     if let Some(reasoning) = value.get("reasoning").filter(|v| !v.is_null()) {
-        checked(reasoning, &["effort"])?;
-        request.reasoning = Some(Reasoning::Effort(
-            required_text(reasoning, "effort")?.into(),
-        ));
+        if let Some(effort) = reasoning.get("effort").filter(|value| !value.is_null()) {
+            request.reasoning = Some(Reasoning::Effort(
+                effort
+                    .as_str()
+                    .ok_or_else(AdapterError::invalid_request)?
+                    .into(),
+            ));
+        }
     }
     Ok(request)
 }
@@ -657,7 +666,22 @@ fn chat(value: &Value) -> AdapterResult<Request> {
         .and_then(Value::as_array)
         .ok_or_else(AdapterError::invalid_request)?
     {
-        checked(message, &["role", "content", "tool_calls", "tool_call_id"])?;
+        checked(
+            message,
+            &[
+                "role",
+                "content",
+                "tool_calls",
+                "tool_call_id",
+                "reasoning_content",
+            ],
+        )?;
+        let reasoning = message
+            .get("reasoning_content")
+            .filter(|value| !value.is_null());
+        if reasoning.is_some() && role(message)? != Role::Assistant {
+            return Err(AdapterError::invalid_request());
+        }
         if message.get("role").and_then(Value::as_str) == Some("tool") {
             request.messages.push(Message {
                 role: Role::User,
@@ -677,6 +701,17 @@ fn chat(value: &Value) -> AdapterResult<Request> {
             message.get("content").unwrap_or(&Value::Null),
             WireApi::ChatCompletions,
         )?;
+        if let Some(reasoning) = reasoning {
+            blocks.insert(
+                0,
+                Block::Reasoning(
+                    reasoning
+                        .as_str()
+                        .ok_or_else(AdapterError::invalid_request)?
+                        .into(),
+                ),
+            );
+        }
         if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 checked(call, &["id", "type", "function"])?;

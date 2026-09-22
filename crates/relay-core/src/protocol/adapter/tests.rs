@@ -113,6 +113,7 @@ fn response_bridges_reject_context_management_before_translation() {
     });
 
     for adapter in [
+        SourceAdapter::ResponsesToChatCompletions,
         SourceAdapter::ResponsesToMessages,
         SourceAdapter::ResponsesToGemini,
     ] {
@@ -145,6 +146,7 @@ fn compaction_history_requires_native_responses_without_mutating_input() {
             let original = request.clone();
             for adapter in [
                 SourceAdapter::Native,
+                SourceAdapter::ResponsesToChatCompletions,
                 SourceAdapter::ResponsesToMessages,
                 SourceAdapter::ResponsesToGemini,
             ] {

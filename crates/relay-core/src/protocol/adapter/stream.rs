@@ -1718,8 +1718,7 @@ impl GeminiStreamBridge {
 }
 
 fn sse_done(event: &[u8]) -> bool {
-    event.split(|byte| *byte == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+    crate::protocol::sse_lines(event).any(|line| {
         line.strip_prefix(b"data:")
             .map(|value| value.trim_ascii() == b"[DONE]")
             .unwrap_or(false)
@@ -1734,25 +1733,14 @@ fn incremental_delta(previous: &str, incoming: &str) -> String {
 }
 
 fn parse_sse_data(event: &[u8]) -> Option<Value> {
-    let mut data = Vec::new();
-    for line in event.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(value) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push(b'\n');
-        }
-        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
-    }
+    let data = crate::protocol::sse_data(event);
     (!data.is_empty())
         .then(|| serde_json::from_slice(&data).ok())
         .flatten()
 }
 
 fn sse_event_has_data(event: &[u8]) -> bool {
-    event.split(|byte| *byte == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+    crate::protocol::sse_lines(event).any(|line| {
         line.strip_prefix(b"data:")
             .is_some_and(|value| value.iter().any(|byte| !byte.is_ascii_whitespace()))
     })

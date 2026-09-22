@@ -2,6 +2,8 @@ use super::*;
 use crate::{AdapterRequestContext, CacheWriteTtl, SourceAdapter};
 use serde_json::json;
 
+mod reasoning;
+
 fn input(protocol: WireApi) -> Value {
     match protocol {
         WireApi::Responses => json!({"model":"test","input":"Hello"}),
@@ -61,6 +63,69 @@ fn responses_continuations_replace_instructions_and_preserve_system_history() {
             assert_eq!(body.contains("New instruction"), instruction.is_some());
         }
     }
+}
+
+#[test]
+fn translated_continuation_preserves_reasoning_mode() {
+    let adapter = SourceAdapter::ResponsesToChatCompletions;
+    let first_request = json!({"input":"Hello"});
+    let first = adapter
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &first_request,
+            model: "test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: None,
+            response_scope: "source-test",
+            response_id_seed: "first",
+        })
+        .unwrap();
+    let completed = first
+        .translate_response_bytes(&serde_json::to_vec(&output(WireApi::ChatCompletions)).unwrap())
+        .unwrap()
+        .unwrap();
+    let (response_id, previous) = completed.continuation().unwrap();
+    assert_eq!(previous.reasoning_mode, MessagesReasoningMode::Disabled);
+
+    let continued_request = json!({
+        "input":"Continue",
+        "previous_response_id": response_id
+    });
+    let continued = adapter
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &continued_request,
+            model: "test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: Some(previous.clone()),
+            response_scope: "source-test",
+            response_id_seed: "second",
+        })
+        .unwrap();
+    let messages = continued.upstream_body()["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["content"][0]["text"], "Hello");
+    assert_eq!(messages[2]["content"][0]["text"], "Continue");
+
+    let mismatch = adapter.prepare_request(AdapterRequestContext {
+        client_wire_api: WireApi::Responses,
+        request: &continued_request,
+        model: "test",
+        stream: false,
+        reasoning_mode: MessagesReasoningMode::Adaptive,
+        cache_write_ttl: CacheWriteTtl::Provider,
+        previous: Some(previous.clone()),
+        response_scope: "source-test",
+        response_id_seed: "second",
+    });
+    assert_eq!(
+        mismatch.unwrap_err().code(),
+        "adapter_continuation_mismatch"
+    );
 }
 
 #[test]
@@ -271,6 +336,48 @@ fn image_schema_and_reasoning_survive_all_protocol_pairs() {
             );
             assert_eq!(body.pointer(tokens), Some(&json!(128)));
             assert_eq!(body.pointer(effort), Some(&json!("high")));
+        }
+    }
+}
+
+#[test]
+fn claude_cache_write_ttl_is_applied_for_every_client_protocol() {
+    for client in WireApi::ALL {
+        let request = match client {
+            WireApi::Responses => json!({"model":"test","input":"Hello"}),
+            WireApi::ChatCompletions => {
+                json!({"model":"test","messages":[{"role":"user","content":"Hello"}]})
+            }
+            WireApi::Messages => {
+                json!({"model":"test","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]})
+            }
+            WireApi::Gemini => {
+                json!({"contents":[{"role":"user","parts":[{"text":"Hello"}]}]})
+            }
+        };
+        for (ttl, expected) in [
+            (CacheWriteTtl::FiveMinutes, "5m"),
+            (CacheWriteTtl::OneHour, "1h"),
+        ] {
+            let prepared = SourceAdapter::between(client, WireApi::Messages)
+                .expect("every client protocol has a Claude bridge")
+                .prepare_request(AdapterRequestContext {
+                    client_wire_api: client,
+                    request: &request,
+                    model: "test",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Adaptive,
+                    cache_write_ttl: ttl,
+                    previous: None,
+                    response_scope: "source-test",
+                    response_id_seed: "cache-test",
+                })
+                .unwrap();
+            let body = prepared.upstream_body();
+            let cache_ttl = body
+                .pointer("/messages/0/content/0/cache_control/ttl")
+                .and_then(Value::as_str);
+            assert_eq!(cache_ttl, Some(expected), "{client:?} -> Messages");
         }
     }
 }
@@ -547,6 +654,89 @@ fn absent_usage_remains_unknown() {
         assert!(value.get("total_tokens").is_none());
         assert!(value.get("totalTokenCount").is_none());
     }
+}
+
+#[test]
+fn messages_thinking_blocks_are_translated_as_reasoning() {
+    let response = response::decode(
+        WireApi::Messages,
+        &json!({
+            "id":"msg_thinking",
+            "stop_reason":"end_turn",
+            "content":[
+                {"type":"thinking","thinking":"plan first"},
+                {"type":"text","text":"answer"}
+            ],
+            "usage":{"input_tokens":4,"output_tokens":3}
+        }),
+        "seed",
+    )
+    .unwrap();
+    assert!(matches!(&response.blocks[0], Block::Reasoning(text) if text == "plan first"));
+    assert!(matches!(&response.blocks[1], Block::Text(text) if text == "answer"));
+
+    let encoded = response::encode(WireApi::Messages, &response, "test").unwrap();
+    assert_eq!(encoded["content"][0]["type"], "thinking");
+    assert_eq!(encoded["content"][0]["thinking"], "plan first");
+}
+
+#[test]
+fn messages_stream_thinking_blocks_complete_without_dropping_reasoning() {
+    let mut bridge = prepare(
+        WireApi::Responses,
+        WireApi::Messages,
+        &json!({"input":"Hello"}),
+        true,
+    )
+    .into_stream_bridge()
+    .unwrap();
+    for event in [
+        json!({"type":"message_start","message":{"id":"msg_thinking","usage":{"input_tokens":4}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"plan "}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"answer"}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}),
+        json!({"type":"message_stop"}),
+    ] {
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+    }
+    bridge.finish();
+    let completed = bridge.completed().expect("thinking stream should complete");
+    let response = response::decode(WireApi::Responses, &completed.response_body, "test").unwrap();
+    assert!(matches!(&response.blocks[0], Block::Text(text) if text == "answer"));
+    assert_eq!(
+        completed.continuation.messages[1]["content"][0]["thinking"],
+        "plan first"
+    );
+}
+
+#[test]
+fn generic_messages_translation_rejects_provider_owned_and_unknown_fields() {
+    let response = json!({
+        "id": "msg_invalid",
+        "stop_reason": "end_turn",
+        "content": [{"type": "thinking", "thinking": "plan", "signature": "opaque"}]
+    });
+    assert!(response::decode(WireApi::Messages, &response, "seed").is_err());
+
+    let mut bridge = prepare(
+        WireApi::ChatCompletions,
+        WireApi::Messages,
+        &input(WireApi::ChatCompletions),
+        true,
+    )
+    .into_stream_bridge()
+    .unwrap();
+    for event in [
+        json!({"type":"message_start","message":{"id":"msg_invalid","usage":{"input_tokens":1}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","vendor_extension":true}}),
+    ] {
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+    }
+    bridge.finish();
+    assert!(bridge.completed().is_none());
 }
 
 fn tool_history(protocol: WireApi) -> Value {

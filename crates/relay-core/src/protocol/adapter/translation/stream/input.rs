@@ -23,8 +23,8 @@ impl TranslationStream {
             &["role", "content", "tool_calls", "reasoning_content"],
         )?;
         for (field, key, reasoning) in [
-            ("content", "text", false),
             ("reasoning_content", "reasoning", true),
+            ("content", "text", false),
         ] {
             if let Some(text) = delta.get(field).filter(|value| !value.is_null()) {
                 let text = text.as_str().ok_or_else(invalid)?;
@@ -270,24 +270,43 @@ impl TranslationStream {
                     .to_string();
                 let block = value.get("content_block").ok_or_else(invalid)?;
                 let block = match block.get("type").and_then(Value::as_str) {
-                    Some("text") => Block::Text(
-                        block
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .into(),
-                    ),
-                    Some("tool_use") => Block::ToolCall {
-                        id: required_text(block, "id")?.into(),
-                        name: required_text(block, "name")?.into(),
-                        arguments: block
-                            .get("input")
-                            .filter(|input| {
-                                input.as_object().is_some_and(|object| !object.is_empty())
-                            })
-                            .map(Value::to_string)
-                            .unwrap_or_default(),
-                    },
+                    Some("text") => {
+                        checked(block, &["type", "text"])?;
+                        Block::Text(
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .into(),
+                        )
+                    }
+                    Some("thinking") => {
+                        // Signed thinking is provider-owned state. The generic
+                        // translator cannot carry it safely across protocols;
+                        // the dedicated MessagesStreamBridge handles it.
+                        checked(block, &["type", "thinking"])?;
+                        Block::Reasoning(
+                            block
+                                .get("thinking")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .into(),
+                        )
+                    }
+                    Some("tool_use") => {
+                        checked(block, &["type", "id", "name", "input"])?;
+                        Block::ToolCall {
+                            id: required_text(block, "id")?.into(),
+                            name: required_text(block, "name")?.into(),
+                            arguments: block
+                                .get("input")
+                                .filter(|input| {
+                                    input.as_object().is_some_and(|object| !object.is_empty())
+                                })
+                                .map(Value::to_string)
+                                .unwrap_or_default(),
+                        }
+                    }
                     _ => return Err(invalid()),
                 };
                 self.insert(key, block)?;
@@ -303,6 +322,12 @@ impl TranslationStream {
                     return Err(invalid());
                 }
                 let delta = value.get("delta").ok_or_else(invalid)?;
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => checked(delta, &["type", "text"])?,
+                    Some("thinking_delta") => checked(delta, &["type", "thinking"])?,
+                    Some("input_json_delta") => checked(delta, &["type", "partial_json"])?,
+                    _ => return Err(invalid()),
+                }
                 match (
                     &mut self.response.blocks[index],
                     delta.get("type").and_then(Value::as_str),
@@ -310,6 +335,12 @@ impl TranslationStream {
                     (Block::Text(text), Some("text_delta")) => text.push_str(
                         delta
                             .get("text")
+                            .and_then(Value::as_str)
+                            .ok_or_else(invalid)?,
+                    ),
+                    (Block::Reasoning(text), Some("thinking_delta")) => text.push_str(
+                        delta
+                            .get("thinking")
                             .and_then(Value::as_str)
                             .ok_or_else(invalid)?,
                     ),

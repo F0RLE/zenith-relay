@@ -221,11 +221,13 @@ impl SourceAdapter {
     pub fn validate(
         self,
         client_wire_api: WireApi,
-        reasoning_mode: MessagesReasoningMode,
+        _reasoning_mode: MessagesReasoningMode,
     ) -> AdapterResult<()> {
         match self {
-            Self::Native if reasoning_mode == MessagesReasoningMode::Disabled => Ok(()),
-            Self::Native => Err(AdapterError::reasoning_unsupported()),
+            // Native traffic is already expressed in the selected client
+            // protocol. It must preserve the request as-is; the shared
+            // reasoning mode only governs translated routes.
+            Self::Native => Ok(()),
             adapter
                 if Self::between(
                     client_wire_api,
@@ -329,7 +331,7 @@ pub(super) fn validate_bridge_compaction(request: &Value) -> AdapterResult<()> {
     let is_compaction = |item: &Value| {
         matches!(
             item.get("type").and_then(Value::as_str),
-            Some("compaction" | "compaction_summary")
+            Some("compaction" | "compaction_summary" | "compaction_trigger")
         )
     };
     let configured = request
@@ -349,6 +351,11 @@ pub(super) fn validate_bridge_compaction(request: &Value) -> AdapterResult<()> {
         return Err(AdapterError {
             code: error_codes::ADAPTER_COMPACTION_UNSUPPORTED,
             message: "Responses compaction history requires a native Responses route",
+            parameter: Some(if configured {
+                "context_management"
+            } else {
+                "input"
+            }),
         });
     }
     Ok(())
@@ -380,6 +387,9 @@ pub(super) fn validate_responses_bridge_request(
         "store",
         "background",
         "include",
+        "context_management",
+        "prompt_cache_key",
+        "client_metadata",
     ];
     if upstream == WireApi::Gemini {
         allowed.extend([
@@ -390,12 +400,24 @@ pub(super) fn validate_responses_bridge_request(
             "response_format",
         ]);
     }
-    if object
+    if let Some((name, _)) = object
         .iter()
-        .any(|(name, value)| !allowed.contains(&name.as_str()) && !value.is_null())
+        .find(|(name, value)| !allowed.contains(&name.as_str()) && !value.is_null())
     {
-        return Err(AdapterError::parameter_unsupported());
+        // Only report contract field names, never arbitrary keys from a payload.
+        let parameter = [
+            "stream_options",
+            "metadata",
+            "access_programs",
+            "prompt_cache_retention",
+            "prompt_cache_options",
+        ]
+        .into_iter()
+        .find(|known| *known == name)
+        .unwrap_or("request");
+        return Err(AdapterError::parameter_unsupported_for(parameter));
     }
+    validate_responses_transport_controls(request)?;
     for name in ["stream", "parallel_tool_calls"] {
         if object
             .get(name)
@@ -425,7 +447,7 @@ pub(super) fn validate_responses_bridge_request(
     {
         return Err(AdapterError::invalid_request());
     }
-    for name in ["instructions", "previous_response_id"] {
+    for name in ["instructions", "previous_response_id", "prompt_cache_key"] {
         if object
             .get(name)
             .is_some_and(|value| !value.is_null() && !value.is_string())
@@ -453,19 +475,15 @@ pub(super) fn validate_responses_bridge_request(
         .pointer("/text/format")
         .filter(|value| !value.is_null())
     {
-        validate_bridge_fields(format, &["type", "name", "schema", "strict"])?;
+        validate_bridge_fields(format, &["type", "name", "schema", "strict", "description"])?;
     }
-    if object
-        .get("background")
-        .is_some_and(|value| !value.is_null() && value != false)
-        || object
-            .get("store")
+    for name in ["background", "store"] {
+        if object
+            .get(name)
             .is_some_and(|value| !value.is_null() && value != false)
-        || object.get("include").is_some_and(|value| {
-            !value.is_null() && value.as_array().is_none_or(|items| !items.is_empty())
-        })
-    {
-        return Err(AdapterError::parameter_unsupported());
+        {
+            return Err(AdapterError::parameter_unsupported_for(name));
+        }
     }
     if object
         .get("text")
@@ -474,25 +492,87 @@ pub(super) fn validate_responses_bridge_request(
             text.iter()
                 .any(|(name, value)| name != "format" && !value.is_null())
         })
-        || object
-            .get("reasoning")
-            .and_then(Value::as_object)
-            .is_some_and(|reasoning| {
-                reasoning
-                    .iter()
-                    .any(|(name, value)| name != "effort" && !value.is_null())
-            })
     {
-        return Err(AdapterError::parameter_unsupported());
+        let field = if request
+            .pointer("/text/verbosity")
+            .is_some_and(|v| !v.is_null())
+        {
+            "text.verbosity"
+        } else {
+            "text"
+        };
+        return Err(AdapterError::parameter_unsupported_for(field));
+    }
+    if object
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .is_some_and(|reasoning| {
+            reasoning.iter().any(|(name, value)| {
+                !matches!(name.as_str(), "effort" | "summary") && !value.is_null()
+            })
+        })
+    {
+        return Err(AdapterError::parameter_unsupported_for("reasoning"));
     }
     if upstream == WireApi::Gemini && object.get("parallel_tool_calls") == Some(&Value::Bool(false))
     {
-        return Err(AdapterError::parameter_unsupported());
+        return Err(AdapterError::parameter_unsupported_for(
+            "parallel_tool_calls",
+        ));
     }
     if let Some(tools) = request_tool_catalog(object)? {
         for tool in &tools {
             validate_bridge_tool(tool)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_responses_transport_controls(request: &Value) -> AdapterResult<()> {
+    // The cache key is consumed by Relay affinity. Client metadata is tracing
+    // information for the receiving server, not model input or provider metadata.
+    if let Some(metadata) = request.get("client_metadata").filter(|v| !v.is_null()) {
+        if metadata
+            .as_object()
+            .is_none_or(|fields| fields.values().any(|v| !v.is_string()))
+        {
+            return Err(AdapterError::invalid_request().with_parameter("client_metadata"));
+        }
+    }
+    // `include` asks for optional output fields; it does not supply encrypted
+    // history. Bridges keep their native continuation state locally. Never
+    // fabricate an OpenAI encrypted blob or discard one received in input.
+    if let Some(include) = request.get("include").filter(|v| !v.is_null()) {
+        let items = include
+            .as_array()
+            .ok_or_else(|| AdapterError::invalid_request().with_parameter("include"))?;
+        if items
+            .iter()
+            .any(|v| v.as_str() != Some("reasoning.encrypted_content"))
+        {
+            return Err(AdapterError::parameter_unsupported_for("include"));
+        }
+    }
+    if let Some(summary) = request
+        .pointer("/reasoning/summary")
+        .filter(|v| !v.is_null())
+    {
+        if summary != "auto" {
+            return Err(AdapterError::parameter_unsupported_for("reasoning.summary"));
+        }
+    }
+    if request
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("encrypted_content").is_some_and(|v| !v.is_null()))
+        })
+    {
+        return Err(AdapterError::parameter_unsupported_for(
+            "input.encrypted_content",
+        ));
     }
     Ok(())
 }
@@ -604,6 +684,7 @@ impl MessagesReasoningMode {
 pub struct AdapterError {
     code: &'static str,
     message: &'static str,
+    parameter: Option<&'static str>,
 }
 
 impl AdapterError {
@@ -613,6 +694,19 @@ impl AdapterError {
 
     pub const fn message(self) -> &'static str {
         self.message
+    }
+
+    pub const fn parameter(self) -> Option<&'static str> {
+        self.parameter
+    }
+
+    pub(crate) const fn with_parameter(mut self, parameter: &'static str) -> Self {
+        self.parameter = Some(parameter);
+        self
+    }
+
+    pub(crate) const fn parameter_unsupported_for(parameter: &'static str) -> Self {
+        Self::parameter_unsupported().with_parameter(parameter)
     }
 
     pub fn is_upstream_failure(self) -> bool {
@@ -638,6 +732,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_INVALID_REQUEST,
             message: "request cannot be represented by the selected source adapter",
+            parameter: None,
         }
     }
 
@@ -645,6 +740,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_PARAMETER_UNSUPPORTED,
             message: "a request parameter has no lossless mapping on this route; use a compatible native endpoint",
+            parameter: None,
         }
     }
 
@@ -652,6 +748,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_CONTINUATION_MISSING,
             message: "the adapter no longer has the prior response needed for this continuation",
+            parameter: None,
         }
     }
 
@@ -659,6 +756,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_CONTINUATION_MISMATCH,
             message: "the continuation belongs to a different model or source route",
+            parameter: None,
         }
     }
 
@@ -666,6 +764,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_BINDING_UNSUPPORTED,
             message: "the selected adapter cannot serve this client protocol",
+            parameter: None,
         }
     }
 
@@ -673,6 +772,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_TOOL_UNSUPPORTED,
             message: "the selected source adapter supports JSON-schema function and direct custom text tools only",
+            parameter: None,
         }
     }
 
@@ -680,6 +780,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_REASONING_UNSUPPORTED,
             message: "the selected source adapter does not expose reasoning for this binding",
+            parameter: None,
         }
     }
 
@@ -687,6 +788,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
             message: "the upstream response cannot be represented as a Responses response",
+            parameter: None,
         }
     }
 
@@ -694,6 +796,7 @@ impl AdapterError {
         Self {
             code: error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,
             message: "the upstream stream cannot be represented as a Responses stream",
+            parameter: None,
         }
     }
 }

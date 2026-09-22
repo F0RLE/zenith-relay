@@ -137,11 +137,15 @@ impl<T> BoundedStateStore<T> {
     }
 
     fn prune(&mut self, now_ms: u64) {
-        self.entries
-            .retain(|_, entry| now_ms.saturating_sub(entry.observed_at_ms) <= self.ttl_ms);
-        self.total_bytes = self.entries.values().fold(0_usize, |total, entry| {
-            total.saturating_add(entry.size_bytes)
+        let mut removed_bytes = 0_usize;
+        self.entries.retain(|_, entry| {
+            let retained = now_ms.saturating_sub(entry.observed_at_ms) <= self.ttl_ms;
+            if !retained {
+                removed_bytes = removed_bytes.saturating_add(entry.size_bytes);
+            }
+            retained
         });
+        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
     }
 
     fn evict_oldest(&mut self) -> bool {

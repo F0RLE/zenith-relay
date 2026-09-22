@@ -1367,22 +1367,25 @@ pub(super) fn custom_tool_input(input: &Value) -> AdapterResult<&str> {
 }
 
 pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
-    let input_tokens = usage
+    let mut result = Map::new();
+    if let Some(input_tokens) = usage
         .and_then(|usage| usage.get("input_tokens"))
         .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let output_tokens = usage
+    {
+        result.insert("input_tokens".to_string(), Value::from(input_tokens));
+    }
+    if let Some(output_tokens) = usage
         .and_then(|usage| usage.get("output_tokens"))
         .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let mut result = Map::from_iter([
-        ("input_tokens".to_string(), Value::from(input_tokens)),
-        ("output_tokens".to_string(), Value::from(output_tokens)),
-        (
-            "total_tokens".to_string(),
-            Value::from(input_tokens.saturating_add(output_tokens)),
-        ),
-    ]);
+    {
+        result.insert("output_tokens".to_string(), Value::from(output_tokens));
+    }
+    if let Some(total_tokens) = usage
+        .and_then(|usage| usage.get("total_tokens"))
+        .and_then(Value::as_u64)
+    {
+        result.insert("total_tokens".to_string(), Value::from(total_tokens));
+    }
     if let Some(cache_read) = usage
         .and_then(|usage| usage.get("cache_read_input_tokens"))
         .and_then(Value::as_u64)

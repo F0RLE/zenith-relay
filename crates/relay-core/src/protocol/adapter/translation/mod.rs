@@ -131,6 +131,7 @@ pub struct TranslationRequest {
     upstream: WireApi,
     model: String,
     response_id: String,
+    reasoning_mode: MessagesReasoningMode,
     history: Vec<Message>,
 }
 
@@ -151,6 +152,9 @@ impl TranslationRequest {
                 .previous
                 .ok_or_else(AdapterError::continuation_missing)?;
             if previous.model != context.model {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            if previous.reasoning_mode != context.reasoning_mode {
                 return Err(AdapterError::continuation_mismatch());
             }
             let mut history = previous
@@ -174,6 +178,7 @@ impl TranslationRequest {
             upstream,
             model: context.model.to_owned(),
             response_id,
+            reasoning_mode: context.reasoning_mode,
             history: request.messages,
         })
     }
@@ -190,8 +195,7 @@ impl TranslationRequest {
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
         response.id = self.response_id.clone();
         let response_body = response::encode(self.client, &response, &self.model)?;
-        let mut continuation =
-            MessagesBridgeState::new(&self.model, MessagesReasoningMode::Adaptive);
+        let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
         let mut history = self.history;
         history.push(Message {
             role: Role::Assistant,

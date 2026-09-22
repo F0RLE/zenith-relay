@@ -336,8 +336,10 @@ fn message_value(message: &Message, protocol: WireApi) -> AdapterResult<Vec<Valu
     let mut values = Vec::new();
     let mut content = Vec::new();
     let mut calls = Vec::new();
+    let mut reasoning = String::new();
     for block in &message.blocks {
         match (protocol, block) {
+            (WireApi::ChatCompletions, Block::Reasoning(text)) => reasoning.push_str(text),
             (
                 WireApi::Responses,
                 Block::ToolCall {
@@ -392,9 +394,10 @@ fn message_value(message: &Message, protocol: WireApi) -> AdapterResult<Vec<Valu
     }
     match protocol {
         WireApi::Responses => flush_responses_content(&mut values, &mut content, role),
-        WireApi::ChatCompletions if !content.is_empty() || !calls.is_empty() => {
+        WireApi::ChatCompletions if !content.is_empty() || !calls.is_empty() || !reasoning.is_empty() => {
             let mut value = json!({"role":role,"content":if content.is_empty() { Value::Null } else { content.into() }});
             if !calls.is_empty() { value["tool_calls"] = calls.into(); }
+            if !reasoning.is_empty() { value["reasoning_content"] = reasoning.into(); }
             values.push(value);
         }
         WireApi::Messages => values.push(json!({"role":role,"content":content})),
@@ -502,6 +505,12 @@ fn content_block(block: &Block, protocol: WireApi, role: Role) -> AdapterResult<
             }
             _ => return Err(AdapterError::unsupported_binding()),
         },
+        Block::Reasoning(text) if protocol == WireApi::Messages => {
+            json!({"type":"thinking","thinking":text})
+        }
+        Block::Reasoning(text) if protocol == WireApi::Gemini => {
+            json!({"text":text,"thought":true})
+        }
         Block::Reasoning(_) => return Err(AdapterError::reasoning_unsupported()),
     })
 }

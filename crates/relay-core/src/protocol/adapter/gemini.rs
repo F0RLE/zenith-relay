@@ -224,23 +224,25 @@ pub(super) fn responses_body_from_output(
 }
 
 pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
-    let input = usage
+    let mut result = Map::new();
+    if let Some(input) = usage
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let output = usage
+    {
+        result.insert("input_tokens".to_string(), Value::from(input));
+    }
+    if let Some(output) = usage
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let total = usage
+    {
+        result.insert("output_tokens".to_string(), Value::from(output));
+    }
+    if let Some(total) = usage
         .and_then(|u| u.get("totalTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or_else(|| input.saturating_add(output));
-    let mut result = Map::from_iter([
-        ("input_tokens".to_string(), Value::from(input)),
-        ("output_tokens".to_string(), Value::from(output)),
-        ("total_tokens".to_string(), Value::from(total)),
-    ]);
+    {
+        result.insert("total_tokens".to_string(), Value::from(total));
+    }
     if let Some(cached) = usage
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)

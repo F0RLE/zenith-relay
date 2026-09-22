@@ -43,5 +43,5 @@ pub use management::{
     UsageTokenBreakdown, UsageTotals, CONFIGURATION_PRESET_FORMAT,
     CONFIGURATION_PRESET_SCHEMA_VERSION, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
-pub(crate) use sse::event_end as sse_event_end;
+pub(crate) use sse::{data as sse_data, event_end as sse_event_end, lines as sse_lines};
 pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

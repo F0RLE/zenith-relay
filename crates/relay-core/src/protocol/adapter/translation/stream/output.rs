@@ -121,6 +121,7 @@ impl TranslationStream {
             WireApi::Messages => {
                 let content = match block {
                     Block::Text(_) => json!({"type":"text","text":""}),
+                    Block::Reasoning(_) => json!({"type":"thinking","thinking":""}),
                     Block::ToolCall { id, name, .. } => {
                         json!({"type":"tool_use","id":id,"name":name,"input":{}})
                     }
@@ -134,7 +135,7 @@ impl TranslationStream {
             WireApi::ChatCompletions => {
                 if let Block::ToolCall { id, name, .. } = block {
                     self.chat_chunk(json!({"tool_calls":[{"index":self.tool_index(index),"id":id,"type":"function","function":{"name":name,"arguments":""}}]}), None);
-                } else if !matches!(block, Block::Text(_)) {
+                } else if !matches!(block, Block::Text(_) | Block::Reasoning(_)) {
                     return Err(AdapterError::upstream_stream_invalid());
                 }
             }
@@ -158,7 +159,9 @@ impl TranslationStream {
             WireApi::Responses if reasoning => self.event("response.reasoning_summary_text.delta", json!({"type":"response.reasoning_summary_text.delta","output_index":index,"item_id":format!("rs_{}_{index}",self.response.id),"summary_index":0,"delta":text})),
             WireApi::Responses => self.event("response.output_text.delta", json!({"type":"response.output_text.delta","output_index":index,"item_id":format!("msg_{}_{index}",self.response.id),"content_index":0,"delta":text})),
             WireApi::Messages if !reasoning => self.event("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":text}})),
+            WireApi::Messages if reasoning => self.event("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":text}})),
             WireApi::ChatCompletions if !reasoning => self.chat_chunk(json!({"content":text}), None),
+            WireApi::ChatCompletions => self.chat_chunk(json!({"reasoning_content":text}), None),
             WireApi::Gemini => self.event("", json!({"responseId":self.response.id,"modelVersion":self.request.model,"candidates":[{"index":0,"content":{"role":"model","parts":[if reasoning { json!({"text":text,"thought":true}) } else { json!({"text":text}) }]}}]})),
             _ => return Err(AdapterError::upstream_stream_invalid()),
         }

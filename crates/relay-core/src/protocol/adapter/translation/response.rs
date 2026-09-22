@@ -40,13 +40,18 @@ pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterRes
             {
                 return Err(invalid());
             }
+            if let Some(reasoning) = message
+                .get("reasoning_content")
+                .filter(|value| !value.is_null())
+            {
+                response.blocks.push(Block::Reasoning(
+                    reasoning.as_str().ok_or_else(invalid)?.into(),
+                ));
+            }
             if let Some(text) = message.get("content").filter(|value| !value.is_null()) {
                 response
                     .blocks
                     .push(Block::Text(text.as_str().ok_or_else(invalid)?.into()));
-            }
-            if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
-                response.blocks.push(Block::Reasoning(reasoning.into()));
             }
             if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
                 for call in calls {
@@ -166,22 +171,38 @@ pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterRes
                 .ok_or_else(invalid)?
             {
                 match block.get("type").and_then(Value::as_str) {
-                    Some("text") => response.blocks.push(Block::Text(
-                        block
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .ok_or_else(invalid)?
-                            .into(),
-                    )),
-                    Some("tool_use") => response.blocks.push(Block::ToolCall {
-                        id: required_text(block, "id").map_err(|_| invalid())?.into(),
-                        name: required_text(block, "name").map_err(|_| invalid())?.into(),
-                        arguments: block
-                            .get("input")
-                            .filter(|value| value.is_object())
-                            .ok_or_else(invalid)?
-                            .to_string(),
-                    }),
+                    Some("text") => {
+                        checked(block, &["type", "text"])?;
+                        response.blocks.push(Block::Text(
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .ok_or_else(invalid)?
+                                .into(),
+                        ));
+                    }
+                    Some("thinking") => {
+                        checked(block, &["type", "thinking"])?;
+                        response.blocks.push(Block::Reasoning(
+                            block
+                                .get("thinking")
+                                .and_then(Value::as_str)
+                                .ok_or_else(invalid)?
+                                .into(),
+                        ));
+                    }
+                    Some("tool_use") => {
+                        checked(block, &["type", "id", "name", "input"])?;
+                        response.blocks.push(Block::ToolCall {
+                            id: required_text(block, "id").map_err(|_| invalid())?.into(),
+                            name: required_text(block, "name").map_err(|_| invalid())?.into(),
+                            arguments: block
+                                .get("input")
+                                .filter(|value| value.is_object())
+                                .ok_or_else(invalid)?
+                                .to_string(),
+                        });
+                    }
                     // Signed thinking is provider-owned continuation state.
                     // It cannot be converted to another client's history.
                     _ => return Err(invalid()),
@@ -453,6 +474,7 @@ pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> Ada
     let usage = usage_value(protocol, &response.usage);
     let mut content = Vec::new();
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut calls = Vec::new();
     for (index, block) in response.blocks.iter().enumerate() {
         match (protocol, block) {
@@ -460,8 +482,10 @@ pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> Ada
             (WireApi::Responses, Block::ToolCall { id, name, arguments }) => content.push(json!({"type":"function_call","id":format!("fc_{}_{index}",response.id),"call_id":id,"name":name,"arguments":arguments,"status":"completed"})),
             (WireApi::Responses, Block::Reasoning(reasoning)) => content.push(json!({"type":"reasoning","id":format!("rs_{}_{index}",response.id),"summary":[{"type":"summary_text","text":reasoning}]})),
             (WireApi::ChatCompletions, Block::Text(value)) => text.push_str(value),
+            (WireApi::ChatCompletions, Block::Reasoning(value)) => reasoning.push_str(value),
             (WireApi::ChatCompletions, Block::ToolCall { id, name, arguments }) => calls.push(json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments}})),
             (WireApi::Messages, Block::Text(text)) => content.push(json!({"type":"text","text":text})),
+            (WireApi::Messages, Block::Reasoning(text)) => content.push(json!({"type":"thinking","thinking":text})),
             (WireApi::Messages, Block::ToolCall { id, name, arguments }) => content.push(json!({"type":"tool_use","id":id,"name":name,"input":serde_json::from_str::<Value>(arguments).map_err(|_| AdapterError::upstream_response_invalid())?})),
             (WireApi::Gemini, Block::Text(text)) => content.push(json!({"text":text})),
             (WireApi::Gemini, Block::Reasoning(text)) => content.push(json!({"text":text,"thought":true})),
@@ -479,6 +503,9 @@ pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> Ada
             let mut message = json!({"role":"assistant","content":if text.is_empty() && !calls.is_empty() { Value::Null } else { text.into() }});
             if !calls.is_empty() {
                 message["tool_calls"] = calls.into();
+            }
+            if !reasoning.is_empty() {
+                message["reasoning_content"] = reasoning.into();
             }
             json!({"id":response.id,"object":"chat.completion","created":0,"model":model,"choices":[{"index":0,"message":message,"finish_reason":finish_value(protocol,response.finish)}],"usage":usage})
         }
