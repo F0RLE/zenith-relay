@@ -8,6 +8,154 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Pool catalog refresh now resolves each member's routes once for all its models,
+  avoiding repeated discovery-policy work as model inventories grow. Offline
+  models retain their editable metadata and cache-price fields. (`3e6e174`)
+- Codex tool schemas preserve reference scope, validation constraints and literal
+  data while limiting reference expansion, preventing excessive memory growth
+  from deeply nested or branching definitions. (`3e6e174`)
+- Converted Chat Completions responses retain reasoning text alongside tool
+  calls in JSON, streams and follow-up history. Opaque reasoning state continues
+  to require its native owner. (`e211560`)
+- Retrying source setup after a failed snapshot or pool-membership update reuses
+  the saved source instead of creating a duplicate. Removed unused controls and
+  frontend helpers for the retired API-role ordering and manual route editor.
+  (`54b0c75`)
+
+- Long generations no longer end because Relay's HTTP, SSE or WebSocket timers
+  expire. Relay waits for the provider, keeps streaming connections alive and
+  preserves client cancellation and retries for real failures before output.
+  (`3e6e174`)
+
+- Reduced memory retained by reference catalogs between updates. Source data
+  stays compact, cached derived data is skipped when loading, and saving a
+  catalog no longer reads another full copy of the previous file into memory.
+- Reduced startup and catalog refresh work by indexing model matches once and
+  sharing immutable reference data. Refresh no longer merges the same catalog
+  twice or duplicates its JSON tree in memory.
+- Fixed a Windows crash when refreshing pool members. Bulk quota refresh keeps
+  bounded concurrency and returns each account's result without overflowing
+  the desktop command stack.
+- Codex launch now applies pending model catalog updates before opening the
+  client. Connecting a local pool checks its catalog before closing Codex, and
+  starting the client no longer waits for an intermediate interface refresh.
+  Profile preparation failures reliably reopen a previously running client.
+  Account catalog requests run concurrently within a shared time limit, and
+  history synchronization avoids rereading every file just to fingerprint it.
+  A successful connection reuses its catalog when launching, and an OpenCode
+  configuration error no longer prevents Codex catalog updates.
+- Reconnecting Codex no longer fails because already-matching chat history
+  exceeds the history-repair size limit. Only files requiring a provider change
+  count toward the rewrite budget, so model and speed updates can complete
+  without backing up unchanged conversations.
+
+- Model details now come from a shared reference catalog for accounts and API
+  providers, with consistent defaults when metadata is missing. Participant
+  capability fields no longer hide reasoning or tools, and redundant metadata
+  polling has been removed. Provider prices still take precedence when supplied.
+- OpenAI models offer Standard, Fast and Ultrafast by Relay policy, including
+  models whose account or provider returns no speed fields. Explicit speed
+  choices survive rotation and override the pool default.
+  Speed catalog entries include descriptions so Codex's Ultrafast option no
+  longer has an empty explanation.
+
+- API sources, stored proxies and quota automations share a more readable layout
+  and compact editors. Proxy import can check new addresses immediately and show
+  the actual exit IP, country and response time. Failed checks keep saved proxies
+  and assignments; declared location is shown separately from observed results.
+  Quota rules run automatically without a separate start button or mode selector.
+  Existing manual rules are upgraded while disabled rules remain disabled.
+  Default rule names now distinguish starting a quota countdown from resetting
+  the weekly limit, including existing rules. Custom names remain unchanged.
+  The editor starts with the automation type and its relevant fields; a custom
+  rule name is optional. General automation labels no longer refer only to quotas.
+  The Automations tab omits the shared search and refresh toolbar; rule changes
+  update the list automatically.
+  Frequent row actions use icons with tooltips. API source rows place launch
+  before edit, with additional actions last. (`0b65f07`, `54b0c75`)
+
+- Source creation keeps provider choices visible above a single column of key,
+  address and name fields. Quick setup now groups progress, choices and navigation
+  in a compact workspace without repeating the window's logo. Custom API setup
+  exposes all required fields and can continue after they are filled; reselecting
+  the active provider preserves edits. (`54b0c75`)
+
+- The API tab brings status, pool counts, address and key into one connection
+  panel with labelled copy actions. Port settings have their own row, and key
+  reissue is available from the key's action menu.
+
+- Adding connections to a pool now uses one searchable list, account/API sections,
+  a selected-connections view and fixed add actions. Selection stays intact
+  while filtering.
+
+- Native requests no longer fail adapter compatibility checks because a source
+  catalog omits a reasoning level or incorrectly marks a feature unsupported.
+  Converted routes retain their feature and reasoning checks.
+
+- Settings no longer repeat the enabled debug-mode notice and operations-folder
+  button below the toggle; the folder action remains in Diagnostics.
+
+- Streaming keep-alives wait for complete event boundaries, preventing a pause
+  in a fragmented response from inserting a heartbeat into its JSON content.
+
+- Invalid stream events now retain safe parser diagnostics in request details:
+  JSON error category, position and frame sizes, without recording response
+  content. These diagnostics identify Relay's parser separately from an
+  upstream error message.
+
+- Streams with mixed LF/CRLF/CR line endings no longer merge separate events and
+  fail with `stream_invalid`. The shared parser preserves event order for
+  native streams, protocol adapters and context compaction.
+
+- Converted Codex requests accept client tracing, cache-affinity keys and the
+  optional encrypted-reasoning output selector. Plain text and empty reasoning
+  controls no longer exclude otherwise compatible routes. Unsupported options
+  identify the offending field; encrypted input still requires a native route.
+
+- Codex context compaction accepts completed output items delivered before the
+  final stream event. Account routing retains only ChatGPT's infrastructure
+  cookie in memory, isolated by account and authorization. WebSocket continuations
+  reconnect after credential changes only with portable history, and delayed
+  catalog refreshes cannot overwrite a different Codex profile binding.
+
+- Relay accepts gzip and zstd JSON requests from current clients. Account
+  compaction falls back to the Responses compaction trigger when the old
+  compact endpoint is explicitly unavailable, preserving context and usage.
+  Turn-state hints stay with the exact session, model and account credentials,
+  including authentication refresh and concurrent responses.
+
+- Model visibility, member model permissions, draining, launch preferences and automation enablement
+  now use the same switch styling as application settings.
+
+- Pool model rules can reset model and group order to the catalog default.
+  Default order places OpenAI, Anthropic, Google and xAI first, then other
+  companies alphabetically, and keeps each catalog family together,
+  with newer versions first inside the family, consistently across providers.
+  New families are grouped automatically from metadata. Failed reorder operations restore the displayed saved order,
+  and another reorder cannot overlap a pending save.
+
+- Catalog refresh retains prices and reference reasoning levels even when legacy
+  route lists or endpoint declarations are incomplete. Pool client projections
+  follow automatic routing, and converted requests retain their source prices
+  across all four protocols. Server background refresh also updates protocol
+  metadata without overwriting concurrent edits or restoring removed sources.
+  Codex receives shared reference reasoning levels through eligible Responses
+  routes, including converted models, with key scopes and adapter limits applied.
+
+- Pool model rules now retain names, groups, prices, reasoning modes and saved
+  order for all pooled account and API models, even while a member is disabled
+  or unavailable. Shared model IDs appear once and count only pool members.
+
+- Codex model labels use shared reference names, then compact labels from the
+  model ID, consistently across pools and direct API
+  connections. Shared reference names remain intact when participant metadata
+  is malformed, and a valid owning-account card takes precedence over an
+  incompatible one. Model IDs and pool order are preserved.
+
+- Removed the technical force-refresh sign-in action from account cards and
+  menus. Sign-in recovery now stays in the normal sign-in flow, while quota
+  refresh remains the only visible refresh action.
+
 - Pool recovery is automatic: all compatible members are considered, temporary
   failures pause for at least five seconds, and repeated failures increase the
   cooldown. Unavailable models, rejected credentials, and opaque gateway
@@ -68,12 +216,16 @@ release entries are kept concise and link to the corresponding tag.
 
 - Pools serve Responses, Chat Completions, Messages and Gemini concurrently,
   with native paths and supported conversions for JSON and streaming requests.
+- API source routing is now fully automatic. Relay keeps adapter routing
+  internal, prefers each model's declared native endpoint and converts requests
+  from Responses, Chat Completions, Messages or Gemini when needed.
   Chat Completions supports function tools and their result history.
 - New API sources determine formats automatically from provider declarations
-  and endpoint settings. Unknown catalogs stay available for manual setup;
-  generation is tested only with the explicit check button. Existing sources
-  retain their manual routes. Model compatibility shows formats, capabilities
-  and reasoning levels, distinguishing declared, verified and unknown support.
+  and endpoint settings. Every catalog model remains routable through the
+  source fallback when declarations are absent. Generation checks are optional
+  diagnostics and do not admit or remove models. Legacy manual-mode fields are
+  accepted during import and ignored; old physical endpoint assignments remain
+  fallback hints so mixed-protocol sources keep working after an upgrade.
 - OpenCode uses protocol-specific SDK groups and retains working model IDs and
   user options during catalog refresh. Codex uses HTTP streaming when a model
   needs conversion, while native WebSocket connections remain supported.
@@ -99,6 +251,12 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Account-card actions now use separate, consistent controls without the
+  nested header frame; sign-in-required quota states have a clearer
+  keyboard and pointer target.
+- Pool rotation modes now save on first use and after members join or leave,
+  without reverting to Smart because of an outdated stored member list.
+  Concurrent edits still refresh and retry safely. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
 - ChatGPT account selection and quota reserve share a compact panel; feature
   switches use flat rows with concise descriptions. Pool member settings no
   longer add a second frame inside the dialog. The OpenCode tab subtitle now

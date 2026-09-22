@@ -8,6 +8,12 @@ with permitted accounts. Test the local path before the user-managed server.
 
 ## P0 — Installed client and live-provider acceptance
 
+- Verify current clients' compressed requests, account compaction through both
+  legacy and Responses-trigger paths, retained-context continuation, and
+  turn-state ownership across OAuth refresh and AgentAssertion task replacement.
+  Include sparse terminal compaction events, ChatGPT routing-cookie expiry,
+  and credential replacement during a live WebSocket conversation.
+
 - Exercise account streaming recovery: safe pre-output failure with complete
   history can retry; opaque response ownership, unpaired tool outputs, and
   already-forwarded output cannot silently move to a different owner.
@@ -71,6 +77,12 @@ PLANNING. Live-provider and installed-client acceptance above remains required.
 
 ## P2 — Recovery and persistence acceptance
 
+- Update the desktop dependency chain when a compatible stable Tauri/GTK stack
+  removes the remaining RustSec warnings. The current GTK path requires
+  `glib` 0.18; RUSTSEC-2024-0429 is fixed in 0.20 and is not a drop-in lockfile
+  update. The same chain retains `proc-macro-error`, while `tauri-utils`
+  retains retired `unic-*` packages through `urlpattern`. Verify the complete
+  platform upgrade and Linux desktop behavior; keep advisories visible.
 - Validate the application-first recovery layout on upgraded installations,
   both history-repair directions, Windows extended paths, partial failure, and
   cleanup failure without losing the rollback handle.
