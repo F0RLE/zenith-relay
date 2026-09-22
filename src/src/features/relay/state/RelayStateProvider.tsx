@@ -115,12 +115,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     options?: PerformOptions,
   ) => performOperation(id, work, refresh, successKey, options), [performOperation, refresh]);
 
-  const launchAttachedCodex = useCallback(() => perform(
-    "profile-launch",
-    relayCommands.launchManagedCodex,
-    "feedback.launched",
-  ), [perform]);
-
   const activateCodexProfile = useCallback(async (
     id: string,
     work: () => Promise<ProfileActivation>,
@@ -130,14 +124,15 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       title: t("profiles.switchBackupTitle"),
       confirmLabel: t("profiles.switchBackupAction"),
     })) return false;
-    const activated = await perform(id, work, launchAfter ? undefined : "feedback.profileAttached");
-    return activated && (!launchAfter || await launchAttachedCodex());
-  }, [confirm, launchAttachedCodex, perform, profileSwitchBackupPrompt, t]);
+    return perform(id, work, launchAfter ? "feedback.launched" : "feedback.profileAttached",
+      launchAfter ? { afterWork: relayCommands.launchManagedCodex } : undefined);
+  }, [confirm, perform, profileSwitchBackupPrompt, t]);
 
   const launchCodexProfile = useCallback(async (_binding: ProfileBinding) => {
-    const stopped = await perform("profile-stop", relayCommands.stopManagedCodex);
-    return stopped && launchAttachedCodex();
-  }, [launchAttachedCodex, perform]);
+    return perform("profile-launch", relayCommands.stopManagedCodex, "feedback.launched", {
+      afterWork: relayCommands.launchManagedCodex,
+    });
+  }, [perform]);
 
   const setCodexBackgroundTasksEnabled = useCallback((enabled: boolean) => perform(
     "codex-background-tasks",

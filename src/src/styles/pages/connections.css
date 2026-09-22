@@ -1,118 +1,3 @@
-
-.relay-dialog.wide:has(.automation-form) {
-  width: min(620px, 100%);
-}
-
-.relay-dialog:has(.automation-form) > header,
-.relay-dialog:has(.automation-form) > footer {
-  min-height: 52px;
-}
-
-.relay-dialog:has(.automation-form) .relay-dialog-body {
-  padding: 16px 18px;
-}
-
-.relay-form.automation-form {
-  gap: 12px;
-}
-
-.automation-target-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.automation-rule {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding-top: 10px;
-  border-top: 1px solid var(--relay-border);
-}
-
-.automation-rule > span {
-  color: var(--relay-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.automation-rule > strong {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.automation-execution {
-  flex: 0 0 auto;
-}
-
-.automation-execution button {
-  min-width: 104px;
-}
-
-.automation-account-picker {
-  max-height: 142px;
-  overflow: auto;
-  background: var(--relay-subtle);
-}
-
-.automation-account-picker .scope-grid label {
-  min-width: 0;
-}
-
-.automation-account-picker .scope-grid span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.automation-validation {
-  margin: -4px 0 0;
-  color: var(--relay-error);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-@media (max-width: 620px) {
-  .automation-target-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .automation-rule {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .automation-execution {
-    width: 100%;
-  }
-
-  .automation-execution button {
-    min-width: 0;
-    flex: 1;
-  }
-}
-
-@media (max-height: 600px) {
-  .relay-dialog:has(.automation-form) .relay-dialog-body {
-    padding-block: 8px;
-  }
-
-  .relay-form.automation-form {
-    gap: 10px;
-  }
-
-  .automation-account-picker {
-    padding: 8px;
-  }
-
-  .automation-rule {
-    padding-top: 6px;
-  }
-}
-
 .account-command-bar {
   min-height: 34px;
   display: grid;
@@ -755,42 +640,46 @@
   display: flex;
   align-self: center;
   align-items: center;
+  gap: 6px;
   margin-right: 10px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
 }
 
 .account-card-header-actions .relay-action-menu summary {
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 5px 0 0 5px;
-}
-
-.account-card-header-actions .account-select-button {
-  width: 30px;
-  min-height: 30px;
-  border: 0;
-  border-left: 1px solid var(--relay-border);
-  border-radius: 0 5px 5px 0;
+  width: 32px;
+  height: 32px;
+  border-color: var(--relay-border);
+  border-radius: 6px;
   background: transparent;
   color: var(--relay-muted);
 }
 
-.account-card-header-actions .account-select-button[aria-pressed="true"] {
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
+.account-card-header-actions .account-select-button {
+  width: 32px;
+  min-height: 32px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--relay-muted);
 }
 
+.account-card-header-actions .relay-action-menu summary:hover,
+.account-card-header-actions .relay-action-menu[open] summary,
 .account-card-header-actions .account-select-button:hover:not(:disabled),
 .account-card-header-actions .account-select-button:focus-visible {
+  border-color: var(--relay-border-strong);
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
 
+.account-card-header-actions .account-select-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
 .account-card-header-actions .account-select-button[aria-pressed="true"]:hover:not(:disabled),
 .account-card-header-actions .account-select-button[aria-pressed="true"]:focus-visible {
+  border-color: var(--relay-accent);
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -1199,7 +1088,10 @@
 
 .account-quota-refresh-state.is-action {
   width: 100%;
+  min-height: 40px;
+  padding: 6px 10px;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   cursor: pointer;
   font: inherit;
@@ -1208,8 +1100,13 @@
 .account-quota-refresh-state.is-action:hover,
 .account-quota-refresh-state.is-action:focus-visible {
   background: var(--relay-error-soft, color-mix(in srgb, var(--relay-error) 10%, transparent));
-  outline: 1px solid color-mix(in srgb, var(--relay-error) 35%, transparent);
-  outline-offset: -1px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-error) 35%, transparent);
+  color: var(--relay-error);
+}
+
+.account-quota-refresh-state.is-action:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--relay-error) 45%, transparent);
+  outline-offset: 1px;
 }
 
 .account-quota-refresh-state svg {
@@ -1307,6 +1204,7 @@
 
 .relay-action-menu > div {
   position: absolute;
+  overflow-y: auto;
   z-index: 30;
   top: 38px;
   right: 0;
@@ -1393,22 +1291,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table {
-  table-layout: fixed;
-}
-
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(1) { width: 56px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(2) { width: 130px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(3) { width: 170px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(4) { width: 120px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5) { width: 110px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:last-child { width: 124px; }
-
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:not(:last-child) {
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .relay-action-menu button {
@@ -1864,23 +1746,5 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-.source-protocol-status { display: grid; gap: 14px; min-width: 0; padding: 16px 0; border-top: 1px solid var(--relay-border); }
-.source-protocol-availability { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.source-protocol-availability > div { display: grid; gap: 6px; align-content: start; min-width: 0; }
-.source-protocol-availability span { font-size: 12px; color: var(--relay-muted); }
-.source-protocol-availability strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
-.source-protocol-availability [data-available="false"] strong { color: var(--relay-muted); font-weight: 400; }
-.source-probe-controls { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; }
-.source-probe-controls .relay-field { min-width: 0; }
 .source-probe-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
 .source-probe-result code { overflow-wrap: anywhere; color: var(--relay-muted); }
-.source-client-protocol { display: grid; gap: 8px; font-size: 12px; }
-.source-client-protocol .relay-tabs { height: auto; min-height: 46px; }
-.source-add-adapters > .relay-tabs { margin: 12px 0; }
-.source-route-simple-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-@media (max-width: 640px) {
-  .source-protocol-availability { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .source-probe-controls { grid-template-columns: minmax(0, 1fr); }
-  .source-client-protocol .relay-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; overflow: visible; }
-  .source-client-protocol .relay-tabs button { min-width: 0; min-height: 40px; white-space: normal; }
-}

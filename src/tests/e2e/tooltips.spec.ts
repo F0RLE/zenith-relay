@@ -51,7 +51,7 @@ test("visible identifiers have no redundant hint but clipped identifiers retain 
   await expect(page.getByRole("tooltip")).toHaveCount(0);
 });
 
-test("source route disabled reasons support both hover and keyboard", async ({ page }) => {
+test("source editor does not expose obsolete route controls or tooltips", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true,
     sourceProtocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: ["gpt-5.4"] }] });
   await page.goto("/");
@@ -59,16 +59,8 @@ test("source route disabled reasons support both hover and keyboard", async ({ p
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
-  await dialog.locator(".source-add-adapters > summary").click();
-  const disabled = dialog.locator("label.source-route-cell[tabindex='0']").first();
-  await disabled.hover();
-  await expect(page.getByRole("tooltip")).toHaveText(await disabled.getAttribute("data-relay-tooltip") as string);
-  await page.keyboard.press("Escape");
-  await expect(dialog).toBeVisible();
-  await expect(page.getByRole("tooltip")).toHaveCount(0);
-  await page.keyboard.press("Tab");
-  await disabled.focus();
-  await expect(page.getByRole("tooltip")).toHaveAttribute("data-instant", "true");
+  await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
+  await expect(dialog.locator(".source-route-cell")).toHaveCount(0);
   await expect(page.locator("[title]")).toHaveCount(0);
 });
 

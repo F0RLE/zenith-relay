@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Download, Loader2, Plug, Plus, Upload } from "lucide-react";
+import { Download, Loader2, Plug, Plus, RotateCcw, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, ConfigurationPresetPreview } from "../../api/types";
@@ -27,6 +27,7 @@ export function PoolPage() {
   const [configurationPreview, setConfigurationPreview] = useState<ConfigurationPresetPreview | null>(null);
   const oauth = useOAuthSignIn(() => refresh());
   const supportsModels = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("models"));
+  const supportsModelOrderReset = mode === "local" || Boolean(runtime?.capabilities.features.includes("model_order_reset"));
   const supportsMembers = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const supportsRoutingSettings = Boolean(runtime);
   const supportsConfigurationPresets = mode === "local" || Boolean(runtime?.capabilities.features.includes("configuration_presets"));
@@ -57,6 +58,7 @@ export function PoolPage() {
     if (preview) setConfigurationPreview(preview);
   });
   const action = <div className="pool-header-actions">
+    {view === "models" && supportsModelOrderReset ? <IconButton className="pool-header-icon" label={t("models.resetOrder")} icon={busy === "model-order-reset" ? <Loader2 className="spin" aria-hidden /> : <RotateCcw aria-hidden />} disabled={Boolean(busy) || !runtime?.gateway.models?.length} onClick={() => void perform("model-order-reset", () => mode === "local" ? relayCommands.setModelDisplayOrder([]) : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved")} /> : null}
     {canSaveConfigurationPreset ? <div className="pool-preset-actions">
       <IconButton className="pool-header-icon" label={t("pool.exportConfiguration")} icon={busy === "configuration-preset-export" ? <Loader2 className="spin" aria-hidden /> : <Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void exportConfiguration()} />
       {supportsConfigurationPresets ? <IconButton className="pool-header-icon" label={t("pool.importConfiguration")} icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />} disabled={Boolean(busy)} onClick={() => void previewConfiguration()} /> : null}

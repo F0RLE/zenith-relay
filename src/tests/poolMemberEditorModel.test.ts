@@ -4,9 +4,6 @@ import { groupModels, memberModelCatalog } from "../src/features/relay/modelGrou
 import {
   modelSelectionForMember,
   modelSelectionPayload,
-  moveSourceBy,
-  moveSourceOrder,
-  sourcePrioritiesForOrder,
 } from "../src/features/relay/components/poolMemberEditorModel";
 
 const source = (overrides: Partial<SourceSummary> = {}): SourceSummary => ({
@@ -104,18 +101,4 @@ describe("pool member editor model", () => {
     });
   });
 
-  test("moves sources before or after a target without mutating the original order", () => {
-    const current = ["a", "b", "c"];
-    expect(moveSourceOrder(current, "a", "c")).toEqual(["b", "a", "c"]);
-    expect(moveSourceOrder(current, "a", "c", true)).toEqual(["b", "c", "a"]);
-    expect(moveSourceBy(current, "b", -1)).toEqual(["b", "a", "c"]);
-    expect(moveSourceBy(current, "b", 1)).toEqual(["a", "c", "b"]);
-    expect(current).toEqual(["a", "b", "c"]);
-  });
-
-  test("builds priorities from the selected role and visual order", () => {
-    expect(sourcePrioritiesForOrder(["a", "b"], "primary")).toEqual({ a: 1_000_002, b: 1_000_001 });
-    expect(sourcePrioritiesForOrder(["a", "b"], "reserve")).toEqual({ a: -1_000_000, b: -1_000_001 });
-    expect(modelSelectionForMember({ ...account(), kind: "account" }).enabledModels).toEqual(["gpt-5.4"]);
-  });
 });

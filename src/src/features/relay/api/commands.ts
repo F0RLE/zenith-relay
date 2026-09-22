@@ -27,6 +27,7 @@ import type {
   ProfileActivation,
   ProfileBinding,
   ProxyPoolImportResult,
+  ProxyCheckResult,
   ProxyPoolSummary,
   RelayStorageInfo,
   RevealedAccountIdentity,
@@ -128,6 +129,7 @@ export const relayCommands = {
   deleteAccounts: (accountIds: string[]) => invoke("delete_local_accounts", { accountIds }),
   setAccountProxy: (accountId: string, proxyUrl: string | null, bypassCommonProxy = false) => invoke("set_local_account_proxy", { input: { accountId, proxyUrl, bypassCommonProxy } }),
   getProxyPool: () => invoke<ProxyPoolSummary>("get_local_proxy_pool"),
+  checkStoredProxy: (proxyId: string) => invoke<ProxyCheckResult>("check_local_stored_proxy", { proxyId }),
   importProxyPool: (proxyUrls: string[]) => invoke<ProxyPoolImportResult>("import_local_proxy_pool", { input: { proxyUrls } }),
   deleteStoredProxy: (proxyId: string) => invoke<ProxyPoolSummary>("delete_local_stored_proxy", { proxyId }),
   deleteStoredProxies: (proxyIds: string[]) => invoke<ProxyPoolSummary>("delete_local_stored_proxies", { input: { proxyIds } }),
@@ -154,6 +156,7 @@ export const relayCommands = {
   setModelPrice: (modelId: string, inputMicroUsdPerMillion: number | null, cachedInputMicroUsdPerMillion: number | null, cacheWrite5mMicroUsdPerMillion: number | null, cacheWrite1hMicroUsdPerMillion: number | null, outputMicroUsdPerMillion: number | null) => invoke("set_local_model_price", { input: { modelId, inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion } }),
   setModelReasoning: (modelId: string, allowedLevels: string[]) => invoke("set_local_model_reasoning", { input: { modelId, allowedLevels } }),
   setModelServiceTier: (modelId: string, serviceTier: DefaultServiceTier) => invoke("set_local_model_service_tier", { input: { modelId, serviceTier } }),
+  /** An empty list clears manual positions and restores catalog ordering. */
   setModelDisplayOrder: (modelIds: string[]) => invoke("set_local_model_display_order", { input: { modelIds } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   previewLocalConfigurationPreset: () => invoke<ConfigurationPresetPreview | null>("preview_local_configuration_preset"),
@@ -181,8 +184,6 @@ export const relayCommands = {
   updateAutomation: (taskId: string, input: Record<string, unknown>) => invoke("update_quota_wake_automation", { taskId, input }),
   setAutomationEnabled: (taskId: string, enabled: boolean) => invoke("set_quota_wake_automation_enabled", { taskId, enabled }),
   deleteAutomation: (taskId: string) => invoke("delete_quota_wake_automation", { taskId }),
-  runWakeConfirmations: () => invoke<number>("run_due_quota_wake_confirmations", { maxClaims: 2 }),
-  testAutomation: (taskId: string) => invoke<{ taskId: string; status: string; eligibleAccounts: number }>("test_quota_wake_automation", { taskId }),
 
   attachCodexGateway: (boundOauthAccountId: string | null = null, disableOauthBinding = false) => invoke<ProfileActivation>("attach_codex_to_local_gateway", { boundOauthAccountId, ...(disableOauthBinding ? { disableOauthBinding: true } : {}) }),
   attachCodexRemoteGateway: () => invoke<ProfileActivation>("attach_codex_to_remote_gateway"),

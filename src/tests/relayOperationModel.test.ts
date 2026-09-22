@@ -27,10 +27,12 @@ describe("relay operation policy", () => {
     let current = true;
     let refreshes = 0;
     let settlements = 0;
+    let launches = 0;
     const result = await runRelayOperation({
       work: async () => { current = false; },
       refresh: async () => { refreshes += 1; },
       isCurrent: () => current,
+      options: { afterWork: async () => { launches += 1; } },
       resolveError: resolvedError,
       setFeedback: () => { throw new Error("stale feedback"); },
       settle: () => { settlements += 1; },
@@ -38,6 +40,39 @@ describe("relay operation policy", () => {
     expect(result).toBeFalse();
     expect(refreshes).toBe(0);
     expect(settlements).toBe(0);
+    expect(launches).toBe(0);
+  });
+
+  test("launches an attached client before refreshing and settles the workflow once", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("attach"); },
+      options: { afterWork: async () => { events.push("launch"); } },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.launched",
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    expect(events).toEqual(["attach", "launch", "refresh", "success:feedback.launched", "settled"]);
+  });
+
+  test("reports a failed launch without publishing connection success or refreshing", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("attach"); },
+      options: { afterWork: async () => { throw new Error("launch failed"); } },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.launched",
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeFalse();
+    expect(events).toEqual(["attach", "error:errors.general", "settled"]);
   });
 
   test("keeps a handled error local when global reporting is disabled", async () => {

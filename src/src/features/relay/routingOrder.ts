@@ -3,11 +3,6 @@ import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/ty
 const subscriptionPlanPriority = ["enterprise", "business", "pro-20x", "pro-5x", "pro", "plus", "go", "edu", "free", "unknown"];
 const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
 
-export type ApiSourceRole = "primary" | "stabilizer" | "reserve";
-
-const API_SOURCE_PRIMARY_PRIORITY = 1_000_000;
-const API_SOURCE_RESERVE_PRIORITY = -1_000_000;
-
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   const positions = new Map<string, number>();
   const sourcePositions = new Map<string, { index: number; active: boolean }>();
@@ -271,18 +266,4 @@ export function compareAccountPlans(left: { id: string; label: string }, right: 
   const leftRank = accountPlanOrder.indexOf(left.id);
   const rightRank = accountPlanOrder.indexOf(right.id);
   return (leftRank < 0 ? accountPlanOrder.length : leftRank) - (rightRank < 0 ? accountPlanOrder.length : rightRank) || left.label.localeCompare(right.label);
-}
-
-export function apiSourceRole(priority: number): ApiSourceRole {
-  if (priority >= API_SOURCE_PRIMARY_PRIORITY) return "primary";
-  if (priority <= API_SOURCE_RESERVE_PRIORITY) return "reserve";
-  return "stabilizer";
-}
-
-export function apiSourcePriority(role: ApiSourceRole, position = 0, total = 1) {
-  const index = Math.max(0, Math.trunc(position));
-  const rank = Math.max(1, Math.trunc(total) - index);
-  if (role === "primary") return API_SOURCE_PRIMARY_PRIORITY + rank;
-  if (role === "reserve") return API_SOURCE_RESERVE_PRIORITY - index;
-  return rank;
 }

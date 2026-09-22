@@ -4,12 +4,11 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
 import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
-import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolBindingsEditor";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
-import { effectiveSourceProtocolBindings, sourceSupportsAnyWireApi, sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../../sourceProtocolBindings";
+import { effectiveSourceProtocolBindings, sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../../sourceProtocolBindings";
 import { sourceHost } from "../../sourceUrl";
-import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, EmptyState, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
 import { compareRoutingOrder, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
@@ -17,7 +16,7 @@ import { compareStableText } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 
-type SourceSortColumn = "status" | "name" | "server" | "route" | "models";
+type SourceSortColumn = "status" | "name" | "server" | "models";
 type SourceSortKey = "runtime" | SourceSortColumn;
 type SourceSortDirection = "asc" | "desc";
 
@@ -34,9 +33,6 @@ function sourceSortValue(source: SourceSummary, key: SourceSortColumn) {
   switch (key) {
     case "status": return sourceStatusRank[source.operationalStatus];
     case "server": return sourceHost(source.baseUrl);
-    case "route": return effectiveSourceProtocolBindings(source)
-      .map((binding) => `${binding.wireApi}:${binding.adapter ?? "native"}`)
-      .join(",");
     case "models": return source.models.length;
     case "name": return source.name;
   }
@@ -118,19 +114,18 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
     "feedback.saved",
   );
   return (
-    <div className="relay-table-wrap relay-compact-content">
-      <table className="relay-table source-table">
+    <div className="relay-table-wrap connection-list-wrap relay-compact-content">
+      <table className="relay-table source-table connection-table">
+        <caption className="connection-mobile-sort"><OptionMenu label={t("sources.sortLabel")} value={sort.key} onChange={(key) => setSort({ key: key as SourceSortKey, direction: "asc" })} options={[{ value: "runtime", label: t("sources.sortDefault") }, { value: "status", label: t("common.status") }, { value: "name", label: t("common.name") }, { value: "server", label: t("sources.host") }, { value: "models", label: t("common.models") }]} />{sort.key !== "runtime" ? <IconButton label={t(sort.direction === "asc" ? "sources.sortDescending" : "sources.sortAscending", { column: t("sources.sortLabel") })} icon={sort.direction === "asc" ? <ArrowUp aria-hidden /> : <ArrowDown aria-hidden />} onClick={() => sortColumn(sort.key)} /> : null}</caption>
         <thead><tr>
           <th aria-sort={sort.key === "status" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("status", t("common.status"))}</th>
           <th aria-sort={sort.key === "name" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("name", t("common.name"))}</th>
           <th aria-sort={sort.key === "server" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("server", t("sources.host"))}</th>
-          <th aria-sort={sort.key === "route" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("route", t("sources.route"))}</th>
           <th aria-sort={sort.key === "models" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("models", t("common.models"))}</th>
           <th><span className="sr-only">{t("common.actions")}</span></th>
         </tr></thead>
         <tbody>{sources.map((source) => {
           const launchBusy = busy === `launch-source-${source.id}`;
-          const supportsAnyRoute = sourceSupportsAnyWireApi(source);
           const supportsNative = sourceSupportsNativeProtocol(source);
           const launchDisabled = !localSource || !supportsNative || !source.enabled || !source.secretAvailable || launchBusy;
           const launchTitle = !localSource
@@ -166,21 +161,20 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
             : source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
             ? operationalStatusTone(source.operationalStatus)
             : runtimeTone ?? operationalStatusTone(source.operationalStatus);
-          return <tr key={source.id}>
-            <td><StatusIcon status={indicatorTone} label={indicatorLabel} /></td>
-            <td><strong>{source.name}</strong></td>
-            <td><code>{sourceHost(source.baseUrl)}</code></td>
-            <td><SourceProtocolBindingsSummary source={source} /></td>
-            <td>{source.models.length}</td>
+          return <tr key={source.id} data-source-id={source.id}>
+            <td><div className="connection-status"><StatusIcon status={indicatorTone} label={indicatorLabel} /><span>{statusLabel}</span></div></td>
+            <td><div className="connection-identity"><strong>{source.name}</strong>{mode !== "zenith" ? <small>{t(source.inPool ? "sources.inPoolLabel" : "sources.notInPoolLabel")}</small> : null}</div></td>
+            <td><code className="connection-host" data-relay-tooltip={source.baseUrl}>{sourceHost(source.baseUrl)}</code></td>
+            <td><span className="connection-model-count">{source.models.length}</span></td>
             <td className="row-actions-cell"><div className="row-actions">
+              <IconButton label={t("sources.launch")} icon={<Play aria-hidden />} busy={launchBusy} disabled={launchDisabled} title={launchTitle} onClick={() => setLaunchSourceId(source.id)} />
+              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
               <ActionMenu>
                 <ActionMenuItem icon={busy === `source-refresh-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => onRefresh(source.id)}>{t("sources.refreshData")}</ActionMenuItem>
-                {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}` || (!source.inPool && !supportsAnyRoute)} title={!source.inPool && !supportsAnyRoute ? t("sources.poolResponsesOnly") : undefined} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
+                {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}`} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
-              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
-              <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => setLaunchSourceId(source.id)} />
             </div></td>
           </tr>;
         })}</tbody>

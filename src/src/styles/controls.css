@@ -91,6 +91,51 @@ input[type="checkbox"]:disabled {
   opacity: 0.5;
 }
 
+:root input.relay-switch[type="checkbox"] {
+  position: relative;
+  display: block;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--relay-border-strong);
+}
+
+:root input.relay-switch[type="checkbox"]::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--relay-surface);
+  clip-path: none;
+  transform: none;
+  transition: transform 140ms ease;
+}
+
+:root input.relay-switch[type="checkbox"]:checked {
+  background: var(--relay-accent-hover);
+}
+
+:root input.relay-switch[type="checkbox"]:checked::before {
+  background: #ffffff;
+  transform: translateX(16px);
+}
+
+:root input.relay-switch[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root input.relay-switch[type="checkbox"]::before {
+    transition: none;
+  }
+}
+
 input[type="radio"] {
   appearance: none;
   display: grid;

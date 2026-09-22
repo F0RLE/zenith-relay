@@ -98,7 +98,6 @@ export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_g
   | "chat_completions_to_gemini" | "messages_to_responses" | "messages_to_chat_completions"
   | "messages_to_gemini" | "gemini_to_responses" | "gemini_to_chat_completions" | "gemini_to_messages";
 
-export type ProtocolSelectionMode = "auto" | "manual";
 export type CapabilityStatus = "declared" | "confirmed" | "unsupported" | "unknown";
 export type CapabilityOrigin = "catalog" | "service_profile" | "endpoint_url" | "manual" | "generation_probe";
 export type ProtocolFeature = "text" | "streaming" | "images" | "function_tools" | "tool_choice" | "structured_output" | "reasoning";
@@ -112,7 +111,6 @@ export type ModelEndpointCapability = {
   reasoningEfforts: string[];
 };
 export type SourceProtocolConfig = {
-  mode: ProtocolSelectionMode;
   revision: number;
   capabilities: ModelEndpointCapability[];
   endpointHint?: SourceWireApi | null;
@@ -449,7 +447,6 @@ type ConfigurationPresetMemberRule = {
 };
 
 export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
-  protocolMode?: ProtocolSelectionMode;
   name: string;
   baseUrl: string;
   pricingProvider?: string | null;
@@ -552,7 +549,17 @@ export type ProxyPoolSummary = {
 export type ProxyPoolImportResult = {
   added: number;
   duplicates: number;
+  addedProxyIds: string[];
   pool: ProxyPoolSummary;
+};
+
+export type ProxyCheckResult = {
+  proxyId: string;
+  checkedAtMs: number;
+  elapsedMs: number;
+  ip: string | null;
+  countryCode: string | null;
+  errorCode: string | null;
 };
 
 export type StoredProxyAssignmentResult = {

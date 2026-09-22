@@ -71,10 +71,6 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             disabled={diagnosticSettings === null || busy === "diagnostics-debug"}
             onChange={(enabled) => void perform("diagnostics-debug", () => updateDiagnosticDebug(enabled), "feedback.saved")}
           />
-          {diagnosticSettings?.debugEnabled ? <div className="settings-debug-details" role="region" aria-label={t("settings.debugDetails")}>
-            <div className="settings-debug-details-copy"><strong>{t("settings.debugDetailsTitle")}</strong><small>{t("settings.debugDetailsHint")}</small></div>
-            <div className="settings-debug-details-action"><code data-relay-tooltip={storageInfo?.operationLogsPath}>{storageInfo?.operationLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code><Button variant="secondary" icon={<FileText aria-hidden />} busy={busy === "open-operation-logs"} onClick={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened")}>{t("settings.openOperations")}</Button></div>
-          </div> : null}
         </div>
         <div className="settings-control-row settings-danger-row"><div><strong>{t("settings.resetData")}</strong><small>{t("settings.resetDataHint")}</small></div><Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("common.reset")}</Button></div>
       </SettingsGroup> : null}

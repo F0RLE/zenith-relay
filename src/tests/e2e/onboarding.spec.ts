@@ -1,5 +1,18 @@
-import { expect, test } from "../bun-playwright";
+import { expect, test, type Page } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+
+async function expectSetupFrame(page: Page) {
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
+  await expect(page.locator('.setup-progress [aria-current="step"]')).toHaveCount(1);
+  expect(await page.locator(".setup-workspace, .setup-footer").evaluateAll((items) => items.every((item) => {
+    const box = item.getBoundingClientRect();
+    return box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight && item.scrollWidth <= item.clientWidth;
+  }))).toBe(true);
+  expect(await page.locator(".setup-body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
+  if (await page.locator(".setup-heading").count()) {
+    await expect(page.locator(".setup-heading")).toHaveCSS("text-align", "left");
+  }
+}
 
 test("quick setup covers all three runtime choices", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
@@ -29,6 +42,7 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   await expect(page.getByRole("link", { name: "Open in browser" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   expect(await page.locator(".setup-oauth-pending").evaluate((element) => {
     const rect = element.getBoundingClientRect();
@@ -124,6 +138,8 @@ test("current profile import keeps setup on the connection step when an item fai
   await page.getByRole("button", { name: /Import current profile/ }).click();
   await expect(page.locator(".setup-current-profile-status.failed")).toContainText("Could not import the current profile");
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expectSetupFrame(page);
+  await page.screenshot({ path: "output/playwright/onboarding-import-error-1160x760.png" });
   await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
   expect(calls.map((call) => call.command)).toContain("cancel_local_account_import");
@@ -155,40 +171,25 @@ test("current profile action stays hidden when no usable ChatGPT profile exists"
   await page.screenshot({ path: "output/playwright/onboarding-step-2-no-profile-ru-dark-1160x760.png" });
 });
 
-test("all onboarding steps are centered and captured", async ({ page }) => {
+test("all onboarding steps keep progress and actions in one bounded workspace", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "ru", theme: "dark", populated: true });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
   await page.getByRole("button", { name: "Приступить" }).click();
 
-  const expectCenteredStep = async () => {
-    const layout = await page.locator(".setup-step").evaluate((step) => {
-      const children = [...step.children].filter((child): child is HTMLElement => child instanceof HTMLElement && child.offsetParent !== null);
-      const first = children[0].getBoundingClientRect();
-      const last = children.at(-1)!.getBoundingClientRect();
-      const bounds = step.getBoundingClientRect();
-      const heading = step.querySelector<HTMLElement>(".setup-heading");
-      return {
-        delta: Math.abs((first.top + last.bottom) / 2 - (bounds.top + bounds.bottom) / 2),
-        headingAlign: heading ? getComputedStyle(heading).textAlign : "center",
-      };
-    });
-    expect(layout.delta).toBeLessThanOrEqual(3);
-    expect(layout.headingAlign).toBe("center");
-  };
-
-  await expectCenteredStep();
+  await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-1-mode-ru-dark-1160x760.png" });
   await page.getByRole("button", { name: "Продолжить" }).click();
   await expect(page.getByRole("button", { name: /Импортировать текущий профиль/ })).toBeVisible();
-  await expectCenteredStep();
+  await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-2-connection-ru-dark-1160x760.png" });
 
   await page.getByRole("button", { name: /Импортировать текущий профиль/ }).click();
   await expect(page.locator(".client-options")).toBeVisible({ timeout: 4_000 });
-  await expectCenteredStep();
+  await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-3-client-ru-dark-1160x760.png" });
   await page.getByRole("button", { name: "Продолжить" }).click();
+  await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-4-ready-ru-dark-1160x760.png" });
 });
 
@@ -206,7 +207,7 @@ test("Choose API setup saves and launches an OpenRouter source directly", async 
   await page.getByRole("button", { name: "Continue" }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "responses" });
+  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "chat_completions" });
   expect(calls.find((call) => call.command === "launch_codex_source")?.args).toEqual({ sourceId: "source_created_2" });
   expect(calls.map((call) => call.command)).not.toContain("set_local_pool_membership");
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.directSourceId"))).toBe("source_created_2");
@@ -214,7 +215,7 @@ test("Choose API setup saves and launches an OpenRouter source directly", async 
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("zenith");
 });
 
-test("Choose API quick setup focuses on the selected service and its key", async ({ page }) => {
+test("Choose API quick setup can configure and save a custom provider", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
@@ -230,9 +231,19 @@ test("Choose API quick setup focuses on the selected service and its key", async
   await expect(page.locator(".source-routing-disclosure")).toHaveCount(0);
   await expect(page.getByLabel("API key")).toBeVisible();
 
-  await page.getByRole("button", { name: "Edit" }).click();
   await page.getByRole("radio", { name: /Custom API/ }).click();
   await expect(page.getByText("Enter a name, endpoint, and API key.")).toBeVisible();
+  await page.getByLabel("API key", { exact: true }).fill("synthetic-custom-api-key");
+  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await page.getByLabel("API address", { exact: true }).fill("https://api.example.invalid/v1");
+  await page.getByLabel("Name", { exact: true }).fill("My API");
+  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.locator(".client-options")).toBeVisible();
+  const input = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: unknown } }>;
+  }).__TAURI_TEST_INVOKES__.find((call) => call.command === "create_local_source")?.args.input);
+  expect(input).toMatchObject({ name: "My API", baseUrl: "https://api.example.invalid/v1", apiKey: "synthetic-custom-api-key", protocolBindings: [] });
 });
 
 test("remote quick setup requires explicit consent for plain HTTP", async ({ page }) => {
@@ -265,30 +276,19 @@ test("quick setup can switch to Russian without untranslated keys", async ({ pag
 });
 
 for (const theme of ["light", "dark"] as const) {
-  for (const viewport of [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as const) {
+  for (const viewport of [{ width: 1160, height: 760 }, { width: 840, height: 560 }, { width: 390, height: 844 }] as const) {
     test(`onboarding layout ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await installTauriMock(page, { onboarding: false, locale: "ru", theme, populated: true });
       await page.setViewportSize(viewport);
       await page.goto("/");
       await expect(page.getByRole("heading", { name: "Zenith Relay" })).toBeVisible();
+      await expect(page.locator("#splash-screen")).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       expect(await page.locator(".product-intro button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-intro-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await page.getByRole("button", { name: "Приступить" }).click();
       expect(await page.locator(".setup-body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
-      const centeredMode = await page.locator(".setup-body").evaluate((body) => {
-        const heading = body.querySelector<HTMLElement>(".setup-heading")!;
-        const options = body.querySelector<HTMLElement>(".mode-options")!;
-        const bodyBox = body.getBoundingClientRect();
-        const headingBox = heading.getBoundingClientRect();
-        const optionsBox = options.getBoundingClientRect();
-        return {
-          delta: Math.abs((headingBox.top + optionsBox.bottom) / 2 - (bodyBox.top + bodyBox.bottom) / 2),
-          headingAlign: getComputedStyle(heading).textAlign,
-        };
-      });
-      expect(centeredMode.headingAlign).toBe("center");
-      expect(centeredMode.delta).toBeLessThanOrEqual(2);
+      await expectSetupFrame(page);
       expect(await page.locator(".mode-options button").evaluateAll((buttons) => buttons.every((button) => {
         const rect = button.getBoundingClientRect();
         return rect.left >= 0 && rect.right <= innerWidth && button.scrollWidth <= button.clientWidth;
@@ -296,13 +296,42 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: `output/playwright/onboarding-mode-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await page.getByRole("button", { name: "Продолжить" }).click();
       await expect(page.getByRole("button", { name: /Импортировать текущий профиль/ })).toBeVisible();
+      await expectSetupFrame(page);
       expect(await page.locator(".setup-connect-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-local-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await page.getByRole("button", { name: "Назад" }).click();
       await page.getByRole("button", { name: /Выбор API/ }).click();
       await page.getByRole("button", { name: "Продолжить" }).click();
+      await expectSetupFrame(page);
       expect(await page.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-api-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await page.getByRole("radio", { name: "Свой API", exact: true }).click();
+      await page.getByLabel("API key", { exact: true }).fill("synthetic-preview-key");
+      await page.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
+      await page.getByLabel("Название", { exact: true }).fill("Рабочий API");
+      await expect(page.getByRole("button", { name: "Продолжить" })).toBeEnabled();
+      await expectSetupFrame(page);
+      await page.screenshot({ path: `output/playwright/onboarding-api-custom-ru-${theme}-${viewport.width}x${viewport.height}.png`, animations: "disabled" });
+      await page.getByRole("button", { name: "Продолжить" }).click();
+      await expect(page.locator(".client-options")).toBeVisible();
+      await expectSetupFrame(page);
+      await page.screenshot({ path: `output/playwright/onboarding-client-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await page.getByRole("button", { name: "Продолжить" }).click();
+      await expect(page.getByRole("heading", { name: "Relay готов" })).toBeVisible();
+      await expectSetupFrame(page);
+      await page.screenshot({ path: `output/playwright/onboarding-ready-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      for (let step = 4; step > 1; step -= 1) {
+        await page.getByRole("button", { name: "Назад", exact: true }).click();
+      }
+      await page.getByRole("button", { name: /На своём сервере/ }).click();
+      await page.getByRole("button", { name: "Продолжить" }).click();
+      await page.getByLabel("Адрес сервера", { exact: true }).fill("https://relay.example.invalid");
+      await page.getByLabel("Токен управления", { exact: true }).fill("synthetic-management-token-000000");
+      await expect(page.getByRole("button", { name: "Продолжить" })).toBeEnabled();
+      await expectSetupFrame(page);
+      await page.screenshot({ path: `output/playwright/onboarding-remote-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await page.getByRole("button", { name: "Продолжить" }).click();
+      await expect(page.locator(".client-options")).toBeVisible();
     });
   }
 }

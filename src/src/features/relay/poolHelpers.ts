@@ -8,10 +8,8 @@ import type {
 } from "./api/types";
 import {
   accountPlanOption,
-  apiSourceRole,
   compareRoutingOrder,
   compareSubscriptionPlanPriority,
-  type ApiSourceRole,
 } from "./routingOrder";
 import { groupModels } from "./modelGroups";
 import { compareOperationalStatus } from "./accountStatus";
@@ -29,59 +27,6 @@ export type SubscriptionPlanGroup = {
   label: string;
   count: number;
 };
-
-export type SourceRoutingStage = {
-  role: ApiSourceRole | "accounts";
-  count: number;
-};
-
-export function sourceOrderForRole(
-  sources: SourceSummary[],
-  role: ApiSourceRole,
-  sourceId: string,
-) {
-  const current = sources.find((source) => source.id === sourceId);
-  const ordered = sources
-    .filter(
-      (source) =>
-        source.inPool &&
-        source.id !== sourceId &&
-        apiSourceRole(source.priority) === role,
-    )
-    .sort(compareSources);
-
-  if (!current) return ordered.map((source) => source.id);
-  ordered.push(current);
-  if (apiSourceRole(current.priority) === role) ordered.sort(compareSources);
-  return ordered.map((source) => source.id);
-}
-
-export function sourceRoutingStages(
-  sources: SourceSummary[],
-  accounts: AccountSummary[],
-  sourceId: string,
-  selectedRole: ApiSourceRole,
-): SourceRoutingStage[] {
-  const enabledSources = sources.filter(
-    (source) => source.inPool && source.enabled,
-  );
-  const countForRole = (role: ApiSourceRole) =>
-    enabledSources.filter(
-      (source) =>
-        (source.id === sourceId ? selectedRole : apiSourceRole(source.priority)) ===
-        role,
-    ).length;
-  const enabledAccounts = accounts.filter(
-    (account) => account.inPool && account.enabled,
-  ).length;
-
-  return [
-    { role: "primary", count: countForRole("primary") },
-    { role: "accounts", count: enabledAccounts },
-    { role: "stabilizer", count: countForRole("stabilizer") },
-    { role: "reserve", count: countForRole("reserve") },
-  ];
-}
 
 export function subscriptionPlanGroups(
   accounts: AccountSummary[],
@@ -125,11 +70,23 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   // contains the saved presentation order), then append newly observed IDs.
   const summaries = new Map<string, ModelSummary>();
   const order: string[] = [];
+  const catalog = new Map(
+    Object.entries(runtime.gateway.modelCatalog ?? {}).map(([id, identity]) => [id.toLowerCase(), identity]),
+  );
   const add = (id: string, summary?: ModelSummary) => {
     const normalized = id.trim().toLowerCase();
-    if (!normalized || summaries.has(normalized)) return;
-    order.push(normalized);
-    summaries.set(normalized, summary ? normalizeModelSummary(summary) : fallbackModelSummary(id.trim()));
+    if (!normalized) return;
+    if (!summaries.has(normalized)) order.push(normalized);
+    const next = summary ? normalizeModelSummary(summary) : fallbackModelSummary(id.trim());
+    const identity = catalog.get(normalized);
+    // A source/account model can arrive before the derived gateway row. Keep
+    // its catalog provider so the pool view still groups it correctly.
+    if (identity && !next.catalogProvider) {
+      next.catalogProvider = identity.catalogProvider ?? null;
+      next.catalogFamily = identity.catalogFamily ?? null;
+    }
+    const existing = summaries.get(normalized);
+    summaries.set(normalized, existing ? mergeModelSummary(existing, next) : next);
   };
 
   for (const model of runtime.gateway.models ?? []) add(model.id, model);
@@ -161,31 +118,30 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
 /**
  * Return the complete model inventory that can be ordered for this pool.
  *
- * The rules page deliberately filters unavailable models from its visible
- * rows. Its save action still needs the complete pool inventory, otherwise a
- * group drag would look like it removed every unavailable model from the
- * saved order.
+ * The rules page edits this complete pool inventory. Runtime availability is
+ * shown by member/runtime surfaces and must not remove a model from the
+ * saved order merely because a route is temporarily unavailable.
  */
 export function currentPoolModelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
-  const currentIds = new Set<string>();
-  const add = (id: string) => {
-    const normalized = id.trim().toLowerCase();
-    if (normalized) currentIds.add(normalized);
+  const memberCounts = new Map<string, number>();
+  const addMember = (ids: string[]) => {
+    for (const id of new Set(ids.map((id) => id.trim().toLowerCase()).filter(Boolean))) {
+      memberCounts.set(id, (memberCounts.get(id) ?? 0) + 1);
+    }
   };
   for (const source of runtime.sources) {
     if (!source.inPool) continue;
-    for (const id of source.models) add(id);
     // Keep the complete ordering inventory consistent with modelSummaries:
     // a partially migrated source can carry an ID only on its route binding.
-    for (const binding of source.protocolBindings ?? []) {
-      for (const id of binding.modelIds) add(id);
-    }
+    addMember([...source.models, ...(source.protocolBindings ?? []).flatMap((binding) => binding.modelIds)]);
   }
   for (const account of runtime.accounts) {
     if (!account.inPool) continue;
-    for (const id of account.models) add(id);
+    addMember(account.models);
   }
-  return modelSummaries(runtime).filter((model) => currentIds.has(model.id.trim().toLowerCase()));
+  return modelSummaries(runtime)
+    .filter((model) => memberCounts.has(model.id.trim().toLowerCase()))
+    .map((model) => ({ ...model, memberCount: memberCounts.get(model.id.trim().toLowerCase())! }));
 }
 
 function normalizeModelSummary(model: ModelSummary): ModelSummary {
@@ -202,6 +158,92 @@ function normalizeModelSummary(model: ModelSummary): ModelSummary {
     speedTier: model.speedTier ?? "standard",
     speedConfigurable: model.speedConfigurable ?? false,
   };
+}
+
+function mergeModelSummary(existing: ModelSummary, incoming: ModelSummary): ModelSummary {
+  const merged = { ...existing };
+  const preferIncoming = <T>(current: T | null | undefined, next: T | null | undefined) =>
+    current == null || current === "" ? next : current;
+  const unionArray = <T>(current: readonly T[] | undefined, next: readonly T[] | undefined) =>
+    [...new Set([...(current ?? []), ...(next ?? [])])];
+  const unionReasoningLevels = (current: readonly string[] | undefined, next: readonly string[] | undefined) =>
+    unionArray(current, next).sort((left, right) => {
+      const rank = (value: string) => ({ none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6, ultra: 7 }[value.replace("-", "_").toLowerCase()] ?? 8);
+      return rank(left) - rank(right);
+    });
+  const unionImagePrices = (current: ModelSummary["imageRequestPrices"], next: ModelSummary["imageRequestPrices"]) => {
+    const prices = new Map<string, NonNullable<ModelSummary["imageRequestPrices"]>[number]>();
+    for (const price of [...(current ?? []), ...(next ?? [])]) {
+      const key = `${price.operation}:${price.quality}:${price.size}:${price.microUsd}`;
+      if (!prices.has(key)) prices.set(key, price);
+    }
+    return [...prices.values()];
+  };
+  const mergeProtocolRoutes = (
+    current: ModelSummary["protocolRoutes"],
+    next: ModelSummary["protocolRoutes"],
+  ): NonNullable<ModelSummary["protocolRoutes"]> => {
+    const routes = new Map<string, NonNullable<ModelSummary["protocolRoutes"]>[number]>();
+    for (const route of [...(current ?? []), ...(next ?? [])]) {
+      const key = `${route.clientWireApi}:${route.upstreamWireApi}`;
+      const previous = routes.get(key);
+      if (!previous) {
+        routes.set(key, {
+          ...route,
+          features: { ...route.features },
+          reasoningEfforts: [...route.reasoningEfforts],
+        });
+        continue;
+      }
+      routes.set(key, {
+        ...previous,
+        features: { ...previous.features, ...route.features },
+        reasoningEfforts: unionReasoningLevels(previous.reasoningEfforts, route.reasoningEfforts),
+      });
+    }
+    return [...routes.values()];
+  };
+
+  merged.memberCount = Math.max(existing.memberCount, incoming.memberCount);
+  merged.protocolRoutes = mergeProtocolRoutes(existing.protocolRoutes, incoming.protocolRoutes);
+  merged.codexDisplayName = existing.codexDisplayName === existing.id
+    ? incoming.codexDisplayName
+    : existing.codexDisplayName;
+  merged.catalogProvider = preferIncoming(existing.catalogProvider, incoming.catalogProvider) ?? null;
+  merged.catalogFamily = preferIncoming(existing.catalogFamily, incoming.catalogFamily) ?? null;
+  merged.catalogName = preferIncoming(existing.catalogName, incoming.catalogName) ?? null;
+  merged.catalogReleaseDate = preferIncoming(existing.catalogReleaseDate, incoming.catalogReleaseDate) ?? null;
+  merged.catalogLastUpdated = preferIncoming(existing.catalogLastUpdated, incoming.catalogLastUpdated) ?? null;
+  merged.catalogStatus = preferIncoming(existing.catalogStatus, incoming.catalogStatus) ?? null;
+  merged.catalogReasoning = preferIncoming(existing.catalogReasoning, incoming.catalogReasoning) ?? null;
+  merged.catalogReasoningMethod = preferIncoming(existing.catalogReasoningMethod, incoming.catalogReasoningMethod) ?? null;
+  merged.catalogReasoningEffortLevels = unionReasoningLevels(existing.catalogReasoningEffortLevels, incoming.catalogReasoningEffortLevels);
+  merged.catalogDefaultReasoningEffort = preferIncoming(existing.catalogDefaultReasoningEffort, incoming.catalogDefaultReasoningEffort) ?? null;
+  merged.catalogToolCall = preferIncoming(existing.catalogToolCall, incoming.catalogToolCall) ?? null;
+  merged.catalogStructuredOutput = preferIncoming(existing.catalogStructuredOutput, incoming.catalogStructuredOutput) ?? null;
+  merged.catalogAttachment = preferIncoming(existing.catalogAttachment, incoming.catalogAttachment) ?? null;
+  merged.catalogOpenWeights = preferIncoming(existing.catalogOpenWeights, incoming.catalogOpenWeights) ?? null;
+  merged.catalogInputModalities = unionArray(existing.catalogInputModalities, incoming.catalogInputModalities);
+  merged.catalogOutputModalities = unionArray(existing.catalogOutputModalities, incoming.catalogOutputModalities);
+  merged.catalogContextLimit = preferIncoming(existing.catalogContextLimit, incoming.catalogContextLimit) ?? null;
+  merged.catalogInputLimit = preferIncoming(existing.catalogInputLimit, incoming.catalogInputLimit) ?? null;
+  merged.catalogOutputLimit = preferIncoming(existing.catalogOutputLimit, incoming.catalogOutputLimit) ?? null;
+  merged.inputMicroUsdPerMillion = preferIncoming(existing.inputMicroUsdPerMillion, incoming.inputMicroUsdPerMillion) ?? null;
+  merged.cachedInputMicroUsdPerMillion = preferIncoming(existing.cachedInputMicroUsdPerMillion, incoming.cachedInputMicroUsdPerMillion) ?? null;
+  merged.cacheWrite5mMicroUsdPerMillion = preferIncoming(existing.cacheWrite5mMicroUsdPerMillion, incoming.cacheWrite5mMicroUsdPerMillion) ?? null;
+  merged.cacheWrite1hMicroUsdPerMillion = preferIncoming(existing.cacheWrite1hMicroUsdPerMillion, incoming.cacheWrite1hMicroUsdPerMillion) ?? null;
+  merged.outputMicroUsdPerMillion = preferIncoming(existing.outputMicroUsdPerMillion, incoming.outputMicroUsdPerMillion) ?? null;
+  merged.imageRequestPrices = unionImagePrices(existing.imageRequestPrices, incoming.imageRequestPrices);
+  merged.reasoningLevels = unionReasoningLevels(existing.reasoningLevels, incoming.reasoningLevels);
+  merged.reasoningSupportedLevels = unionReasoningLevels(existing.reasoningSupportedLevels, incoming.reasoningSupportedLevels);
+  merged.reasoningAllowedLevels = unionReasoningLevels(existing.reasoningAllowedLevels, incoming.reasoningAllowedLevels);
+  merged.reasoningConfigurable = (existing.reasoningConfigurable ?? false) || (incoming.reasoningConfigurable ?? false);
+  merged.reasoningManualFallback = (existing.reasoningManualFallback ?? false) || (incoming.reasoningManualFallback ?? false);
+  merged.speedSupported = (existing.speedSupported ?? false) || (incoming.speedSupported ?? false);
+  merged.speedTiers = unionArray(existing.speedTiers, incoming.speedTiers);
+  merged.speedTier = existing.speedTier ?? incoming.speedTier ?? "standard";
+  merged.speedConfigurable = (existing.speedConfigurable ?? false) || (incoming.speedConfigurable ?? false);
+  return merged;
 }
 
 function fallbackModelSummary(id: string): ModelSummary {
@@ -249,9 +291,8 @@ function fallbackModelSummary(id: string): ModelSummary {
 }
 
 /**
- * Model Rules is an operational surface: it must not offer a rule for a
- * model whose only pool routes are unavailable. Inventory remains intact in
- * Connections, where unavailable accounts and sources can still be repaired.
+ * Operational views may filter the inventory by live availability. Model Rules
+ * uses currentPoolModelSummaries instead, so configured models stay editable.
  */
 export function operationalModelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   return modelSummaries(runtime).filter((model) =>
@@ -437,14 +478,6 @@ export function toggle(values: string[], value: string) {
 
 export function clampRoutingCount(value: string) {
   return Math.min(8, Math.max(1, Math.trunc(Number(value)) || 1));
-}
-
-function compareSources(left: SourceSummary, right: SourceSummary) {
-  return (
-    right.priority - left.priority ||
-    compareStableText(left.name, right.name) ||
-    compareStableText(left.id, right.id)
-  );
 }
 
 export function compareStableText(left: string, right: string) {

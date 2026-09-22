@@ -1,11 +1,26 @@
-import { useState } from "react";
-import { CheckCheck, Plus, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { Check, CheckCheck, Layers, Plus, Search, Server, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { AccountPlanBadge, Button, Dialog, EmptyState } from "../../components/Ui";
-import { accountPlanOption, apiSourceRole, compareAccountPlans } from "../../routingOrder";
+import { AccountPlanBadge, Button, Dialog, EmptyState, OptionMenu } from "../../components/Ui";
+import { accountPlanOption, compareAccountPlans } from "../../routingOrder";
 import { compareStableText, toggle } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
+
+type MemberView = "all" | "accounts" | "sources" | "selected";
+
+function MemberOption({ name, detail, icon, badge, checked, disabled, onChange }: {
+  name: string; detail?: string; icon: ReactNode; badge?: ReactNode;
+  checked: boolean; disabled: boolean; onChange: () => void;
+}) {
+  return <label className="pool-picker-option" data-selected={checked}>
+    <span className="pool-picker-avatar" aria-hidden>{icon}</span>
+    <span className="pool-member-option-copy"><strong>{name}</strong>{detail ? <small>{detail}</small> : null}</span>
+    {badge}
+    <input type="checkbox" aria-label={name} checked={checked} disabled={disabled} onChange={onChange} />
+  </label>;
+}
 
 export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
   const { t } = useTranslation();
@@ -14,8 +29,11 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const [accountIds, setAccountIds] = useState<string[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<MemberView>("all");
   const [planFilter, setPlanFilter] = useState("all");
+  const listRef = useRef<HTMLDivElement>(null);
   const allAccounts = (runtime?.accounts ?? []).filter((account) => !account.inPool);
+  const allSources = (runtime?.sources ?? []).filter((source) => !source.inPool);
   const planOptions = new Map<string, { id: string; label: string; count: number }>();
   for (const account of allAccounts) {
     const option = accountPlanOption(account.subscription.planType, t("common.unknown"));
@@ -23,41 +41,78 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
     planOptions.set(option.id, { ...option, count: (current?.count ?? 0) + 1 });
   }
   const plans = [...planOptions.values()].sort(compareAccountPlans);
-  const activePlan = planFilter === "all" || planOptions.has(planFilter) ? planFilter : "all";
+  const activePlan = view !== "accounts" || !planOptions.has(planFilter) ? "all" : planFilter;
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matches = (...values: Array<string | null | undefined>) => !normalizedQuery || values.some((value) => value?.toLocaleLowerCase().includes(normalizedQuery));
   const accounts = allAccounts
+    .filter((account) => view !== "sources" && (view !== "selected" || accountIds.includes(account.id)))
     .filter((account) => activePlan === "all" || accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan)
-    .filter((account) => !normalizedQuery || [account.identityHint, account.label, account.subscription.planType].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)))
+    .filter((account) => matches(account.identityHint, account.label, account.subscription.planType))
     .sort((left, right) => compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareStableText(left.label, right.label));
-  const sources = (runtime?.sources ?? []).filter((source) => !source.inPool);
-  const selectedCount = accountIds.length + sourceIds.length;
-  const availableCount = allAccounts.length + sources.length;
-  const allSelected = availableCount > 0 && accountIds.length === allAccounts.length && sourceIds.length === sources.length;
-  const shownSelected = accounts.length > 0 && accounts.every((account) => accountIds.includes(account.id));
-  const toggleAll = () => {
-    setAccountIds(allSelected ? [] : allAccounts.map((account) => account.id));
-    setSourceIds(allSelected ? [] : sources.map((source) => source.id));
+  const sources = allSources
+    .filter((source) => view !== "accounts" && (view !== "selected" || sourceIds.includes(source.id)) && matches(source.name, source.baseUrl))
+    .sort((left, right) => compareStableText(left.name, right.name));
+  // Do not submit members that were removed or added elsewhere during a refresh.
+  const selectedAccounts = accountIds.filter((id) => allAccounts.some((account) => account.id === id));
+  const selectedSources = sourceIds.filter((id) => allSources.some((source) => source.id === id));
+  const selectedCount = selectedAccounts.length + selectedSources.length;
+  const availableCount = allAccounts.length + allSources.length;
+  const shownCount = accounts.length + sources.length;
+  const checkedCount = accounts.filter((account) => accountIds.includes(account.id)).length + sources.filter((source) => sourceIds.includes(source.id)).length;
+  const shownSelected = shownCount > 0 && checkedCount === shownCount;
+  const toggleShown = () => {
+    const update = (current: string[], visible: string[]) => shownSelected
+      ? current.filter((id) => !visible.includes(id))
+      : [...new Set([...current, ...visible])];
+    setAccountIds((current) => update(current, accounts.map((account) => account.id)));
+    setSourceIds((current) => update(current, sources.map((source) => source.id)));
   };
-  const toggleShown = () => setAccountIds(shownSelected
-    ? accountIds.filter((id) => !accounts.some((account) => account.id === id))
-    : [...new Set([...accountIds, ...accounts.map((account) => account.id)])]);
+  useEffect(() => { listRef.current?.scrollTo({ top: 0 }); }, [view, query, activePlan]);
   const add = async () => {
-    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds, sourceIds, inPool: true }), "feedback.saved");
+    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: selectedAccounts, sourceIds: selectedSources, inPool: true }), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog wide title={t("pool.addMembersTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "pool-add-members"} disabled={!selectedCount} onClick={add}>{t("pool.addSelected", { count: selectedCount })}</Button></>}>
-    <div className="relay-form pool-member-picker">
-      <div className="pool-member-picker-intro"><p className="form-note">{t("pool.addMembersHint")}</p><div className="inline-actions">{availableCount ? <Button variant="secondary" icon={allSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} onClick={toggleAll}>{allSelected ? t("accounts.clearSelection") : t("pool.selectAllMembers", { count: availableCount })}</Button> : null}<Button variant="secondary" icon={<Plus aria-hidden />} disabled={!canAddSource} title={!canAddSource ? t("remote.capabilityUnavailable") : undefined} onClick={onAddSource}>{t("sources.addToPool")}</Button></div></div>
-      {availableCount ? <>
-      {allAccounts.length ? <section>
-        <header><strong>{t("connections.accounts")}</strong><span>{t("pool.availableAccounts", { count: allAccounts.length })}</span></header>
-        <label className="relay-field"><span>{t("pool.searchAccounts")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchAccountsPlaceholder")} /></label>
-        {plans.length > 1 ? <div className="pool-member-plan-tools"><div className="account-plan-filters" role="group" aria-label={t("accounts.filterByPlan")}><span>{t("accounts.plan")}</span><button type="button" aria-pressed={activePlan === "all"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length })} onClick={() => setPlanFilter("all")}><span>{t("accounts.allPlans")}</span><small>{allAccounts.length}</small></button>{plans.map((plan) => <button key={plan.id} type="button" aria-pressed={activePlan === plan.id} aria-label={t("accounts.planFilterOption", { plan: plan.label, count: plan.count })} onClick={() => setPlanFilter(plan.id)}><span>{plan.label}</span><small>{plan.count}</small></button>)}</div><Button variant="secondary" icon={shownSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} disabled={!accounts.length} onClick={toggleShown}>{shownSelected ? t("pool.clearShown") : t("pool.selectShown", { count: accounts.length })}</Button></div> : null}
-        <div className="pool-member-options">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span className="pool-member-option-copy"><strong>{account.label}</strong></span><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></label>)}</div>
-        {!accounts.length ? <p className="form-note">{t("pool.noMatchingAccounts")}</p> : null}
-      </section> : null}
-      {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span className="pool-member-option-copy"><strong>{source.name}</strong><small>{source.baseUrl} · {t(`sources.roles.${apiSourceRole(source.priority)}`)}</small></span></label>)}</div></section> : null}
-      </> : <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} />}
+  const saving = busy === "pool-add-members";
+  const views: Array<{ id: MemberView; label: string; icon: ReactNode }> = [
+    { id: "all", label: t("pool.allConnections"), icon: <Layers aria-hidden /> },
+    { id: "accounts", label: t("connections.accounts"), icon: <UserRound aria-hidden /> },
+    { id: "sources", label: t("connections.sources"), icon: <Server aria-hidden /> },
+    { id: "selected", label: t("pool.selectedMembers"), icon: <CheckCheck aria-hidden /> },
+  ];
+  return <Dialog className="pool-add-dialog" title={t("pool.addMembersTitle")} onClose={onClose} footer={<>
+    <div className="pool-picker-summary" role="status"><span className="pool-picker-summary-icon" data-active={selectedCount > 0}><Check aria-hidden /></span><span>{selectedCount ? t("pool.selectionCount", { count: selectedCount }) : t("pool.chooseMembers")}</span></div>
+    <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+    <Button variant="primary" busy={saving} disabled={!selectedCount} aria-label={t("pool.addSelected", { count: selectedCount })} onClick={add}>{t("pool.confirmAdd")}</Button>
+  </>}>
+    <div className="pool-member-picker">
+      <aside className="pool-picker-sidebar">
+        <nav aria-label={t("pool.memberTypes")}>
+          {views.map((item) => <button key={item.id} type="button" aria-pressed={view === item.id} onClick={() => setView(item.id)}>{item.icon}<span>{item.label}</span>{item.id === "selected" && selectedCount ? <small>{selectedCount}</small> : null}</button>)}
+        </nav>
+        <Button className="pool-picker-new" variant="ghost" icon={<Plus aria-hidden />} aria-label={t("sources.addToPool")} disabled={!canAddSource || saving} title={!canAddSource ? t("remote.capabilityUnavailable") : undefined} onClick={onAddSource}>{t("pool.newSource")}</Button>
+      </aside>
+      <div className="pool-picker-content">
+        <div className="pool-picker-toolbar">
+          <label className="pool-picker-search"><Search aria-hidden /><input type="search" aria-label={t("pool.searchMembers")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchMembersPlaceholder")} /></label>
+          {view === "accounts" && plans.length > 1 ? <OptionMenu className="pool-picker-plan" label={t("accounts.filterByPlan")} value={activePlan} options={[
+            { value: "all", label: t("accounts.allPlans") },
+            ...plans.map((plan) => ({ value: plan.id, label: plan.label })),
+          ]} onChange={setPlanFilter} /> : null}
+        </div>
+        <div className="pool-picker-selection">
+          <label><input type="checkbox" ref={(node) => { if (node) node.indeterminate = checkedCount > 0 && !shownSelected; }} checked={shownSelected} disabled={!shownCount || saving} onChange={toggleShown} /><span>{t("pool.selectVisible")}</span></label>
+          {selectedCount ? <Button variant="ghost" disabled={saving} onClick={() => { setAccountIds([]); setSourceIds([]); }}>{t("accounts.clearSelection")}</Button> : null}
+        </div>
+        <div ref={listRef} className="pool-picker-list">
+          {accounts.length ? <section aria-label={t("connections.accounts")} className="pool-member-options">
+            {accounts.map((account) => <MemberOption key={account.id} name={account.label} icon={<UserRound />} badge={<AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} />} checked={accountIds.includes(account.id)} disabled={saving} onChange={() => setAccountIds((current) => toggle(current, account.id))} />)}
+          </section> : null}
+          {sources.length ? <section aria-label={t("connections.sources")} className="pool-member-options">
+            {sources.map((source) => <MemberOption key={source.id} name={source.name} detail={source.baseUrl} icon={<Server />} checked={sourceIds.includes(source.id)} disabled={saving} onChange={() => setSourceIds((current) => toggle(current, source.id))} />)}
+          </section> : null}
+          {!availableCount ? <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} /> : !shownCount ? <EmptyState title={t(view === "selected" && !selectedCount ? "pool.noSelectedMembers" : "pool.noMatchingMembers")} description={t(view === "selected" && !selectedCount ? "pool.noSelectedMembersHint" : "pool.noMatchingMembersHint")} /> : null}
+        </div>
+      </div>
     </div>
   </Dialog>;
 }

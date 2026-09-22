@@ -5,8 +5,7 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import { SourcePriceEditor } from "./SourcePriceEditor";
 import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./sourcePriceEditorModel";
-import { effectiveSourceProtocolBindings } from "../sourceProtocolBindings";
-import { Button, Dialog, OptionMenu, Tabs } from "./Ui";
+import { Button, Dialog, OptionMenu, Tabs, ToggleSwitch } from "./Ui";
 import { toggle, type PoolMember } from "../poolHelpers";
 import { groupModels, memberModelCatalog } from "../modelGroups";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -55,7 +54,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           ? relayCommands.updateAccount({ accountId: member.id, ...payload })
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
-      const protocolBindings = effectiveSourceProtocolBindings(member);
+      const protocolBindings = member.protocolBindings ?? [];
       const payload = { allowedModels, excludedModels, draining, priority: member.priority, weight: member.weight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
@@ -76,7 +75,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
             <ul>{group.items.map((model) => {
               const enabled = enabledModels.includes(model);
               return <li key={model} data-member-model-id={model} data-enabled={String(enabled)}>
-                <label><code>{model}</code><input className="member-model-switch" type="checkbox" role="switch" aria-label={t("pool.allowMemberModel", { model })} checked={enabled} onChange={() => toggleEnabledModel(model)} /></label>
+                <label><code>{model}</code><ToggleSwitch className="member-model-switch" role="switch" label={t("pool.allowMemberModel", { model })} checked={enabled} onChange={() => toggleEnabledModel(model)} /></label>
               </li>;
             })}</ul>
           </details>) : <p className="form-note">{t(modelIds.length ? "common.noResults" : "models.emptyDescription")}</p>}
@@ -84,7 +83,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
         {tab === "prices" && member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} presentation="member" /> : null}
         {tab === "settings" ? <div className="member-editor-settings">
           {member.kind === "source" ? <div className="member-editor-setting" data-member-setting="recovery"><span className="member-setting-label"><RotateCcw aria-hidden /><span>{t("sources.recoveryDelay")}</span></span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /></div> : <>
-            <label className="member-editor-setting" data-member-setting="drain"><span className="member-setting-label"><Pause aria-hidden /><span>{t("accounts.drain")}</span></span><input className="member-model-switch" type="checkbox" role="switch" checked={draining} onChange={(event) => setDraining(event.target.checked)} /></label>
+            <label className="member-editor-setting" data-member-setting="drain"><span className="member-setting-label"><Pause aria-hidden /><span>{t("accounts.drain")}</span></span><ToggleSwitch className="member-model-switch" role="switch" label={t("accounts.drain")} checked={draining} onChange={setDraining} /></label>
             <label className="member-editor-setting" data-member-setting="cost"><span className="member-setting-label"><CircleDollarSign aria-hidden /><span>{t("accounts.accountValue.purchaseCost")}</span></span><input type="number" min="0" max="1000000" step="0.01" aria-invalid={!purchaseCostValid || undefined} value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} placeholder={t("pool.purchaseCostNotSet")} /></label>
           </>}
         </div> : null}

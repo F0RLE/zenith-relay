@@ -1,5 +1,4 @@
 import type { PoolMember } from "../poolHelpers";
-import { apiSourcePriority, type ApiSourceRole } from "../routingOrder";
 import { uniqueModelIds } from "../modelGroups";
 import { sourcePriceModels } from "./sourcePriceEditorModel";
 
@@ -32,26 +31,4 @@ export function modelSelectionPayload(modelIds: readonly string[], enabledModels
     allowedModels: allEnabled ? [] : modelIds.filter((model) => enabled.has(model.toLocaleLowerCase())),
     excludedModels: allEnabled ? [] : modelIds.filter((model) => !enabled.has(model.toLocaleLowerCase())),
   };
-}
-
-export function moveSourceOrder(order: readonly string[], sourceId: string, targetId: string, after = false) {
-  if (sourceId === targetId) return [...order];
-  const next = order.filter((id) => id !== sourceId);
-  const targetIndex = next.indexOf(targetId);
-  if (targetIndex < 0) return [...order];
-  next.splice(targetIndex + (after ? 1 : 0), 0, sourceId);
-  return next;
-}
-
-export function moveSourceBy(order: readonly string[], sourceId: string, offset: number) {
-  const index = order.indexOf(sourceId);
-  const target = order[index + offset];
-  return target ? moveSourceOrder(order, sourceId, target, offset > 0) : [...order];
-}
-
-export function sourcePrioritiesForOrder(order: readonly string[], role: ApiSourceRole) {
-  return Object.fromEntries(order.map((sourceId, index) => [
-    sourceId,
-    apiSourcePriority(role, index, order.length),
-  ]));
 }

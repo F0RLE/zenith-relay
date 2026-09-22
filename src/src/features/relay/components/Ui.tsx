@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { InputHTMLAttributes, ReactNode } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
@@ -8,14 +8,13 @@ import { useTranslation } from "react-i18next";
 import type { QuotaSnapshot, QuotaWindow } from "../api/types";
 import { accountErrorTranslationKey } from "../accountStatus";
 import { formatDetailedRemainingTime, formatSupplementalQuotaLabel, isFastSupplementalQuota, quotaWindowLabel } from "../quotaFormatting";
-import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
+import { accountPlanOption, compareAccountPlans, formatAccountPlan } from "../routingOrder";
 import type { FeedbackError } from "../state/feedback";
 import { useTransientFlag } from "../hooks/useTransientFlag";
 
 export { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../quotaFormatting";
 
-export { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan };
-export type { ApiSourceRole };
+export { accountPlanOption, compareAccountPlans, formatAccountPlan };
 // Compatibility exports keep existing feature and test imports stable while
 // the status policy itself lives in its domain module.
 export {
@@ -234,15 +233,17 @@ export function useTooltip<T extends HTMLElement>(label: string) {
   };
 }
 
-export function IconButton({ label, icon, className = "", title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode }) {
+export function IconButton({ label, icon, busy = false, className = "", title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode; busy?: boolean }) {
   const tooltip = useTooltip<HTMLElement>(title ?? label);
-  const disabled = Boolean(props.disabled);
+  const disabled = Boolean(busy || props.disabled);
   const button = <button
     ref={disabled ? undefined : (node) => { tooltip.anchorRef.current = node; }}
     type={props.type ?? "button"}
     className={`relay-icon-button ${className}`.trim()}
     aria-label={label}
     {...props}
+    disabled={disabled}
+    aria-busy={busy || props["aria-busy"]}
     aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
     onMouseEnter={disabled ? undefined : (event) => { tooltip.show(); onMouseEnter?.(event); }}
     onMouseLeave={disabled ? undefined : (event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
@@ -250,7 +251,7 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
     onBlur={disabled ? undefined : (event) => { tooltip.hide(); onBlur?.(event); }}
     onPointerDown={disabled ? undefined : (event) => { tooltip.pointerStart(); onPointerDown?.(event); }}
   >
-    {icon}
+    {busy ? <Loader2 className="spin" aria-hidden /> : icon}
   </button>;
   return <>
     {disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" tabIndex={0} aria-describedby={tooltip.describedBy} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover}>{button}</span> : button}
@@ -270,7 +271,32 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
   const { t } = useTranslation();
   const resolvedLabel = label ?? t("common.actions");
   const tooltip = useTooltip<HTMLElement>(resolvedLabel);
-  return <details className={`relay-action-menu ${className}`.trim()}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div role="menu">{children}</div></details>;
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const anchor = menuRef.current?.getBoundingClientRect();
+      const panel = panelRef.current;
+      if (!anchor || !panel || !menuRef.current?.open) return;
+      panel.style.maxHeight = `${Math.max(0, innerHeight - 50)}px`;
+      const { width, height } = panel.getBoundingClientRect();
+      const below = anchor.bottom + 4;
+      const top = below + height <= innerHeight - 8 ? below : anchor.top - height - 4;
+      panel.style.top = `${Math.max(42, Math.min(top, innerHeight - height - 8)) - anchor.top}px`;
+      panel.style.left = `${Math.max(8, Math.min(anchor.right - width, innerWidth - width - 8)) - anchor.left}px`;
+      panel.style.right = "auto";
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, children]);
+  return <details ref={menuRef} className={`relay-action-menu ${className}`.trim()} onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div ref={panelRef} role="menu">{children}</div></details>;
 }
 
 export function ActionMenuItem({ children, icon, danger = false, className = "", title, onClick, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
@@ -578,6 +604,14 @@ export function EmptyState({ title, description, action }: { title: string; desc
   return <div className="relay-empty"><CircleHelp aria-hidden /><strong>{title}</strong><p>{description}</p>{action}</div>;
 }
 
+export function ToggleSwitch({ label, checked, onChange, className = "", ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "checked" | "defaultChecked" | "onChange"> & {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return <input {...props} className={`relay-switch${className ? ` ${className}` : ""}`} type="checkbox" checked={checked} aria-label={label} data-relay-tooltip={label} onChange={(event) => onChange(event.target.checked)} />;
+}
+
 export function SettingToggle({ label, description, checked, disabled = false, onChange, className = "", tone = "default" }: {
   label: string;
   description: string;
@@ -589,7 +623,7 @@ export function SettingToggle({ label, description, checked, disabled = false, o
 }) {
   return <label className={`setting-toggle ${tone}${className ? ` ${className}` : ""}`}>
     <span><strong>{label}</strong><small>{description}</small></span>
-    <input type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={(event) => onChange(event.target.checked)} />
+    <ToggleSwitch label={label} checked={checked} disabled={disabled} onChange={onChange} />
   </label>;
 }
 
@@ -665,8 +699,13 @@ export async function copyText(value: string) {
   await navigator.clipboard.writeText(value);
 }
 
-export function CopyButton({ value, label }: { value: string; label: string }) {
+export function CopyButton({ value, label, children }: { value: string; label: string; children?: ReactNode }) {
   const { t } = useTranslation();
   const [copied, showCopied] = useTransientFlag(1_500);
-  return <IconButton label={copied ? `${label}: ${t("feedback.copied")}` : label} icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />} onClick={async () => { await copyText(value); showCopied(); }} />;
+  const accessibleLabel = copied ? `${label}: ${t("feedback.copied")}` : label;
+  const icon = copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />;
+  const onClick = async () => { await copyText(value); showCopied(); };
+  return children !== undefined
+    ? <Button aria-label={accessibleLabel} icon={icon} onClick={onClick}>{children}</Button>
+    : <IconButton label={accessibleLabel} icon={icon} onClick={onClick} />;
 }

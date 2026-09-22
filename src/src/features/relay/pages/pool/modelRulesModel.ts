@@ -64,7 +64,7 @@ export function reorderModelGroups(groups: readonly ModelRuleGroup[], sourceId: 
   return blocks.flat();
 }
 
-/** Keep models omitted from the operational view in the persisted order. */
+/** Keep every current pool model in the persisted order. */
 export function completeModelDisplayOrder(
   reordered: readonly ModelSummary[],
   catalog: readonly ModelSummary[],

@@ -1,12 +1,12 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, Server, SkipForward, Upload, UserRoundCheck, X } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, Clock3, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, MessageSquare, Server, SkipForward, Terminal, Upload, UserRoundCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { setI18nLanguage } from "../../../i18n";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
 import { sourceSupportsNativeResponses } from "../sourceProtocolBindings";
-import { Button, IconButton, OptionMenu, SecretField } from "../components/Ui";
+import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { secondsUntil, useRelativeTimeClock } from "../hooks/useRelativeTimeClock";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -184,9 +184,8 @@ export function QuickSetupWizard() {
 
   if (intro) {
     return <main className="setup-shell setup-shell-intro">
-      <div className="setup-language-floating"><LanguageSelect /></div>
+      <SetupHeader />
       <section className="product-intro">
-        <div className="intro-mark"><img src="/icons/zenith-sword.png" alt="" /></div>
         <div className="intro-copy"><h1>Zenith Relay</h1><p>{t("onboarding.intro")}</p></div>
         <div className="intro-actions"><Button variant="primary" onClick={() => setIntro(false)}>{t("onboarding.start")}</Button><Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skip")}</Button></div>
       </section>
@@ -249,15 +248,22 @@ export function QuickSetupWizard() {
   };
 
   return <main className="setup-shell">
-    <div className="setup-language-floating"><LanguageSelect /></div>
-    <ol className="setup-progress" aria-label={t("onboarding.progress")}>{[1, 2, 3, 4].map((value) => <li key={value} className={value <= step ? "active" : ""}><span>{value < step ? <Check aria-hidden /> : value}</span>{t(`onboarding.steps.${value}`)}</li>)}</ol>
+    <SetupHeader />
+    <div className="setup-workspace">
+    <ol className="setup-progress" aria-label={t("onboarding.progress")}>{[1, 2, 3, 4].map((value) => <li key={value} className={value < step ? "complete" : value === step ? "active" : ""} aria-current={value === step ? "step" : undefined}><span>{value < step ? <Check aria-hidden /> : value}</span><div><strong>{t(`onboarding.steps.${value}`)}</strong><small>{t(`onboarding.stepHints.${value}`)}</small></div></li>)}</ol>
+    <div className="setup-content">
     <section className="setup-body">
-      {step === 1 ? <div className="setup-step setup-mode-step"><div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div><div className="mode-options">{(["local", "zenith", "remote"] as RelayMode[]).map((value) => { const Icon = value === "local" ? Laptop : value === "remote" ? Server : Cloud; return <button key={value} type="button" className={mode === value ? "selected" : ""} onClick={() => selectMode(value)}><Icon aria-hidden /><span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span><i>{mode === value ? <Check aria-hidden /> : null}</i></button>; })}</div></div> : null}
+      {step === 1 ? <div className="setup-step setup-mode-step"><div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div><div className="mode-options" role="group" aria-label={t("onboarding.steps.1")}>{(["local", "zenith", "remote"] as RelayMode[]).map((value) => { const Icon = value === "local" ? Laptop : value === "remote" ? Server : Cloud; return <button key={value} type="button" aria-pressed={mode === value} className={mode === value ? "selected" : ""} onClick={() => selectMode(value)}><Icon aria-hidden /><span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span><i>{mode === value ? <Check aria-hidden /> : null}</i></button>; })}</div></div> : null}
       {step === 2 ? <div className="setup-step"><ConnectionStep mode={mode} provider={provider} onProviderChange={(value) => { setProvider(value); setConnectionReady(false); }} serverUrl={serverUrl} setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }} serverToken={serverToken} setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }} currentProfileAvailable={currentProfileAvailable} currentProfileImport={currentProfileImport} currentProfileCountdown={currentProfileCountdown} onConnected={() => setConnectionReady(true)} onOAuthPendingChange={setOauthPending} onImport={openFileImport} onImportCurrent={() => void openCurrentProfileImport()} onRetryCurrent={retryCurrentProfileImport} onUseAnotherConnection={resetCurrentProfileImport} />{mode === "remote" && insecureRemote ? <label className="check-line"><input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} /><span>{t("onboarding.allowInsecureRemote")}</span></label> : null}</div> : null}
-      {step === 3 ? <div className="setup-step"><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options">{["codex", "opencode", "later"].map((value) => <button type="button" key={value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><span>{t(`clients.${value}`)}</span><i>{client === value ? <Check aria-hidden /> : null}</i></button>)}</div></div> : null}
-      {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p></div> : null}
+      {step === 3 ? <div className="setup-step"><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options" role="group" aria-label={t("onboarding.steps.3")}>{["codex", "opencode", "later"].map((value) => {
+        const Icon = value === "codex" ? MessageSquare : value === "opencode" ? Terminal : Clock3;
+        return <button type="button" key={value} aria-label={t(`clients.${value}`)} aria-describedby={`setup-client-${value}-hint`} aria-pressed={client === value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><Icon aria-hidden /><span><strong>{t(`clients.${value}`)}</strong><small id={`setup-client-${value}-hint`}>{t(`onboarding.clientDescriptions.${value}`)}</small></span><i>{client === value ? <Check aria-hidden /> : null}</i></button>;
+      })}</div></div> : null}
+      {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint")}</p><dl className="setup-ready-summary"><div><dt>{t("onboarding.steps.1")}</dt><dd>{t(`modes.${mode}`)}</dd></div><div><dt>{t("onboarding.steps.3")}</dt><dd>{t(`clients.${client}`)}</dd></div></dl></div> : null}
     </section>
-    <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 4 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>
+    <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 3 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>
+    </div>
+    </div>
     {showImport ? <Suspense fallback={null}><ImportDialog {...(importSession ? { initialSession: importSession } : {})} modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={closeImport} /></Suspense> : null}
   </main>;
 }
@@ -297,9 +303,9 @@ function ConnectionStep({ mode, provider, onProviderChange, serverUrl, setServer
       {flowFailed ? <p role="alert" className="form-note error-text">{t(`accounts.oauthStatus.${flow.status}`)}</p> : null}
       <div className="setup-oauth-pending-actions">
         <a className="setup-oauth-reopen" href={flow.authorizationUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden /><span>{t("accounts.openSignIn")}</span></a>
-        <IconButton label={t("common.cancel")} icon={<X aria-hidden />} disabled={busy === "oauth-cancel"} onClick={() => void oauth.cancel()} />
+        <Button variant="ghost" disabled={busy === "oauth-cancel"} onClick={() => void oauth.cancel()}>{t("common.cancel")}</Button>
       </div>
-    </section> : <div className={`setup-connect-options${currentProfileAvailable ? " has-current-profile" : ""}`}>
+    </section> : <div className="setup-connect-options">
       {currentProfileAvailable ? <button type="button" disabled={importingCurrent} onClick={onImportCurrent}><UserRoundCheck aria-hidden /><span><strong>{t("onboarding.importCurrentProfile")}</strong><small>{t("onboarding.importCurrentProfileDescription")}</small></span></button> : null}
       <button type="button" disabled={busy === "oauth-start" || importingCurrent} onClick={() => void oauth.start()}><LogIn aria-hidden /><span><strong>{t("accounts.signIn")}</strong><small>{t("onboarding.signInDescription")}</small></span></button>
       <button type="button" disabled={importingCurrent} onClick={onImport}><Upload aria-hidden /><span><strong>{t("accounts.import")}</strong><small>{t("onboarding.importDescription")}</small></span></button>
@@ -321,6 +327,11 @@ function CurrentProfileImportStatus({ state, countdown, onRetry, onUseAnotherCon
     </div>
     {failed ? <div className="setup-current-profile-actions"><Button variant="secondary" onClick={onRetry}>{t("common.retry")}</Button><Button variant="ghost" onClick={onUseAnotherConnection}>{t("onboarding.chooseAnotherConnection")}</Button></div> : null}
   </section>;
+}
+
+function SetupHeader() {
+  const { t } = useTranslation();
+  return <header className="setup-header"><strong>{t("onboarding.setupTitle")}</strong><LanguageSelect /></header>;
 }
 
 function LanguageSelect() {

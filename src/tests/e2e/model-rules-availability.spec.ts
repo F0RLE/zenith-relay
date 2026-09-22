@@ -1,7 +1,7 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-test("Model Rules hides a model while its only active pool route is cooling down", async ({ page }) => {
+test("Model Rules preserves editable inventory while its only pool route is cooling down", async ({ page }) => {
   await installTauriMock(page, {
     locale: "en",
     mode: "local",
@@ -19,9 +19,13 @@ test("Model Rules hides a model while its only active pool route is cooling down
   await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
 
   await expect(page.locator(".model-discovery-alert")).toHaveCount(0);
-  await expect(page.locator('[data-model-id="gpt-5.4"]')).toHaveCount(0);
+  const coolingModel = page.locator('[data-model-id="gpt-5.4"]');
+  await expect(coolingModel).toBeVisible();
+  await expect(coolingModel.getByRole("checkbox")).toBeChecked();
+  await coolingModel.getByRole("checkbox").click();
+  await expect(coolingModel.getByRole("checkbox")).not.toBeChecked();
   await expect(page.locator('[data-model-id="gpt-5.4-mini"]')).toBeVisible();
-  await page.screenshot({ path: "output/playwright/model-rules-active-route-en-light-1160x760.png" });
+  await page.screenshot({ path: "output/playwright/model-rules-cooldown-inventory-en-light-1160x760.png" });
 });
 
 test("Model Rules shows the discovered catalog for a legacy API binding", async ({ page }) => {

@@ -1,5 +1,5 @@
 import type { Page } from "../bun-playwright";
-import type { ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput } from "../../src/features/relay/api/types";
+import type { ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
   locale?: "en" | "ru";
@@ -7,10 +7,12 @@ export type MockOptions = {
   mode?: "local" | "remote" | "zenith";
   theme?: "system" | "light" | "dark";
   populated?: boolean;
+  automation?: Partial<WakeTask>;
   profileSnapshots?: boolean;
   readyConnected?: boolean;
   readyActive?: boolean;
   sourceCount?: number;
+  sourceEnabled?: boolean;
   sourceStats?: SourceStats[];
   sourceStatsDelayMs?: number[];
   sourceStatsById?: Record<string, SourceStats>;
@@ -63,10 +65,14 @@ export type MockOptions = {
   chatgptRetryUntilAvailable?: boolean;
   poolMembers?: boolean;
   proxyCount?: number;
+  accountProxyRequired?: boolean;
+  proxyCheckError?: string;
+  proxyCheckDelayMs?: number;
   importResult?: "success" | "item_failure" | "not_found";
   importFailureCode?: string;
   importPreviewError?: boolean;
   importPreviewDelayMs?: number;
+  importPreviewDeferred?: boolean;
   importConfirmDelayMs?: number;
   sourceUpdateDelayMs?: number;
   importDescription?: string;
@@ -88,6 +94,9 @@ export type MockOptions = {
   distinctAccountIdentityHints?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
+  modelMetadata?: Record<string, Pick<ModelSummary, "catalogProvider" | "catalogFamily" | "catalogName">>;
+  modelOrderError?: boolean;
+  modelOrderDelayMs?: number;
   modelSpeed?: Record<string, "standard" | "fast" | "ultrafast">;
   sourceDetectedModelPrices?: Record<string, {
     inputMicroUsdPerMillion: number;
@@ -99,6 +108,7 @@ export type MockOptions = {
   sourceErrorCode?: string;
   sourceRefreshError?: boolean;
   sourceCreateError?: string;
+  sourceFollowupError?: "state" | "membership";
   catalogRefreshWarning?: "failed" | "deferred";
   modelReasoning?: Record<string, string[]>;
   modelProtocolRoutes?: Record<string, ModelSummary["protocolRoutes"]>;
@@ -119,6 +129,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const populated = input.populated ?? true;
     const usagePresent = populated && input.usagePresent !== false;
     let sourceStatsIndex = 0;
+    let sourceFollowupPending = false;
     const distinctAccountIdentityHints = input.distinctAccountIdentityHints ?? false;
     const dayMs = 24 * 60 * 60_000;
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
@@ -156,23 +167,40 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const sourceModels = input.serverModelOrder ?? (input.mixedModels
       ? ["gpt-5.4", "claude-opus-4-8", "gemini-3.1-pro-preview", "grok-4.5", "glm-5.2", "private-model"]
       : ["gpt-5.4", "gpt-5.4-mini"]);
+    const automaticBindings = (models: string[], upstream: "responses" | "chat_completions" | "messages" | "gemini") =>
+      (["responses", "chat_completions", "messages", "gemini"] as const).map((client) => ({
+        wireApi: client,
+        adapter: client === upstream ? "native" : `${client}_to_${upstream}`,
+        reasoningMode: client === upstream ? "disabled" : "adaptive",
+        modelIds: [...models],
+      })) as SourceProtocolBinding[];
+    const configuredSourceBindings = input.sourceProtocolBindings ?? [{
+      wireApi: "responses" as const,
+      adapter: "native" as const,
+      reasoningMode: "disabled" as const,
+      modelIds: [...sourceModels],
+    }];
+    const configuredRoutes = sourceModels.flatMap((model) => {
+      const binding = configuredSourceBindings.find((entry) => entry.modelIds.includes(model))
+        ?? configuredSourceBindings[0];
+      const upstream = !binding || (binding.adapter ?? "native") === "native"
+        ? binding?.wireApi ?? "responses"
+        : (["responses", "chat_completions", "messages", "gemini"] as const).find((protocol) =>
+          binding.adapter?.endsWith(`_to_${protocol}`)) ?? "responses";
+      return automaticBindings([model], upstream);
+    });
     const source = {
       id: "source_synthetic",
       name: "Example compatible API",
-      enabled: true,
+      enabled: input.sourceEnabled ?? true,
       inPool: input.poolMembers ?? true,
       draining: false,
       operationalStatus: "rotation" as MockOperationalStatus,
       baseUrl: "https://api.zenithmarket.dev/v1",
       wireApi: "responses" as const,
-      protocolConfig: input.sourceProtocolConfig ?? { mode: "manual", revision: 0, capabilities: [] } as SourceProtocolConfig,
-      resolvedProtocolBindings: input.sourceProtocolConfig?.mode === "auto" ? [] : undefined as SourceProtocolBinding[] | undefined,
-      protocolBindings: input.sourceProtocolBindings ?? [{
-        wireApi: "responses" as const,
-        adapter: "native" as const,
-        reasoningMode: "disabled" as const,
-        modelIds: [...sourceModels],
-      }],
+      protocolConfig: input.sourceProtocolConfig ?? { revision: 0, capabilities: [] } as SourceProtocolConfig,
+      resolvedProtocolBindings: configuredRoutes,
+      protocolBindings: configuredSourceBindings,
       models: sourceModels,
       allowedModels: [] as string[],
       excludedModels: [] as string[],
@@ -302,6 +330,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       "gemini-3.6-flash-low": { catalogProvider: "google", catalogFamily: "gemini-flash", catalogName: "Gemini 3.6 Flash Low" },
       "grok-4.5": { catalogProvider: "xai", catalogFamily: "grok", catalogName: "Grok 4.5" },
       "glm-5.2": { catalogProvider: "zai", catalogFamily: "glm", catalogName: "GLM 5.2" },
+      ...input.modelMetadata,
     };
     const automation = {
       id: "wake_synthetic",
@@ -316,6 +345,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       maxAttemptsPerCycle: 1,
       createdAtMs: Date.now() - 86_400_000,
       updatedAtMs: Date.now() - 60_000,
+      ...input.automation,
     };
     const localRuntime = {
       schemaVersion: 14,
@@ -364,6 +394,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }));
     localRuntime.gateway.poolRouting.members = orderedMembers.filter((item) => populated && item.inPool).map((item) => ({ kind: "baseUrl" in item ? "source" : "account", id: item.id, weight: item.weight, maxConcurrency: 0 }));
     refreshGatewayModels(localRuntime);
+    const defaultModelOrder = localRuntime.gateway.models.map((model) => model.id);
+    async function prepareModelOrder() {
+      if (input.modelOrderDelayMs) await new Promise((resolve) => setTimeout(resolve, input.modelOrderDelayMs));
+      if (input.modelOrderError) throw { code: "io", message: "Could not save model order" };
+    }
+    localRuntime.gateway.accountProxyRequired = input.accountProxyRequired ?? false;
     const remoteRuntime = structuredClone(localRuntime);
     let localGatewayApiKey = "zlr_synthetic_local_gateway_key";
     let remoteGatewayApiKey = "zrs_synthetic_remote_gateway_key";
@@ -373,6 +409,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.platform = "linux";
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
     remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] };
+    if (!input.remoteFeatures) remoteRuntime.capabilities.features.push("model_order_reset");
     const configurationPreset = {
       format: "zenith-relay-configuration",
       schemaVersion: 2,
@@ -441,8 +478,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         baseUrl: String(payload.baseUrl ?? source.baseUrl),
         wireApi,
         protocolBindings,
-        protocolConfig: { mode: payload.protocolMode === "auto" ? "auto" : "manual", revision: 0, capabilities: [] },
-        resolvedProtocolBindings: payload.protocolMode === "auto" ? [] : undefined,
+        protocolConfig: { revision: 0, capabilities: [] },
+        resolvedProtocolBindings: automaticBindings(models, wireApi),
         models,
         allowedModels: payload.allowedModels as string[] ?? [],
         excludedModels: payload.excludedModels as string[] ?? [],
@@ -534,7 +571,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "deactivate_ready_api_profile": readyActive = false; return "chat";
           case "reset_key": readyKey = ""; readyActive = false; return "reset";
           case "prepare_top_up_amount": return { amountCents: 1000, amountUsd: 10, valid: true };
-          case "get_local_runtime_state": return structuredClone(localRuntime);
+          case "get_local_runtime_state":
+            if (sourceFollowupPending && input.sourceFollowupError === "state") {
+              sourceFollowupPending = false;
+              throw { code: "invalid_state", message: "Synthetic snapshot read failed after source creation" };
+            }
+            return structuredClone(localRuntime);
           case "get_local_runtime_order": return structuredClone(localRuntime.gateway.routingOrder);
           case "export_local_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
           case "preview_local_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
@@ -567,6 +609,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             if (input.sourceCreateError) throw { code: input.sourceCreateError, message: "Synthetic upstream model discovery failed" };
             const created = sourceFromPayload(args.input as Record<string, unknown>, `source_created_${localRuntime.sources.length + 1}`);
             localRuntime.sources = [...localRuntime.sources, created];
+            sourceFollowupPending = true;
             return structuredClone(created);
           }
           case "update_local_source": {
@@ -574,10 +617,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             if (input.sourceUpdateDelayMs) await new Promise((resolve) => setTimeout(resolve, input.sourceUpdateDelayMs));
             const target = localRuntime.sources.find((item) => item.id === request.sourceId);
             if (target) Object.assign(target, request);
-            if (target && request.protocolMode) {
-              target.protocolConfig.mode = request.protocolMode as "auto" | "manual";
-              if (request.protocolMode === "manual") target.resolvedProtocolBindings = undefined;
-            }
             for (const [sourceId, priority] of Object.entries(request.sourcePriorities ?? {})) {
               const source = localRuntime.sources.find((item) => item.id === sourceId);
               if (source) source.priority = priority;
@@ -600,9 +639,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             if (!target || target.protocolConfig.revision !== request.expectedRevision) throw { code: "source_probe_stale", message: "Configuration changed" };
             const capability = { modelId: request.modelId, upstreamWireApi: request.wireApi, status: "confirmed" as const, origin: "generation_probe" as const, checkedAtMs: Date.now(), features: { text: "confirmed" as const }, reasoningEfforts: [] };
             target.protocolConfig.capabilities.push(capability);
-            if (target.protocolConfig.mode === "auto") {
-              target.resolvedProtocolBindings = (["responses", "chat_completions", "messages", "gemini"] as const).map((client) => ({ wireApi: client, adapter: client === request.wireApi ? "native" : `${client}_to_${request.wireApi}`, reasoningMode: client === request.wireApi ? "disabled" : "adaptive", modelIds: [request.modelId] })) as SourceProtocolBinding[];
-            }
             return { capability, revision: request.expectedRevision, httpStatus: 200, errorCode: null };
           }
           case "refresh_local_source_data":
@@ -630,6 +666,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             if (input.importPreviewDelayMs) await new Promise((resolve) => setTimeout(resolve, input.importPreviewDelayMs));
             return importSession("current_codex_profile");
           case "preview_local_account_import_files":
+            if (input.importPreviewDeferred) await new Promise<void>((resolve) => {
+              window.addEventListener("relay-test-finish-import-preview", () => resolve(), { once: true });
+            });
             if (input.importPreviewDelayMs) await new Promise((resolve) => setTimeout(resolve, input.importPreviewDelayMs));
             return importSession("11111111-2222-4333-8444-555555555555");
           case "preview_remote_account_import_files":
@@ -678,6 +717,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "set_local_pool_membership": {
+            if (sourceFollowupPending && input.sourceFollowupError === "membership") {
+              sourceFollowupPending = false;
+              throw { code: "conflict", message: "Synthetic membership conflict after source creation" };
+            }
             const request = args.input as { accountIds: string[]; sourceIds: string[]; inPool: boolean };
             for (const item of localRuntime.accounts) if (request.accountIds.includes(item.id)) item.inPool = request.inPool;
             for (const item of localRuntime.sources) if (request.sourceIds.includes(item.id)) item.inPool = request.inPool;
@@ -723,7 +766,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "set_local_model_display_order": {
             const request = args.input as { modelIds: string[] };
-            const positions = new Map(request.modelIds.map((id, index) => [id.toLowerCase(), index]));
+            await prepareModelOrder();
+            const ids = request.modelIds.length ? request.modelIds : defaultModelOrder;
+            const positions = new Map(ids.map((id, index) => [id.toLowerCase(), index]));
             localRuntime.gateway.models.sort((left, right) =>
               (positions.get(left.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
               - (positions.get(right.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER));
@@ -794,10 +839,16 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "get_local_proxy_pool": return proxyPool();
+          case "check_local_stored_proxy": {
+            if (input.proxyCheckDelayMs) await new Promise((resolve) => setTimeout(resolve, input.proxyCheckDelayMs));
+            const errorCode = input.proxyCheckError ?? null;
+            return { proxyId: args.proxyId, checkedAtMs: Date.now(), elapsedMs: 184, ip: errorCode ? null : "203.0.113.42", countryCode: errorCode ? null : "NL", errorCode };
+          }
           case "import_local_proxy_pool": {
             const values = (args.input as { proxyUrls?: string[] })?.proxyUrls ?? [];
             let added = 0;
             let duplicates = 0;
+            const addedProxyIds: string[] = [];
             for (const value of values) {
               const match = value.match(/^(?:https?:\/\/)?([^:@]+):(\d+)/);
               const endpoint = match ? `http://${match[1]}:${match[2]}` : `http://imported-${proxyEntries.length + 1}.example.test:8080`;
@@ -807,9 +858,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               }
               const countryCode = value.match(/__cr[.-]([a-z]{2})/i)?.[1]?.toUpperCase() ?? null;
               proxyEntries.push({ id: `proxy_synthetic_${proxyEntries.length + 1}`, endpoint, assignedAccountIds: [], countryCode, region: null, createdAtMs: Date.now() });
+              addedProxyIds.push(proxyEntries[proxyEntries.length - 1]!.id);
               added += 1;
             }
-            return { added, duplicates, pool: proxyPool() };
+            return { added, duplicates, addedProxyIds, pool: proxyPool() };
           }
           case "delete_local_stored_proxy": {
             proxyEntries = proxyEntries.filter((entry) => entry.id !== String(args.proxyId));
@@ -1111,11 +1163,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const currentModels = new Map(runtime.gateway.models.map((model) => [model.id.toLowerCase(), model]));
       const members = [...runtime.sources, ...runtime.accounts];
       const eligible = members.filter((member) => member.inPool && member.operationalStatus === "rotation");
-      const modelMembers = members.filter((member) => member.enabled
-        && member.inPool
-        && !member.draining
-        && member.secretAvailable
-        && ("baseUrl" in member || member.proxyAvailable));
+      const modelMembers = members.filter((member) => member.inPool);
       runtime.gateway.candidateCount = eligible.length;
       const orderedMembers = members
         .filter((member) => member.inPool)
@@ -1165,16 +1213,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           && source.inPool
           && !source.draining
           && source.secretAvailable
-          && sourceServesResponsesModel(source, id));
+          && source.models.some((model) => model.toLowerCase() === id.toLowerCase()));
         const hasNativeAccountRoute = runtime.accounts.some((account) => account.enabled
           && account.inPool
           && !account.draining
           && account.secretAvailable
           && account.models.some((model) => model.toLowerCase() === id.toLowerCase()));
         const hasPoolRoute = hasApiSourceRoute || hasNativeAccountRoute;
-        const manualReasoning = hasPoolRoute
-          ? current?.reasoningAllowedLevels ?? reportedReasoning
-          : [];
+        const manualReasoning = current?.reasoningAllowedLevels ?? reportedReasoning;
         const price = current?.customPrice
           ? { inputMicroUsdPerMillion: current.inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion: current.cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion: current.cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion: current.cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion: current.outputMicroUsdPerMillion }
           : modelPrices[id.toLowerCase()] ?? { inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null };
@@ -1182,7 +1228,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           id,
           enabled: current?.enabled ?? true,
           memberCount: modelMembers.filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
-          codexVisible: current?.enabled ?? true,
+          codexVisible: (current?.enabled ?? true) && hasPoolRoute,
           protocolRoutes: input.modelProtocolRoutes?.[id],
           codexDisplayName: id.replaceAll("-", " "),
           ...(modelMetadata[id.toLowerCase()] ?? {}),
@@ -1196,7 +1242,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           reasoningLevels: manualReasoning,
           reasoningSupportedLevels: current?.reasoningSupportedLevels ?? reportedReasoning,
           reasoningAllowedLevels: manualReasoning,
-          reasoningConfigurable: current?.reasoningConfigurable ?? hasPoolRoute,
+          reasoningConfigurable: reportedReasoning.length > 0,
           reasoningManualFallback: current?.reasoningManualFallback
             ?? input.manualReasoningFallbackModels?.some((model) => model.toLowerCase() === id.toLowerCase())
             ?? false,
@@ -1210,22 +1256,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       });
       runtime.gateway.models = models.filter((model) => !input.omittedPoolModels?.includes(model.id));
       runtime.gateway.visibleModelIds = runtime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
-    }
-
-    function sourceServesResponsesModel(source: { models: string[]; wireApi: string; protocolBindings: Array<{ wireApi: string; adapter?: string; modelIds: string[] }> }, modelId: string) {
-      const normalized = modelId.toLowerCase();
-      if (source.protocolBindings.length) {
-        // Match the runtime's legacy single native binding: an empty model
-        // list means the whole discovered source catalog.
-        if (source.protocolBindings.length === 1
-          && source.protocolBindings[0].wireApi === "responses"
-          && (source.protocolBindings[0].adapter ?? "native") === "native"
-          && source.protocolBindings[0].modelIds.length === 0) {
-          return source.models.some((model) => model.toLowerCase() === normalized);
-        }
-        return source.protocolBindings.some((binding) => binding.wireApi === "responses" && binding.modelIds.some((model) => model.toLowerCase() === normalized));
-      }
-      return source.wireApi === "responses" && source.models.some((model) => model.toLowerCase() === normalized);
     }
 
     async function remoteAction(args: Record<string, unknown>) {
@@ -1367,7 +1397,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }
       if (type === "set_model_order") {
         const modelIds = input.payload?.modelIds as string[] ?? [];
-        const positions = new Map(modelIds.map((id, index) => [id.toLowerCase(), index]));
+        await prepareModelOrder();
+        const ids = modelIds.length ? modelIds : defaultModelOrder;
+        const positions = new Map(ids.map((id, index) => [id.toLowerCase(), index]));
         remoteRuntime.gateway.models.sort((left, right) =>
           (positions.get(left.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
           - (positions.get(right.id.toLowerCase()) ?? Number.MAX_SAFE_INTEGER));

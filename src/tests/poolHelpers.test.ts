@@ -8,8 +8,6 @@ import {
   mergeSubscriptionPlanOrder,
   modelSummaries,
   operationalModelSummaries,
-  sourceOrderForRole,
-  sourceRoutingStages,
   subscriptionPlanGroups,
   toggle,
 } from "../src/features/relay/poolHelpers";
@@ -89,40 +87,6 @@ function runtime(overrides: Partial<RuntimeSnapshot>): RuntimeSnapshot {
 }
 
 describe("pool helpers", () => {
-  test("orders sources within a role and keeps the edited source visible", () => {
-    const sources = [
-      source({ id: "primary-a", name: "A", priority: 1_000_002 }),
-      source({ id: "primary-b", name: "B", priority: 1_000_001 }),
-      source({ id: "reserve", name: "Reserve", priority: -1_000_000 }),
-    ];
-
-    expect(sourceOrderForRole(sources, "primary", "primary-b")).toEqual([
-      "primary-a",
-      "primary-b",
-    ]);
-    expect(sourceOrderForRole(sources, "primary", "reserve")).toEqual([
-      "primary-a",
-      "primary-b",
-      "reserve",
-    ]);
-  });
-
-  test("recalculates routing stages for an unsaved role selection", () => {
-    const stages = sourceRoutingStages(
-      [source({ id: "one", priority: 1 }), source({ id: "two", priority: -1_000_000 })],
-      [account({ id: "account-a" }), account({ id: "account-b", enabled: false })],
-      "one",
-      "reserve",
-    );
-
-    expect(stages).toEqual([
-      { role: "primary", count: 0 },
-      { role: "accounts", count: 1 },
-      { role: "stabilizer", count: 0 },
-      { role: "reserve", count: 2 },
-    ]);
-  });
-
   test("merges saved plan order without dropping newly available plans", () => {
     const groups = subscriptionPlanGroups([
       account({ id: "a", subscription: { planType: "plus", activeUntilMs: null, status: "active", updatedAtMs: null } }),
@@ -167,6 +131,125 @@ describe("pool helpers", () => {
     expect(groupModelSummaries(fallback, [account({ models: ["GPT-TEST"] })]).map((group) => group.provider)).toEqual(["openai"]);
   });
 
+  test("enriches a sparse gateway row with later reasoning and pricing data", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: [],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [
+          { id: "gpt-test", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-test", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
+          { id: "GPT-TEST", enabled: true, memberCount: 2, codexVisible: true, codexDisplayName: "GPT Test", catalogProvider: "openai", catalogFamily: "gpt", inputMicroUsdPerMillion: 10, outputMicroUsdPerMillion: 20, customPrice: true, reasoningLevels: ["low", "high"], reasoningSupportedLevels: ["low", "high"], reasoningConfigurable: true },
+        ],
+      },
+    });
+
+    expect(modelSummaries(snapshot)[0]).toMatchObject({
+      id: "gpt-test",
+      memberCount: 2,
+      catalogProvider: "openai",
+      inputMicroUsdPerMillion: 10,
+      outputMicroUsdPerMillion: 20,
+      reasoningLevels: ["low", "high"],
+      reasoningConfigurable: true,
+    });
+  });
+
+  test("merges protocol routes, reasoning levels, and both Claude cache write prices", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: [],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        models: [
+          {
+            id: "claude-test",
+            enabled: true,
+            memberCount: 1,
+            codexVisible: true,
+            codexDisplayName: "claude-test",
+            inputMicroUsdPerMillion: 100,
+            outputMicroUsdPerMillion: 300,
+            customPrice: false,
+            reasoningLevels: ["low"],
+            reasoningSupportedLevels: ["low"],
+            reasoningAllowedLevels: ["low"],
+            protocolRoutes: [{
+              clientWireApi: "responses",
+              upstreamWireApi: "messages",
+              features: { text: "confirmed" },
+              reasoningEfforts: ["low"],
+            }],
+          },
+          {
+            id: "CLAUDE-TEST",
+            enabled: true,
+            memberCount: 1,
+            codexVisible: true,
+            codexDisplayName: "Claude Test",
+            inputMicroUsdPerMillion: null,
+            outputMicroUsdPerMillion: null,
+            customPrice: false,
+            cacheWrite5mMicroUsdPerMillion: 125,
+            cacheWrite1hMicroUsdPerMillion: 110,
+            reasoningLevels: ["high", "medium"],
+            reasoningSupportedLevels: ["high", "medium"],
+            reasoningAllowedLevels: ["high", "medium"],
+            protocolRoutes: [{
+              clientWireApi: "messages",
+              upstreamWireApi: "messages",
+              features: { function_tools: "confirmed" },
+              reasoningEfforts: ["high", "medium"],
+            }],
+          },
+        ],
+      },
+    });
+
+    expect(modelSummaries(snapshot)[0]).toMatchObject({
+      reasoningLevels: ["low", "medium", "high"],
+      reasoningSupportedLevels: ["low", "medium", "high"],
+      reasoningAllowedLevels: ["low", "medium", "high"],
+      cacheWrite5mMicroUsdPerMillion: 125,
+      cacheWrite1hMicroUsdPerMillion: 110,
+      protocolRoutes: [
+        { clientWireApi: "responses", upstreamWireApi: "messages" },
+        { clientWireApi: "messages", upstreamWireApi: "messages" },
+      ],
+    });
+  });
+
+  test("counts physical pool members once and preserves complete backend metadata", () => {
+    const snapshot = runtime({
+      sources: [
+        source({ id: "offline", enabled: false, secretAvailable: false, models: ["future"],
+          protocolBindings: [{ wireApi: "messages", modelIds: ["FUTURE"] }] }),
+        source({ id: "outside", inPool: false, models: ["future"] }),
+      ],
+      accounts: [account({ models: ["FUTURE"], secretAvailable: false })],
+    });
+    snapshot.gateway.models = [{ id: "future", enabled: false, memberCount: 2,
+      catalogName: "Future Model", catalogProvider: "synthetic", codexDisplayName: "Future Model",
+      inputMicroUsdPerMillion: 12, outputMicroUsdPerMillion: 34, customPrice: false,
+      reasoningSupportedLevels: ["low", "high"], reasoningAllowedLevels: ["high"],
+      reasoningLevels: ["high"], reasoningConfigurable: true, protocolRoutes: [],
+    }];
+    expect(currentPoolModelSummaries(snapshot)).toHaveLength(1);
+    expect(currentPoolModelSummaries(snapshot)[0]).toMatchObject({
+      id: "future", enabled: false, memberCount: 2, catalogName: "Future Model",
+      inputMicroUsdPerMillion: 12, outputMicroUsdPerMillion: 34,
+      reasoningSupportedLevels: ["low", "high"], reasoningLevels: ["high"], reasoningConfigurable: true,
+    });
+  });
+
   test("keeps a binding-only pooled source model in the saved order inventory", () => {
     const snapshot = runtime({
       sources: [source({
@@ -178,7 +261,42 @@ describe("pool helpers", () => {
     expect(currentPoolModelSummaries(snapshot).map((model) => model.id)).toEqual(["binding-only"]);
   });
 
-  test("keeps Model Rules limited to models with an active pool route", () => {
+  test("keeps every pooled provider model and its catalog group when the gateway rows lag", () => {
+    const snapshot = runtime({
+      gateway: {
+        running: true,
+        baseUrl: "http://127.0.0.1:0",
+        candidateCount: 1,
+        visibleModelIds: ["gpt-live"],
+        maxRetryCandidates: 3,
+        routingStrategy: "adaptive",
+        defaultServiceTier: "standard",
+        // The derived rows currently contain only the native account model.
+        models: [{ id: "gpt-live", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "GPT Live", catalogProvider: "openai", catalogFamily: "gpt", inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
+        modelCatalog: {
+          "gpt-live": { catalogProvider: "openai", catalogFamily: "gpt" },
+          "claude-live": { catalogProvider: "anthropic", catalogFamily: "claude" },
+          "grok-live": { catalogProvider: "xai", catalogFamily: "grok" },
+        },
+      },
+      sources: [source({
+        id: "provider",
+        models: ["claude-live", "grok-live"],
+        protocolBindings: [{ wireApi: "messages", adapter: "native", modelIds: ["claude-live"] }],
+      })],
+      accounts: [account({ id: "account-a", models: ["gpt-live"] })],
+    });
+
+    const models = currentPoolModelSummaries(snapshot);
+    expect(models.map((model) => model.id)).toEqual(["gpt-live", "claude-live", "grok-live"]);
+    expect(groupModelSummaries(models, snapshot.accounts).map((group) => [group.provider, group.items.map((model) => model.id)])).toEqual([
+      ["openai", ["gpt-live"]],
+      ["anthropic", ["claude-live"]],
+      ["xai", ["grok-live"]],
+    ]);
+  });
+
+  test("keeps operational views limited to models with an active pool route", () => {
     const nowMs = Date.now();
     const snapshot = runtime({
       gateway: {

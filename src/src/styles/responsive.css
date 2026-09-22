@@ -9,26 +9,8 @@
     gap: 8px;
   }
 
-  .setup-progress li { font-size: 0; }
-  .setup-progress li span { font-size: 12px; }
   .usage-filter-primary { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
-  .relay-shell[data-page="connections"] .relay-page .relay-table { min-width: 820px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table,
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table {
-    min-width: 700px;
-  }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table {
-    table-layout: fixed;
-  }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(1) { width: 60px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(2) { width: 165px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(3) { width: 220px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(4) { width: 140px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:last-child { width: 116px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:not(:last-child) {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
+  .relay-shell[data-page="connections"] .relay-page .relay-table:not(.connection-table) { min-width: 820px; }
   .relay-shell[data-page="pool"] .relay-table { min-width: 720px; }
   .relay-shell[data-page="usage"] .relay-table { min-width: 720px; }
   .relay-shell[data-page="profiles"] .relay-table { min-width: 720px; }
@@ -69,90 +51,10 @@
     overflow-wrap: normal;
     word-break: normal;
   }
-  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
-  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5),
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:nth-child(5) {
-    display: none;
-  }
-}
 
-@media (max-width: 900px) {
-  .api-provider-options {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .source-add-selecting .api-provider-options {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 900px) and (min-width: 701px) {
-  .source-route-matrix-heading,
-  .source-route-model-row {
-    grid-template-columns: minmax(170px, 0.9fr) minmax(0, 3.1fr);
-  }
-
-  .source-route-format-headings,
-  .source-route-model-controls {
-    grid-template-columns: repeat(var(--source-route-column-count), minmax(100px, 1fr));
-  }
 }
 
 @media (max-width: 700px) {
-  .client-options {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-route-map {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .source-route-arrow {
-    display: none;
-  }
-
-  .source-route-stage[data-stage-index="2"],
-  .source-route-stage[data-stage-index="3"] {
-    border-top: 1px solid var(--relay-border);
-  }
-
-  .source-route-stage[data-stage-index="0"],
-  .source-route-stage[data-stage-index="2"] {
-    border-left: 0;
-  }
-
-  .source-route-stage {
-    gap: 4px;
-    padding-inline: 6px;
-  }
-
-  .source-routing-controls {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-routing-control {
-    grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
-  }
-
-  .source-routing-details > summary {
-    grid-template-columns: minmax(0, 1fr) 14px;
-    grid-template-rows: auto auto;
-    align-items: start;
-    row-gap: 2px;
-  }
-
-  .source-routing-details > summary small {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .source-routing-details > summary::after {
-    grid-column: 2;
-    grid-row: 1 / -1;
-    align-self: center;
-  }
-
   .source-identity-grid,
   .source-access-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -178,61 +80,6 @@
     width: 100%;
   }
 
-  .source-route-matrix-heading {
-    display: none;
-  }
-
-  .source-cache-settings {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 7px;
-  }
-
-  .source-route-model-row {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-route-model-name {
-    min-height: 38px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--relay-border);
-    background: var(--relay-subtle);
-  }
-
-  .source-route-model-controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .source-route-cell {
-    grid-template-columns: minmax(0, 1fr) auto;
-    justify-items: stretch;
-    gap: 8px;
-    min-height: 39px;
-    padding: 7px 10px;
-  }
-
-  .source-route-cell:nth-child(odd) {
-    border-left: 0;
-  }
-
-  .source-route-cell:nth-child(n + 3) {
-    border-top: 1px solid var(--relay-border);
-  }
-
-  .source-route-cell-label {
-    min-width: 0;
-    display: block;
-    overflow: hidden;
-    color: var(--relay-secondary);
-    font-size: 10px;
-    line-height: 14px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .source-route-model-list {
-    max-height: none;
-  }
-
   .pool-member-toolbar .pool-priority-label,
   .pool-member-toolbar .pool-quota-actions {
     width: 100%;
@@ -249,249 +96,9 @@
     border-left: 0;
   }
 
-  .setup-progress,
-  .setup-footer {
-    padding-right: 14px;
-    padding-left: 14px;
-  }
-
-  .setup-progress {
-    padding-right: 128px;
-  }
-
-  .setup-language-floating {
-    right: 10px;
-  }
-
-  .product-intro {
-    width: calc(100% - 28px);
-  }
-
-  .mode-options,
-  .setup-connect-options,
-  .setup-connect-options.has-current-profile,
-  .setup-fields,
-  .api-provider-fields {
-    grid-template-columns: 1fr;
-  }
-
-  .api-provider-fields > :nth-child(2) {
-    grid-column: auto;
-    grid-row: auto;
-  }
-
-  .setup-body {
-    padding-right: 18px;
-    padding-left: 18px;
-  }
-
-  .setup-footer .relay-button.ghost span {
-    display: none;
-  }
-}
-
-@media (max-height: 620px) {
-  .relay-dialog .api-provider-setup {
-    gap: 10px;
-  }
-
-  .relay-dialog.source-add-configuring .relay-dialog-body {
-    padding: 10px 16px 12px;
-  }
-
-  .relay-dialog.source-add-configuring .api-provider-setup,
-  .relay-dialog.source-add-configuring .api-provider-configuration {
-    gap: 8px;
-  }
-
-  .relay-dialog.source-add-configuring .api-provider-selected {
-    padding-bottom: 8px;
-  }
-
-  .relay-dialog.source-add-configuring .source-protocol-bindings {
-    gap: 6px;
-  }
-
-  .relay-dialog.source-add-configuring .source-protocol-bindings > header > p {
-    display: none;
-  }
-
-  .relay-dialog.source-add-configuring .source-route-model-list {
-    max-height: 150px;
-  }
-
-  .relay-dialog.source-add-configuring .api-provider-key-field {
-    padding-top: 10px;
-  }
-
-  .relay-dialog.source-edit-dialog .source-routing-disclosure {
-    gap: 8px;
-    padding: 10px;
-  }
-
-  .relay-dialog.source-edit-dialog .source-routing-active {
-    display: none;
-  }
-
-  .relay-dialog.source-edit-dialog .source-routing-stats > div {
-    padding-block: 6px;
-  }
-
-  .relay-dialog.source-edit-dialog .source-protocol-bindings {
-    gap: 8px;
-  }
-
-  .relay-dialog.source-edit-dialog .source-protocol-bindings > header > p {
-    display: none;
-  }
-
-  .relay-dialog .source-form .api-provider-options button {
-    min-height: 58px;
-    gap: 4px;
-    padding: 8px 10px;
-  }
-
-  .relay-dialog .source-form .api-provider-options button small {
-    display: none;
-  }
-
-  .product-intro {
-    gap: 10px;
-    padding-top: 12px;
-    padding-bottom: 16px;
-  }
-
-  .intro-mark {
-    width: 92px;
-    height: 92px;
-  }
-
-  .intro-copy h1 {
-    font-size: 28px;
-  }
-
-  .intro-copy p {
-    font-size: 13px;
-    line-height: 1.45;
-  }
-
-  .intro-actions .relay-button {
-    min-height: 36px;
-  }
-
-  .setup-body {
-    padding-top: 18px;
-    padding-bottom: 16px;
-  }
-
-  .setup-heading {
-    margin-bottom: 12px;
-  }
-
-  .setup-heading h1,
-  .setup-ready h1 {
-    font-size: 21px;
-  }
-
-  .mode-options button {
-    min-height: 132px;
-    padding: 14px;
-  }
-
-  .api-provider-options button {
-    min-height: 86px;
-    padding: 11px;
-  }
-
-  .setup-connect-options button {
-    min-height: 106px;
-    padding: 14px;
-  }
-}
-
-@media (max-height: 620px) and (min-width: 901px) {
-  .api-provider-options {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 560px) {
-  .api-provider-options,
-  .relay-dialog .api-provider-options {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-route-simple-options {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-add-dialog .api-provider-selected {
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 8px;
-  }
-
-  .source-add-dialog .relay-dialog-body {
-    padding: 14px 16px 16px;
-  }
-
-  .source-add-flow-heading {
-    display: grid;
-    gap: 10px;
-    margin-bottom: 12px;
-  }
-
-  .source-add-adapters > summary {
-    grid-template-columns: minmax(0, 1fr) 12px;
-  }
-
-  .source-add-adapters-state {
-    display: none;
-  }
-
-  .source-add-adapters > .source-protocol-bindings {
-    padding-inline: 8px;
-  }
-
-  .source-add-dialog .api-provider-change {
-    grid-column: 1 / -1;
-    justify-self: center;
-  }
-
-  .onboarding-api-provider.has-selection .api-provider-selected {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .onboarding-api-provider .api-provider-selected-endpoint {
-    grid-column: 1;
-  }
-
-  .onboarding-api-provider .api-provider-change {
-    grid-column: 1;
-    grid-row: 3;
-    justify-self: start;
-  }
-
-  .setup-oauth-pending-actions {
-    grid-column: 1 / -1;
-    width: 100%;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 36px;
-  }
-
-  .setup-oauth-pending-actions > * {
-    width: 100%;
-  }
-
-  .setup-oauth-pending {
-    grid-template-columns: 40px minmax(0, 1fr);
-    justify-items: initial;
-    text-align: left;
-  }
-
-  .setup-current-profile-actions {
-    padding-left: 0;
-  }
-
   .api-provider-key-field .relay-field-label-row {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -529,56 +136,10 @@
     justify-self: end;
   }
 
-  .source-priority-row {
-    grid-template-columns: 24px 22px minmax(0, 1fr) auto;
-  }
-
-  .source-models-toolbar {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 5px;
-  }
-
-  .source-model-mode {
-    width: 100%;
-  }
-
-  .source-model-mode label {
-    flex: 1 1 0;
-    justify-content: center;
-  }
-
-  .source-auto-route-toggle {
-    font-size: 10px;
-  }
-
-  .source-priority-row > .inline-actions {
-    grid-column: auto;
-  }
-
   .model-rules > header {
     padding-bottom: 10px;
   }
 
-}
-
-@media (max-height: 620px) {
-  .relay-dialog.source-add-dialog .relay-dialog-body {
-    padding-top: 12px;
-    padding-bottom: 12px;
-  }
-
-  .source-add-dialog .source-add-steps {
-    margin-bottom: 10px;
-  }
-
-  .source-add-dialog .source-add-flow-heading {
-    margin-bottom: 10px;
-  }
-
-  .source-add-dialog .source-add-adapters > summary {
-    min-height: 46px;
-  }
 }
 
 @media (max-width: 900px) {
@@ -588,14 +149,9 @@
   }
 
   .gateway-setting-row,
-  .gateway-account-panel,
-  .gateway-api-connection-panel {
+  .gateway-account-panel {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
-  }
-
-  .gateway-api-key-actions {
-    justify-self: start;
   }
 
 }
@@ -697,34 +253,6 @@
     max-width: none;
   }
 
-  .gateway-runtime-panel {
-    grid-template-columns: 1fr;
-  }
-
-  .gateway-runtime-metrics {
-    border-top: 1px solid var(--relay-border);
-    border-left: 0;
-  }
-
-}
-
-@media (max-width: 480px) {
-  .source-routing-control {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
-  }
-
-  .source-route-model-controls {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .source-route-cell {
-    border-left: 0;
-  }
-
-  .source-route-cell + .source-route-cell {
-    border-top: 1px solid var(--relay-border);
-  }
 }
 
 @media (max-width: 700px) {
@@ -740,40 +268,6 @@
 
   .proxy-assignment-summary > div:last-child {
     border-bottom: 0;
-  }
-
-  .proxy-storage-row {
-    grid-template-columns: 28px minmax(0, 1fr) auto;
-    gap: 8px;
-  }
-
-  .proxy-storage-head {
-    display: none;
-  }
-
-  .proxy-row-select {
-    grid-column: 1;
-    grid-row: 1 / span 2;
-  }
-
-  .proxy-storage-endpoint {
-    grid-column: 2;
-  }
-
-  .proxy-storage-account-count {
-    grid-column: 2;
-    grid-row: 3;
-    justify-self: start;
-  }
-
-  .proxy-storage-row > .relay-status {
-    grid-column: 3;
-    grid-row: 1;
-  }
-
-  .proxy-storage-row > .row-actions {
-    grid-column: 3;
-    grid-row: 2;
   }
 
   .usage-view-toolbar {
@@ -792,29 +286,6 @@
   .source-connection-check > .relay-button {
     grid-column: 2;
     width: 100%;
-  }
-
-  .source-routing-overview {
-    grid-template-columns: 22px minmax(0, 1fr);
-  }
-
-  .source-routing-status {
-    grid-column: 2;
-    justify-self: start;
-  }
-
-  .source-routing-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .source-routing-stats > div:last-child {
-    grid-column: 1 / -1;
-    border-top: 1px solid var(--relay-border);
-    border-left: 0;
-  }
-
-  .source-routing-details-action {
-    display: none;
   }
 
   .source-connection-check-stats > div:first-child {
@@ -886,5 +357,4 @@
     animation: none;
   }
 
-  .intro-mark { animation: none; }
 }

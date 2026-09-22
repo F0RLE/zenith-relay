@@ -234,7 +234,6 @@ for (const theme of ["light", "dark"] as const) {
       await expect(diagnostics).toHaveCount(0);
       const poolData = groups.filter({ hasText: "Данные пула" });
       await expect(poolData.locator(".settings-debug-section")).toHaveCount(1);
-      await expect(poolData.locator(".settings-debug-details")).toHaveCount(0);
       await expect(poolData.locator(".settings-control-row").last()).toHaveClass(/settings-danger-row/);
 
       const pageBox = await page.locator(".settings-page").boundingBox();
@@ -261,8 +260,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: `output/playwright/settings-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
       await debugToggle.check();
-      const debugDetails = poolData.locator(".settings-debug-details");
-      await expect(debugDetails).toBeVisible();
+      await expect(page.getByRole("button", { name: "Открыть операции", exact: true })).toHaveCount(1);
       await expect(diagnostics).toHaveCount(1);
       await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs", { exact: true })).toBeVisible();
       await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\errors", { exact: true })).toBeVisible();
@@ -270,7 +268,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(diagnostics.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toBeVisible();
       await expect(groups).toHaveCount(4);
       await expect(groups.last()).toContainText("Диагностика");
-      await debugDetails.scrollIntoViewIfNeeded();
+      await debugToggle.scrollIntoViewIfNeeded();
       const debugLayout = await poolData.evaluate((item) => ({ overflow: item.scrollWidth - item.clientWidth }));
       expect(debugLayout.overflow).toBe(0);
       await poolData.screenshot({ path: `output/playwright/settings-debug-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -292,9 +290,9 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await expect(table.locator(".model-group-row").filter({ hasText: "OpenAI" })).toHaveCount(1);
   await expect(table.locator(".model-group-row").first()).toContainText("2 модели");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
-  await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();
+  await model.getByRole("checkbox", { name: "Отключить gpt-5.4-mini" }).click();
   await expect(model).toHaveAttribute("data-enabled", "false");
-  await expect(model.getByRole("button", { name: "Включить gpt-5.4-mini" })).toHaveAttribute("aria-pressed", "false");
+  await expect(model.getByRole("checkbox", { name: "Включить gpt-5.4-mini" })).not.toBeChecked();
   expect(await page.locator(".model-rules tbody tr").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await expect(page.locator(".model-sort-select")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/model-rules-disabled-ru-dark-840x560.png" });
@@ -366,13 +364,25 @@ test("source prices are grouped by metadata and Messages models expose cache TTL
   await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "Anthropic" }).click();
-  await expect(dialog.getByText("Кэш запись 5 мин", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Кэш запись 1 ч", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".member-price-grid-head").getByText("Кэш запись 5 мин", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".member-price-grid-head").getByText("Кэш запись 1 ч", { exact: true })).toBeVisible();
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/source-pricing-groups-ru-dark-1280x900.png" });
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
+  for (const viewport of [{ width: 840, height: 560 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    const anthropic = dialog.locator(".source-price-group").filter({ hasText: "Anthropic" });
+    await anthropic.scrollIntoViewIfNeeded();
+    expect(await anthropic.locator("input").evaluateAll((inputs) => inputs.every((input) => {
+      const rect = input.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.width >= 60;
+    }))).toBe(true);
+    expect(await dialog.locator(".relay-dialog-body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/source-cache-prices-ru-dark-${viewport.width}.png` });
+  }
 });
 
-test("source editor keeps discovery compact and manual routes in advanced settings", async ({ page }) => {
+test("source editor keeps discovery compact and routing controls internal", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, mixedModels: true });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
@@ -382,8 +392,8 @@ test("source editor keeps discovery compact and manual routes in advanced settin
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
-  await expect(dialog.locator(".source-protocol-availability")).toBeVisible();
-  await expect(dialog.locator(".source-route-matrix")).toBeHidden();
+  await expect(dialog.locator(".source-protocol-availability")).toHaveCount(0);
+  await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   for (const size of [{ width: 1160, height: 760 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(size);
     expect(await dialog.evaluate((element) => {
@@ -392,14 +402,8 @@ test("source editor keeps discovery compact and manual routes in advanced settin
     })).toBe(true);
     await page.screenshot({ path: `output/playwright/source-discovery-general-${size.width}.png` });
   }
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await dialog.locator(".source-add-adapters > summary").click();
-  await expect(dialog.locator(".source-route-format-heading")).toHaveCount(4);
-  await dialog.getByRole("tab", { name: "Gemini", exact: true }).click();
-  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-discovery-manual.png" });
   await dialog.getByRole("tab", { name: "Pricing", exact: true }).click();
-  await expect(dialog.locator(".source-price-tab-status")).toHaveText("API prices in use");
+  await expect(dialog.locator(".source-price-tab")).toBeVisible();
   await page.screenshot({ path: "output/playwright/source-discovery-pricing.png" });
 });
 
@@ -455,9 +459,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.getByRole("tab", { name: "Источники API" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
-  await dialog.locator(".source-add-adapters > summary").click();
-
-  await expect(dialog.getByRole("button", { name: "Prompt-кэш: 1 час" })).toBeVisible();
+  await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
@@ -465,11 +467,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.screenshot({ path: "output/playwright/source-cache-policy-ru-dark-840x560.png" });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  expect(await dialog.locator(".source-cache-settings").evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    const dialogRect = element.closest("[data-relay-dialog]")!.getBoundingClientRect();
-    return rect.left >= dialogRect.left && rect.right <= dialogRect.right;
-  })).toBe(true);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/source-cache-policy-ru-dark-390x844.png" });
 });
 
@@ -486,7 +484,7 @@ for (const viewport of viewports) {
     let dialog = page.getByRole("dialog", { name: "Добавить подключения в пул" });
     await expect(dialog).toBeVisible();
     await page.screenshot({ path: `output/playwright/pool-add-members-ru-dark-${viewport.width}x${viewport.height}.png` });
-    const accountSearch = dialog.getByLabel("Найти учётную запись");
+    const accountSearch = dialog.getByLabel("Найти подключение");
     await accountSearch.fill("pro");
     await expect(dialog.locator(".pool-member-options > label").first()).toContainText("Pro account");
     const planBadge = dialog.locator(".pool-member-options .account-plan-badge");
@@ -708,7 +706,7 @@ for (const viewport of viewports) {
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Force-refresh sign-in", "Proxy: Common", "Export", "Disable", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Proxy: Common", "Export", "Disable", "Delete"]);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -975,7 +973,7 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Sources" }).click();
     const sourceActions = page.locator(".relay-table .row-actions");
-    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
+    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Launch", "Edit", "Actions"]);
     await sourceActions.locator("summary").click();
     const sourceMenu = page.getByRole("menu");
     await expect(sourceMenu.getByRole("menuitem")).toHaveCount(4);
@@ -1301,7 +1299,7 @@ for (const theme of themes) {
       await page.goto("/");
       await page.getByRole("button", { name: "API", exact: true }).click();
       const connectionPanel = page.locator(".gateway-api-connection-panel");
-      const endpointValue = connectionPanel.locator(".gateway-endpoint-value");
+      const endpointValue = connectionPanel.locator(".gateway-api-address");
       const portControl = connectionPanel.locator(".gateway-api-port-control");
       await expect(connectionPanel).toBeVisible();
       await expect(page.getByText("В сети", { exact: true })).toHaveCount(0);
@@ -1318,7 +1316,7 @@ for (const theme of themes) {
       expect(portControlBox).not.toBeNull();
       expect(portBox).not.toBeNull();
       expect(saveBox).not.toBeNull();
-      expect(Math.abs((endpointBox!.y + endpointBox!.height / 2) - (portControlBox!.y + portControlBox!.height / 2))).toBeLessThanOrEqual(2);
+      expect(portControlBox!.y).toBeGreaterThan(endpointBox!.y + endpointBox!.height);
       expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
       await page.screenshot({ path: `output/playwright/gateway-api-connection-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
@@ -1429,13 +1427,13 @@ test("unsupported usage empty state uses the available page center", async ({ pa
   await page.screenshot({ path: "output/playwright/usage-unsupported-centered-ru-dark-1160x760.png" });
 });
 
-test("automation table fits the standard window without horizontal scrolling", async ({ page }) => {
+test("automation list fits the standard window without horizontal scrolling", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Автоматизация" }).click();
-  const table = page.locator(".relay-table-wrap");
+  const table = page.locator(".automation-list");
   expect(await table.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
@@ -1475,18 +1473,18 @@ test("automation editor fits the compact window without hidden controls", async 
   await expect(page.locator('[role="option"][data-value="gpt-5.4"]')).toBeVisible();
   await expect(page.locator('[role="option"][data-value="gpt-5.4-mini"]')).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(dialog.getByRole("button", { name: "Автоматически" })).toHaveAttribute("aria-pressed", "true");
-  await expect(dialog.getByRole("button", { name: "Вручную" })).toHaveAttribute("aria-pressed", "false");
+  await expect(dialog.getByRole("button", { name: "Автоматически" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Вручную" })).toHaveCount(0);
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     const body = element.querySelector(".relay-dialog-body");
-    const execution = element.querySelector(".automation-execution");
+    const execution = element.querySelector("footer");
     const bodyRect = body?.getBoundingClientRect();
     const executionRect = execution?.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
       && element.scrollWidth <= element.clientWidth
       && Boolean(body && body.scrollHeight <= body.clientHeight)
-      && Boolean(bodyRect && executionRect && executionRect.top >= bodyRect.top && executionRect.bottom <= bodyRect.bottom);
+      && Boolean(bodyRect && executionRect && executionRect.top >= bodyRect.bottom && executionRect.bottom <= innerHeight);
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/automation-dialog-ru-dark-840x560.png" });
 
@@ -1498,13 +1496,13 @@ test("automation editor fits the compact window without hidden controls", async 
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     const body = element.querySelector(".relay-dialog-body");
-    const execution = element.querySelector(".automation-execution");
+    const execution = element.querySelector("footer");
     const bodyRect = body?.getBoundingClientRect();
     const executionRect = execution?.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
       && element.scrollWidth <= element.clientWidth
       && Boolean(body && body.scrollHeight <= body.clientHeight)
-      && Boolean(bodyRect && executionRect && executionRect.top >= bodyRect.top && executionRect.bottom <= bodyRect.bottom);
+      && Boolean(bodyRect && executionRect && executionRect.top >= bodyRect.bottom && executionRect.bottom <= innerHeight);
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/automation-dialog-selected-ru-dark-840x560.png" });
 });

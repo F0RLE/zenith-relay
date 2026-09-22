@@ -15,7 +15,6 @@ import {
   ListMinus,
   ListPlus,
   Loader2,
-  LogIn,
   Network,
   Play,
   Power,
@@ -30,7 +29,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, AccountTransferProgress, CandidateRuntimeSnapshot, ProfileBinding } from "../../api/types";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, requiresAccountReauthentication, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import {
   refreshAllAccountQuotas,
   refreshOneAccountQuota,
@@ -269,20 +268,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
     () => refreshOneAccountQuota(mode, account.id),
     "feedback.refreshed",
   );
-  const forceRefreshAccountCredentials = (account: AccountSummary) => perform(
-    `connection-account-credentials-${account.id}`,
-    async () => {
-      const result = await relayCommands.forceRefreshAccountCredentials(account.id);
-      if (result.status !== "refreshed") {
-        const code = result.status === "requires_reauth"
-          ? "credential_refresh_requires_reauth"
-          : "credential_refresh_retryable";
-        throw { code, message: t(`errors.${code}`), reason: result.code, retryable: result.status === "retryable_failure" };
-      }
-      return result;
-    },
-    "feedback.credentialsRefreshed",
-  );
   return (
     <>
     <div className="connections-account-controls">
@@ -396,9 +381,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
             </div>
             <div className="account-card-header-actions">
               <ActionMenu className="account-row-menu">
-                {errorCode ? <ActionMenuItem icon={<CircleAlert aria-hidden />} onClick={() => setErrorDetails(account)}>{t("accounts.errorDetailsTitle")}</ActionMenuItem> : null}
-                {mode === "local" && requiresAccountReauthentication(account) ? <ActionMenuItem icon={<LogIn aria-hidden />} onClick={() => onReauthenticate(account)}>{t("accounts.reauthenticate")}</ActionMenuItem> : null}
-                {mode === "local" && account.secretAvailable ? <ActionMenuItem icon={<RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void forceRefreshAccountCredentials(account)}>{t("accounts.forceRefreshCredentials")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Network aria-hidden />} disabled={onServer || !canManageProxies} onClick={() => onProxy(account)}>{t("proxies.proxy")}: {proxyLabel}</ActionMenuItem>

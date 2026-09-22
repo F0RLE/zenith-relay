@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, GripVertical, Loader2, Power, Route, Zap } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, GripVertical, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, OptionMenu } from "../../components/Ui";
-import { currentPoolModelSummaries, groupModelSummaries, operationalModelSummaries } from "../../poolHelpers";
+import { Button, Dialog, EmptyState, IconButton, OptionMenu, ToggleSwitch } from "../../components/Ui";
+import { currentPoolModelSummaries, groupModelSummaries } from "../../poolHelpers";
 import { formatReasoningEffort } from "../../poolFormatting";
 import {
   initialReasoningLevels,
@@ -20,7 +20,6 @@ import {
 } from "./modelRulesModel";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
-import { ModelProtocolDialog } from "./ModelProtocolDialog";
 
 type ModelDragState = {
   kind: "group" | "model";
@@ -43,9 +42,11 @@ export function ModelRulesView() {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
-  const [protocolModel, setProtocolModel] = useState<ModelSummary | null>(null);
-  const models = runtime ? operationalModelSummaries(runtime) : [];
-  const poolModels = runtime ? currentPoolModelSummaries(runtime) : [];
+  // Model Rules configures the complete pool inventory. Route health and
+  // cooldowns are runtime state; they must not make a member's model vanish
+  // from the policy editor while the relay can still recover or adapt it.
+  const models = runtime ? currentPoolModelSummaries(runtime) : [];
+  const poolModels = models;
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [dragModelId, setDragModelId] = useState<string | null>(null);
   const [dragGroupId, setDragGroupId] = useState<string | null>(null);
@@ -53,6 +54,9 @@ export function ModelRulesView() {
   const [dropGroupId, setDropGroupId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const modelDragRef = useRef<ModelDragState | null>(null);
+  const orderMutation = useRef(false);
+  const currentModels = useRef(models);
+  currentModels.current = models;
   const catalogSignature = modelSignature(models);
   useEffect(() => {
     setOrderedModels(models);
@@ -65,7 +69,7 @@ export function ModelRulesView() {
       : relayCommands.remoteAction({ type: "set_model_enabled" }, { modelId: model.id, enabled: !model.enabled }),
     "feedback.saved",
   );
-  const saveModelOrder = (next: ModelSummary[]) => perform(
+  const persistModelOrder = (next: ModelSummary[]) => perform(
     "model-order",
     () => mode === "local"
       ? relayCommands.setModelDisplayOrder(completeModelDisplayOrder(next, poolModels))
@@ -75,16 +79,24 @@ export function ModelRulesView() {
       ),
     "feedback.saved",
   );
+  const saveModelOrder = async (next: ModelSummary[]) => {
+    if (orderMutation.current || busy) return;
+    orderMutation.current = true;
+    setOrderedModels(next);
+    try {
+      if (!await persistModelOrder(next)) setOrderedModels(currentModels.current);
+    } finally {
+      orderMutation.current = false;
+    }
+  };
   const reorderModels = (sourceId: string, targetId: string) => {
     const next = reorderById(orderedModels, sourceId, targetId);
     if (!next) return;
-    setOrderedModels(next);
     void saveModelOrder(next);
   };
   const reorderGroups = (sourceId: string, targetId: string) => {
     const next = reorderModelGroups(modelGroups, sourceId, targetId);
     if (!next) return;
-    setOrderedModels(next);
     void saveModelOrder(next);
   };
   const clearModelDrag = () => {
@@ -131,6 +143,7 @@ export function ModelRulesView() {
     onCancel: clearModelDrag,
   });
   const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], id: string) => {
+    if (orderMutation.current || busy) return;
     const target = event.target as HTMLElement;
     if (event.button !== 0 || (target.closest("button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
     event.preventDefault();
@@ -141,6 +154,10 @@ export function ModelRulesView() {
     setDropGroupId(null);
   };
   const startGroupDrag = (event: React.DragEvent<HTMLTableRowElement>, groupId: string) => {
+    if (orderMutation.current || busy) {
+      event.preventDefault();
+      return;
+    }
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", `group:${groupId}`);
     setDragGroupId(groupId);
@@ -149,7 +166,7 @@ export function ModelRulesView() {
   const startModelDrag = (event: React.DragEvent<HTMLTableRowElement>, modelId: string) => {
     // Interactive controls inside a draggable row must keep their normal
     // click/focus behavior; the row itself is the drag surface.
-    if ((event.target as HTMLElement).closest("button, input, textarea, a")) {
+    if (orderMutation.current || busy || (event.target as HTMLElement).closest("button, input, textarea, a")) {
       event.preventDefault();
       return;
     }
@@ -185,7 +202,6 @@ export function ModelRulesView() {
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"} data-drop-target={dropModelId === model.id ? "true" : undefined} className={dragModelId === model.id ? "model-dragging" : undefined} draggable onPointerDown={(event) => startPointerDrag(event, "model", model.id)} onDragStart={(event) => startModelDrag(event, model.id)} onDragEnd={() => { setDragModelId(null); setDropModelId(null); }} onDragOver={(event) => { event.preventDefault(); setDropModelId(dragModelId && dragModelId !== model.id ? model.id : null); }} onDrop={() => { if (dragModelId) reorderModels(dragModelId, model.id); setDragModelId(null); setDropModelId(null); }}>
         <td data-column="model"><button className="model-rule-drag-handle" type="button" aria-label={t("models.dragModel", { model: displayName })} data-relay-tooltip={t("models.dragModel", { model: displayName })} onPointerDown={(event) => startPointerDrag(event, "model", model.id)}><GripVertical aria-hidden /></button><div className="model-rule-identity"><strong data-relay-tooltip={displayName}>{displayName}</strong>{displayName !== model.id ? <code data-relay-tooltip={model.id}>{model.id}</code> : null}</div></td>
         <td data-column="actions"><div className="model-rule-actions">
-          <IconButton className="model-protocol-button" label={t("models.viewProtocols", { model: model.id })} icon={<Route aria-hidden />} onClick={() => setProtocolModel(model)} />
           <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} disabled={!hasReasoningModes} onClick={() => setReasoningModel(model)} />
           {canEditSpeed ? <span className="model-speed-toggle" data-speed-tier={speedTier} data-model-speed-select={model.id} data-relay-tooltip={`${t("pool.serviceTier")}: ${t(`pool.serviceTiers.${speedTier}`)}`}>
             <OptionMenu className="model-speed-select" label={t("pool.serviceTier")} value={speedTier} icon={<Zap aria-hidden />} disabled={busy === `model-speed-${model.id}`}
@@ -198,13 +214,13 @@ export function ModelRulesView() {
               options={speedTiers.map((value) => ({ value, label: t(`pool.serviceTiers.${value}`) }))}
             />
           </span> : null}
-          <IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} />
+          <ToggleSwitch data-model-toggle={model.id} label={toggleLabel} className="model-toggle" checked={model.enabled} aria-busy={toggling} disabled={Boolean(busy)} onChange={() => void toggleModel(model)} />
         </div></td>
       </tr>;
       })}</tbody>;
       })}
     </table></div>
-  </section>{reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}{protocolModel ? <ModelProtocolDialog model={models.find((model) => model.id === protocolModel.id) ?? protocolModel} onClose={() => setProtocolModel(null)} /> : null}</>;
+  </section>{reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}</>;
 }
 
 function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
