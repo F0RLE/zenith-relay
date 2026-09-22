@@ -9,7 +9,6 @@ use super::super::request::{
     candidate_protocols, chat_request_is_text_or_image_only, client_context_fingerprint,
     codex_background_request_kind, forwarded_codex_headers, forwarded_messages_headers,
     is_managed_codex_client, request_id, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
-    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::request::{execute_request, RequestExecution};
 use crate::error_codes;
@@ -63,23 +62,9 @@ async fn execute_client_request_inner(
     if !runtime.allows_client_wire_api(&key, client_wire_api) {
         return client_api_forbidden();
     }
-    let Ok(body) = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES).await else {
-        return api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            MAX_CLIENT_REQUEST_BODY_ERROR,
-            error_codes::REQUEST_TOO_LARGE,
-        );
-    };
-
-    let mut request: Value = match serde_json::from_slice(&body) {
-        Ok(Value::Object(request)) => Value::Object(request),
-        _ => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "request body must be a JSON object",
-                error_codes::INVALID_REQUEST,
-            )
-        }
+    let mut request = match super::super::request_body::read_json_object(&headers, body).await {
+        Ok(object) => Value::Object(object),
+        Err(response) => return *response,
     };
     let managed_codex_client = is_managed_codex_client(&headers);
     let service_tier_policy = if managed_codex_client {

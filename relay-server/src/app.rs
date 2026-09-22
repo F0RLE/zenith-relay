@@ -349,9 +349,16 @@ mod tests {
         assert!(snapshot.gateway.running);
         assert_eq!(snapshot.gateway.candidate_count, 1);
         assert_eq!(snapshot.gateway.visible_model_ids, ["gpt-runtime-test"]);
-        assert_eq!(snapshot.gateway.routing_order.len(), 1);
+        assert_eq!(snapshot.gateway.routing_order.len(), 4);
         assert_eq!(snapshot.gateway.routing_order[0].candidate_id, source.id);
-        assert!(snapshot.gateway.routing_order[0].available);
+        assert!(snapshot.gateway.routing_order.iter().all(|candidate| {
+            candidate.available
+                && (candidate.candidate_id == source.id
+                    || candidate
+                        .candidate_id
+                        .strip_prefix(&source.id)
+                        .is_some_and(|suffix| suffix.starts_with("::")))
+        }));
         assert_eq!(
             snapshot.sources[0].operational_status,
             OperationalStatus::Rotation

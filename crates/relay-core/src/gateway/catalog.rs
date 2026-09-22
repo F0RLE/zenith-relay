@@ -45,18 +45,9 @@ pub(super) fn native_catalog(
     let entry = |id: &str| -> Value {
         if protocol == WireApi::Gemini {
             let model = runtime.resolve_model(&key, id).unwrap_or_else(|| id.into());
-            let streaming = runtime
+            let streaming = !runtime
                 .configured_executor_routes(&key, &model, &[protocol], true)
-                .iter()
-                .any(|route| {
-                    route.account_id.is_some()
-                        || runtime
-                            .route_capabilities(&route.candidate_id, &route.source_model)
-                            .and_then(|capability| {
-                                capability.features.get(&crate::ProtocolFeature::Streaming)
-                            })
-                            .is_some_and(|status| status.available())
-                });
+                .is_empty();
             let mut methods = vec!["generateContent"];
             if streaming {
                 methods.push("streamGenerateContent");

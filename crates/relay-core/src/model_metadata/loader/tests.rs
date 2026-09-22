@@ -1,4 +1,5 @@
 use super::*;
+use crate::model_metadata::MetadataCacheEnvelope;
 use axum::{
     extract::{Path as AxumPath, State},
     http::HeaderMap,
@@ -177,6 +178,108 @@ async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
 }
 
 #[tokio::test]
+async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
+    let cache = CacheDir::new();
+    let server = Server::start().await;
+    let loader = server.loader(&cache);
+    loader.refresh(false).await.unwrap();
+    let before = loader.state.read().unwrap().clone();
+    let snapshot = loader.snapshot();
+    let bundle = CacheBundle::new(&before).unwrap();
+    for (i, state) in before.iter().enumerate() {
+        assert!(Arc::ptr_eq(
+            &state.envelope.as_ref().unwrap().payload,
+            &bundle.sources[SOURCES[i]].payload
+        ));
+    }
+
+    for i in 0..2 {
+        server.reply(i, StatusCode::NOT_MODIFIED, "");
+    }
+    server.reply(
+        2,
+        StatusCode::OK,
+        r#"{"data":[{"id":"vendor/model","reasoning":{"supported_efforts":["max"]}}]}"#,
+    );
+    server.reply(3, StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+    loader.refresh(true).await.unwrap();
+    let after = loader.state.read().unwrap().clone();
+    for i in 0..4 {
+        assert_eq!(
+            Arc::ptr_eq(
+                &before[i].envelope.as_ref().unwrap().payload,
+                &after[i].envelope.as_ref().unwrap().payload
+            ),
+            i != 2,
+            "only the changed source should allocate a new payload"
+        );
+    }
+    assert!(!before[3].envelope.as_ref().unwrap().stale);
+    assert!(after[3].envelope.as_ref().unwrap().stale);
+    assert_eq!(snapshot.reasoning_levels_for("model"), ["low", "high"]);
+    assert_eq!(loader.snapshot().reasoning_levels_for("model"), ["max"]);
+    assert_eq!(*loader.snapshot(), *server.loader(&cache).snapshot());
+}
+
+#[test]
+fn compact_source_preserves_json_contract_and_validates_canonical_content() {
+    let payload = serde_json::json!({
+        "vendor/model": {
+            "reasoning": true,
+            "limit": {"context": 1_234_567},
+            "future_metadata": {"ratio": 0.125, "values": [null, false, "текст"]}
+        }
+    });
+    let mut envelope = SourceEnvelope::new(0, payload.clone(), 1).unwrap();
+    assert_eq!(envelope.payload.get().len(), payload.to_string().len());
+    let encoded = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(encoded["payload"], payload);
+    let decoded: SourceEnvelope = serde_json::from_value(encoded).unwrap();
+    decoded.validate(0).unwrap();
+    assert_eq!(decoded.parse_payload().unwrap(), payload);
+
+    // Stored whitespace is not part of the content hash. Old and new cache
+    // writers remain compatible without trusting unchecked raw JSON.
+    envelope.payload =
+        Arc::from(RawValue::from_string(serde_json::to_string_pretty(&payload).unwrap()).unwrap());
+    envelope.validate(0).unwrap();
+    envelope.payload =
+        Arc::from(RawValue::from_string(r#"{"vendor/model":false}"#.into()).unwrap());
+    assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
+    envelope.revision = payload_hash(&envelope.parse_payload().unwrap()).unwrap();
+    assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
+}
+
+#[tokio::test]
+async fn malformed_compact_source_does_not_discard_other_cached_models() {
+    let cache = CacheDir::new();
+    let server = Server::start().await;
+    let loader = server.loader(&cache);
+    loader.refresh(false).await.unwrap();
+    let expected = loader.snapshot().reasoning_levels_for("vendor/model");
+    let mut bundle: Value = catalog_io::read_json(&cache.path(), MAX_CACHE_BYTES)
+        .unwrap()
+        .unwrap();
+    bundle["sources"]["models_dev_details"] = serde_json::json!({"payload": "invalid"});
+    bundle["mergedPayload"] = serde_json::json!({"untrusted/injected-only": {"reasoning": true}});
+    catalog_io::write_json_if_changed(&cache.path(), &bundle, MAX_CACHE_BYTES).unwrap();
+
+    let reopened = server.loader(&cache);
+    assert_eq!(
+        reopened.auxiliary_status("models_dev_details"),
+        CatalogStatus::Error
+    );
+    assert_eq!(
+        reopened.snapshot().reasoning_levels_for("vendor/model"),
+        expected
+    );
+    assert!(reopened
+        .snapshot()
+        .resolve("untrusted/injected-only")
+        .is_none());
+}
+
+#[tokio::test]
 async fn partial_failure_preserves_stale_levels_and_refreshes_other_sources() {
     let cache = CacheDir::new();
     let server = Server::start().await;
@@ -223,12 +326,17 @@ async fn auxiliary_catalog_works_when_models_dev_never_loaded() {
     server.reply(0, StatusCode::BAD_GATEWAY, "bad");
     let loader = server.loader(&cache);
     loader.refresh(false).await.unwrap();
-    assert!(loader.snapshot().resolve("vendor/model").is_none());
-    assert!(server
-        .loader(&cache)
-        .snapshot()
-        .resolve("vendor/model")
-        .is_none());
+    assert_eq!(
+        loader.snapshot().reasoning_levels_for("vendor/model"),
+        ["low", "high"]
+    );
+    assert_eq!(
+        server
+            .loader(&cache)
+            .snapshot()
+            .reasoning_levels_for("vendor/model"),
+        ["low", "high"]
+    );
     assert_eq!(loader.auxiliary_status("models_dev"), CatalogStatus::Error);
 }
 

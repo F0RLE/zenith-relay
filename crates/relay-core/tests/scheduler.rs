@@ -163,7 +163,7 @@ async fn public_models_preserve_the_provider_model_order() {
 }
 
 #[tokio::test]
-async fn pool_does_not_inject_unconfirmed_fast_without_overriding_client_service_tier() {
+async fn generic_client_keeps_tier_ownership_without_managed_codex_defaults() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![source("source", &upstream, "source-key", &[MODEL], 0)],
@@ -216,6 +216,135 @@ async fn pool_does_not_inject_unconfirmed_fast_without_overriding_client_service
             Some("priority"),
         ]
     );
+}
+
+#[tokio::test]
+async fn codex_catalog_exposes_api_speed_choices_and_honors_explicit_selection() {
+    for default_tier in [DefaultServiceTier::Standard, DefaultServiceTier::Ultrafast] {
+        let (upstream, state) = spawn_upstream("synthetic-speed-key", Vec::new()).await;
+        let (gateway, _) = spawn_gateway_with_options(
+            vec![source(
+                "source",
+                &upstream,
+                "synthetic-speed-key",
+                &[MODEL],
+                0,
+            )],
+            vec![local_key("key", LOCAL_KEY, None)],
+            GatewayRuntimeOptions {
+                default_service_tier: default_tier,
+                ..GatewayRuntimeOptions::default()
+            },
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let catalog: Value = client
+            .get(format!(
+                "{}/v1/models?client_version=0.120.0",
+                gateway.base_url
+            ))
+            .bearer_auth(LOCAL_KEY)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let card = &catalog["models"][0];
+        assert_eq!(card["slug"], MODEL);
+        assert_eq!(card["service_tiers"][0]["id"], "priority");
+        assert_eq!(card["service_tiers"][1]["id"], "ultrafast");
+        assert_eq!(card["additional_speed_tiers"], json!(["fast", "ultrafast"]));
+        assert!(card.get("default_service_tier").is_none());
+
+        for tier in [
+            None,
+            Some("priority"),
+            Some("fast"),
+            Some("ultrafast"),
+            Some("default"),
+        ] {
+            let mut body = json!({"model": MODEL, "input": "synthetic input"});
+            if let Some(tier) = tier {
+                body["service_tier"] = json!(tier);
+            }
+            let response = client
+                .post(format!("{}/v1/responses", gateway.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .header("originator", "codex_cli_rs")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path == "/v1/models")
+                .count(),
+            0
+        );
+        let tiers = requests
+            .iter()
+            .filter(|request| request.path == "/v1/responses")
+            .map(|request| request.body["service_tier"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tiers,
+            [
+                (default_tier == DefaultServiceTier::Ultrafast).then_some("ultrafast"),
+                Some("priority"),
+                Some("fast"),
+                Some("ultrafast"),
+                Some("default")
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_speed_survives_fallback_without_participant_metadata_requests() {
+    for tier in ["default", "fast", "priority", "ultrafast", "flex"] {
+        let (first, first_state) = spawn_upstream(
+            "first-synthetic-key",
+            vec![status_reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                None,
+            )],
+        )
+        .await;
+        let (second, second_state) = spawn_upstream("second-synthetic-key", Vec::new()).await;
+        let (gateway, _) = spawn_gateway_with_options(
+            vec![
+                source("first", &first, "first-synthetic-key", &[MODEL], 10),
+                source("second", &second, "second-synthetic-key", &[MODEL], 0),
+            ],
+            vec![local_key("key", LOCAL_KEY, None)],
+            GatewayRuntimeOptions {
+                default_service_tier: DefaultServiceTier::Ultrafast,
+                max_retry_candidates: 2,
+                ..GatewayRuntimeOptions::default()
+            },
+        )
+        .await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model": MODEL, "input": "synthetic input", "service_tier": tier}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        for state in [first_state, second_state] {
+            let requests = state.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].path, "/v1/responses");
+            assert_eq!(requests[0].body["service_tier"], tier);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1005,15 +1134,21 @@ async fn exhausted_retry_preserves_a_safe_gateway_error_message() {
 }
 
 #[tokio::test]
-async fn unmapped_candidate_is_tried_without_spending_the_execution_budget() {
+async fn automatic_adapter_candidate_shares_the_execution_budget() {
     let (chat_server, chat_state) = spawn_upstream("chat-key", Vec::new()).await;
     let (responses_server, responses_state) = spawn_upstream(
         "responses-key",
         vec![response_reply("responses-wins", "winner")],
     )
     .await;
-    let mut chat = source("chat", &chat_server, "chat-key", &[MODEL], 10);
-    chat.source.wire_api = WireApi::ChatCompletions;
+    let chat = source_with_protocol(
+        "chat",
+        &chat_server,
+        "chat-key",
+        &[MODEL],
+        10,
+        WireApi::ChatCompletions,
+    );
     let (gateway, events) = spawn_gateway(
         vec![
             chat,
@@ -1034,17 +1169,17 @@ async fn unmapped_candidate_is_tried_without_spending_the_execution_budget() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["id"],
-        "responses-wins"
-    );
-    assert!(chat_state.requests.lock().unwrap().is_empty());
-    assert_eq!(responses_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let chat_requests = chat_state.requests.lock().unwrap();
+    assert_eq!(chat_requests.len(), 1);
+    assert_eq!(chat_requests[0].path, "/v1/chat/completions");
+    drop(chat_requests);
+    assert!(responses_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].attempt, 1);
-    assert_eq!(events[0].source_id, "responses");
+    assert_eq!(events[0].source_id, "chat");
+    assert!(!events[0].success);
 }
 
 #[tokio::test]
@@ -1265,14 +1400,14 @@ async fn bridged_messages_prelude_returns_one_safe_terminal_error() {
         }],
     )
     .await;
-    let mut messages = source("messages", &upstream, "messages-key", &[MODEL], 0);
-    messages.protocol_bindings = vec![SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::ResponsesToMessages,
-        reasoning_mode: MessagesReasoningMode::Adaptive,
-        cache_write_ttl: Default::default(),
-        model_ids: vec![MODEL.to_string()],
-    }];
+    let messages = source_with_protocol(
+        "messages",
+        &upstream,
+        "messages-key",
+        &[MODEL],
+        0,
+        WireApi::Messages,
+    );
     let (gateway, events) =
         spawn_gateway(vec![messages], vec![local_key("key", LOCAL_KEY, None)], 3).await;
 
@@ -1399,7 +1534,7 @@ async fn invalid_sse_after_a_native_prelude_falls_back_before_a_source_switch() 
 }
 
 #[tokio::test]
-async fn chat_completions_preserves_native_tools_and_complete_tool_history() {
+async fn chat_completions_preserves_native_tools_and_bridges_responses() {
     let chat = json!({
         "id": "chat-1",
         "object": "chat.completion",
@@ -1415,6 +1550,12 @@ async fn chat_completions_preserves_native_tools_and_complete_tool_history() {
     let (chat_server, state) = spawn_upstream(
         "chat-key",
         vec![
+            Reply::Json {
+                status: StatusCode::OK,
+                body: chat.clone(),
+                cache_control: "chat",
+                retry_after: None,
+            },
             Reply::Json {
                 status: StatusCode::OK,
                 body: chat.clone(),
@@ -1521,7 +1662,10 @@ async fn chat_completions_preserves_native_tools_and_complete_tool_history() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output"][0]["content"][0]["text"], "translated");
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/chat/completions", gateway.base_url))
@@ -1577,22 +1721,22 @@ async fn chat_completions_preserves_native_tools_and_complete_tool_history() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "translated");
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert_eq!(
         requests[1].body["messages"][0]["content"][1]["type"],
         "image_url"
     );
-    assert_eq!(requests[2].body["tools"][0]["function"]["name"], "lookup");
+    assert_eq!(requests[3].body["tools"][0]["function"]["name"], "lookup");
     assert_eq!(
-        requests[2].body["tool_choice"]["function"]["name"],
+        requests[3].body["tool_choice"]["function"]["name"],
         "lookup"
     );
     assert_eq!(
-        requests[3].body["messages"][1]["tool_calls"][0]["id"],
+        requests[4].body["messages"][1]["tool_calls"][0]["id"],
         "call_1"
     );
-    assert_eq!(requests[3].body["messages"][2]["tool_call_id"], "call_1");
-    assert_eq!(requests[3].body["messages"][2]["content"], "result");
+    assert_eq!(requests[4].body["messages"][2]["tool_call_id"], "call_1");
+    assert_eq!(requests[4].body["messages"][2]["content"], "result");
 }
 
 #[tokio::test]
@@ -1691,6 +1835,12 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
                 chunks: vec![StreamChunk::Data(native_sse)],
                 cache_control: "messages",
             },
+            Reply::Json {
+                status: StatusCode::OK,
+                body: native_message.clone(),
+                cache_control: "messages",
+                retry_after: None,
+            },
         ],
     )
     .await;
@@ -1776,10 +1926,17 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "I will continue.");
+    assert_eq!(
+        body["choices"][0]["message"]["tool_calls"][0]["id"],
+        "toolu_2"
+    );
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(requests
         .iter()
         .all(|request| request.path == "/v1/messages"));
@@ -1789,28 +1946,39 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
     assert!(requests
         .iter()
         .all(|request| request.x_api_key.as_deref() == Some("messages-key")));
-    assert!(requests.iter().all(|request| {
+    assert!(requests[..2].iter().all(|request| {
         request.anthropic_version.as_deref() == Some("2023-06-01")
             && request.anthropic_beta.as_deref() == Some("fine-grained-tool-streaming-2025-05-14")
             && request.claude_code_session_id.as_deref() == Some("claude-session-1")
     }));
     assert_eq!(requests[0].body, request);
     assert_eq!(requests[1].body, streaming_request);
+    assert_eq!(
+        requests[2].body["messages"][0]["content"][0]["text"],
+        "hello"
+    );
+    assert_eq!(requests[2].anthropic_version.as_deref(), Some("2023-06-01"));
+    assert!(requests[2].anthropic_beta.is_none());
+    assert!(requests[2]
+        .claude_code_session_id
+        .as_deref()
+        .is_some_and(|session_id| !session_id.is_empty()));
     drop(requests);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert!(events.iter().all(|event| event.success));
-    assert!(events
+    assert!(events[..2]
         .iter()
         .all(|event| event.wire_api == WireApi::Messages));
-    assert!(events.iter().all(|event| {
+    assert_eq!(events[2].wire_api, WireApi::ChatCompletions);
+    assert!(events[..2].iter().all(|event| {
         event.tool_use.client_tool_count == 1 && event.tool_use.forwarded_tool_count == 1
     }));
 }
 
 #[tokio::test]
-async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bridge() {
+async fn legacy_protocol_bindings_do_not_filter_automatic_routes() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let mut mixed = source(
         "mixed",
@@ -1840,7 +2008,7 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
 
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
-        ["gpt-5.4", "shared-model"]
+        ["gpt-5.4", "gpt-5.4-mini", "shared-model"]
     );
 
     let catalog: Value = reqwest::Client::new()
@@ -1861,13 +2029,10 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
         .iter()
         .filter_map(|model| model["slug"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
-    assert_eq!(
-        catalog_models,
-        [
-            "gpt-5.4".to_string(),
-            zenith_relay_core::codex_model_alias("shared-model"),
-        ]
-    );
+    assert_eq!(catalog_models.len(), 3);
+    assert!(catalog_models.contains(&"gpt-5.4".to_string()));
+    assert!(catalog_models.contains(&"gpt-5.4-mini".to_string()));
+    assert!(catalog_models.contains(&zenith_relay_core::codex_model_alias("shared-model")));
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -1884,26 +2049,15 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
         .json(&json!({
             "model": "shared-model",
             "max_tokens": 16,
-            "messages": [{"role": "user", "content": "hello"}],
-            "tools": [{"name": "PowerShell", "input_schema": {"type": "object"}}]
+            "messages": [{"role": "user", "content": "hello"}]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
+    let response_body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "body={response_body}");
 
-    state.replies.lock().unwrap().push_back(Reply::Json {
-        status: StatusCode::OK,
-        body: json!({
-            "id": "msg_linked",
-            "model": "gpt-5.4-mini",
-            "content": [{"type": "text", "text": "linked"}],
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 2, "output_tokens": 1}
-        }),
-        cache_control: "no-store",
-        retry_after: None,
-    });
     let response = reqwest::Client::new()
         .post(format!("{}/v1/messages", gateway.base_url))
         .header("x-api-key", LOCAL_KEY)
@@ -1916,8 +2070,6 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["content"][0]["text"], "linked");
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/messages", gateway.base_url))
@@ -1925,38 +2077,46 @@ async fn protocol_bindings_keep_native_clients_without_an_implicit_responses_bri
         .json(&json!({
             "model": "gpt-5.4",
             "max_tokens": 16,
-            "messages": [{"role": "user", "content": "must not route"}]
+            "messages": [{"role": "user", "content": "route automatically"}]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let requests = state.requests.lock().unwrap();
     let paths = requests
         .iter()
+        .filter(|request| request.path != "/v1/models")
         .map(|request| request.path.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(paths, ["/v1/responses", "/v1/messages", "/v1/messages",]);
     assert_eq!(
-        requests[1].body["tools"][0]["name"].as_str(),
-        Some("PowerShell")
+        paths,
+        [
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/messages",
+            "/v1/responses"
+        ]
     );
     drop(requests);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert!(events.iter().any(|event| {
         event.wire_api == WireApi::Responses && event.candidate_id.as_deref() == Some("mixed")
     }));
     assert!(events.iter().any(|event| {
         event.wire_api == WireApi::Messages
-            && event.candidate_id.as_deref() == Some("mixed::messages")
+            && event.candidate_id.as_deref() == Some("mixed::messages_to_responses")
     }));
-    assert!(!events.iter().any(|event| {
-        event.wire_api == WireApi::Responses
-            && event.candidate_id.as_deref() == Some("mixed::responses_to_messages")
-    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.wire_api == WireApi::Messages)
+            .count(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -1993,6 +2153,7 @@ async fn native_gpt_picker_ids_and_legacy_aliases_keep_key_scope_and_upstream_id
     let rows = catalog["models"].as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["slug"], "local/gpt-6-astra");
+    assert_eq!(rows[0]["display_name"], "6 Astra");
     for (model, expected) in [
         ("local/gpt-6-astra".to_string(), StatusCode::OK),
         (
@@ -2014,7 +2175,11 @@ async fn native_gpt_picker_ids_and_legacy_aliases_keep_key_scope_and_upstream_id
             .unwrap();
         assert_eq!(response.status(), expected, "model: {model}");
     }
-    let requests = state.requests.lock().unwrap();
+    let observed = state.requests.lock().unwrap();
+    let requests = observed
+        .iter()
+        .filter(|request| request.path == "/v1/responses")
+        .collect::<Vec<_>>();
     assert_eq!(requests.len(), 2);
     assert!(requests
         .iter()
@@ -2140,6 +2305,7 @@ fn source_with_protocol(
 ) -> RuntimeSource {
     let mut source = source(id, server, key, models, priority);
     source.source.wire_api = wire_api;
+    source.protocol_config.endpoint_hint = Some(wire_api);
     source.protocol_bindings = vec![SourceProtocolBinding::legacy(
         wire_api,
         &source.source.models,
@@ -2361,6 +2527,7 @@ fn response_reply(id: &str, cache_control: &'static str) -> Reply {
             "id": id,
             "object": "response",
             "model": MODEL,
+            "status": "completed",
             "output": [],
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         }),

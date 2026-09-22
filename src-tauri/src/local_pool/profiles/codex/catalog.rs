@@ -76,6 +76,7 @@ pub(super) fn direct_source_model_catalog_with_capabilities(
                 continue;
             };
             let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
+            model["display_name"] = Value::String(metadata.codex_display_name(&decoded));
             metadata.apply_codex_capabilities(&decoded, model);
         }
     }

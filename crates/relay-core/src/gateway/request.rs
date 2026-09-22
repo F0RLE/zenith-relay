@@ -7,12 +7,9 @@ mod normalization;
 #[cfg(test)]
 use super::now_ms;
 pub(super) use account::{account_endpoint_url, alpha_search, responses_compact, AccountEndpoint};
-pub(super) use codex_models::models;
 #[cfg(test)]
-use codex_models::{
-    build_codex_models_response, build_codex_models_response_with_source_capabilities,
-    build_codex_models_response_with_source_reasoning,
-};
+use codex_models::build_codex_models_response;
+pub(super) use codex_models::models;
 pub(super) use headers::{
     apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_codex_headers,
@@ -712,8 +709,8 @@ pub(super) fn request_id() -> String {
 mod tests {
     use super::*;
     use crate::{
-        DefaultServiceTier, GatewayRuntimeOptions, LocalGatewayKey, MessagesReasoningMode,
-        ProviderSource, RuntimeLocalKey, RuntimeSource, SourceAdapter, SourceProtocolBinding,
+        DefaultServiceTier, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+        RuntimeLocalKey, RuntimeSource,
     };
     use axum::http::{HeaderMap, HeaderValue};
 
@@ -1222,14 +1219,8 @@ mod tests {
             {"slug": "disabled-code", "supported_in_api": false}
         ]});
 
-        let response = build_codex_models_response(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            Some(&upstream),
-        )
-        .expect("coding model catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, Some(&upstream))
+            .expect("coding model catalog");
         let models = response["models"].as_array().unwrap();
         assert_eq!(models.len(), 2);
         for model in models {
@@ -1296,7 +1287,6 @@ mod tests {
             &runtime,
             &key,
             &visible,
-            &Default::default(),
             Some(&json!({"models": [unrelated]})),
         )
         .unwrap();
@@ -1306,7 +1296,7 @@ mod tests {
             let model = models.iter().find(|model| model["slug"] == id).unwrap();
             assert!(codex_catalog_entry_is_compatible(model));
             assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
-            assert_eq!(model["supports_parallel_tool_calls"], false);
+            assert_eq!(model["supports_parallel_tool_calls"], true);
             assert_eq!(model["supported_reasoning_levels"], json!([]));
             assert!(model.get("use_responses_lite").is_none());
         }
@@ -1339,9 +1329,7 @@ mod tests {
             .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
             .unwrap();
         let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
-        let response =
-            build_codex_models_response(&runtime, &key, &visible, &Default::default(), None)
-                .unwrap();
+        let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
         let entry = &response["models"][0];
         assert_eq!(entry["input_modalities"], json!(["text"]));
         assert!(entry.get("context_window").is_none());
@@ -1379,13 +1367,10 @@ mod tests {
         };
         let runtime = GatewayRuntime::from_pool(
             vec![RuntimeSource {
-                protocol_bindings: vec![SourceProtocolBinding {
-                    wire_api: WireApi::Responses,
-                    adapter: SourceAdapter::ResponsesToMessages,
-                    reasoning_mode: MessagesReasoningMode::Adaptive,
-                    cache_write_ttl: Default::default(),
-                    model_ids: vec![model.into()],
-                }],
+                protocol_config: crate::SourceProtocolConfig {
+                    endpoint_hint: Some(WireApi::Messages),
+                    ..Default::default()
+                },
                 ..RuntimeSource::unrestricted(source)
             }],
             vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
@@ -1403,9 +1388,7 @@ mod tests {
             .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
             .unwrap();
         let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
-        let response =
-            build_codex_models_response(&runtime, &key, &visible, &Default::default(), None)
-                .unwrap();
+        let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
 
         assert_eq!(
             response["models"][0]["supported_reasoning_levels"]
@@ -1414,10 +1397,10 @@ mod tests {
                 .iter()
                 .filter_map(|level| level["effort"].as_str())
                 .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh", "max", "ultra"]
+            ["low", "medium", "high", "max", "ultra"]
         );
         // The model metadata remains the official five-level enum; `ultra`
-        // exists only in the Codex projection that translates it to `max`.
+        // maps to `max` in Codex, while this adapter cannot forward `xhigh`.
         assert_eq!(
             runtime.model_capabilities(model).reasoning_effort_levels,
             ["low", "medium", "high", "xhigh", "max"]
@@ -1425,41 +1408,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_reasoning_and_manual_overrides_do_not_grant_unknown_capabilities() {
+    fn manual_overrides_do_not_grant_unknown_reasoning_capabilities() {
         let runtime =
             capability_test_runtime(&["vendor/claude-fable-5"], GatewayRuntimeOptions::default());
         let key = runtime
             .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
             .unwrap();
         let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
-        let source_reasoning = std::collections::BTreeMap::from([(
-            "vendor/claude-fable-5".to_string(),
-            json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Low"},
-                    {"effort": "medium", "description": "Medium"},
-                    {"effort": "high", "description": "High"},
-                    {"effort": "ultra", "description": "Ultra"}
-                ],
-                "default_reasoning_level": "ultra",
-                "supports_reasoning_summary_parameter": true,
-                "supports_reasoning_summaries": true,
-                "default_reasoning_summary": "detailed"
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-        )]);
-
-        let response = build_codex_models_response_with_source_reasoning(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            &source_reasoning,
-            None,
-        )
-        .expect("coding model catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, None)
+            .expect("coding model catalog");
         let model = &response["models"][0];
 
         assert_eq!(
@@ -1479,15 +1436,8 @@ mod tests {
                 vec!["ultra".to_string()],
             )]))
             .unwrap();
-        let configured = build_codex_models_response_with_source_reasoning(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            &source_reasoning,
-            None,
-        )
-        .expect("coding model catalog");
+        let configured = build_codex_models_response(&runtime, &key, &visible, None)
+            .expect("coding model catalog");
         let configured_model = &configured["models"][0];
         assert!(configured_model.get("default_reasoning_level").is_none());
         assert_eq!(configured_model["supported_reasoning_levels"], json!([]));
@@ -1495,15 +1445,8 @@ mod tests {
         runtime
             .set_model_reasoning_allowed_levels(std::collections::BTreeMap::new())
             .unwrap();
-        let no_manual_selection = build_codex_models_response_with_source_reasoning(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            &source_reasoning,
-            None,
-        )
-        .expect("coding model catalog");
+        let no_manual_selection = build_codex_models_response(&runtime, &key, &visible, None)
+            .expect("coding model catalog");
         assert_eq!(
             no_manual_selection["models"][0]["supported_reasoning_levels"],
             json!([])
@@ -1511,25 +1454,74 @@ mod tests {
     }
 
     #[test]
-    fn api_source_image_capability_is_published_to_codex() {
+    fn codex_catalog_names_do_not_merge_routes_or_grant_native_transport() {
+        use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+        let metadata = ModelMetadataCatalog::from_models_dev_json(
+            r#"{
+            "openai/future-model":{"name":"Future Name"},
+            "alpha/shared":{"name":"Same Display Name"},
+            "beta/shared":{"name":"Same Display Name"}
+        }"#,
+        )
+        .unwrap();
+        let runtime = capability_test_runtime(
+            &[
+                "openai/future-model",
+                "alpha/shared",
+                "beta/shared",
+                "unknown-model",
+            ],
+            GatewayRuntimeOptions {
+                model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(metadata)),
+                ..GatewayRuntimeOptions::default()
+            },
+        );
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
+        let rows = response["models"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        for (row, id) in rows.iter().zip(&visible) {
+            let expected = match id.as_str() {
+                "openai/future-model" => "Future Name",
+                "alpha/shared" | "beta/shared" => "Same Display Name",
+                _ => "Unknown Model",
+            };
+            assert_eq!(row["display_name"], expected);
+            assert_eq!(
+                runtime
+                    .resolve_configured_model(
+                        &key,
+                        row["slug"].as_str().unwrap(),
+                        &[WireApi::Responses]
+                    )
+                    .as_ref(),
+                Some(id)
+            );
+            assert_eq!(row["supports_parallel_tool_calls"], true);
+            assert_eq!(row["supported_reasoning_levels"], json!([]));
+            assert!(row.get("use_responses_lite").is_none());
+            assert_eq!(
+                row["service_tiers"].as_array().map(Vec::len),
+                Some(if id == "openai/future-model" { 2 } else { 0 })
+            );
+        }
+        assert_ne!(rows[1]["slug"], rows[2]["slug"]);
+    }
+
+    #[test]
+    fn codex_catalog_uses_shared_image_defaults_for_unknown_models() {
         let runtime =
             capability_test_runtime(&["vendor/claude-fable-5"], GatewayRuntimeOptions::default());
         let key = runtime
             .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
             .unwrap();
         let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
-        let image_models = std::collections::BTreeSet::from(["vendor/claude-fable-5".to_string()]);
-
-        let response = build_codex_models_response_with_source_capabilities(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            &image_models,
-            &Default::default(),
-            None,
-        )
-        .expect("coding model catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, None)
+            .expect("coding model catalog");
 
         assert_eq!(
             response["models"][0]["input_modalities"],
@@ -1539,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_catalog_uses_unique_priorities_and_keeps_unconfirmed_capabilities_disabled() {
+    fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
         let runtime = GatewayRuntime::from_pool(
             vec![RuntimeSource::unrestricted(ProviderSource {
                 id: "source".into(),
@@ -1585,14 +1577,8 @@ mod tests {
             "supports_parallel_tool_calls": true
         }]});
 
-        let response = build_codex_models_response(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            Some(&upstream),
-        )
-        .expect("coding model catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, Some(&upstream))
+            .expect("coding model catalog");
         let models = response["models"].as_array().unwrap();
         let priorities = models
             .iter()
@@ -1611,14 +1597,14 @@ mod tests {
                 "Grok 4.5",
                 "Gemini 3.6 Flash",
                 "Claude Opus 4.8",
-                "GPT 5.4",
+                "5.4",
             ]
         );
         assert!(models.iter().all(codex_catalog_entry_is_compatible));
         // A generic Responses source can reuse an OpenAI-looking model ID
         // without supporting Codex's native tool contract. Only account
         // manifests are authoritative for this capability.
-        assert_eq!(models[0]["supports_parallel_tool_calls"], false);
+        assert_eq!(models[0]["supports_parallel_tool_calls"], true);
     }
 
     #[test]
@@ -1654,14 +1640,8 @@ mod tests {
             ]
         });
 
-        let response = build_codex_models_response(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            Some(&upstream),
-        )
-        .expect("coding model catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, Some(&upstream))
+            .expect("coding model catalog");
         let models = response["models"].as_array().unwrap();
         let priorities = models
             .iter()
@@ -1674,7 +1654,7 @@ mod tests {
                 .iter()
                 .map(|model| model["display_name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["GPT 5.6 Sol", "Claude Opus", "Grok"]
+            ["5.6 Sol", "Claude Opus", "Grok"]
         );
     }
 
@@ -1692,17 +1672,8 @@ mod tests {
             "auto_compact_token_limit": 122_000,
             "effective_context_window_percent": 95
         }]});
-        let source_context_windows =
-            std::collections::BTreeMap::from([("gpt-5.4".into(), 1_000_000)]);
-
-        let response = build_codex_models_response(
-            &runtime,
-            &key,
-            &visible,
-            &source_context_windows,
-            Some(&upstream),
-        )
-        .expect("coding model catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, Some(&upstream))
+            .expect("coding model catalog");
         let model = &response["models"][0];
 
         assert!(model.get("context_window").is_none());

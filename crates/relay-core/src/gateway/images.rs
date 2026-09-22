@@ -503,7 +503,7 @@ async fn execute_prepared(
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
         let upstream = runtime
-            .request_client(&route.candidate_id, account_route || prepared.stream)
+            .request_client(&route.candidate_id)
             .post(upstream_url)
             .header(
                 CONTENT_TYPE,
@@ -523,7 +523,7 @@ async fn execute_prepared(
             )
             .body(request_body);
         let upstream = match runtime
-            .send_authorized_request(&route.candidate_id, upstream, None)
+            .send_authorized_request(&route.candidate_id, upstream, None, None)
             .await
         {
             Ok(upstream) => {
@@ -1090,17 +1090,7 @@ fn translate_account_response(
 }
 
 fn sse_json(event: &[u8]) -> Option<Value> {
-    let mut data = Vec::new();
-    for line in event.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(value) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push(b'\n');
-        }
-        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
-    }
+    let data = crate::protocol::sse_data(event);
     (!data.is_empty() && data != b"[DONE]")
         .then(|| serde_json::from_slice(&data).ok())
         .flatten()
@@ -1313,18 +1303,18 @@ mod tests {
 
     #[test]
     fn completed_response_becomes_images_api_payload() {
-        let translated = translate_account_response(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"created_at\":7,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\",\"output_format\":\"png\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
-            "b64_json",
-            "image_generation",
-        )
-        .unwrap();
-        let body: Value = serde_json::from_slice(&translated.json).unwrap();
-        assert_eq!(body["created"], 7);
-        assert_eq!(body["data"][0]["b64_json"], "aW1hZ2U=");
-        assert!(String::from_utf8(translated.stream)
-            .unwrap()
-            .contains("image_generation.completed"));
+        for ending in ["\n", "\r\n", "\r"] {
+            let frame = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"created_at\":7,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\",\"output_format\":\"png\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n".replace('\n', ending);
+            let translated =
+                translate_account_response(frame.as_bytes(), "b64_json", "image_generation")
+                    .unwrap();
+            let body: Value = serde_json::from_slice(&translated.json).unwrap();
+            assert_eq!(body["created"], 7);
+            assert_eq!(body["data"][0]["b64_json"], "aW1hZ2U=");
+            assert!(String::from_utf8(translated.stream)
+                .unwrap()
+                .contains("image_generation.completed"));
+        }
     }
 
     #[test]

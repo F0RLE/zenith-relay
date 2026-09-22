@@ -14,9 +14,8 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
     discover_source_with_protocol_config, fetch_source_provider_stats,
-    normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding,
-    SourceProtocolConfig, WireApi,
+    normalize_model_price_overrides, source_points_to_gateway, ApiModelPriceOverride,
+    ProviderSource, SourceDiscovery, SourceProtocolBinding, SourceProtocolConfig, WireApi,
 };
 
 mod policy;
@@ -51,8 +50,6 @@ pub struct SourceInput {
     wire_api: WireApi,
     #[serde(default)]
     protocol_bindings: Vec<SourceProtocolBinding>,
-    #[serde(default)]
-    protocol_mode: Option<zenith_relay_core::ProtocolSelectionMode>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -129,7 +126,6 @@ pub struct SourcePatch {
     official_provider_family: Option<String>,
     wire_api: Option<WireApi>,
     protocol_bindings: Option<Vec<SourceProtocolBinding>>,
-    protocol_mode: Option<zenith_relay_core::ProtocolSelectionMode>,
     models: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
     excluded_models: Option<Vec<String>>,
@@ -182,9 +178,6 @@ pub async fn update_source(
     }
     if record.base_url != old_record.base_url || input.api_key.is_some() {
         record.protocol_config.invalidate(&record.base_url);
-    }
-    if let Some(mode) = input.protocol_mode {
-        record.protocol_config.mode = mode;
     }
     if let Some(value) = input.models {
         record.models = normalized_values(value);
@@ -437,9 +430,6 @@ pub async fn test_source(
         })
         .await
         .map_err(runtime_error)?;
-    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
-        runtime.refresh_source_model_metadata_for_source(&id).await;
-    }
     Ok(Json(source_summary(&state, &record)?))
 }
 
@@ -543,15 +533,7 @@ fn source_record(
     secret_ref: String,
     input: SourceInput,
 ) -> Result<SourceRecord, ManagementError> {
-    let mut protocol_config = SourceProtocolConfig::automatic(&input.base_url);
-    // Payloads from before protocol selection was persisted did not carry a
-    // mode. Keep those legacy connections on their explicit native route;
-    // automatic capability expansion is opt-in through `protocolMode: auto`.
-    // This also prevents an old Responses-only source from silently gaining
-    // adapted client routes after a server upgrade.
-    protocol_config.mode = input
-        .protocol_mode
-        .unwrap_or(zenith_relay_core::ProtocolSelectionMode::Manual);
+    let protocol_config = SourceProtocolConfig::automatic(&input.base_url);
     let mut record = SourceRecord {
         id,
         name: clean_label(&input.name, "source name")?,
@@ -638,32 +620,10 @@ fn validate_record_protocol_bindings(record: &SourceRecord) -> Result<(), Manage
 }
 
 fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), ManagementError> {
-    if record.protocol_config.mode == zenith_relay_core::ProtocolSelectionMode::Auto {
-        record
-            .effective_protocol_bindings()
-            .map_err(validation_error)?;
-        return Ok(());
-    }
-    if record.protocol_bindings.is_empty() {
-        return Ok(());
-    }
-    let source_wide_catalog_route =
-        record.protocol_bindings.len() == 1 && record.protocol_bindings[0].model_ids.is_empty();
-    let mut bindings = normalize_source_protocol_bindings(
-        std::mem::take(&mut record.protocol_bindings),
-        record.wire_api,
-        &record.models,
-    )
-    .map_err(|error| validation_error(error.to_string()))?;
-    if source_wide_catalog_route {
-        // Preserve automatic source-wide discovery; runtime readers expand
-        // the empty route through the effective bindings helper.
-        if let Some(binding) = bindings.first_mut() {
-            binding.model_ids.clear();
-        }
-    }
-    record.protocol_bindings = bindings;
-    Ok(())
+    record
+        .effective_protocol_bindings()
+        .map(drop)
+        .map_err(validation_error)
 }
 
 fn clear_source_binding_models(bindings: &mut [SourceProtocolBinding]) {

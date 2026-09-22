@@ -191,7 +191,8 @@ impl ClientRequest {
     ) {
         self.service_tier_policy.prepare_for_candidate(
             &mut self.value,
-            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+            self.service_tier_policy
+                .select_for_model(runtime, &route.source_model),
             WireApi::Responses,
         );
     }
@@ -203,7 +204,8 @@ impl ClientRequest {
     ) -> DefaultServiceTier {
         self.service_tier_policy.effective_tier(
             &self.value,
-            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+            self.service_tier_policy
+                .select_for_model(runtime, &route.source_model),
             WireApi::Responses,
         )
     }

@@ -1,17 +1,17 @@
 use super::{runtime_error, store_error, ManagementError};
-use crate::state::AppState;
+use crate::state::{AppState, ServerAccountRecord, SourceRecord};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
-    is_valid_model_id, normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot,
-    reasoning_policy_key, ApiModelPriceOverride, DefaultServiceTier, WireApi,
+    protocol::{
+        canonical_pool_model_id, complete_model_display_order, update_model_reasoning_policy,
+        ModelPolicyError, RuntimeStateSnapshot,
+    },
+    ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -154,13 +154,14 @@ pub async fn set_model_service_tier(
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
     let runtime = state.runtime().map_err(runtime_error)?;
     if input.service_tier != DefaultServiceTier::Standard
-        && !runtime.as_ref().is_some_and(|runtime| {
-            runtime.model_supports_service_tier(&canonical, input.service_tier)
+        && !snapshot.gateway.models.iter().any(|model| {
+            model.id.eq_ignore_ascii_case(&canonical)
+                && model.speed_tiers.contains(&input.service_tier)
         })
     {
         return Err(ManagementError::validation(
             error_codes::MODEL_SERVICE_TIER_UNSUPPORTED,
-            "requested service tier requires confirmed upstream support for this active model route",
+            "requested service tier is not available under the Relay model-family policy",
         ));
     }
     let previous = state
@@ -193,10 +194,22 @@ pub async fn set_model_order(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelOrderInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
     let snapshot = state.snapshot().map_err(store_error)?;
-    let current = pool_model_inventory(&state, &snapshot)?;
+    let sources = state.store.sources().map_err(store_error)?;
+    let accounts = state.store.accounts().map_err(store_error)?;
     let previous = state.store.model_display_order().map_err(store_error)?;
-    let order = complete_model_display_order(&current, input.model_ids, &previous)?;
+    let order = complete_model_display_order(
+        snapshot
+            .gateway
+            .models
+            .iter()
+            .map(|model| &model.id)
+            .chain(configured_pool_model_ids(&sources, &accounts)),
+        &input.model_ids,
+        &previous,
+    )
+    .map_err(model_policy_error)?;
     if previous == order {
         return Ok(Json(snapshot));
     }
@@ -216,18 +229,6 @@ pub async fn set_model_reasoning(
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?.to_ascii_lowercase();
-    let policy_key = reasoning_policy_key(&canonical);
-    let mut normalized_allowed_levels =
-        normalize_model_reasoning_allowed_levels(BTreeMap::from([(
-            policy_key.clone(),
-            input.allowed_levels,
-        )]))
-        .map_err(|message| {
-            ManagementError::validation(error_codes::REASONING_LEVELS_INVALID, message)
-        })?;
-    let allowed_levels = normalized_allowed_levels
-        .remove(&policy_key)
-        .unwrap_or_default();
     let runtime = state.runtime().map_err(runtime_error)?;
 
     let previous = state
@@ -235,10 +236,9 @@ pub async fn set_model_reasoning(
         .model_reasoning_allowed_levels()
         .map_err(store_error)?;
     let mut configured = previous.clone();
-    configured.remove(&canonical);
-    // Keep an explicit empty override so the user can disable every
-    // provider-reported mode without losing that choice on the next refresh.
-    configured.insert(policy_key, allowed_levels);
+    update_model_reasoning_policy(&mut configured, &canonical, input.allowed_levels).map_err(
+        |message| ManagementError::validation(error_codes::REASONING_LEVELS_INVALID, message),
+    )?;
     if configured == previous {
         return Ok(Json(snapshot));
     }
@@ -268,142 +268,50 @@ fn canonical_model_id(
     snapshot: &RuntimeStateSnapshot,
     requested: &str,
 ) -> Result<String, ManagementError> {
-    let requested = requested.trim();
-    if !is_valid_model_id(requested) {
-        return Err(ManagementError::validation(
-            error_codes::MODEL_ID_INVALID,
-            "model id is invalid",
-        ));
+    match canonical_pool_model_id(
+        snapshot.gateway.models.iter().map(|model| &model.id),
+        requested,
+    ) {
+        Ok(model) => return Ok(model.to_string()),
+        Err(ModelPolicyError::NotFound) => {}
+        Err(error) => return Err(model_policy_error(error)),
     }
-    if let Some(model) = snapshot
-        .gateway
-        .models
-        .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.clone())
-    {
-        return Ok(model);
-    }
-    pool_model_inventory(state, snapshot)?
-        .get(&requested.to_ascii_lowercase())
-        .cloned()
-        .ok_or_else(|| {
-            ManagementError::not_found(error_codes::MODEL_NOT_FOUND, "pool model not found")
-        })
-}
-
-/// Build the editable model inventory from configured pool members. The live
-/// snapshot intentionally omits routes that are unavailable, but management
-/// actions must remain usable while a source or account is cooling down,
-/// refreshing, or temporarily missing credentials.
-fn pool_model_inventory(
-    state: &AppState,
-    snapshot: &RuntimeStateSnapshot,
-) -> Result<BTreeMap<String, String>, ManagementError> {
     let sources = state.store.sources().map_err(store_error)?;
     let accounts = state.store.accounts().map_err(store_error)?;
-    let mut current = snapshot
-        .gateway
-        .models
+    canonical_pool_model_id(configured_pool_model_ids(&sources, &accounts), requested)
+        .map(str::to_owned)
+        .map_err(model_policy_error)
+}
+
+/// Read the editable model inventory from configured pool members so actions
+/// remain usable even with old or incomplete runtime projections.
+fn configured_pool_model_ids<'a>(
+    sources: &'a [SourceRecord],
+    accounts: &'a [ServerAccountRecord],
+) -> impl Iterator<Item = &'a String> {
+    let source_models = sources
         .iter()
-        .map(|model| (model.id.to_ascii_lowercase(), model.id.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for source in sources.iter().filter(|source| source.in_pool) {
-        for wire_api in WireApi::ALL {
-            let Ok(models) = source.models_for_wire_api(wire_api) else {
-                continue;
-            };
-            for model in models {
-                current.entry(model.to_ascii_lowercase()).or_insert(model);
-            }
-        }
-    }
-    for account in accounts.iter().filter(|account| account.in_pool) {
-        for model in account.effective_models() {
-            current
-                .entry(model.to_ascii_lowercase())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    Ok(current)
+        .filter(|source| source.in_pool)
+        .flat_map(|source| {
+            source.models.iter().chain(
+                source
+                    .protocol_bindings
+                    .iter()
+                    .flat_map(|binding| &binding.model_ids),
+            )
+        });
+    let account_models = accounts
+        .iter()
+        .filter(|account| account.in_pool)
+        .flat_map(ServerAccountRecord::effective_models);
+    source_models.chain(account_models)
 }
 
-/// Merge a partial order from the management UI with the saved order and the
-/// current configured inventory. Unknown or duplicate IDs supplied by the UI
-/// are rejected; stale saved IDs are dropped and newly discovered models are
-/// appended deterministically.
-fn complete_model_display_order(
-    current: &BTreeMap<String, String>,
-    requested_ids: Vec<String>,
-    saved_order: &[String],
-) -> Result<Vec<String>, ManagementError> {
-    let mut included = BTreeSet::new();
-    let mut order = Vec::with_capacity(current.len());
-    let mut include = |model: &str, reject: bool| -> Result<(), ManagementError> {
-        let key = model.trim().to_ascii_lowercase();
-        let Some(canonical) = current.get(&key) else {
-            if reject {
-                return Err(ManagementError::not_found(
-                    error_codes::MODEL_NOT_FOUND,
-                    "pool model not found",
-                ));
-            }
-            return Ok(());
-        };
-        if !included.insert(key) {
-            if reject {
-                return Err(ManagementError::validation(
-                    error_codes::MODEL_ORDER_INVALID,
-                    "model order contains duplicates",
-                ));
-            }
-            return Ok(());
+fn model_policy_error(error: ModelPolicyError) -> ManagementError {
+    match error {
+        ModelPolicyError::NotFound => ManagementError::not_found(error.code(), error.to_string()),
+        ModelPolicyError::InvalidId | ModelPolicyError::DuplicateOrderEntry => {
+            ManagementError::validation(error.code(), error.to_string())
         }
-        order.push(canonical.clone());
-        Ok(())
-    };
-
-    for model in requested_ids {
-        include(&model, true)?;
-    }
-    for model in saved_order {
-        include(model, false)?;
-    }
-    for model in current.values() {
-        include(model, false)?;
-    }
-    Ok(order)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn inventory(ids: &[&str]) -> BTreeMap<String, String> {
-        ids.iter()
-            .map(|id| (id.to_ascii_lowercase(), (*id).to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn partial_model_order_keeps_saved_entries_and_appends_new_models() {
-        let current = inventory(&["gpt-a", "gpt-b", "gpt-hidden", "gpt-new"]);
-        let order = complete_model_display_order(
-            &current,
-            vec!["gpt-b".into(), "gpt-a".into()],
-            &["gpt-hidden".into(), "gpt-a".into(), "stale-model".into()],
-        )
-        .unwrap();
-        assert_eq!(order, ["gpt-b", "gpt-a", "gpt-hidden", "gpt-new"]);
-    }
-
-    #[test]
-    fn model_order_rejects_unknown_and_duplicate_requested_ids() {
-        let current = inventory(&["gpt-a", "gpt-b"]);
-        assert!(complete_model_display_order(&current, vec!["missing".into()], &[]).is_err());
-        assert!(
-            complete_model_display_order(&current, vec!["gpt-a".into(), "GPT-A".into()], &[])
-                .is_err()
-        );
     }
 }

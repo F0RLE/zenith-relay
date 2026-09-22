@@ -24,7 +24,7 @@ use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, response_id_from_bytes,
     route_error_origin, usage_event,
 };
-use super::super::turn_state::{guard_account_request, relay_account_response_header};
+use super::super::turn_state::{relay_account_response_header, request_scope};
 use super::finish_request_failure;
 use super::request::should_wait_for_candidate_availability;
 use super::{wait_for_candidate_retry, AutomaticRecovery, CandidateRetryContext};
@@ -285,7 +285,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             continue;
         }
         let selected_service_tier =
-            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model);
+            service_tier_policy.select_for_model(&runtime, &route.source_model);
         service_tier_policy.prepare_for_candidate(
             &mut request,
             selected_service_tier,
@@ -307,9 +307,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             .then(|| HeaderValue::from_static("true"))
         });
         let selected_error_origin = route_error_origin(&route);
+        let cooldown_scope = route.scope.clone();
+        let cooldown_protocols = route.allowed_protocols.clone();
         let cooldown_context = CooldownContext {
-            scope: &route.scope,
-            allowed_protocols: &route.allowed_protocols,
+            scope: &cooldown_scope,
+            allowed_protocols: &cooldown_protocols,
         };
         let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint) else {
             last_failure = Some(AttemptFailure::invalid_request());
@@ -351,21 +353,39 @@ pub(in crate::gateway) async fn execute_account_endpoint(
 
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
+        let failed_usage =
+            |route: &crate::runtime::ExecutorRoute, attempt, failure: AttemptFailure| {
+                usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    route,
+                    Some(&reasoning_effort),
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
+                )
+            };
         let mut request_headers = forwarded_codex_headers(&client_headers, &request_id);
         apply_codex_routing_hint(
             &mut request_headers,
             &route.source_model,
             route.service_tier,
         );
-        guard_account_request(
-            &runtime,
+        let turn_account = route.account_id.clone();
+        let turn_model = route.source_model.clone();
+        let turn_scope = request_scope(
             &key.id,
-            &mut request_headers,
-            route.account_id.as_deref().unwrap_or_default(),
-            now_ms(),
+            &client_headers,
+            turn_account.as_deref(),
+            &turn_model,
         );
+        let compaction_headers = request_headers.clone();
         let mut upstream_request = runtime
-            .request_client(&route.candidate_id, false)
+            .request_client(&route.candidate_id)
             .post(upstream_url)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
@@ -381,6 +401,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 &route.candidate_id,
                 upstream_request.body(request_body),
                 codex_client_version(&client_headers),
+                turn_scope.as_ref(),
             )
             .await;
         let upstream = match upstream {
@@ -399,19 +420,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     &cooldown_context,
                     route.half_open_probe,
                 );
-                let mut event = usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    Some(&reasoning_effort),
-                    &requested_model,
-                    false,
-                    failure.status.as_u16(),
-                    Some(failure.category.to_string()),
-                    started.elapsed().as_millis() as u64,
-                    tool_use.clone(),
-                );
+                let mut event = failed_usage(&route, attempt, failure);
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -419,9 +428,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 continue;
             }
         };
-        let status = upstream.status();
-        let response_headers = upstream.headers().clone();
-        let Ok(bytes) =
+        let mut status = upstream.status();
+        let mut response_headers = upstream.headers().clone();
+        let Ok(mut bytes) =
             crate::transport::collect_limited(upstream, endpoint.response_limit()).await
         else {
             let failure = AttemptFailure::body();
@@ -434,25 +443,61 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 &cooldown_context,
                 route.half_open_probe,
             );
-            let mut event = usage_event(
-                &request_id,
-                attempt,
-                &key.id,
-                &route,
-                Some(&reasoning_effort),
-                &requested_model,
-                false,
-                failure.status.as_u16(),
-                Some(failure.category.to_string()),
-                started.elapsed().as_millis() as u64,
-                tool_use.clone(),
-            );
+            let mut event = failed_usage(&route, attempt, failure);
             apply_failure_state(&mut event, state);
             emit_usage(&runtime, event);
             last_failure = Some(failure);
             last_failure_origin = selected_error_origin;
             continue;
         };
+        if endpoint == AccountEndpoint::Compact
+            && usize::from(attempt) < attempt_limit
+            && super::super::compaction::missing_legacy_endpoint(status, &bytes)
+        {
+            attempt = attempt.saturating_add(1);
+            match super::super::compaction::execute(
+                &runtime,
+                &mut route,
+                &upstream_body,
+                &compaction_headers,
+                turn_scope.as_ref(),
+            )
+            .await
+            {
+                Ok((headers, body)) => {
+                    status = StatusCode::OK;
+                    response_headers = headers;
+                    bytes = body;
+                }
+                Err(error) => {
+                    let (failure, headers) = *error;
+                    let mut event = failed_usage(&route, attempt, failure);
+                    let state = apply_attempt_failure_cooldown(
+                        &runtime,
+                        &route.candidate_id,
+                        &route.source_model,
+                        &failure,
+                        &headers,
+                        &cooldown_context,
+                        route.half_open_probe,
+                    );
+                    apply_failure_state(&mut event, state);
+                    emit_usage(&runtime, event);
+                    return finish_request_failure(
+                        &runtime,
+                        &key,
+                        &resolved_model,
+                        &[WireApi::Responses],
+                        &account_only_exclusions,
+                        response_affinity_key.as_deref(),
+                        failure,
+                        None,
+                        selected_error_origin,
+                        &request_id,
+                    );
+                }
+            }
+        }
         if !status.is_success() {
             if !legacy_call_id_repair_attempted
                 && responses_tool_call_links_rejected(&bytes)
@@ -630,16 +675,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 failure.category,
                 Some(&request_id),
             );
-            if let Some(account_id) = route.account_id.as_deref() {
-                relay_account_response_header(
-                    &runtime,
-                    &key.id,
-                    &client_headers,
-                    account_id,
-                    &response_headers,
-                    &mut response,
-                    now_ms(),
-                );
+            if route.account_id.is_some() {
+                relay_account_response_header(&client_headers, &response_headers, &mut response);
             }
             return response;
         }
@@ -692,16 +729,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         emit_usage(&runtime, event);
         drop(lease);
         let mut response = proxy_response(status, &response_headers, Body::from(bytes));
-        if let Some(account_id) = route.account_id.as_deref() {
-            relay_account_response_header(
-                &runtime,
-                &key.id,
-                &client_headers,
-                account_id,
-                &response_headers,
-                &mut response,
-                now_ms(),
-            );
+        if route.account_id.is_some() {
+            relay_account_response_header(&client_headers, &response_headers, &mut response);
         }
         return response;
     }

@@ -75,9 +75,6 @@ pub async fn start_local_gateway(
         let runtime = runtime_from_store(&state).await?;
         let port = state.store()?.gateway().port;
         state.gateway.start(runtime, port).await?;
-        if let Some(runtime) = state.gateway.runtime().await {
-            runtime.prefetch_source_model_metadata();
-        }
         let result = super::profiles::refresh_active_client_catalogs(&state).await;
         super::record_catalog_refresh_result(&state, &result);
         let enable_result = { state.store()?.set_gateway_enabled(true) };
@@ -366,13 +363,11 @@ pub async fn set_codex_profile_websockets(
         .state()
         .await
         .map_err(super::remote_server::remote_error)?;
-    for model in &mut snapshot.gateway.models {
-        model.protocol_routes = zenith_relay_core::protocol::model_protocol_routes(
-            &model.id,
-            &snapshot.sources,
-            &snapshot.accounts,
-        );
-    }
+    zenith_relay_core::protocol::apply_model_protocol_routes(
+        &mut snapshot.gateway.models,
+        &snapshot.sources,
+        &snapshot.accounts,
+    );
     let enabled = input.enabled
         && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
     crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
@@ -523,9 +518,6 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
         // scheduler exists so startup cannot strand fresh provider credits.
         super::sync_running_account_states(state).await?;
         if state.background_session_active() {
-            if let Some(runtime) = state.gateway.runtime().await {
-                runtime.prefetch_source_model_metadata();
-            }
             let result = super::profiles::refresh_active_client_catalogs(state).await;
             super::record_catalog_refresh_result(state, &result);
         }

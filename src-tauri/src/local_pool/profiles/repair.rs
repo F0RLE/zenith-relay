@@ -20,7 +20,7 @@ const PREVIEW_TTL_MS: u64 = 30 * 60 * 1_000;
 const MAX_PROFILES: usize = 8;
 const MAX_ROLLOUT_FILES: usize = 4_096;
 const MAX_ROLLOUT_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_TOTAL_REWRITE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_DATABASE_FILES: usize = 64;
 const MAX_REPAIR_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
@@ -178,6 +178,22 @@ pub fn preview(
     target_provider: TargetProvider,
     codex_running: bool,
 ) -> Result<RepairPreview, String> {
+    preview_with_rewrite_budget(
+        state_root,
+        profile_roots,
+        target_provider,
+        codex_running,
+        MAX_TOTAL_REWRITE_BYTES,
+    )
+}
+
+fn preview_with_rewrite_budget(
+    state_root: &Path,
+    profile_roots: &[PathBuf],
+    target_provider: TargetProvider,
+    codex_running: bool,
+    mut remaining_rewrite_bytes: u64,
+) -> Result<RepairPreview, String> {
     if profile_roots.is_empty() || profile_roots.len() > MAX_PROFILES {
         return Err("repair must select between 1 and 8 profiles".to_string());
     }
@@ -187,7 +203,6 @@ pub fn preview(
     let mut history_rollouts = Vec::new();
     let mut databases = Vec::new();
     let mut seen = HashSet::new();
-    let mut total_bytes = 0_u64;
     for root in &roots {
         let mut collected_rollouts = RolloutCollection::default();
         for directory in [root.join("sessions"), root.join("archived_sessions")] {
@@ -198,7 +213,7 @@ pub fn preview(
                 0,
                 &mut seen,
                 &mut collected_rollouts,
-                &mut total_bytes,
+                &mut remaining_rewrite_bytes,
             )?;
         }
         let profile_rollouts = collected_rollouts.rewrites;
@@ -523,7 +538,7 @@ fn collect_rollouts(
     depth: usize,
     seen: &mut HashSet<PathBuf>,
     collection: &mut RolloutCollection,
-    total_bytes: &mut u64,
+    remaining_rewrite_bytes: &mut u64,
 ) -> Result<(), String> {
     if !directory.exists() {
         return Ok(());
@@ -545,7 +560,7 @@ fn collect_rollouts(
                 depth + 1,
                 seen,
                 collection,
-                total_bytes,
+                remaining_rewrite_bytes,
             )?;
             continue;
         }
@@ -558,10 +573,6 @@ fn collect_rollouts(
         if metadata.len() > MAX_ROLLOUT_BYTES {
             return Err("ChatGPT rollout file is too large".to_string());
         }
-        *total_bytes = total_bytes.saturating_add(metadata.len());
-        if *total_bytes > MAX_TOTAL_ROLLOUT_BYTES {
-            return Err("repair rollout data limit exceeded".to_string());
-        }
         let path = canonical_child(root, &entry.path())?;
         if !seen.insert(path.clone()) {
             continue;
@@ -571,6 +582,14 @@ fn collect_rollouts(
             collection.history.push(snapshot.clone());
         }
         if snapshot.records > 0 {
+            // This bounds backup and rewrite I/O, not the size of the user's
+            // entire history. Matching files are checked for imported metadata
+            // and database reconciliation, but are never copied or rewritten.
+            // Charging them here used to block even a same-pool reconnect once
+            // unrelated, already-correct history exceeded 4 GiB.
+            *remaining_rewrite_bytes = remaining_rewrite_bytes
+                .checked_sub(metadata.len())
+                .ok_or_else(|| "repair rollout data limit exceeded".to_string())?;
             collection.rewrites.push(snapshot);
         }
     }
@@ -582,7 +601,8 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
         return Err("ChatGPT rollout file is too large".to_string());
     }
-    let metadata = read_session_metadata(path)?;
+    let mut hasher = Sha256::new();
+    let metadata = read_session_metadata_from(BufReader::new(file), Some(&mut hasher))?;
     let records = session_meta_replacements(&metadata, target).len();
     let mut session_ids = metadata
         .records
@@ -592,16 +612,6 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     session_ids.sort();
     session_ids.dedup();
     let session_meta_count = metadata.records.len();
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).map_err(io_error)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
     Ok(RolloutSnapshot {
         path: path_string(path),
         hash: hex::encode(hasher.finalize()),
@@ -616,7 +626,13 @@ fn read_session_metadata(path: &Path) -> Result<SessionMetadata, String> {
     if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
         return Err("ChatGPT rollout file is too large".to_string());
     }
-    let mut reader = BufReader::new(file);
+    read_session_metadata_from(BufReader::new(file), None)
+}
+
+fn read_session_metadata_from(
+    mut reader: impl Read,
+    mut hasher: Option<&mut Sha256>,
+) -> Result<SessionMetadata, String> {
     let mut metadata = SessionMetadata {
         records: Vec::new(),
     };
@@ -629,6 +645,9 @@ fn read_session_metadata(path: &Path) -> Result<SessionMetadata, String> {
         let read = reader.read(&mut buffer).map_err(io_error)?;
         if read == 0 {
             break;
+        }
+        if let Some(hasher) = hasher.as_mut() {
+            hasher.update(&buffer[..read]);
         }
         for byte in &buffer[..read] {
             if !line_too_large {
@@ -694,9 +713,26 @@ fn session_meta_value(line: &[u8]) -> Option<(Value, Vec<u8>)> {
     } else {
         (line, b"".as_slice())
     };
-    let value: Value = serde_json::from_slice(line).ok()?;
-    (value.get("type").and_then(Value::as_str) == Some("session_meta"))
-        .then_some((value, separator.to_vec()))
+    // Ignore message/tool payloads without constructing a JSON tree for every
+    // event. Still inspect every record: imported files can contain more than
+    // one session_meta, and JSON field order is not significant.
+    #[derive(Deserialize)]
+    struct RecordKind {
+        #[serde(rename = "type")]
+        kind: Kind,
+    }
+    #[derive(Deserialize)]
+    enum Kind {
+        #[serde(rename = "session_meta")]
+        SessionMeta,
+        #[serde(other)]
+        Other,
+    }
+    let record: RecordKind = serde_json::from_slice(line).ok()?;
+    match record.kind {
+        Kind::SessionMeta => Some((serde_json::from_slice(line).ok()?, separator.to_vec())),
+        Kind::Other => None,
+    }
 }
 
 fn session_meta_provider(value: &Value) -> Option<&str> {
@@ -1409,6 +1445,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scan_reads_and_fingerprints_history_in_one_pass() {
+        struct CountingReader<'a> {
+            bytes: &'a [u8],
+            consumed: &'a std::cell::Cell<usize>,
+        }
+        impl Read for CountingReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.bytes.read(buffer)?;
+                self.consumed.set(self.consumed.get() + count);
+                Ok(count)
+            }
+        }
+        let mut body = String::from("{\"type\":\"session_meta\",\"payload\":{\"id\":\"first\",\"model_provider\":\"openai\"}}\r\n");
+        for _ in 0..5_000 {
+            body.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"session_meta\",\"text\":\"synthetic\"}}\n");
+        }
+        // Also accept payload before the escaped type, with no final newline.
+        body.push_str("{\"payload\":{\"id\":\"second\",\"model_provider\":\"openai\"},\"type\":\"session\\u005fmeta\"}");
+        let consumed = std::cell::Cell::new(0);
+        let mut digest = Sha256::new();
+        let metadata = read_session_metadata_from(
+            CountingReader {
+                bytes: body.as_bytes(),
+                consumed: &consumed,
+            },
+            Some(&mut digest),
+        )
+        .unwrap();
+        assert_eq!(consumed.get(), body.len());
+        assert_eq!(metadata.records.len(), 2);
+        assert_eq!(metadata.records[0].separator, b"\r\n");
+        assert_eq!(metadata.records[1].end, body.len() as u64);
+        assert_eq!(
+            hex::encode(digest.finalize()),
+            hex::encode(Sha256::digest(body.as_bytes()))
+        );
+    }
+
+    #[test]
     fn preview_apply_and_rollback_repair_only_provider_metadata() {
         let (root, state, backups, profile, rollout, database) = fixture("round-trip");
         let preview = preview(
@@ -1460,6 +1535,81 @@ mod tests {
         rollback(&backups, &applied.backup_id).unwrap();
         assert_eq!(rollout_provider_from_file(&rollout), "openai");
         assert_eq!(database_provider(&database), "openai");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn matching_history_does_not_consume_the_rewrite_budget() {
+        let (root, state, backups, profile, rollout, database) = fixture("rewrite-budget");
+        let matching = profile.join("sessions").join("already-matching.jsonl");
+        let matching_content = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"matching\",\"model_provider\":\"zenith_relay_local\"}}}}\n{}",
+            "{\"type\":\"event_msg\",\"payload\":{\"text\":\"synthetic\"}}\n".repeat(100)
+        );
+        fs::write(&matching, &matching_content).unwrap();
+        let rewrite_bytes = fs::metadata(&rollout).unwrap().len();
+        assert!(matching_content.len() as u64 > rewrite_bytes);
+
+        let preview = preview_with_rewrite_budget(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+            rewrite_bytes,
+        )
+        .unwrap();
+        assert_eq!(preview.rollout_record_count, 1);
+        assert_eq!(preview.sqlite_row_count, 1);
+        let applied = apply(&state, &backups, &preview.session_id).unwrap();
+        assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
+        assert_eq!(database_provider(&database), "zenith_relay_local");
+        assert_eq!(fs::read_to_string(&matching).unwrap(), matching_content);
+        let manifest: RepairManifest = serde_json::from_slice(
+            &fs::read(backups.join(&applied.backup_id).join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .filter(|entry| !entry.sqlite)
+                .count(),
+            1
+        );
+
+        let unchanged = preview_with_rewrite_budget(
+            &state,
+            std::slice::from_ref(&profile),
+            TargetProvider::ZenithRelayLocal,
+            false,
+            0,
+        )
+        .unwrap();
+        assert_eq!(unchanged.rollout_record_count, 0);
+        assert_eq!(unchanged.sqlite_row_count, 0);
+        rollback(&backups, &applied.backup_id).unwrap();
+        assert_eq!(rollout_provider_from_file(&rollout), "openai");
+        assert_eq!(fs::read_to_string(&matching).unwrap(), matching_content);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_rewrite_budget_still_rejects_oversized_changes_before_writing() {
+        let (root, state, backups, profile, rollout, database) = fixture("rewrite-limit");
+        let original = fs::read(&rollout).unwrap();
+        let error = preview_with_rewrite_budget(
+            &state,
+            &[profile],
+            TargetProvider::ZenithRelayLocal,
+            false,
+            original.len() as u64 - 1,
+        )
+        .unwrap_err();
+        assert_eq!(error, "repair rollout data limit exceeded");
+        assert_eq!(fs::read(&rollout).unwrap(), original);
+        assert_eq!(database_provider(&database), "openai");
+        assert!(!backups.exists());
+        assert!(!state.join("repair_previews").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

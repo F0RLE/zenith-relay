@@ -19,7 +19,15 @@ fn generation_path(protocol: WireApi, streaming: bool) -> &'static str {
 
 fn request_body(protocol: WireApi, streaming: bool) -> Value {
     let mut request = match protocol {
-        WireApi::Responses => json!({"input":"Synthetic matrix request"}),
+        WireApi::Responses => json!({
+            "input":"Synthetic matrix request",
+            "store":false,
+            "include":["reasoning.encrypted_content"],
+            "prompt_cache_key":"synthetic-cache-key",
+            "client_metadata":{"source":"synthetic-client"},
+            "reasoning":null,
+            "text":{"format":{"type":"text"}}
+        }),
         WireApi::ChatCompletions | WireApi::Messages => {
             json!({"messages":[{"role":"user","content":"Synthetic matrix request"}],"max_tokens":32})
         }
@@ -83,7 +91,21 @@ fn stream_body(protocol: WireApi) -> String {
     };
     let mut body = events
         .iter()
-        .map(|event| format!("data: {event}\n\n"))
+        .enumerate()
+        .map(|(index, event)| {
+            let (ending, blank) = match index % 4 {
+                0 => ("\r", "\r"),
+                1 => ("\n", "\r"),
+                2 => ("\r\n", "\r\n"),
+                _ => ("\n", "\n"),
+            };
+            let data = serde_json::to_string_pretty(event)
+                .unwrap()
+                .lines()
+                .map(|line| format!("data: {line}{ending}"))
+                .collect::<String>();
+            format!("{data}{blank}")
+        })
         .collect::<String>();
     if protocol == WireApi::ChatCompletions {
         body.push_str("data: [DONE]\n\n");
@@ -214,6 +236,9 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                     "{input:?} -> {output:?}: {body}"
                 );
                 if streaming {
+                    if input == output {
+                        assert_eq!(body, stream_body(output), "native {input:?}");
+                    }
                     let terminal = match input {
                         WireApi::Responses => "response.completed",
                         WireApi::ChatCompletions => "[DONE]",

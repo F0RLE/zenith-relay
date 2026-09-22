@@ -20,6 +20,7 @@ use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result a
 use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
 use crate::local_pool::profiles::codex;
 use crate::local_pool::state::{DesktopState, QuotaRefreshReservation};
+use futures_util::{stream, StreamExt};
 use reqwest::header::HeaderValue;
 use reqwest::redirect::Policy;
 use serde::Serialize;
@@ -859,27 +860,22 @@ pub(super) async fn refresh_account_quotas(
     state: &DesktopState,
     account_ids: Vec<String>,
 ) -> Vec<AccountQuotaRefreshItemResult> {
-    let mut results = Vec::with_capacity(account_ids.len());
-    for chunk in account_ids.chunks(QUOTA_REFRESH_BATCH_SIZE) {
-        let (first, second, third, fourth, fifth) = tokio::join!(
-            refresh_batch_slot(state, chunk.first()),
-            refresh_batch_slot(state, chunk.get(1)),
-            refresh_batch_slot(state, chunk.get(2)),
-            refresh_batch_slot(state, chunk.get(3)),
-            refresh_batch_slot(state, chunk.get(4)),
-        );
-        results.extend([first, second, third, fourth, fifth].into_iter().flatten());
-    }
-    results
+    // Buffered owns the in-flight futures on the heap. An inline join of five
+    // full account refreshes makes Tauri's generated command dispatcher exceed
+    // the Windows UI thread's stack, even when invoking a different command.
+    stream::iter(account_ids)
+        .map(|account_id| refresh_account_quota_item(state, account_id))
+        .buffered(QUOTA_REFRESH_BATCH_SIZE)
+        .collect()
+        .await
 }
 
-pub(super) async fn refresh_batch_slot(
+async fn refresh_account_quota_item(
     state: &DesktopState,
-    account_id: Option<&String>,
-) -> Option<AccountQuotaRefreshItemResult> {
-    let account_id = account_id?.clone();
+    account_id: String,
+) -> AccountQuotaRefreshItemResult {
     let result = refresh_manual_account_quota(state, &account_id).await;
-    Some(match result {
+    match result {
         Ok(response) => AccountQuotaRefreshItemResult {
             account_id,
             status: AccountQuotaRefreshStatus::Succeeded,
@@ -892,7 +888,7 @@ pub(super) async fn refresh_batch_slot(
             response: None,
             error: Some(error.into()),
         },
-    })
+    }
 }
 
 pub(super) async fn refresh_manual_account_quota(

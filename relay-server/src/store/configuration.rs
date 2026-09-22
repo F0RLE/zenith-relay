@@ -370,7 +370,7 @@ fn configuration_settings_from_connection(
     let sources = list_records_from::<SourceRecord>(connection, "sources")?
         .into_iter()
         .map(|record| SourcePresetRule {
-            protocol_mode: record.protocol_config.mode,
+            legacy_protocol_mode: None,
             id: record.id,
             name: record.name,
             base_url: record.base_url,
@@ -525,7 +525,6 @@ fn write_configuration(
         record.enabled = rule.enabled;
         record.in_pool = rule.in_pool;
         record.protocol_bindings = rule.protocol_bindings.clone();
-        record.protocol_config.mode = rule.protocol_mode;
         record.pricing_provider = rule.pricing_provider.clone();
         record.official_provider_family = rule.official_provider_family.clone();
         record.allowed_models = rule.allowed_models.clone();

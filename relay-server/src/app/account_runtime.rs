@@ -197,12 +197,9 @@ pub(super) fn source_summary(
         pricing_provider: record.pricing_provider.clone(),
         official_provider_family: record.official_provider_family.clone(),
         wire_api: record.wire_api,
-        protocol_config: record.protocol_config.with_effective_capabilities(
-            &record.base_url,
-            &record.models,
-            &record.protocol_bindings,
-            record.wire_api,
-        ),
+        protocol_config: record
+            .protocol_config
+            .with_effective_capabilities(&record.base_url, &record.models),
         protocol_bindings: record.protocol_bindings.clone(),
         resolved_protocol_bindings: Some(record.effective_protocol_bindings().unwrap_or_default()),
         models: record.models.clone(),

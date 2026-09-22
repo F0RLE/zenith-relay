@@ -8,7 +8,7 @@ pub use probe::{probe_source_generation, SourceProbeInput, SourceProbeResult};
 
 pub use capabilities::{
     endpoint_url_protocol, service_protocol, CapabilityOrigin, CapabilityStatus,
-    ModelEndpointCapability, ProtocolFeature, ProtocolSelectionMode, SourceProtocolConfig,
+    ModelEndpointCapability, ProtocolFeature, SourceProtocolConfig,
 };
 pub use connector::SourceConnector;
 pub(crate) use discovery::discover_models_with_client;

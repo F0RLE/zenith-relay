@@ -406,15 +406,14 @@ async fn require_preset_protocol_contract(
 ) -> Result<(), CommandError> {
     let needs_contract = preset.schema_version >= 4
         || preset.settings.sources.iter().any(|source| {
-            !source.protocol_mode.is_manual()
-                || source.protocol_bindings.iter().any(|binding| {
-                    !matches!(
-                        binding.adapter,
-                        zenith_relay_core::SourceAdapter::Native
-                            | zenith_relay_core::SourceAdapter::ResponsesToMessages
-                            | zenith_relay_core::SourceAdapter::ResponsesToGemini
-                    )
-                })
+            source.protocol_bindings.iter().any(|binding| {
+                !matches!(
+                    binding.adapter,
+                    zenith_relay_core::SourceAdapter::Native
+                        | zenith_relay_core::SourceAdapter::ResponsesToMessages
+                        | zenith_relay_core::SourceAdapter::ResponsesToGemini
+                )
+            })
         });
     if needs_contract
         && !client
@@ -652,23 +651,22 @@ pub async fn execute_remote_server_action(
             &input.action,
             RemoteServerAction::CreateSource | RemoteServerAction::UpdateSource { .. }
         ) && input.payload.as_ref().is_some_and(|payload| {
-            payload.get("protocolMode").is_some()
-                || payload
-                    .get("protocolBindings")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|bindings| {
-                        bindings.iter().any(|binding| {
-                            binding
-                                .get("adapter")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|adapter| {
-                                    !matches!(
-                                        adapter,
-                                        "native" | "responses_to_messages" | "responses_to_gemini"
-                                    )
-                                })
-                        })
+            payload
+                .get("protocolBindings")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|bindings| {
+                    bindings.iter().any(|binding| {
+                        binding
+                            .get("adapter")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|adapter| {
+                                !matches!(
+                                    adapter,
+                                    "native" | "responses_to_messages" | "responses_to_gemini"
+                                )
+                            })
                     })
+                })
         }));
     if uses_protocol_contract
         && !client

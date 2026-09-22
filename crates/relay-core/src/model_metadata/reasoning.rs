@@ -1,6 +1,9 @@
-use super::{model_leaf, normalize, validate_payload, ReasoningMethod, MAX_STRING_LENGTH};
+use super::{model_leaf, normalize, ReasoningMethod, MAX_STRING_LENGTH};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+
+mod matching;
+use matching::RecordIndex;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct ReasoningRecord {
@@ -253,87 +256,6 @@ fn models_dev_details_records(value: &Value) -> BTreeMap<String, ReasoningRecord
     records
 }
 
-fn base_id(id: &str) -> &str {
-    id.split_once(':').map_or(id, |(base, _)| base)
-}
-
-/// Models.dev spells decimal release components with a dash while other
-/// registries commonly keep the decimal point (`claude-opus-4-8` versus
-/// `claude-opus-4.8`). Normalize only separators surrounded by ASCII digits;
-/// arbitrary punctuation and provider/model boundaries remain significant.
-fn version_match_id(id: &str) -> String {
-    let id = base_id(id);
-    let bytes = id.as_bytes();
-    let mut normalized = String::with_capacity(id.len());
-    for (index, character) in id.char_indices() {
-        if character == '.'
-            && index > 0
-            && index + 1 < bytes.len()
-            && bytes[index - 1].is_ascii_digit()
-            && bytes[index + 1].is_ascii_digit()
-        {
-            normalized.push('-');
-        } else {
-            normalized.push(character);
-        }
-    }
-    normalized
-}
-
-// Provider-qualified IDs match their exact external ID or a suffixed variant
-// (OpenRouter uses `:free`, `:nitro`, etc.). An unqualified leaf is accepted
-// only when it identifies one external record; this prevents cross-provider
-// capability leakage.
-fn matching_record<'a, T>(records: &'a BTreeMap<String, T>, id: &str) -> Option<&'a T> {
-    let key = normalize(id);
-    if let Some(value) = records.get(&key) {
-        return Some(value);
-    }
-    let version_key = version_match_id(&key);
-    let provider_prefix = key
-        .split_once('/')
-        .map(|(provider, _)| format!("{provider}/"));
-
-    // Prefer the unsuffixed registry row. Variant rows such as `:batch` may
-    // coexist with it and must not make an otherwise exact version match
-    // ambiguous.
-    let mut unsuffixed = records.iter().filter(|(candidate, _)| {
-        !candidate.contains(':')
-            && version_match_id(candidate) == version_key
-            && (!key.contains('/')
-                || provider_prefix
-                    .as_ref()
-                    .is_some_and(|prefix| candidate.starts_with(prefix)))
-    });
-    if let Some((_, value)) = unsuffixed.next() {
-        if unsuffixed.next().is_none() {
-            return Some(value);
-        }
-        return None;
-    }
-    let mut candidates = records.iter().filter(|(candidate, _)| {
-        version_match_id(candidate) == version_key
-            && (!key.contains('/')
-                || provider_prefix
-                    .as_ref()
-                    .is_some_and(|prefix| candidate.starts_with(prefix)))
-    });
-    if let Some((_, value)) = candidates.next() {
-        return candidates.next().is_none().then_some(value);
-    }
-    let leaf = model_leaf(&key);
-    let mut candidates = records.iter().filter(|(candidate, _)| {
-        model_leaf(candidate) == leaf
-            && (!key.contains('/')
-                || !candidate.contains('/')
-                || provider_prefix
-                    .as_ref()
-                    .is_some_and(|prefix| candidate.starts_with(prefix)))
-    });
-    let (_, value) = candidates.next()?;
-    candidates.next().is_none().then_some(value)
-}
-
 #[cfg(test)]
 pub(crate) fn enrich_reasoning_metadata(
     models_dev: &Value,
@@ -349,11 +271,12 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
     openrouter: Option<&Value>,
     litellm: Option<&Value>,
 ) -> Value {
-    let mut models: BTreeMap<String, Value> = validate_payload(models_dev)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, value)| (normalize(&id), value.clone()))
-        .collect();
+    let mut models = super::reference::merge_reference_records(
+        models_dev,
+        models_dev_details,
+        openrouter,
+        litellm,
+    );
     let router: BTreeMap<String, ReasoningRecord> = openrouter
         .and_then(|v| v.get("data"))
         .and_then(Value::as_array)
@@ -379,15 +302,21 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
         .map(|(id, value)| (normalize(id), litellm_record(value)))
         .collect();
     let models_dev_details = models_dev_details.map(models_dev_details_records);
+    let router = RecordIndex::new(&router);
+    let lite = RecordIndex::new(&lite);
+    let models_dev_details = models_dev_details.as_ref().map(RecordIndex::new);
     for (id, value) in &mut models {
         let Some(object) = value.as_object_mut() else {
             continue;
         };
-        let router_record = matching_record(&router, id);
-        let lite_record = matching_record(&lite, id);
+        if object.get("reasoning").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let router_record = router.get(id);
+        let lite_record = lite.get(id);
         let details_record = models_dev_details
             .as_ref()
-            .and_then(|records| matching_record(records, id));
+            .and_then(|records| records.get(id));
         let exact = router_record
             .filter(|r| !r.levels.is_empty())
             .map(|r| (r, "openrouter"))
@@ -441,11 +370,6 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
                     Value::String(default.clone()),
                 );
             }
-        } else if object.get("reasoning").and_then(Value::as_bool).is_some() {
-            object.insert(
-                "reasoning_source".into(),
-                Value::String("models_dev".into()),
-            );
         }
         if router_record.is_some() || lite_record.is_some() || details_record.is_some() {
             for (index, key) in [
@@ -467,5 +391,7 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
             }
         }
     }
-    serde_json::to_value(models).unwrap_or_default()
+    // Move the merged records into the JSON object; serializing the map here
+    // would allocate a second complete tree while the first is still alive.
+    Value::Object(models.into_iter().collect())
 }

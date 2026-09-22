@@ -2,7 +2,7 @@ use reqwest::Response;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -19,6 +19,12 @@ pub(crate) fn read_json<T: DeserializeOwned>(
     path: &Path,
     max_bytes: usize,
 ) -> Result<Option<T>, CatalogIoError> {
+    read_bytes(path, max_bytes)?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| CatalogIoError::InvalidJson))
+        .transpose()
+}
+
+pub(crate) fn read_bytes(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, CatalogIoError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -27,10 +33,7 @@ pub(crate) fn read_json<T: DeserializeOwned>(
     if metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
         return Err(CatalogIoError::TooLarge);
     }
-    let bytes = read_bounded(path, max_bytes)?;
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| CatalogIoError::InvalidJson)
+    read_bounded(path, max_bytes).map(Some)
 }
 
 pub(crate) fn write_json_if_changed<T: Serialize>(
@@ -81,15 +84,35 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, CatalogIoError
 }
 
 fn existing_bytes_equal(path: &Path, expected: &[u8], max_bytes: usize) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(file) = File::open(path) else {
         return false;
     };
-    if metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if metadata.len() != expected.len() as u64
+        || metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    {
         return false;
     }
-    read_bounded(path, max_bytes)
-        .ok()
-        .is_some_and(|actual| actual == expected)
+    // Comparing a catalog must not retain a second complete file in memory.
+    // Stop at the first difference, including growth after the metadata read.
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut remaining = expected;
+    loop {
+        let Ok(chunk) = reader.fill_buf() else {
+            return false;
+        };
+        if chunk.is_empty() {
+            return remaining.is_empty();
+        }
+        let Some(tail) = remaining.strip_prefix(chunk) else {
+            return false;
+        };
+        remaining = tail;
+        let consumed = chunk.len();
+        reader.consume(consumed);
+    }
 }
 
 pub(crate) async fn response_json(
@@ -181,6 +204,37 @@ mod tests {
             read_json::<Value>(&path, 64).unwrap(),
             Some(serde_json::json!({"ok": true}))
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streamed_cache_comparison_checks_boundaries_lengths_and_limits() {
+        let path = test_path();
+        let expected: Vec<u8> = (0..3 * 64 * 1024 + 17).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &expected).unwrap();
+        assert!(existing_bytes_equal(&path, &expected, expected.len()));
+        for index in [
+            0,
+            64 * 1024 - 1,
+            64 * 1024,
+            2 * 64 * 1024,
+            expected.len() - 1,
+        ] {
+            let mut different = expected.clone();
+            different[index] ^= 1;
+            assert!(!existing_bytes_equal(&path, &different, expected.len()));
+        }
+        assert!(!existing_bytes_equal(&path, &expected, expected.len() - 1));
+        assert!(!existing_bytes_equal(
+            &path,
+            &expected[..expected.len() - 1],
+            expected.len()
+        ));
+        let mut longer = expected.clone();
+        longer.push(1);
+        assert!(!existing_bytes_equal(&path, &longer, longer.len()));
+        std::fs::write(&path, []).unwrap();
+        assert!(existing_bytes_equal(&path, &[], 0));
         let _ = std::fs::remove_file(path);
     }
 }

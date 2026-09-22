@@ -399,9 +399,6 @@ async fn source_model_loop(app: AppHandle) {
                 if !state.background_session_active() {
                     continue;
                 }
-                if let Some(runtime) = state.gateway.runtime().await {
-                    runtime.prefetch_source_model_metadata();
-                }
                 let _mutation = state.setup_guard().await;
                 let result =
                     super::commands::profiles::refresh_active_client_catalogs(&state).await;

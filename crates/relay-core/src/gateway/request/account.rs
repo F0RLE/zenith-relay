@@ -1,20 +1,19 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::execution::{execute_account_endpoint, AccountExecution};
+use super::super::request_body::read_json_object;
 use super::normalization::{
     normalize_compact_account_request, responses_lite_parallel_tool_calls_valid,
 };
-use super::{
-    CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES, MAX_CLIENT_REQUEST_BODY_BYTES,
-    MAX_CLIENT_REQUEST_BODY_ERROR,
-};
+use super::{CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
+use crate::runtime::AuthenticatedKey;
 use crate::GatewayRuntime;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderValue, Request, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -22,20 +21,9 @@ pub(in crate::gateway) async fn responses_compact(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let (parts, body) = request.into_parts();
-    let headers = parts.headers;
-    if !valid_local_host(&headers) {
-        return invalid_host();
-    }
-    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
-        return unauthorized();
-    };
-    if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
-        return client_api_forbidden();
-    }
-    let mut request = match read_json_object(body).await {
+    let (headers, key, mut request) = match read_account_request(&runtime, request).await {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if request.get("stream").is_some_and(|stream| stream != false) {
         return api_error(
@@ -104,20 +92,9 @@ pub(in crate::gateway) async fn alpha_search(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let (parts, body) = request.into_parts();
-    let mut headers = parts.headers;
-    if !valid_local_host(&headers) {
-        return invalid_host();
-    }
-    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
-        return unauthorized();
-    };
-    if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
-        return client_api_forbidden();
-    }
-    let mut request = match read_json_object(body).await {
+    let (mut headers, key, mut request) = match read_account_request(&runtime, request).await {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let model_was_provided = request
         .get("model")
@@ -190,6 +167,25 @@ pub(in crate::gateway) async fn alpha_search(
     .await
 }
 
+async fn read_account_request(
+    runtime: &GatewayRuntime,
+    request: Request<Body>,
+) -> Result<(HeaderMap, AuthenticatedKey, Map<String, Value>), Box<Response<Body>>> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    if !valid_local_host(&headers) {
+        return Err(Box::new(invalid_host()));
+    }
+    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
+        return Err(Box::new(unauthorized()));
+    };
+    if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
+        return Err(Box::new(client_api_forbidden()));
+    }
+    let request = read_json_object(&headers, body).await?;
+    Ok((headers, key, request))
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(in crate::gateway) enum AccountEndpoint {
     Compact,
@@ -206,30 +202,6 @@ impl AccountEndpoint {
             Self::Compact | Self::Wake => crate::runtime::MAX_NON_STREAM_BODY_BYTES,
             Self::AlphaSearch => MAX_ALPHA_SEARCH_RESPONSE_BYTES,
         }
-    }
-}
-
-#[expect(
-    clippy::result_large_err,
-    reason = "The bounded Axum response is the existing account-request short-circuit contract."
-)]
-async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Body>> {
-    let body = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES)
-        .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                MAX_CLIENT_REQUEST_BODY_ERROR,
-                error_codes::REQUEST_TOO_LARGE,
-            )
-        })?;
-    match serde_json::from_slice(&body) {
-        Ok(Value::Object(object)) => Ok(object),
-        _ => Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "request body must be a JSON object",
-            error_codes::INVALID_REQUEST,
-        )),
     }
 }
 

@@ -40,7 +40,7 @@ use failure::responses_call_id_is_missing;
 
 pub(super) use response::{
     api_error, api_error_code, api_error_type, api_error_with_origin,
-    api_error_with_origin_and_category, cooldown_error,
+    api_error_with_origin_and_category, api_error_with_parameter, cooldown_error,
 };
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;

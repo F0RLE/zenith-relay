@@ -1,5 +1,5 @@
 use crate::accounts::{TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter};
-use crate::catalog::{normalize_model_reasoning_allowed_levels, SourceReasoningCapabilities};
+use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
@@ -21,7 +21,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 #[cfg(test)]
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -37,12 +37,14 @@ mod candidates;
 mod codex_metadata;
 mod control;
 mod images;
+mod model_speed;
+mod routing_cookies;
 mod selection;
 mod session_state;
 mod source_metadata;
-mod source_speed;
 
 use control::RuntimeControl;
+pub(crate) use session_state::CodexTurnStateScope;
 use session_state::CodexTurnStateStore;
 
 use build::{
@@ -62,8 +64,6 @@ use images::{cheapest_image_main_model, select_image_main_model};
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
-const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 8 * 60 * 60 * 1_000;
-const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
 static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
@@ -83,13 +83,6 @@ pub struct RuntimeActivitySnapshot {
     pub active_models: Vec<crate::ActiveModelRuntime>,
 }
 
-#[derive(Default)]
-pub(crate) struct CodexSourceModelMetadata {
-    pub context_windows: BTreeMap<String, u64>,
-    pub reasoning_catalog_templates: BTreeMap<String, Map<String, Value>>,
-    pub image_models: BTreeSet<String>,
-}
-
 fn source_candidate_id(
     source_id: &str,
     binding: &SourceProtocolBinding,
@@ -102,65 +95,12 @@ fn source_candidate_id(
     format!("{source_id}::{suffix}")
 }
 
-fn source_reasoning_for_route(
-    mut capabilities: SourceReasoningCapabilities,
-    adapter: SourceAdapter,
-    reasoning_mode: MessagesReasoningMode,
-) -> Option<SourceReasoningCapabilities> {
-    if capabilities.is_empty() {
-        return Some(capabilities);
-    }
-    if adapter.is_passthrough() {
-        return Some(capabilities);
-    }
-    capabilities
-        .retain_efforts(|effort| adapter.supports_reasoning_effort(reasoning_mode, effort))
-        .then_some(())?;
-    capabilities.clear_summary_capabilities();
-    Some(capabilities)
-}
-
-fn declared_source_reasoning_levels(
-    efforts_by_model: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
-    previous_levels: &BTreeMap<String, Vec<String>>,
-    preferred_levels: &BTreeMap<String, Vec<String>>,
-) -> BTreeMap<String, Vec<String>> {
-    let mut levels_by_model = BTreeMap::new();
-    for (model, routes) in efforts_by_model {
-        let supported = routes
-            .values()
-            .flat_map(|efforts| efforts.iter().cloned())
-            .collect::<BTreeSet<_>>();
-        if supported.is_empty() {
-            continue;
-        }
-        let mut ordered = Vec::new();
-        for levels in [preferred_levels.get(model), previous_levels.get(model)] {
-            let Some(levels) = levels else {
-                continue;
-            };
-            for effort in levels {
-                if supported.contains(effort) && !ordered.contains(effort) {
-                    ordered.push(effort.clone());
-                }
-            }
-        }
-        for effort in supported {
-            if !ordered.contains(&effort) {
-                ordered.push(effort);
-            }
-        }
-        levels_by_model.insert(model.clone(), ordered);
-    }
-    levels_by_model
-}
-
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
     pub source: ProviderSource,
-    /// Client-facing contracts and explicit adapters, scoped to models
-    /// verified for each route. An empty list preserves the legacy source-wide
-    /// `wire_api`.
+    /// Legacy persisted bindings retained for backward-compatible reads.
+    /// Runtime routes are derived automatically from protocol evidence and
+    /// fall back to the source-wide `wire_api` when evidence is absent.
     pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub protocol_config: crate::SourceProtocolConfig,
     pub enabled: bool,
@@ -472,7 +412,6 @@ pub struct GatewayRuntime {
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
-    source_capabilities: BTreeMap<String, Vec<crate::ModelEndpointCapability>>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
@@ -518,58 +457,12 @@ struct PassiveQuotaState {
 #[derive(Clone, Debug)]
 struct CachedModelManifest {
     value: Value,
-    observed_at_ms: u64,
 }
 
 #[derive(Default)]
-struct DeclaredSourceReasoning {
-    efforts: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
-    empty_routes: BTreeMap<String, BTreeSet<String>>,
-    levels: BTreeMap<String, Vec<String>>,
-}
-
 struct SourceModelMetadataState {
-    /// Native Codex catalog rows returned by `/models?client_version=...`.
+    /// Native Codex transport cards. Model capabilities use the reference catalog.
     codex_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
-    /// Generic source `/models` rows used only for source-declared
-    /// capabilities such as context and reasoning. This stays separate from
-    /// the Codex catalog because providers can return different payloads.
-    source_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
-    /// Serializes generic discovery and throttles best-effort prefetches.
-    refresh_lock: tokio::sync::Mutex<()>,
-    prefetch_pending: AtomicBool,
-    prefetch_not_before_ms: AtomicU64,
-    /// Source-declared effort metadata and its derived model-level catalog.
-    /// Native account metadata is intentionally kept out of this state. This
-    /// state is presentation metadata only; it is never request admission
-    /// evidence.
-    declared_reasoning: Mutex<DeclaredSourceReasoning>,
-}
-
-impl Default for SourceModelMetadataState {
-    fn default() -> Self {
-        Self {
-            codex_manifests: Mutex::new(BTreeMap::new()),
-            source_manifests: Mutex::new(BTreeMap::new()),
-            refresh_lock: tokio::sync::Mutex::new(()),
-            prefetch_pending: AtomicBool::new(false),
-            prefetch_not_before_ms: AtomicU64::new(0),
-            declared_reasoning: Mutex::new(DeclaredSourceReasoning::default()),
-        }
-    }
-}
-
-struct SourceModelMetadataPrefetchGuard {
-    runtime: Arc<GatewayRuntime>,
-}
-
-impl Drop for SourceModelMetadataPrefetchGuard {
-    fn drop(&mut self) {
-        self.runtime
-            .model_metadata
-            .prefetch_pending
-            .store(false, Ordering::Release);
-    }
 }
 
 pub(crate) struct CandidateLease {
@@ -692,6 +585,7 @@ struct ChatGptAccountExecutor {
     active: AtomicBool,
     agent_identity: RwLock<Option<AgentIdentityCredential>>,
     agent_task_lock: tokio::sync::Mutex<()>,
+    routing_cookies: routing_cookies::RoutingCookies,
 }
 
 #[derive(Clone)]
@@ -733,6 +627,7 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
     pub(crate) agent_task_id: Option<String>,
+    pub(crate) agent_credential_fingerprint: Option<[u8; 32]>,
 }
 
 /// The upstream response together with the exact OAuth credential generation
@@ -769,26 +664,16 @@ struct RuntimeKey {
 }
 
 struct RuntimeHttpClients {
-    streaming: reqwest::Client,
-    bounded: reqwest::Client,
+    http: reqwest::Client,
     websocket: reqwest::Client,
 }
 
 impl RuntimeHttpClients {
     fn new(proxy: Option<&ProxyConfig>) -> Result<Self> {
         Ok(Self {
-            streaming: runtime_client(proxy, false)?,
-            bounded: runtime_client(proxy, true)?,
+            http: runtime_client(proxy)?,
             websocket: runtime_websocket_client(proxy)?,
         })
-    }
-
-    fn request(&self, upstream_stream: bool) -> &reqwest::Client {
-        if upstream_stream {
-            &self.streaming
-        } else {
-            &self.bounded
-        }
     }
 }
 
@@ -956,7 +841,6 @@ impl GatewayRuntime {
             discovery_client,
             sources: source_parts.executors,
             source_candidate_bindings: source_parts.candidate_bindings,
-            source_capabilities: source_parts.capabilities,
             source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
             chatgpt_accounts: account_parts.executors,
             chatgpt_team_members: account_parts.team_members,
@@ -1354,26 +1238,6 @@ impl GatewayRuntime {
             .collect()
     }
 
-    /// Resolves source-provided model metadata that is safe to expose in the
-    /// generated Codex catalog.
-    ///
-    /// Metadata is evaluated per eligible candidate route. A public model may
-    /// have several source candidates behind it, so the catalog exposes the
-    /// union of efforts declared by at least one source. Discovery metadata
-    /// only informs the picker: source routing stays model-based and request
-    /// admission never depends on reasoning metadata.
-    #[cfg(test)]
-    pub(crate) async fn codex_source_model_metadata(
-        &self,
-        key: &AuthenticatedKey,
-        allowed_protocols: &[WireApi],
-        now_ms: u64,
-    ) -> CodexSourceModelMetadata {
-        let scope = key.scope_snapshot();
-        self.source_model_metadata(&key.model_rules, &scope, allowed_protocols, now_ms)
-            .await
-    }
-
     pub fn visible_models_for_secret(
         &self,
         secret: &str,
@@ -1513,15 +1377,11 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn request_client(
-        &self,
-        candidate_id: &str,
-        upstream_stream: bool,
-    ) -> &reqwest::Client {
+    pub(crate) fn request_client(&self, candidate_id: &str) -> &reqwest::Client {
         if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
-            return account.clients.request(upstream_stream);
+            return &account.clients.http;
         }
-        self.clients.request(upstream_stream)
+        &self.clients.http
     }
 
     pub(crate) fn websocket_client(&self, candidate_id: &str) -> &reqwest::Client {
@@ -1632,21 +1492,6 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = overrides;
         Ok(())
-    }
-
-    pub(crate) fn model_service_tier_for_candidate(
-        &self,
-        candidate_id: &str,
-        model: &str,
-    ) -> DefaultServiceTier {
-        let requested = self
-            .model_service_tier_overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&model.trim().to_ascii_lowercase())
-            .copied()
-            .unwrap_or_else(|| self.default_service_tier());
-        self.effective_service_tier_for_candidate(candidate_id, model, requested)
     }
 
     pub(crate) fn model_effective_service_tier(&self, model: &str) -> DefaultServiceTier {
@@ -1875,14 +1720,14 @@ fn runtime_client_builder(proxy: Option<&ProxyConfig>) -> reqwest::ClientBuilder
     }
 }
 
-fn runtime_client(proxy: Option<&ProxyConfig>, bounded: bool) -> Result<reqwest::Client> {
-    let builder = runtime_client_builder(proxy).http2_adaptive_window(true);
-    let builder = if bounded {
-        builder.timeout(Duration::from_secs(900))
-    } else {
-        builder.read_timeout(Duration::from_secs(300))
-    };
-    builder.build().map_err(Error::from)
+fn runtime_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Client> {
+    // A quiet or long generation is still an active request. Reqwest's default
+    // has no response/read deadline; retain only the connection timeout above.
+    // Metadata and credential operations set their own request-level timeout.
+    runtime_client_builder(proxy)
+        .http2_adaptive_window(true)
+        .build()
+        .map_err(Error::from)
 }
 
 fn runtime_websocket_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Client> {

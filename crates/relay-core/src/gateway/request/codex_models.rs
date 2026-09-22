@@ -1,7 +1,10 @@
 use super::super::auth::{invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::now_ms;
-use crate::catalog::{normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry};
+use crate::catalog::{
+    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    set_codex_service_tiers,
+};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
@@ -16,16 +19,15 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
-#[cfg(test)]
-use serde_json::Map;
+use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
-#[cfg(test)]
-use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
+const CODEX_MODELS_FETCH_CONCURRENCY: usize = 4;
+const CODEX_MODELS_FETCH_BUDGET: Duration = Duration::from_secs(12);
 
 pub(in crate::gateway) async fn models(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -67,7 +69,7 @@ pub(in crate::gateway) async fn models(
             );
         }
         if let Some(catalog) =
-            codex_models_response(runtime.as_ref(), &key, &protocols, &models, client_version).await
+            codex_models_response(runtime.as_ref(), &key, &models, client_version).await
         {
             return Json(catalog).into_response();
         }
@@ -86,11 +88,20 @@ pub(in crate::gateway) async fn models(
 async fn codex_models_response(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
-    _allowed_protocols: &[WireApi],
     visible_models: &[String],
     client_version: &str,
 ) -> Option<Value> {
     let now_ms = now_ms();
+    let manifests = codex_account_model_manifests(runtime, key, client_version, now_ms).await;
+    build_codex_models_response_from_manifests(runtime, key, visible_models, manifests)
+}
+
+async fn codex_account_model_manifests(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    client_version: &str,
+    now_ms: u64,
+) -> Vec<(String, Value)> {
     let routes = runtime.codex_models_routes(key, now_ms).await;
     let candidate_ids = routes
         .iter()
@@ -102,45 +113,39 @@ async fn codex_models_response(
     } else {
         vec![client_version.to_string(), fallback_client_version]
     };
+    // Account transport manifests are independent. Preserve their ranked order,
+    // but do not make connecting a pool wait for every account timeout in turn.
+    let fetches = stream::iter(routes.into_iter().enumerate().map(
+        |(index, (candidate_id, url))| {
+            let versions = &client_versions;
+            async move {
+                let manifest =
+                    fetch_codex_account_manifest(runtime, &candidate_id, url, versions).await;
+                (index, candidate_id, manifest)
+            }
+        },
+    ))
+    .buffer_unordered(CODEX_MODELS_FETCH_CONCURRENCY);
+    tokio::pin!(fetches);
+    let deadline = tokio::time::sleep(CODEX_MODELS_FETCH_BUDGET);
+    tokio::pin!(deadline);
+    let mut completed = Vec::new();
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            result = fetches.next() => match result {
+                Some(result) => completed.push(result),
+                None => break,
+            },
+        }
+    }
+    completed.sort_by_key(|(index, _, _)| *index);
     let mut live_manifests = Vec::<(String, Value)>::new();
     let mut live_candidate_ids = HashSet::new();
-    for (candidate_id, mut url) in routes {
-        let mut candidate_manifest = None;
-        for client_version in &client_versions {
-            url.query_pairs_mut()
-                .clear()
-                .append_pair("client_version", client_version);
-            let request = runtime
-                .request_client(&candidate_id, false)
-                .get(url.clone())
-                .timeout(Duration::from_secs(10));
-            let Ok(response) = runtime
-                .send_authorized_request(&candidate_id, request, Some(client_version.as_str()))
-                .await
-            else {
-                continue;
-            };
-            let response = response.response;
-            if !response.status().is_success() {
-                continue;
-            }
-            let Ok(body) =
-                crate::transport::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES).await
-            else {
-                continue;
-            };
-            let Ok(upstream) = serde_json::from_slice::<Value>(&body) else {
-                continue;
-            };
-            if upstream_codex_models(&upstream).is_none() {
-                continue;
-            }
+    for (_, candidate_id, manifest) in completed {
+        if let Some(manifest) = manifest {
             runtime.clear_candidate_capability_blocks(&candidate_id);
-            runtime.remember_codex_model_manifest(&candidate_id, upstream.clone(), now_ms);
-            candidate_manifest = Some(upstream);
-            break;
-        }
-        if let Some(manifest) = candidate_manifest {
+            runtime.remember_codex_model_manifest(&candidate_id, manifest.clone(), now_ms);
             live_candidate_ids.insert(candidate_id.clone());
             live_manifests.push((candidate_id, manifest));
         }
@@ -155,12 +160,45 @@ async fn codex_models_response(
             .filter(|candidate_id| !live_candidate_ids.contains(candidate_id.as_str()))
             .map(String::as_str),
     );
-    build_codex_models_response_from_manifests(
-        runtime,
-        key,
-        visible_models,
-        live_manifests.into_iter().chain(stale),
-    )
+    live_manifests.into_iter().chain(stale).collect()
+}
+
+async fn fetch_codex_account_manifest(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    mut url: url::Url,
+    client_versions: &[String],
+) -> Option<Value> {
+    for client_version in client_versions {
+        url.query_pairs_mut()
+            .clear()
+            .append_pair("client_version", client_version);
+        let request = runtime
+            .request_client(candidate_id)
+            .get(url.clone())
+            .timeout(Duration::from_secs(10));
+        let Ok(response) = runtime
+            .send_authorized_request(candidate_id, request, Some(client_version.as_str()), None)
+            .await
+        else {
+            continue;
+        };
+        if !response.response.status().is_success() {
+            continue;
+        }
+        let Ok(body) =
+            crate::transport::collect_limited(response.response, MAX_CODEX_MODELS_BODY_BYTES).await
+        else {
+            continue;
+        };
+        let Ok(upstream) = serde_json::from_slice::<Value>(&body) else {
+            continue;
+        };
+        if upstream_codex_models(&upstream).is_some() {
+            return Some(upstream);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -168,48 +206,6 @@ pub(in crate::gateway) fn build_codex_models_response(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
-    _source_context_windows: &BTreeMap<String, u64>,
-    upstream: Option<&Value>,
-) -> Option<Value> {
-    build_codex_models_response_from_manifests(
-        runtime,
-        key,
-        visible_models,
-        upstream
-            .cloned()
-            .into_iter()
-            .map(|manifest| (String::new(), manifest)),
-    )
-}
-
-#[cfg(test)]
-pub(in crate::gateway) fn build_codex_models_response_with_source_reasoning(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    visible_models: &[String],
-    _source_context_windows: &BTreeMap<String, u64>,
-    _source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
-    upstream: Option<&Value>,
-) -> Option<Value> {
-    build_codex_models_response_from_manifests(
-        runtime,
-        key,
-        visible_models,
-        upstream
-            .cloned()
-            .into_iter()
-            .map(|manifest| (String::new(), manifest)),
-    )
-}
-
-#[cfg(test)]
-pub(in crate::gateway) fn build_codex_models_response_with_source_capabilities(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    visible_models: &[String],
-    _source_context_windows: &BTreeMap<String, u64>,
-    _source_image_models: &BTreeSet<String>,
-    _source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
     upstream: Option<&Value>,
 ) -> Option<Value> {
     build_codex_models_response_from_manifests(
@@ -246,7 +242,7 @@ fn build_codex_models_response_from_manifests(
     }
     // Source models remain provider-agnostic in the runtime. The picker is the
     // presentation boundary: it groups familiar model IDs while the upstream
-    // catalog only supplies capability templates for those same IDs.
+    // account catalog supplies transport templates for those same IDs.
     let mut upstream_by_model = HashMap::<String, Vec<(String, Value)>>::new();
     for (candidate_id, manifest) in &upstream_manifests {
         let Some(models) = upstream_codex_models(manifest) else {
@@ -292,29 +288,38 @@ fn build_codex_models_response_from_manifests(
         // upstream id would make prefixed keys look like API-only routes.
         let has_native_account_route = runtime.codex_model_has_chatgpt_account(key, &display_id);
         let native_account_ids = runtime.codex_model_chatgpt_account_ids(key, &display_id);
-        let native_entry = upstream_by_model.get(&normalized).and_then(|entries| {
-            entries.iter().find(|(candidate_id, _)| {
+        let capabilities = runtime.model_capabilities(&upstream_id);
+        let native_entries = upstream_by_model
+            .get(&normalized)
+            .into_iter()
+            .flatten()
+            .filter(|(candidate_id, _)| {
                 candidate_id.is_empty()
                     || native_account_ids
                         .iter()
                         .any(|account_id| account_id == candidate_id)
-            })
-        });
-        // Only the exact owning account's card can supply native capabilities.
+            });
+        // Only the exact owning account's card can supply native transport.
         // Model identity is independent: a missing card must not rename a GPT
-        // model or copy another account/model's client capabilities.
+        // model or copy another account/model's transport controls.
         let native_catalog_model = has_native_account_route
             .then(|| {
-                native_entry.and_then(|(_, entry)| {
+                native_entries.clone().find_map(|(_, entry)| {
+                    // Ignore participant semantic fields before validation too:
+                    // malformed reasoning/image metadata must not discard the
+                    // account's otherwise valid transport template.
+                    let mut entry = entry.clone();
+                    capabilities.apply_to_codex(&mut entry);
+                    entry["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
                     entry.as_object().and_then(|entry| {
                         normalize_native_codex_catalog_entry(entry, &upstream_id, priority, None)
                     })
                 })
             })
             .flatten();
-        let native_account_model = native_catalog_model.is_some();
         let mut model = native_catalog_model
             .unwrap_or_else(|| routed_codex_catalog_entry(None, &display_id, priority, None));
+        model["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
         // Account models and unqualified GPT IDs retain their public spelling,
         // including an explicitly configured key prefix. Qualified provider
         // IDs keep reversible aliases; a similar leaf is not the same model.
@@ -338,28 +343,30 @@ fn build_codex_models_response_from_manifests(
                 uses_responses_lite,
             );
         }
-        if !native_account_model {
-            runtime
-                .model_capabilities(&upstream_id)
-                .apply_to_codex(&mut model);
+        capabilities.apply_to_codex(&mut model);
+        let supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
+        let catalog_default = model["default_reasoning_level"]
+            .as_str()
+            .filter(|default| supported.iter().any(|level| level == default))
+            .map(str::to_owned);
+        apply_model_reasoning_allowed_levels(&mut model, Some(&supported));
+        if let Some(default) = catalog_default {
+            model["default_reasoning_level"] = json!(default);
         }
-        // A saved override may narrow known capabilities, never manufacture
-        // modes for an unknown model or copy them from an upstream manifest.
-        if !native_account_model {
-            if let Some(allowed) = runtime.model_reasoning_policy_levels(&upstream_id) {
-                let supported = runtime
-                    .model_capabilities(&upstream_id)
-                    .reasoning_effort_levels;
-                let allowed = allowed
-                    .into_iter()
-                    .filter(|level| supported.contains(level))
-                    .collect::<Vec<_>>();
-                apply_model_reasoning_allowed_levels(&mut model, Some(&allowed));
-            }
-            if runtime.model_has_translated_ultra_route(key, &display_id) {
-                add_translated_ultra_after_max(&mut model);
-            }
+        if let Some(allowed) = runtime.model_reasoning_policy_levels(&upstream_id) {
+            let allowed = allowed
+                .into_iter()
+                .filter(|level| supported.contains(level))
+                .collect::<Vec<_>>();
+            apply_model_reasoning_allowed_levels(&mut model, Some(&allowed));
         }
+        if runtime.model_has_translated_ultra_route(key, &display_id) {
+            add_translated_ultra_after_max(&mut model);
+        }
+        set_codex_service_tiers(
+            &mut model,
+            runtime.model_supported_service_tiers(&upstream_id),
+        );
         sort_supported_reasoning_levels(&mut model);
         models.push(model);
     }
@@ -426,8 +433,7 @@ fn sort_supported_reasoning_levels(model: &mut Value) {
 
 fn apply_model_reasoning_allowed_levels(model: &mut Value, allowed_levels: Option<&[String]>) {
     let Some(allowed_levels) = allowed_levels else {
-        // No override: preserve the provider-declared modes already present
-        // in the source template. A probe is never required for defaults.
+        // No override: preserve the projected reference modes.
         return;
     };
     if allowed_levels.is_empty() {
@@ -539,8 +545,8 @@ mod tests {
     };
     use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
     use crate::{
-        CandidateHealth, CandidateQuota, GatewayRuntimeOptions, LocalGatewayKey,
-        RuntimeMixedLocalKey, WireApi,
+        CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntimeOptions,
+        LocalGatewayKey, RuntimeMixedLocalKey, WireApi,
     };
     use futures_util::future::BoxFuture;
     use serde_json::json;
@@ -598,32 +604,48 @@ mod tests {
         model_prefix: Option<&str>,
         model_metadata_catalog: Option<crate::model_metadata::ModelMetadataCatalogHandle>,
     ) -> GatewayRuntime {
-        let account_id = "native-account";
+        native_catalog_test_runtime_with_accounts(
+            model_prefix,
+            model_metadata_catalog,
+            &["native-account"],
+            &["gpt-native"],
+        )
+    }
+
+    fn native_catalog_test_runtime_with_accounts(
+        model_prefix: Option<&str>,
+        model_metadata_catalog: Option<crate::model_metadata::ModelMetadataCatalogHandle>,
+        account_ids: &[&str],
+        models: &[&str],
+    ) -> GatewayRuntime {
         GatewayRuntime::from_mixed_pool_allow_unroutable(
             Vec::new(),
-            vec![RuntimeChatGptAccount {
-                id: account_id.into(),
-                source_id: "chatgpt".into(),
-                chatgpt_account_id: "chatgpt-account".into(),
-                responses_url: "https://example.test/v1/responses".into(),
-                models: vec!["gpt-native".into()],
-                enabled: true,
-                draining: false,
-                priority: 0,
-                weight: 1,
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                health: CandidateHealth::Healthy,
-                quota: CandidateQuota::Unknown,
-                quota_updated_at_ms: None,
-                quota_snapshot: Default::default(),
-                subscription_plan_type: None,
-                subscription_expires_at_ms: None,
-                last_used_at_ms: None,
-                cooldowns: Default::default(),
-                consecutive_failures: 0,
-                proxy: None,
-            }],
+            account_ids
+                .iter()
+                .map(|account_id| RuntimeChatGptAccount {
+                    id: (*account_id).into(),
+                    source_id: "chatgpt".into(),
+                    chatgpt_account_id: "chatgpt-account".into(),
+                    responses_url: "https://example.test/v1/responses".into(),
+                    models: models.iter().map(|model| (*model).into()).collect(),
+                    enabled: true,
+                    draining: false,
+                    priority: 0,
+                    weight: 1,
+                    allowed_models: Vec::new(),
+                    excluded_models: Vec::new(),
+                    health: CandidateHealth::Healthy,
+                    quota: CandidateQuota::Unknown,
+                    quota_updated_at_ms: None,
+                    quota_snapshot: Default::default(),
+                    subscription_plan_type: None,
+                    subscription_expires_at_ms: None,
+                    last_used_at_ms: None,
+                    cooldowns: Default::default(),
+                    consecutive_failures: 0,
+                    proxy: None,
+                })
+                .collect(),
             vec![RuntimeMixedLocalKey {
                 key: LocalGatewayKey {
                     id: "key".into(),
@@ -651,6 +673,55 @@ mod tests {
             Arc::new(|_| {}),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn relay_speed_policy_overrides_missing_empty_and_conflicting_account_fields() {
+        use crate::gateway::request::normalization::ServiceTierPolicy;
+
+        let models = ["gpt-future", "gpt-another-synthetic"];
+        let runtime =
+            native_catalog_test_runtime_with_accounts(None, None, &["native-account"], &models);
+        let key = runtime.authenticate_secret("secret").unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        for fields in [
+            json!({}),
+            json!({"service_tiers": [], "additional_speed_tiers": []}),
+            json!({"service_tiers": null, "additional_speed_tiers": "invalid"}),
+            json!({"service_tiers": [{"id":"unrelated"}], "default_service_tier": "unrelated"}),
+        ] {
+            let sparse = json!({"models": models.iter().map(|id| {
+                let mut row = fields.clone();
+                row["slug"] = json!(id);
+                row
+            }).collect::<Vec<_>>()});
+            runtime.remember_codex_model_manifest("native-account", sparse.clone(), now_ms());
+            let response = build_codex_models_response_from_manifests(
+                &runtime,
+                &key,
+                &visible,
+                [("native-account".into(), sparse)],
+            )
+            .unwrap();
+            assert_eq!(response["models"].as_array().unwrap().len(), models.len());
+            for model in response["models"].as_array().unwrap() {
+                let id = model["slug"].as_str().unwrap();
+                assert!(models.contains(&id));
+                assert_eq!(model["service_tiers"][0]["id"], "priority");
+                assert_eq!(model["service_tiers"][1]["id"], "ultrafast");
+                assert_eq!(
+                    model["additional_speed_tiers"],
+                    json!(["fast", "ultrafast"])
+                );
+                assert!(model.get("default_service_tier").is_none());
+                let mut request = json!({"model": id, "service_tier": "ultrafast"});
+                let policy = ServiceTierPolicy::pool_owned(&request);
+                let selected = policy.select_for_model(&runtime, id);
+                assert_eq!(selected, DefaultServiceTier::Ultrafast);
+                policy.prepare_for_candidate(&mut request, selected, WireApi::Responses);
+                assert_eq!(request["service_tier"], "ultrafast");
+            }
+        }
     }
 
     #[test]
@@ -754,12 +825,13 @@ mod tests {
     }
 
     #[test]
-    fn native_account_catalog_keeps_native_capabilities_over_external_metadata() {
+    fn native_account_catalog_uses_reference_capabilities_despite_conflicting_account_fields() {
         use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 
         let catalog = ModelMetadataCatalog::from_models_dev_json(
             r#"{
                 "gpt-native": {
+                    "name": "External catalog title",
                     "reasoning": true,
                     "reasoning_effort_levels": ["low"],
                     "default_reasoning_effort": "low",
@@ -783,8 +855,8 @@ mod tests {
         native_entry.extend([
             ("slug".into(), json!("gpt-native")),
             ("display_name".into(), json!("Native GPT")),
-            ("input_modalities".into(), json!(["text", "audio"])),
-            ("output_modalities".into(), json!(["text", "audio"])),
+            ("input_modalities".into(), json!(["text"])),
+            ("output_modalities".into(), json!(["text"])),
             ("supports_parallel_tool_calls".into(), json!(true)),
             ("supports_search_tool".into(), json!(true)),
             (
@@ -802,25 +874,162 @@ mod tests {
         )
         .is_some());
 
-        let response = build_codex_models_response(
-            &runtime,
-            &key,
-            &visible,
-            &Default::default(),
-            Some(&upstream),
-        )
-        .expect("native catalog");
+        let response = build_codex_models_response(&runtime, &key, &visible, Some(&upstream))
+            .expect("native catalog");
         let model = &response["models"][0];
         assert_eq!(model["slug"], "gpt-native");
-        assert_eq!(model["input_modalities"], json!(["text", "audio"]));
-        assert_eq!(model["output_modalities"], json!(["text", "audio"]));
+        assert_eq!(model["display_name"], "External catalog title");
+        assert_eq!(model["input_modalities"], json!(["text"]));
+        assert_eq!(model["output_modalities"], json!(["text"]));
         assert_eq!(model["supports_parallel_tool_calls"], true);
-        assert_eq!(model["supports_search_tool"], true);
+        assert_eq!(model["supports_search_tool"], false);
         assert_eq!(
             model["supported_reasoning_levels"],
-            json!([{"effort": "high", "description": "Native high"}])
+            json!([{"effort": "low", "description": "low"}])
         );
-        assert_eq!(model["default_reasoning_level"], "high");
+        assert_eq!(model["default_reasoning_level"], "low");
+
+        // A missing account card uses this exact model's external name and
+        // capabilities; it does not retain the native-only features above.
+        let fallback = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
+        assert_eq!(
+            fallback["models"][0]["display_name"],
+            "External catalog title"
+        );
+        assert_eq!(fallback["models"][0]["slug"], "gpt-native");
+        assert_eq!(fallback["models"][0]["supports_search_tool"], false);
+        assert_eq!(fallback["models"][0]["default_reasoning_level"], "low");
+
+        // A partial native card can supply capabilities without a title.
+        // The normalizer's generated title must not hide a real catalog name.
+        let mut unnamed = upstream.clone();
+        unnamed["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("display_name");
+        let response =
+            build_codex_models_response(&runtime, &key, &visible, Some(&unnamed)).unwrap();
+        assert_eq!(
+            response["models"][0]["display_name"],
+            "External catalog title"
+        );
+        assert_eq!(response["models"][0]["supports_search_tool"], false);
+        assert_eq!(response["models"][0]["default_reasoning_level"], "low");
+    }
+
+    #[test]
+    fn native_catalog_follows_inventory_replacement_without_a_model_name_allowlist() {
+        // Synthetic future identities deliberately include a non-GPT model.
+        let old = "gpt-123-retired";
+        let replacements = ["gpt-124-future", "next-family-synthetic"];
+        let cards = [old, replacements[0], replacements[1]]
+            .into_iter()
+            .map(|id| {
+                json!({
+                    "slug": id,
+                    "display_name": format!("Upstream title for {id}"),
+                    "supported_reasoning_levels": [{"effort": "high", "description": "High"}],
+                    "supports_parallel_tool_calls": true
+                })
+            })
+            .collect::<Vec<_>>();
+        // A retained manifest must not resurrect a model removed from the pool.
+        for inventory in [&[old][..], &replacements[..]] {
+            let runtime = native_catalog_test_runtime_with_accounts(
+                None,
+                None,
+                &["native-account"],
+                inventory,
+            );
+            let key = runtime
+                .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+                .unwrap();
+            let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+            let response = build_codex_models_response_from_manifests(
+                &runtime,
+                &key,
+                &visible,
+                [("native-account".into(), json!({"models": cards}))],
+            )
+            .unwrap();
+            let models = response["models"].as_array().unwrap();
+            assert_eq!(models.len(), inventory.len());
+            assert_eq!(
+                models
+                    .iter()
+                    .map(|row| row["slug"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                visible
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| codex_model_is_picker_eligible(id))
+                    .collect::<Vec<_>>()
+            );
+            for (index, model) in models.iter().enumerate() {
+                let id = model["slug"].as_str().unwrap();
+                assert!(inventory.contains(&id));
+                assert_eq!(model["display_name"], crate::codex_model_display_name(id));
+                assert_eq!(model["supports_parallel_tool_calls"], true);
+                assert_eq!(
+                    model["priority"],
+                    crate::CODEX_CATALOG_PRIORITY_BASE + index as u64
+                );
+                assert!(crate::codex_catalog_entry_is_compatible(model));
+            }
+        }
+    }
+
+    #[test]
+    fn native_card_selection_skips_invalid_owners_without_borrowing_foreign_cards() {
+        let runtime = native_catalog_test_runtime_with_accounts(
+            None,
+            None,
+            &["native-account", "second-account"],
+            &["gpt-native"],
+        );
+        let key = runtime
+            .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        let mut native = routed_codex_catalog_entry(None, "gpt-native", 1_000, None);
+        native["slug"] = json!("gpt-native");
+        native["display_name"] = json!("Native account name");
+        native["supports_parallel_tool_calls"] = json!(true);
+        native["supported_reasoning_levels"] = json!([{"effort": "high", "description": "High"}]);
+        let mut invalid = native.clone();
+        invalid["display_name"] = json!("First account name");
+        invalid["use_responses_lite"] = json!("invalid");
+        let mut foreign = native.clone();
+        foreign["display_name"] = json!("Foreign account name");
+        let manifests = [
+            ("unrelated-account".into(), json!({"models": [foreign]})),
+            ("native-account".into(), json!({"models": [invalid]})),
+            ("second-account".into(), json!({"models": [native]})),
+        ];
+        for count in [2, 3] {
+            let response = build_codex_models_response_from_manifests(
+                &runtime,
+                &key,
+                &visible,
+                manifests[..count].iter().cloned(),
+            )
+            .unwrap();
+            let models = response["models"].as_array().unwrap();
+            assert_eq!(models.len(), 1);
+            let model = &models[0];
+            assert_eq!(model["slug"], "gpt-native");
+            assert_eq!(model["display_name"], "GPT Native");
+            assert_eq!(model["supports_parallel_tool_calls"], true);
+            assert_eq!(
+                model["supported_reasoning_levels"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                0
+            );
+            assert_eq!(model["priority"], crate::CODEX_CATALOG_PRIORITY_BASE);
+            assert!(crate::codex_catalog_entry_is_compatible(model));
+        }
     }
 
     #[test]
@@ -837,6 +1046,7 @@ mod tests {
             );
             let mut foreign = routed_codex_catalog_entry(None, "gpt-native", 1_000, None);
             foreign["slug"] = json!("gpt-native");
+            foreign["display_name"] = json!("Foreign name must not leak");
             foreign["supports_parallel_tool_calls"] = json!(true);
             foreign["use_responses_lite"] = json!(true);
             foreign["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
@@ -853,8 +1063,9 @@ mod tests {
                         .expect("native catalog");
                 let model = &response["models"][0];
                 assert_eq!(model["slug"], display_id);
+                assert_eq!(model["display_name"], "GPT Native");
                 assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
-                assert_eq!(model["supports_parallel_tool_calls"], false);
+                assert_eq!(model["supports_parallel_tool_calls"], true);
                 assert_eq!(model["supported_reasoning_levels"], json!([]));
                 for field in [
                     "use_responses_lite",

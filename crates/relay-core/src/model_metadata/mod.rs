@@ -1,6 +1,7 @@
 mod capabilities;
 mod loader;
 mod reasoning;
+mod reference;
 pub(crate) use reasoning::enrich_reasoning_metadata_with_models_dev_details;
 use reasoning::{
     normalize_external_levels, parse_effort_flags, parse_reasoning_object, parse_reasoning_options,
@@ -111,27 +112,47 @@ pub struct MetadataSourceStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ProviderOrder {
+struct FamilyOrder {
     newest_release: Option<u32>,
     source_order: usize,
 }
 
 impl ModelMetadataCatalog {
+    /// Presentation only: resolving a label must never rewrite the route ID or
+    /// promote catalog metadata into an account's native transport contract.
+    pub fn codex_display_name(&self, model: &str) -> String {
+        self.resolve(model)
+            .and_then(|metadata| metadata.name.as_deref())
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::codex_model_display_name(model))
+    }
+
     pub fn reasoning_levels_for(&self, model: &str) -> Vec<String> {
         let capabilities = self.capabilities_for(model);
         crate::canonicalize_reasoning_levels(capabilities.reasoning_effort_levels)
     }
 
     /// Capabilities belong to the exact model identity, not the provider route.
-    /// Unknown models advertise only text/image input and text output.
+    /// Missing fields use Relay's shared baseline; source claims are not used.
     pub fn capabilities_for(&self, model: &str) -> ModelCapabilities {
         self.resolve(model)
-            .map(|metadata| metadata.capabilities.clone())
+            .map(|metadata| metadata.capabilities.clone().with_defaults())
             .unwrap_or_else(ModelCapabilities::unknown_model)
     }
 
     pub fn apply_codex_capabilities(&self, model: &str, entry: &mut Value) {
         self.capabilities_for(model).apply_to_codex(entry);
+        crate::catalog::set_codex_service_tiers(entry, self.service_tiers_for(model));
+    }
+
+    pub fn service_tiers_for(&self, model: &str) -> &'static [crate::DefaultServiceTier] {
+        crate::catalog::model_service_tiers(
+            model,
+            self.resolve(model)
+                .map(|metadata| metadata.provider.as_str()),
+        )
     }
 
     pub fn empty() -> Self {
@@ -161,6 +182,7 @@ impl ModelMetadataCatalog {
         let mut entries = BTreeMap::new();
         let mut leaf_matches = BTreeMap::new();
         let mut ambiguous_leaves = BTreeSet::new();
+        let mut leaf_priorities = BTreeMap::new();
 
         for (source_id, value) in records {
             let provider = source_id
@@ -173,6 +195,20 @@ impl ModelMetadataCatalog {
             let leaf = model_leaf(&key).to_string();
             entries.insert(key.clone(), metadata);
 
+            // Supplemental hosting catalogs must not make a canonical model
+            // lose its unqualified identity. Equal-priority collisions remain
+            // ambiguous; exact qualified IDs always resolve independently.
+            let priority = reference::identity_priority(value);
+            match leaf_priorities.get(&leaf) {
+                Some(previous) if *previous < priority => continue,
+                Some(previous) if *previous == priority => {}
+                _ => {
+                    leaf_priorities.insert(leaf.clone(), priority);
+                    ambiguous_leaves.remove(&leaf);
+                    leaf_matches.insert(leaf, key);
+                    continue;
+                }
+            }
             if ambiguous_leaves.contains(&leaf) {
                 continue;
             }
@@ -220,25 +256,20 @@ impl ModelMetadataCatalog {
             .map(|metadata| metadata.capabilities.reasoning_effort_levels.clone())
     }
 
-    /// Keep companies together and sort their models by release/update date,
-    /// regardless of catalog family. Equal dates retain discovery order; price
-    /// and family names are not evidence of model quality.
+    /// Keep companies and catalog families together. Release/update dates order
+    /// versions inside each family; presentation never determines eligibility.
     pub fn order_model_ids<I, S>(&self, models: I) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let source = crate::normalize_model_ids(models);
-        let provider_order = self.provider_order(&source);
+        let family_order = self.family_order(&source);
         let mut indexed = source.into_iter().enumerate().collect::<Vec<_>>();
         indexed.sort_by(|(left_index, left_id), (right_index, right_id)| {
-            compare_metadata(
-                self.resolve(left_id),
-                self.resolve(right_id),
-                &provider_order,
-            )
-            .then_with(|| left_index.cmp(right_index))
-            .then_with(|| normalize(left_id).cmp(&normalize(right_id)))
+            compare_metadata(self.resolve(left_id), self.resolve(right_id), &family_order)
+                .then_with(|| left_index.cmp(right_index))
+                .then_with(|| normalize(left_id).cmp(&normalize(right_id)))
         });
         indexed.into_iter().map(|(_, id)| id).collect()
     }
@@ -295,8 +326,8 @@ impl ModelMetadataCatalog {
         ordered
     }
 
-    fn provider_order(&self, models: &[String]) -> BTreeMap<String, ProviderOrder> {
-        let mut providers = BTreeMap::new();
+    fn family_order(&self, models: &[String]) -> BTreeMap<(String, String), FamilyOrder> {
+        let mut families = BTreeMap::new();
         for (source_order, id) in models.iter().enumerate() {
             let Some(metadata) = self.resolve(id) else {
                 continue;
@@ -304,18 +335,21 @@ impl ModelMetadataCatalog {
             let Some(key) = provider_key(metadata) else {
                 continue;
             };
+            let Some(family) = family_key(metadata) else {
+                continue;
+            };
             let release = metadata.release_date.as_deref().and_then(date_key);
-            providers
-                .entry(key)
-                .and_modify(|order: &mut ProviderOrder| {
+            families
+                .entry((key, family))
+                .and_modify(|order: &mut FamilyOrder| {
                     order.newest_release = order.newest_release.max(release);
                 })
-                .or_insert(ProviderOrder {
+                .or_insert(FamilyOrder {
                     newest_release: release,
                     source_order,
                 });
         }
-        providers
+        families
     }
 }
 
@@ -325,7 +359,8 @@ pub struct ModelMetadataCatalogHandle {
 }
 
 impl ModelMetadataCatalogHandle {
-    pub(super) fn new(catalog: ModelMetadataCatalog) -> Self {
+    /// Share an already validated reference snapshot with a runtime.
+    pub fn new(catalog: ModelMetadataCatalog) -> Self {
         Self {
             current: Arc::new(RwLock::new(Arc::new(catalog))),
         }
@@ -527,25 +562,60 @@ fn parse_metadata(provider: &str, value: &Value) -> Option<ModelMetadata> {
 fn compare_metadata(
     left: Option<&ModelMetadata>,
     right: Option<&ModelMetadata>,
-    provider_order: &BTreeMap<String, ProviderOrder>,
+    family_order: &BTreeMap<(String, String), FamilyOrder>,
 ) -> Ordering {
     let left_provider = left.and_then(provider_key);
     let right_provider = right.and_then(provider_key);
 
     match (left_provider.as_ref(), right_provider.as_ref()) {
         (Some(left_key), Some(right_key)) if left_key == right_key => {
-            compare_model_dates(left, right)
+            compare_families(left_key, left, right, family_order)
+                .then_with(|| compare_model_dates(left, right))
         }
-        (Some(left_key), Some(right_key)) => {
-            let left_order = provider_order[left_key];
-            let right_order = provider_order[right_key];
-            compare_optional_date_desc(left_order.newest_release, right_order.newest_release)
-                .then_with(|| left_order.source_order.cmp(&right_order.source_order))
-                .then_with(|| left_key.cmp(right_key))
-        }
+        (Some(left_key), Some(right_key)) => company_order(left_key)
+            .cmp(&company_order(right_key))
+            .then_with(|| left_key.cmp(right_key)),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
+    }
+}
+
+fn company_order(provider: &str) -> usize {
+    match provider {
+        "openai" => 0,
+        "anthropic" => 1,
+        "google" => 2,
+        "xai" | "x-ai" => 3,
+        _ => 4,
+    }
+}
+
+fn family_key(metadata: &ModelMetadata) -> Option<String> {
+    metadata
+        .family
+        .as_deref()
+        .map(normalize)
+        .filter(|family| !family.is_empty())
+}
+
+fn compare_families(
+    provider: &str,
+    left: Option<&ModelMetadata>,
+    right: Option<&ModelMetadata>,
+    families: &BTreeMap<(String, String), FamilyOrder>,
+) -> Ordering {
+    match (left.and_then(family_key), right.and_then(family_key)) {
+        (Some(left), Some(right)) if left != right => {
+            let left_order = families[&(provider.to_string(), left.clone())];
+            let right_order = families[&(provider.to_string(), right.clone())];
+            compare_optional_date_desc(left_order.newest_release, right_order.newest_release)
+                .then_with(|| left_order.source_order.cmp(&right_order.source_order))
+                .then_with(|| left.cmp(&right))
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        _ => Ordering::Equal,
     }
 }
 
@@ -937,6 +1007,33 @@ mod tests {
     }
 
     #[test]
+    fn codex_labels_use_catalog_names_without_guessing_ambiguous_models() {
+        let catalog = catalog(
+            r#"{
+            "openai/new-family": {"name": "Future Native Name"},
+            "alpha/shared": {"name": "Alpha Name"},
+            "beta/shared": {"name": "Beta Name"},
+            "openai/invalid-name": {"name": "Bad\nName"},
+            "openai/unnamed": {"family": "future"}
+        }"#,
+        );
+        for (id, name) in [
+            ("openai/new-family", "Future Native Name"),
+            ("new-family", "Future Native Name"),
+            ("relay/new-family", "Future Native Name"),
+            ("alpha/shared", "Alpha Name"),
+            ("beta/shared", "Beta Name"),
+            ("shared", "Shared"),
+            ("unrelated/shared", "Shared"),
+            ("invalid-name", "Invalid Name"),
+            ("unnamed", "Unnamed"),
+            ("gpt-123-future", "123 Future"),
+        ] {
+            assert_eq!(catalog.codex_display_name(id), name, "{id}");
+        }
+    }
+
+    #[test]
     fn accepts_models_dev_data_payload_and_maps_capabilities() {
         let catalog = catalog(
             r#"{
@@ -993,6 +1090,31 @@ mod tests {
     }
 
     #[test]
+    fn default_company_order_preserves_manual_override_and_unknown_models() {
+        let catalog = catalog(
+            r#"{
+            "xai/model-x":{"family":"line-x"},
+            "google/model-g":{"family":"line-g"},
+            "openai/model-o":{"family":"line-o"},
+            "anthropic/model-a":{"family":"line-a"},
+            "another/model-n":{"family":"line-n"}
+        }"#,
+        );
+        let inventory = [
+            "unknown", "model-x", "model-n", "model-a", "model-g", "model-o",
+        ];
+        assert_eq!(
+            catalog.order_model_ids(inventory),
+            ["model-o", "model-a", "model-g", "model-x", "model-n", "unknown"]
+        );
+        let manual = inventory.map(str::to_string);
+        assert_eq!(catalog.merge_display_order(inventory, &manual), inventory);
+        assert_eq!(
+            catalog.merge_display_order(inventory, &[]),
+            catalog.order_model_ids(inventory)
+        );
+    }
+    #[test]
     fn order_uses_release_dates_and_keeps_unknown_models_last() {
         let catalog = catalog(
             r#"{
@@ -1022,7 +1144,55 @@ mod tests {
     }
 
     #[test]
-    fn company_order_uses_individual_dates_across_families_and_missing_families() {
+    fn catalog_families_group_versions_for_every_company_without_name_rules() {
+        let catalog = catalog(
+            r#"{
+                "anthropic/fable-new":{"family":"claude-fable","release_date":"2026-09-01"},
+                "anthropic/fable-old":{"family":"claude-fable","release_date":"2026-06-09"},
+                "anthropic/opus-new":{"family":"claude-opus","release_date":"2026-07-24"},
+                "anthropic/opus-old":{"family":"claude-opus","release_date":"2026-02-05"},
+                "anthropic/sonnet":{"family":"claude-sonnet","release_date":"2026-06-30"},
+                "anthropic/haiku":{"family":"claude-haiku","release_date":"2025-10-15"},
+                "google/flash-new":{"family":"gemini-flash","release_date":"2026-09-10"},
+                "google/flash-old":{"family":"gemini-flash","release_date":"2025-01-01"},
+                "google/pro":{"family":"gemini-pro","release_date":"2026-02-19"},
+                "openai/full-new":{"family":"gpt","release_date":"2026-09-04"},
+                "openai/full-old":{"family":"gpt","release_date":"2025-01-01"},
+                "openai/mini":{"family":"gpt-mini","release_date":"2026-03-05"},
+                "future-company/next-new":{"family":" NEW-LINE ","release_date":"2028-01-01"},
+                "future-company/next-old":{"family":"new-line","release_date":"2024-01-01"},
+                "future-company/mid":{"family":"other-line","release_date":"2027-01-01"}
+            }"#,
+        );
+        let expected = [
+            "full-new",
+            "full-old",
+            "mini",
+            "fable-new",
+            "fable-old",
+            "opus-new",
+            "opus-old",
+            "sonnet",
+            "haiku",
+            "flash-new",
+            "flash-old",
+            "pro",
+            "next-new",
+            "next-old",
+            "mid",
+        ];
+        assert_eq!(
+            catalog.order_model_ids(expected.into_iter().rev()),
+            expected
+        );
+        assert_eq!(
+            catalog.merge_display_order(expected.into_iter().rev(), &[]),
+            expected
+        );
+    }
+
+    #[test]
+    fn company_order_keeps_families_together_and_missing_families_last() {
         let catalog = catalog(
             r#"{
                 "alpha/new":{"family":"large","release_date":"2026-06-01"},
@@ -1045,10 +1215,10 @@ mod tests {
             ]),
             [
                 "new",
-                "no-family",
-                "middle",
                 "old",
+                "middle",
                 "undated",
+                "no-family",
                 "other",
                 "unknown"
             ]
@@ -1056,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_dates_across_families_preserve_source_order() {
+    fn equal_dates_keep_family_blocks_and_source_order_within_family() {
         let catalog = catalog(
             r#"{
                 "alpha/first":{"family":"small","release_date":"2026-01-01"},
@@ -1066,7 +1236,7 @@ mod tests {
         );
         assert_eq!(
             catalog.order_model_ids(["first", "second", "third"]),
-            ["first", "second", "third"]
+            ["first", "third", "second"]
         );
     }
 
@@ -1075,13 +1245,55 @@ mod tests {
         let catalog = catalog(
             r#"{
                 "alpha/first":{"name":"First","family":"alpha","release_date":"not-a-date"},
-                "beta/second":{"name":"Second","family":"beta"}
+                "alpha/second":{"name":"Second","family":"alpha"}
             }"#,
         );
         assert_eq!(
             catalog.order_model_ids(["second", "first", "unknown"]),
             ["second", "first", "unknown"]
         );
+    }
+
+    #[test]
+    fn clearing_saved_order_restores_catalog_groups_and_newest_models_first() {
+        let catalog = catalog(
+            r#"{
+                "anthropic/claude-old":{"release_date":"2025-10-15","last_updated":"2026-09-19"},
+                "anthropic/claude-new":{"release_date":"2026-09-01"},
+                "openai/gpt-old":{"release_date":"2025-01-01"},
+                "openai/gpt-new":{"release_date":"2026-09-04"},
+                "google/gemini-old":{"release_date":"2025-01-01"},
+                "google/gemini-new":{"release_date":"2026-02-19"},
+                "google/gemini-undated":{}
+            }"#,
+        );
+        let inventory = [
+            "claude-old",
+            "gpt-old",
+            "gemini-undated",
+            "gemini-old",
+            "claude-new",
+            "gpt-new",
+            "gemini-new",
+            "unknown",
+        ];
+        let manual = inventory.map(str::to_string);
+        assert_eq!(catalog.merge_display_order(inventory, &manual), manual);
+        let reset = catalog.merge_display_order(inventory, &[]);
+        assert_eq!(
+            reset,
+            [
+                "gpt-new",
+                "gpt-old",
+                "claude-new",
+                "claude-old",
+                "gemini-new",
+                "gemini-old",
+                "gemini-undated",
+                "unknown",
+            ]
+        );
+        assert_eq!(catalog.merge_display_order(&reset, &[]), reset);
     }
 
     #[test]

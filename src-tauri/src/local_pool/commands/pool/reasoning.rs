@@ -1,11 +1,11 @@
 use crate::local_pool::{
-    error::{CommandError, ErrorCode, LocalPoolError},
+    error::{CommandError, LocalPoolError},
     models::LocalPoolSnapshot,
     state::DesktopState,
 };
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use tauri::State;
+use zenith_relay_core::protocol::update_model_reasoning_policy;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -31,24 +31,14 @@ async fn apply_local_model_reasoning(
     requested_levels: Vec<String>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let policy_key = zenith_relay_core::reasoning_policy_key(&canonical);
-    let mut normalized_allowed_levels =
-        zenith_relay_core::normalize_model_reasoning_allowed_levels(BTreeMap::from([(
-            policy_key.clone(),
-            requested_levels,
-        )]))
-        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    let allowed_levels = normalized_allowed_levels
-        .remove(&policy_key)
-        .unwrap_or_default();
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
-    gateway
-        .model_reasoning_allowed_levels
-        .remove(&canonical.to_ascii_lowercase());
-    gateway
-        .model_reasoning_allowed_levels
-        .insert(policy_key, allowed_levels);
+    update_model_reasoning_policy(
+        &mut gateway.model_reasoning_allowed_levels,
+        &canonical,
+        requested_levels,
+    )
+    .map_err(LocalPoolError::invalid_state)?;
     if gateway == old_gateway {
         return state.snapshot().await.map_err(Into::into);
     }

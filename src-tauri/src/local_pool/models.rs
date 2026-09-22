@@ -551,34 +551,11 @@ impl ProviderSourceRecord {
             .map_err(|error| error.to_string())
     }
 
-    pub fn normalize_protocol_bindings(&mut self) -> Result<(), String> {
-        if self.protocol_config.mode == zenith_relay_core::ProtocolSelectionMode::Auto {
-            self.effective_protocol_bindings()?;
-            return Ok(());
-        }
-        if self.protocol_bindings.is_empty() {
-            return Ok(());
-        }
-        let source_wide_catalog_route =
-            self.protocol_bindings.len() == 1 && self.protocol_bindings[0].model_ids.is_empty();
-        let bindings = self.effective_protocol_bindings()?;
-        if source_wide_catalog_route {
-            // An empty single route means discover the source-wide catalog;
-            // effective bindings expand it only for validation and routing.
-            return Ok(());
-        }
-        // `wire_api` is a compatibility default for legacy readers. Do not
-        // derive it from route order: an explicit mixed source is defined by
-        // `protocol_bindings`, and discovery is free to return routes in any
-        // stable upstream order.
-        self.protocol_bindings = bindings;
-        Ok(())
-    }
-
     pub fn validate_protocol_bindings(&self) -> Result<(), String> {
         self.effective_protocol_bindings().map(drop)
     }
 
+    #[cfg(test)]
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
         self.protocol_config
             .models_for(

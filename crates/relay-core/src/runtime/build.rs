@@ -26,7 +26,6 @@ pub(super) enum ReachabilityRequirement {
 pub(super) struct SourceRuntimeParts {
     pub(super) executors: BTreeMap<String, SourceConnector>,
     pub(super) candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
-    pub(super) capabilities: BTreeMap<String, Vec<crate::ModelEndpointCapability>>,
     pub(super) recovery_delays_ms: BTreeMap<String, u64>,
 }
 
@@ -85,7 +84,6 @@ pub(super) fn build_sources(
 ) -> Result<SourceRuntimeParts> {
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
-    let mut capabilities = BTreeMap::new();
     let mut recovery_delays_ms = BTreeMap::new();
     for source in sources {
         source.source.validate()?;
@@ -109,15 +107,6 @@ pub(super) fn build_sources(
             source.source.wire_api,
         )?;
         let source_id = source.source.id.clone();
-        capabilities.insert(
-            source_id.clone(),
-            source.protocol_config.effective_capabilities(
-                &source.source.base_url,
-                &source.source.models,
-                &source.protocol_bindings,
-                source.source.wire_api,
-            ),
-        );
         let connector = SourceConnector::new(&source.source, &bindings)?;
         let rules = model_rules(&source.allowed_models, &source.excluded_models);
         for binding in &bindings {
@@ -154,7 +143,7 @@ pub(super) fn build_sources(
                 consecutive_failures: 0,
                 secret_available: true,
             };
-            registry.replace(candidate_id.clone(), binding.model_ids.iter());
+            registry.replace(candidate_id.clone(), source.source.models.iter());
             scheduler.upsert(candidate);
             scheduler.set_native_route(&candidate_id, binding.adapter.is_passthrough());
             if source.recovery_delay_seconds > 0 {
@@ -180,7 +169,6 @@ pub(super) fn build_sources(
     Ok(SourceRuntimeParts {
         executors,
         candidate_bindings,
-        capabilities,
         recovery_delays_ms,
     })
 }
@@ -299,6 +287,7 @@ pub(super) fn build_accounts(
                 active: AtomicBool::new(true),
                 agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
                 agent_task_lock: tokio::sync::Mutex::new(()),
+                routing_cookies: super::routing_cookies::RoutingCookies::default(),
             },
         );
     }

@@ -164,28 +164,6 @@ impl GatewayFailure {
         }
     }
 
-    pub(super) fn idle_timeout(origin: ErrorOrigin) -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            category: error_codes::WEBSOCKET_IDLE_TIMEOUT,
-            message: "upstream WebSocket produced no event before the idle timeout",
-            retry_at_ms: None,
-            upstream_error: None,
-            origin,
-        }
-    }
-
-    pub(super) fn semantic_timeout(origin: ErrorOrigin) -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            category: error_codes::STREAM_SEMANTIC_TIMEOUT,
-            message: "upstream produced no semantic output before the watchdog timeout",
-            retry_at_ms: None,
-            upstream_error: None,
-            origin,
-        }
-    }
-
     pub(super) fn message_too_large(origin: ErrorOrigin) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,

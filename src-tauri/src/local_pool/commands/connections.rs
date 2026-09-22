@@ -17,8 +17,8 @@ use uuid::Uuid;
 use zenith_relay_core::{
     discover_source_with_protocol_config, fetch_source_provider_stats, normalize_model_ids,
     normalize_source_protocol_bindings, source_points_to_gateway, ApiModelPriceOverride,
-    ProtocolSelectionMode, ProviderSource, SourceDiscovery, SourceProtocolBinding,
-    SourceProtocolConfig, SourceProviderStats, WireApi,
+    ProviderSource, SourceDiscovery, SourceProtocolBinding, SourceProtocolConfig,
+    SourceProviderStats, WireApi,
 };
 #[cfg(test)]
 use zenith_relay_core::{MessagesReasoningMode, SourceAdapter};
@@ -39,8 +39,6 @@ pub struct CreateSourceInput {
     wire_api: WireApi,
     #[serde(default)]
     protocol_bindings: Vec<SourceProtocolBinding>,
-    #[serde(default)]
-    protocol_mode: Option<ProtocolSelectionMode>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -72,8 +70,6 @@ pub struct UpdateSourceInput {
     wire_api: WireApi,
     #[serde(default)]
     protocol_bindings: Option<Vec<SourceProtocolBinding>>,
-    #[serde(default)]
-    protocol_mode: Option<ProtocolSelectionMode>,
     models: Vec<String>,
     #[serde(default)]
     in_pool: Option<bool>,
@@ -113,13 +109,6 @@ pub async fn create_local_source(
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
     let manual_models = normalize_model_ids(&runtime_source.models);
     let mut protocol_config = SourceProtocolConfig::automatic(&runtime_source.base_url);
-    protocol_config.mode = input
-        .protocol_mode
-        .unwrap_or(if input.protocol_bindings.is_empty() {
-            ProtocolSelectionMode::Auto
-        } else {
-            ProtocolSelectionMode::Manual
-        });
     let (discovery, last_test_status, last_error) = if manual_models.is_empty() {
         match discover_source_with_protocol_config(
             &runtime_source,
@@ -198,7 +187,7 @@ pub async fn create_local_source(
     };
     record.normalize();
     record
-        .normalize_protocol_bindings()
+        .validate_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let (old_sources, old_keys) = current_records(&state)?;
     secret_store::save(&secret_ref, &runtime_source.api_key)?;
@@ -264,9 +253,6 @@ pub async fn update_local_source(
     if input.base_url.trim() != current.base_url {
         protocol_config.invalidate(&input.base_url);
     }
-    if let Some(mode) = input.protocol_mode {
-        protocol_config.mode = mode;
-    }
     let mut updated = ProviderSourceRecord {
         id: current.id.clone(),
         name: input.name,
@@ -308,7 +294,7 @@ pub async fn update_local_source(
     }
     updated.normalize();
     updated
-        .normalize_protocol_bindings()
+        .validate_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
@@ -541,7 +527,7 @@ pub async fn probe_local_source(
     }
     let (old_sources, old_keys) = current_records(&state)?;
     current
-        .normalize_protocol_bindings()
+        .validate_protocol_bindings()
         .map_err(LocalPoolError::invalid_state)?;
     state.store()?.upsert_source(current)?;
     sync_records_or_rollback(&state, old_sources, old_keys).await?;
@@ -662,7 +648,7 @@ pub(crate) async fn refresh_local_source_models(
     updated.last_error = None;
     updated.normalize();
     updated
-        .normalize_protocol_bindings()
+        .validate_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let (old_sources, old_keys) = current_records(state)?;
     state.store()?.upsert_source(updated.clone())?;
@@ -670,26 +656,10 @@ pub(crate) async fn refresh_local_source_models(
         sync_records_or_rollback(state, old_sources, old_keys).await?;
     }
     if refresh_mode.refreshes_active_catalog() {
-        refresh_active_catalog_after_source_update(state, source_id, refresh_mode).await;
+        let catalog_result = super::profiles::refresh_active_client_catalogs(state).await;
+        record_catalog_refresh_result(state, &catalog_result);
     }
     Ok(updated)
-}
-
-async fn refresh_active_catalog_after_source_update(
-    state: &DesktopState,
-    source_id: &str,
-    refresh_mode: SourceRefreshMode,
-) {
-    if !refresh_mode.refreshes_active_catalog() {
-        return;
-    }
-    if let Some(runtime) = state.gateway.runtime().await {
-        runtime
-            .refresh_source_model_metadata_for_source(source_id)
-            .await;
-    }
-    let catalog_result = super::profiles::refresh_active_client_catalogs(state).await;
-    record_catalog_refresh_result(state, &catalog_result);
 }
 
 /// Records a transient discovery failure without destroying the last known
@@ -915,12 +885,12 @@ mod tests {
         }];
 
         source.normalize();
-        source.normalize_protocol_bindings().unwrap();
+        source.validate_protocol_bindings().unwrap();
         assert!(source.validate_protocol_bindings().is_ok());
     }
 
     #[test]
-    fn source_wide_catalog_binding_remains_automatic_after_normalization() {
+    fn source_wide_catalog_binding_is_preserved_when_validated() {
         let mut source = source_record();
         source.protocol_bindings = vec![SourceProtocolBinding {
             wire_api: WireApi::Responses,
@@ -930,7 +900,7 @@ mod tests {
             model_ids: Vec::new(),
         }];
 
-        source.normalize_protocol_bindings().unwrap();
+        source.validate_protocol_bindings().unwrap();
 
         assert!(source.protocol_bindings[0].model_ids.is_empty());
         assert_eq!(
@@ -1040,7 +1010,7 @@ mod tests {
         ];
         source.models = vec!["claude-native".into(), "gpt-native".into()];
 
-        source.normalize_protocol_bindings().unwrap();
+        source.validate_protocol_bindings().unwrap();
 
         assert_eq!(source.wire_api, WireApi::Responses);
         assert!(!source

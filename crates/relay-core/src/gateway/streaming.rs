@@ -35,16 +35,13 @@ use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
 pub(super) const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
-const SSE_FIRST_OUTPUT_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
-
-const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
+mod diagnostics;
 mod events;
 mod replay;
 mod upstream_usage;
@@ -93,14 +90,11 @@ pub(super) async fn bootstrap_stream(
     // `response.created` and other setup frames do not make a response safe to
     // commit. Keep them private until the source produces real output or a
     // terminal event, so a pre-output provider failure can use another route.
-    let first_output_deadline = TokioInstant::now() + SSE_FIRST_OUTPUT_TIMEOUT;
-
+    // No local generation deadline: quiet reasoning or provider queuing is not
+    // a failed attempt. EOF, explicit provider errors and cancellation still end it.
     loop {
-        match tokio::time::timeout_at(first_output_deadline, stream.next()).await {
-            Err(_) => {
-                return Err(AttemptFailure::stream(error_codes::STREAM_FIRST_OUTPUT_TIMEOUT).into())
-            }
-            Ok(Some(Ok(chunk))) => {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
                 if chunk.len() > MAX_SSE_EVENT_BYTES {
                     return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
                 }
@@ -117,7 +111,10 @@ pub(super) async fn bootstrap_stream(
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
                     if event.has_data && !event.valid {
-                        return Err(AttemptFailure::stream(error_codes::STREAM_INVALID).into());
+                        return Err(StreamBootstrapFailure {
+                            upstream_error: event.upstream_error,
+                            ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
+                        });
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
                         let category = event
@@ -165,8 +162,8 @@ pub(super) async fn bootstrap_stream(
                     return Ok((headers, Bytes::from(buffered), stream));
                 }
             }
-            Ok(Some(Err(error))) => return Err(AttemptFailure::transport(&error).into()),
-            Ok(None) => return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()),
+            Some(Err(error)) => return Err(AttemptFailure::transport(&error).into()),
+            None => return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()),
         }
     }
 }
@@ -520,7 +517,6 @@ pub(super) struct UsageStream<S> {
     // already owned by the client and cannot be replaced by a synthetic response.
     client_visible_output: bool,
     pub(super) heartbeat: Pin<Box<Sleep>>,
-    pub(super) idle_watchdog: Pin<Box<Sleep>>,
     pub(super) terminated: bool,
 }
 
@@ -550,7 +546,6 @@ impl<S> UsageStream<S> {
             output_pending: VecDeque::new(),
             client_visible_output: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
-            idle_watchdog: Box::pin(sleep(SSE_IDLE_TIMEOUT)),
             terminated: false,
         }
     }
@@ -581,7 +576,6 @@ impl<S> UsageStream<S> {
             output_pending: VecDeque::new(),
             client_visible_output: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
-            idle_watchdog: Box::pin(sleep(SSE_IDLE_TIMEOUT)),
             terminated: false,
         }
     }
@@ -712,6 +706,7 @@ impl<S> UsageStream<S> {
             let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
+                self.set_upstream_error(terminal.upstream_error);
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::STREAM_INVALID);
                 return false;
@@ -887,7 +882,6 @@ where
                 Poll::Ready(Some(Ok(bytes))) => {
                     let now = TokioInstant::now();
                     this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
-                    this.idle_watchdog.as_mut().reset(now + SSE_IDLE_TIMEOUT);
                     let valid = if this.native_gemini {
                         this.ingest_native_gemini(&bytes)
                     } else {
@@ -927,13 +921,13 @@ where
                     return Poll::Ready(None);
                 }
                 Poll::Pending => {
-                    if this.idle_watchdog.as_mut().poll(context).is_ready() {
-                        if this.fail_stream(error_codes::STREAM_IDLE_TIMEOUT) {
-                            continue;
-                        }
-                        return Poll::Ready(None);
-                    }
-                    if this.heartbeat.as_mut().poll(context).is_ready() {
+                    // Keep the client connection alive without imposing a
+                    // deadline on the provider's next output.
+                    // Chunks are forwarded immediately, so a heartbeat is safe
+                    // only between complete SSE events, never inside a frame.
+                    if this.sse_pending.is_empty()
+                        && this.heartbeat.as_mut().poll(context).is_ready()
+                    {
                         this.heartbeat
                             .as_mut()
                             .reset(TokioInstant::now() + SSE_HEARTBEAT_INTERVAL);
@@ -1027,11 +1021,6 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
             Some("invalid_request_error")
         );
         assert_eq!(upstream.http_status, None);
-    }
-
-    #[test]
-    fn first_sse_event_gets_the_same_patience_as_an_active_stream() {
-        assert_eq!(SSE_FIRST_OUTPUT_TIMEOUT, SSE_IDLE_TIMEOUT);
     }
 
     #[tokio::test]
@@ -1177,6 +1166,90 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
     }
 
     #[tokio::test]
+    async fn heartbeat_never_splits_an_unfinished_sse_frame() {
+        let frame =
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\r\n\r\n";
+        for native_gemini in [false, true] {
+            for split in 1..frame.len() {
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                let input = stream::unfold(receiver, |mut receiver| async move {
+                    receiver.recv().await.map(|chunk| (chunk, receiver))
+                });
+                let mut stream = usage_stream_with_events(input, Arc::default());
+                stream.native_gemini = native_gemini;
+                sender
+                    .send(Ok(Bytes::copy_from_slice(&frame[..split])))
+                    .unwrap();
+                let first = stream.next().await.unwrap().unwrap();
+                stream
+                    .heartbeat
+                    .as_mut()
+                    .reset(TokioInstant::now() - Duration::from_secs(1));
+                let pending = futures_util::future::poll_fn(|context| {
+                    Poll::Ready(Pin::new(&mut stream).poll_next(context))
+                })
+                .await;
+                if split == frame.len() - 1 {
+                    // CR already completes the blank line; its optional LF
+                    // can arrive after a heartbeat without changing the data.
+                    assert_eq!(
+                        pending,
+                        Poll::Ready(Some(Ok(Bytes::from_static(SSE_HEARTBEAT))))
+                    );
+                    assert!(parse_sse_event(&frame[..split]).valid);
+                } else {
+                    assert!(pending.is_pending(), "heartbeat inserted at byte {split}");
+                }
+                sender
+                    .send(Ok(Bytes::copy_from_slice(&frame[split..])))
+                    .unwrap();
+                let last = stream.next().await.unwrap().unwrap();
+                assert_eq!([first.as_ref(), last.as_ref()].concat(), frame);
+                stream
+                    .heartbeat
+                    .as_mut()
+                    .reset(TokioInstant::now() - Duration::from_secs(1));
+                assert_eq!(stream.next().await.unwrap().unwrap(), SSE_HEARTBEAT);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_stream_keeps_sending_heartbeats_until_provider_completion() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let input = stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|chunk| (chunk, receiver))
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut stream = usage_stream_with_events(input, events.clone());
+        let first = Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+        );
+        sender.send(Ok(first.clone())).unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap(), first);
+
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(20 * 60)).await;
+            assert_eq!(stream.next().await.unwrap().unwrap(), SSE_HEARTBEAT);
+            assert!(events.lock().unwrap().is_empty());
+            assert!(!stream.terminated);
+        }
+
+        let completed = Bytes::from_static(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+        sender.send(Ok(completed.clone())).unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap(), completed);
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].success);
+        assert_eq!(events[0].total_tokens, Some(3));
+        assert_eq!(events[0].cached_input_tokens, None);
+    }
+
+    #[tokio::test]
     async fn usage_stream_forwards_chunks_without_waiting_for_an_sse_boundary() {
         let first =
             Bytes::from_static(br#"data: {"type":"response.output_text.delta","delta":"hel"#);
@@ -1244,6 +1317,11 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
             assert_eq!(events.len(), 1);
             assert!(!events[0].success);
             assert_eq!(events[0].error_category.as_deref(), Some(category));
+            if category == error_codes::STREAM_INVALID {
+                let details = events[0].upstream_error.as_ref().unwrap();
+                assert_eq!(details.error_type.as_deref(), Some("relay_stream_parser"));
+                assert!(!details.message.as_ref().unwrap().contains("invalid-json"));
+            }
         }
     }
 

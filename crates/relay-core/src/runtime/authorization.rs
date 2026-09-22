@@ -1,6 +1,6 @@
 use super::{
     runtime_now_ms, AuthorizedRequestError, AuthorizedResponse, ChatGptAccountExecutor,
-    ExecutorPrepareError, GatewayRuntime, PreparedAuthorization,
+    CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime, PreparedAuthorization,
 };
 use crate::accounts::TokenAuthorityError;
 use crate::providers::chatgpt::{
@@ -32,6 +32,7 @@ impl GatewayRuntime {
                 identity: None,
                 token_generation: None,
                 agent_task_id: None,
+                agent_credential_fingerprint: None,
             });
         }
         let account = self
@@ -62,6 +63,7 @@ impl GatewayRuntime {
                         ),
                         token_generation: None,
                         agent_task_id: agent.task_id().map(str::to_string),
+                        agent_credential_fingerprint: Some(agent_credential_fingerprint(&agent)),
                     });
                 }
                 Err(error) if account.token_authority.tokens(&account.id).await.is_none() => {
@@ -124,6 +126,7 @@ impl GatewayRuntime {
             ),
             token_generation: Some(prepared.tokens.generation()),
             agent_task_id: None,
+            agent_credential_fingerprint: None,
         })
     }
 
@@ -184,6 +187,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         request: reqwest::RequestBuilder,
         client_version: Option<&str>,
+        turn_scope: Option<&CodexTurnStateScope<'_>>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
         let first_request = request
             .try_clone()
@@ -192,8 +196,15 @@ impl GatewayRuntime {
             .prepare_authorization(candidate_id, runtime_now_ms())
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
-        let response =
-            send_prepared_authorization(first_request, &prepared, client_version).await?;
+        let response = self
+            .send_prepared_authorization(
+                candidate_id,
+                first_request,
+                &prepared,
+                client_version,
+                turn_scope,
+            )
+            .await?;
         if response.status() == StatusCode::UNAUTHORIZED {
             if let Some(task_id) = prepared.agent_task_id.as_deref() {
                 let (response, invalid_task) =
@@ -219,8 +230,15 @@ impl GatewayRuntime {
                     )
                     .await
                     .map_err(AuthorizedRequestError::Prepare)?;
-                let response =
-                    send_prepared_authorization(request, &refreshed, client_version).await?;
+                let response = self
+                    .send_prepared_authorization(
+                        candidate_id,
+                        request,
+                        &refreshed,
+                        client_version,
+                        turn_scope,
+                    )
+                    .await?;
                 self.observe_codex_quota_headers(
                     candidate_id,
                     response.status(),
@@ -256,7 +274,15 @@ impl GatewayRuntime {
             )
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
-        let response = send_prepared_authorization(request, &refreshed, client_version).await?;
+        let response = self
+            .send_prepared_authorization(
+                candidate_id,
+                request,
+                &refreshed,
+                client_version,
+                turn_scope,
+            )
+            .await?;
         self.observe_codex_quota_headers(
             candidate_id,
             response.status(),
@@ -303,7 +329,7 @@ impl ChatGptAccountExecutor {
             return Ok(current);
         }
         let task_id = current
-            .register_task(&self.clients.bounded)
+            .register_task(&self.clients.http)
             .await
             .map_err(classify_agent_identity_error)?;
         let task_id = self
@@ -353,16 +379,114 @@ async fn inspect_agent_identity_unauthorized(
     Ok((reqwest::Response::from(restored), invalid))
 }
 
-async fn send_prepared_authorization(
-    request: reqwest::RequestBuilder,
-    prepared: &PreparedAuthorization,
-    client_version: Option<&str>,
-) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
-    let (client, request) = apply_prepared_authorization(request, prepared, client_version)?;
-    client
-        .execute(request)
-        .await
-        .map_err(AuthorizedRequestError::Transport)
+impl GatewayRuntime {
+    pub(crate) fn routing_cookies(
+        &self,
+        candidate_id: &str,
+        prepared: &PreparedAuthorization,
+    ) -> Option<std::sync::Arc<super::routing_cookies::RoutingCookieJar>> {
+        self.chatgpt_accounts.get(candidate_id).map(|account| {
+            account
+                .routing_cookies
+                .for_credential(prepared.turn_state_credential())
+        })
+    }
+
+    pub(crate) fn guard_turn_state(
+        &self,
+        headers: &mut reqwest::header::HeaderMap,
+        scope: Option<&CodexTurnStateScope<'_>>,
+        prepared: &PreparedAuthorization,
+    ) {
+        if let Some(state) = headers.get("x-codex-turn-state") {
+            if !scope.is_some_and(|scope| {
+                self.codex_turn_state_matches(
+                    scope,
+                    state.as_bytes(),
+                    prepared.turn_state_credential(),
+                    runtime_now_ms(),
+                )
+            }) {
+                headers.remove("x-codex-turn-state");
+            }
+        }
+    }
+
+    pub(crate) fn observe_turn_state(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+        scope: Option<&CodexTurnStateScope<'_>>,
+        prepared: &PreparedAuthorization,
+    ) {
+        if let (Some(scope), Some(state)) = (scope, headers.get("x-codex-turn-state")) {
+            self.note_codex_turn_state(
+                scope,
+                state.as_bytes(),
+                prepared.turn_state_credential(),
+                runtime_now_ms(),
+            );
+        }
+    }
+
+    async fn send_prepared_authorization(
+        &self,
+        candidate_id: &str,
+        request: reqwest::RequestBuilder,
+        prepared: &PreparedAuthorization,
+        client_version: Option<&str>,
+        scope: Option<&CodexTurnStateScope<'_>>,
+    ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
+        let (client, mut request) =
+            apply_prepared_authorization(request, prepared, client_version)?;
+        self.guard_turn_state(request.headers_mut(), scope, prepared);
+        let url = request.url().clone();
+        let cookies = self.routing_cookies(candidate_id, prepared);
+        if let Some(cookies) = &cookies {
+            cookies.apply(&url, request.headers_mut());
+        }
+        let response = client
+            .execute(request)
+            .await
+            .map_err(AuthorizedRequestError::Transport)?;
+        if let Some(cookies) = cookies {
+            cookies.observe(&url, response.headers());
+        }
+        if response.status().is_success() {
+            self.observe_turn_state(response.headers(), scope, prepared);
+        }
+        Ok(response)
+    }
+}
+
+// Agent assertions are signed anew each second. Bind state to their credential
+// and task, not the timestamp/signature of an individual request.
+fn agent_credential_fingerprint(agent: &AgentIdentityCredential) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"relay-agent-turn-state-v1");
+    for part in [
+        agent.private_key(),
+        agent.runtime_id(),
+        agent.task_id().unwrap_or_default(),
+    ] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+impl PreparedAuthorization {
+    pub(crate) fn credential_fingerprint(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.turn_state_credential()).into()
+    }
+
+    fn turn_state_credential(&self) -> &[u8] {
+        self.agent_credential_fingerprint.as_ref().map_or_else(
+            || self.authorization.as_bytes(),
+            |fingerprint| fingerprint.as_slice(),
+        )
+    }
 }
 
 /// Build the request before adding account authorization so the existing
@@ -406,5 +530,47 @@ fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepare
         TokenAuthorityError::RefreshFailed(_)
         | TokenAuthorityError::InvalidCapacity
         | TokenAuthorityError::CapacityReached => ExecutorPrepareError::Transient,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_turn_state_identity_ignores_signature_timestamp_but_tracks_credentials() {
+        let agent = AgentIdentityCredential::new(
+            "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
+            "synthetic-runtime".into(),
+            "synthetic-task".into(),
+        )
+        .unwrap();
+        let prepare = |agent: &AgentIdentityCredential, timestamp| PreparedAuthorization {
+            header_name: AUTHORIZATION,
+            authorization: agent.authorization(timestamp).unwrap(),
+            identity: None,
+            token_generation: None,
+            agent_task_id: agent.task_id().map(str::to_string),
+            agent_credential_fingerprint: Some(agent_credential_fingerprint(agent)),
+        };
+        let first = prepare(&agent, 1_000);
+        let next = prepare(&agent, 2_000);
+        assert_ne!(first.authorization, next.authorization);
+        assert_eq!(first.turn_state_credential(), next.turn_state_credential());
+        let changed_task = prepare(&agent.with_task_id("another-task".into()).unwrap(), 2_000);
+        assert_ne!(
+            first.turn_state_credential(),
+            changed_task.turn_state_credential()
+        );
+        let changed_runtime = AgentIdentityCredential::new(
+            agent.private_key().into(),
+            "another-runtime".into(),
+            "synthetic-task".into(),
+        )
+        .unwrap();
+        assert_ne!(
+            first.turn_state_credential(),
+            prepare(&changed_runtime, 2_000).turn_state_credential()
+        );
     }
 }

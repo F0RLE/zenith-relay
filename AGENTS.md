@@ -29,6 +29,17 @@ pool, and user-managed remote pool distinct in UI, configuration, and storage.
   Compatibility belongs at client/admission/routing boundaries, not discovery
   filtering.
   Do not replace discovery with a hardcoded model allowlist.
+- Model descriptions and capabilities are Relay-owned. Resolve identity,
+  grouping, reasoning, modalities, tools and limits from the shared validated
+  reference catalogs, filling missing fields with documented Relay defaults.
+  Do not fetch, infer or gate these properties from participant declarations.
+  Request speed is a model-family rule: OpenAI conversational models offer
+  Standard, Fast and Ultrafast without a model-version allowlist or source
+  entitlement check. Explicit client choices survive rotation unchanged.
+  Prices are the exception: use a participant's valid declared prices first,
+  then trusted catalog prices and manual fallback. Never invent prices,
+  numeric limits, reasoning enums or observed usage. Inventory, endpoint and
+  native transport configuration, authentication and quota remain separate.
 - Preserve model metadata and its provenance. Price/cache-write accounting must
   follow actual upstream protocol evidence; adapters must not invent counters,
   zero costs, or unsupported cache semantics.

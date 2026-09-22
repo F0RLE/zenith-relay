@@ -118,7 +118,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     );
     let visible_model_ids = models
         .iter()
-        .filter(|model| model.enabled)
+        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
         .map(|model| model.id.clone())
         .collect();
     let pricing_metadata = PricingMetadata::for_catalog_with_status(

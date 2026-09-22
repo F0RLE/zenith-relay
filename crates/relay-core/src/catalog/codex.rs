@@ -1,4 +1,5 @@
 use super::context::context_window;
+use crate::DefaultServiceTier;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Map, Value};
 
@@ -6,6 +7,44 @@ pub const CODEX_RELAY_ALIAS_PREFIX: &str = "zenith/";
 pub const CODEX_RELAY_CATALOG_HASH: &str = "zenith-relay";
 pub const CODEX_CATALOG_PRIORITY_BASE: u64 = 1_000;
 const CODEX_RELAY_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
+
+/// Replace source-provided tier fields with the shared Relay model policy.
+pub(crate) fn set_codex_service_tiers(model: &mut Value, supported: &[DefaultServiceTier]) {
+    let Some(object) = model.as_object_mut() else {
+        return;
+    };
+    let mut tiers = Vec::new();
+    let mut aliases = Vec::new();
+    for (tier, id, alias, name, description) in [
+        (
+            DefaultServiceTier::Fast,
+            "priority",
+            "fast",
+            "Fast",
+            "Priority processing for faster responses.",
+        ),
+        (
+            DefaultServiceTier::Ultrafast,
+            "ultrafast",
+            "ultrafast",
+            "Ultrafast",
+            "Ultrafast processing for latency-sensitive work.",
+        ),
+    ] {
+        if !supported.contains(&tier) {
+            continue;
+        }
+        // Codex displays the catalog description for Ultrafast verbatim;
+        // an empty string suppresses its built-in fallback text.
+        tiers.push(json!({"id": id, "name": name, "description": description}));
+        aliases.push(alias);
+    }
+    object.insert("service_tiers".into(), json!(tiers));
+    // Older Codex clients consume this field instead of service_tiers.
+    object.insert("additional_speed_tiers".into(), json!(aliases));
+    object.remove("default_service_tier");
+    object.remove("service_tier");
+}
 
 pub fn codex_model_alias(model: &str) -> String {
     format!(
@@ -44,6 +83,14 @@ pub fn codex_model_is_picker_eligible(model: &str) -> bool {
 
 pub fn codex_model_display_name(model: &str) -> String {
     let leaf = model.rsplit('/').next().unwrap_or(model).trim();
+    // Use compact picker labels without the GPT prefix for numbered models.
+    // Reference names take precedence at projection; routing IDs are unchanged.
+    let leaf = leaf
+        .get(..4)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("gpt-"))
+        .and_then(|_| leaf.get(4..))
+        .filter(|suffix| suffix.as_bytes().first().is_some_and(u8::is_ascii_digit))
+        .unwrap_or(leaf);
     let mut output = String::new();
     let mut previous_was_number = false;
     for raw in leaf.split(['-', '_']).filter(|part| !part.is_empty()) {
@@ -206,31 +253,9 @@ pub fn normalize_upstream_codex_catalog_entry(
         );
     }
 
-    for key in [
-        "additional_speed_tiers",
-        "default_service_tier",
-        "default_reasoning_level",
-    ] {
-        if let Some(value) = template.get(key) {
-            let valid = match key {
-                "additional_speed_tiers" => {
-                    let mut candidate = Map::new();
-                    candidate.insert(key.into(), value.clone());
-                    default_string_array(&candidate, key)
-                }
-                _ => optional_non_empty_string(template, key),
-            };
-            if valid {
-                entry.insert(key.into(), value.clone());
-            }
-        }
-    }
-
-    if let Some(value) = template.get("service_tiers") {
-        let mut candidate = Map::new();
-        candidate.insert("service_tiers".into(), value.clone());
-        if default_service_tiers(&candidate) {
-            entry.insert("service_tiers".into(), value.clone());
+    if let Some(value) = template.get("default_reasoning_level") {
+        if optional_non_empty_string(template, "default_reasoning_level") {
+            entry.insert("default_reasoning_level".into(), value.clone());
         }
     }
 
@@ -299,7 +324,8 @@ pub fn normalize_upstream_codex_catalog_entry(
         }
     }
 
-    let value = Value::Object(entry);
+    let mut value = Value::Object(entry);
+    set_codex_service_tiers(&mut value, super::model_service_tiers(model, None));
     codex_catalog_entry_is_compatible(&value).then_some(value)
 }
 
@@ -366,16 +392,16 @@ fn prefer_medium_reasoning_default(entry: &mut Map<String, Value>) {
 /// Provider-routed rows intentionally use `codex_model_alias` and the
 /// conservative `routed_codex_catalog_entry` path.  A native OAuth model is
 /// different: Codex uses the bare upstream slug to select its native
-/// Responses contract, so replacing it with a Relay alias would hide the
-/// account's native reasoning and service-tier controls.
+/// Responses contract. Semantic model fields are overlaid from the shared
+/// reference catalog by the caller; transport remains account-owned.
 pub fn normalize_native_codex_catalog_entry(
     template: &Map<String, Value>,
     model: &str,
     priority: u64,
     _advertised_context_window: Option<u64>,
 ) -> Option<Value> {
-    // Native rows own their context and capability fields. An API-source
-    // context override must never be allowed to fill or replace them.
+    // Normalize the account transport template without an API context override.
+    // The final projection applies shared model semantics and client context policy.
     let mut entry = catalog_entry_base(template, model, priority, None)?;
     // `catalog_entry_base` starts from the routed fallback schema, which has
     // a context value for API clients. Native catalogs are different: an
@@ -391,7 +417,7 @@ pub fn normalize_native_codex_catalog_entry(
     }
     // Start from a known-compatible native-shaped row so partial manifests
     // cannot make the whole pool catalog row disappear, then overlay every
-    // upstream field to retain native capabilities verbatim.
+    // upstream field to retain native capabilities. Speed is Relay-owned.
     entry.extend(
         template
             .iter()
@@ -414,7 +440,9 @@ pub fn normalize_native_codex_catalog_entry(
         "priority".into(),
         Value::Number(priority.min(i32::MAX as u64).into()),
     );
-    codex_catalog_entry_is_compatible(&Value::Object(entry.clone())).then_some(Value::Object(entry))
+    let mut value = Value::Object(entry);
+    set_codex_service_tiers(&mut value, super::model_service_tiers(model, None));
+    codex_catalog_entry_is_compatible(&value).then_some(value)
 }
 
 pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
@@ -745,20 +773,6 @@ fn upstream_reasoning_levels(template: &Map<String, Value>) -> Option<Value> {
     (normalized.len() == levels.len()).then_some(Value::Array(normalized))
 }
 
-pub(crate) fn codex_reasoning_level_ids(value: &Value) -> Vec<String> {
-    let Some(template) = value.as_object() else {
-        return Vec::new();
-    };
-    let Some(Value::Array(levels)) = upstream_reasoning_levels(template) else {
-        return Vec::new();
-    };
-    crate::canonicalize_reasoning_levels(
-        levels
-            .iter()
-            .filter_map(|level| level.get("effort").and_then(Value::as_str)),
-    )
-}
-
 fn valid_reasoning_effort_text(value: &str) -> bool {
     !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control)
 }
@@ -823,6 +837,25 @@ fn display_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_gpt_fallback_labels_match_the_compact_codex_picker() {
+        for (model, expected) in [
+            ("gpt-6-astra", "6 Astra"),
+            ("gpt-5.6-sol", "5.6 Sol"),
+            ("gpt-5.6-terra", "5.6 Terra"),
+            ("local/gpt-6-astra", "6 Astra"),
+            ("GPT-6-Astra", "6 Astra"),
+            ("gpt-123-future", "123 Future"),
+            ("gpt-124.7-next", "124.7 Next"),
+            ("next-family-synthetic", "Next Family Synthetic"),
+            ("gpt-future", "GPT Future"),
+            ("gpt-", "GPT"),
+            ("vendor/claude-opus-4-8", "Claude Opus 4.8"),
+        ] {
+            assert_eq!(codex_model_display_name(model), expected, "{model}");
+        }
+    }
 
     #[test]
     fn relay_aliases_are_exact_and_media_models_stay_out_of_codex() {

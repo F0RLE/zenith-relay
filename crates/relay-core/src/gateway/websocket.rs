@@ -14,9 +14,7 @@ use super::streaming::{
     has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
     is_known_non_output_event, parse_sse_event, NativeReplayCapture, MAX_SSE_EVENT_BYTES,
 };
-use super::turn_state::{
-    guard_account_request, note_account_response_header, CODEX_TURN_STATE_HEADER,
-};
+use super::turn_state::request_scope;
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
@@ -47,8 +45,6 @@ use events::{
 };
 use failure::{send_gateway_error, GatewayFailure};
 use request::ClientRequest;
-
-const WEBSOCKET_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(600);
 
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::request::MAX_CLIENT_REQUEST_BODY_BYTES;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
@@ -426,6 +422,7 @@ fn websocket_transport_fallback_status(status: StatusCode) -> bool {
 }
 
 struct Connected {
+    credential_fingerprint: [u8; 32],
     upstream: UpstreamWebSocket,
     initial_messages: Vec<UpstreamMessage>,
     route: ExecutorRoute,
@@ -755,10 +752,16 @@ async fn connect_upstream(
                 &request.request_id,
             );
             apply_codex_routing_hint(&mut headers, &route.source_model, route.service_tier);
-            if let Some(account_id) = route.account_id.as_deref() {
-                guard_account_request(runtime, &key.id, &mut headers, account_id, now_ms());
-            } else {
-                headers.remove(CODEX_TURN_STATE_HEADER);
+            let turn_scope = request_scope(
+                &key.id,
+                client_headers,
+                route.account_id.as_deref(),
+                &route.source_model,
+            );
+            runtime.guard_turn_state(&mut headers, turn_scope.as_ref(), &prepared);
+            let cookies = runtime.routing_cookies(&route.candidate_id, &prepared);
+            if let Some(cookies) = &cookies {
+                cookies.apply(&route.upstream_url, &mut headers);
             }
             let upgrade = runtime
                 .websocket_client(&route.candidate_id)
@@ -773,6 +776,9 @@ async fn connect_upstream(
                 last_failure = Some(failure);
                 continue 'candidates;
             };
+            if let Some(cookies) = cookies {
+                cookies.observe(&route.upstream_url, upgrade.headers());
+            }
             if upgrade.status() != StatusCode::UNAUTHORIZED
                 || prepared.token_generation.is_none()
                 || refresh_fence.is_some()
@@ -815,16 +821,13 @@ async fn connect_upstream(
             now_ms(),
         );
         if status == StatusCode::SWITCHING_PROTOCOLS {
-            if let Some(account_id) = route.account_id.as_deref() {
-                note_account_response_header(
-                    runtime,
-                    &key.id,
-                    client_headers,
-                    account_id,
-                    &response_headers,
-                    now_ms(),
-                );
-            }
+            let turn_scope = request_scope(
+                &key.id,
+                client_headers,
+                route.account_id.as_deref(),
+                &route.source_model,
+            );
+            runtime.observe_turn_state(&response_headers, turn_scope.as_ref(), &prepared);
         }
         if status != StatusCode::SWITCHING_PROTOCOLS {
             let response = upgrade.into_inner();
@@ -1203,6 +1206,7 @@ async fn connect_upstream(
             }
         }
         return Ok(Connected {
+            credential_fingerprint: prepared.credential_fingerprint(),
             upstream,
             initial_messages,
             route,
@@ -1291,9 +1295,20 @@ async fn await_while_client_connected<F: std::future::Future>(
     future: F,
 ) -> Result<F::Output, GatewayFailure> {
     tokio::pin!(future);
+    let mut heartbeat = interval_at(
+        TokioInstant::now() + WEBSOCKET_HEARTBEAT_INTERVAL,
+        WEBSOCKET_HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             result = &mut future => return Ok(result),
+            _ = heartbeat.tick() => {
+                downstream
+                    .send(Message::Ping(Default::default()))
+                    .await
+                    .map_err(|_| GatewayFailure::client_closed())?;
+            }
             message = downstream.recv() => {
                 match message {
                     Some(Ok(Message::Ping(payload))) => {
@@ -1389,7 +1404,6 @@ async fn first_application_message(
     upstream: &mut UpstreamWebSocket,
     origin: ErrorOrigin,
 ) -> Result<UpstreamMessage, GatewayFailure> {
-    let deadline = TokioInstant::now() + INITIAL_MESSAGE_TIMEOUT;
     let mut heartbeat = interval_at(
         TokioInstant::now() + WEBSOCKET_HEARTBEAT_INTERVAL,
         WEBSOCKET_HEARTBEAT_INTERVAL,
@@ -1397,7 +1411,6 @@ async fn first_application_message(
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout(origin)),
             _ = heartbeat.tick() => {
                 upstream
                     .send(UpstreamMessage::Ping(Default::default()))
@@ -1683,6 +1696,7 @@ struct InFlight {
 }
 
 struct BridgeState {
+    credential_fingerprint: [u8; 32],
     local_key_id: String,
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
@@ -1732,6 +1746,7 @@ async fn bridge(
     let upstream_origin = route_error_origin(&connected.route);
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
     let mut state = BridgeState {
+        credential_fingerprint: connected.credential_fingerprint,
         local_key_id: key.id.clone(),
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
@@ -1766,50 +1781,20 @@ async fn bridge(
 
     loop {
         let idle_deadline = last_activity + WEBSOCKET_IDLE_TIMEOUT;
-        let semantic_waiting = state
-            .in_flight
-            .as_ref()
-            .is_some_and(|in_flight| in_flight.event.ttft_ms.is_none());
-        let semantic_deadline = TokioInstant::now()
-            + state
-                .in_flight
-                .as_ref()
-                .map_or(WEBSOCKET_SEMANTIC_TIMEOUT, |in_flight| {
-                    WEBSOCKET_SEMANTIC_TIMEOUT.saturating_sub(in_flight.started.elapsed())
-                });
         tokio::select! {
-            _ = sleep_until(semantic_deadline), if semantic_waiting => {
-                let request_id = state.request_id().map(str::to_owned);
-                let can_send_error = state.can_send_gateway_error();
-                finish_incomplete(&runtime, &mut state, error_codes::STREAM_SEMANTIC_TIMEOUT);
-                if can_send_error {
-                send_gateway_error(
-                    &mut downstream,
-                    &GatewayFailure::semantic_timeout(state.upstream_origin),
-                    request_id.as_deref(),
-                ).await;
-                }
-                break;
-            }
-            _ = sleep_until(idle_deadline) => {
-                let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
-                let request_id = state.request_id().map(str::to_owned);
-                finish_incomplete(&runtime, &mut state, error_codes::WEBSOCKET_IDLE_TIMEOUT);
-                if active_request {
-                    send_gateway_error(
-                        &mut downstream,
-                        &GatewayFailure::idle_timeout(state.upstream_origin),
-                        request_id.as_deref(),
-                    ).await;
-                } else {
-                    let _ = downstream.send(Message::Close(Some(CloseFrame {
-                        code: close_code::AWAY,
-                        reason: "idle timeout".into(),
-                    }))).await;
-                }
+            // Reap an unused connection, never a provider's active generation.
+            _ = sleep_until(idle_deadline), if state.in_flight.is_none() => {
+                let _ = downstream.send(Message::Close(Some(CloseFrame {
+                    code: close_code::AWAY,
+                    reason: "idle timeout".into(),
+                }))).await;
                 break;
             }
             _ = heartbeat.tick() => {
+                if downstream.send(Message::Ping(Default::default())).await.is_err() {
+                    finish_incomplete(&runtime, &mut state, error_codes::CLIENT_CANCELLED);
+                    break;
+                }
                 if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
                     let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
                     let request_id = state.request_id().map(str::to_owned);
@@ -2158,6 +2143,7 @@ async fn install_connected(
     connected: Connected,
 ) -> bool {
     let Connected {
+        credential_fingerprint,
         upstream: next_upstream,
         initial_messages,
         route,
@@ -2179,6 +2165,7 @@ async fn install_connected(
         state,
         key,
         InFlightInstall {
+            credential_fingerprint,
             request,
             route,
             lease,
@@ -2348,6 +2335,23 @@ async fn start_next_request(
         if selected.candidate_id != state.upstream_candidate_id {
             return Err(GatewayFailure::unavailable());
         }
+        let prepared = runtime
+            .prepare_authorization(&selected.candidate_id, now_ms())
+            .await
+            .map_err(|error| GatewayFailure::prepare(error, state.upstream_origin))?;
+        if prepared.credential_fingerprint() != state.credential_fingerprint {
+            drop(lease);
+            if !request.drop_previous_response_id(runtime, &key.id) {
+                return Err(GatewayFailure::continuation_unavailable());
+            }
+            let connected = connect_upstream_while_client_connected(
+                downstream, runtime, key, headers, request, true, 0, None,
+            )
+            .await?;
+            return Ok(
+                install_connected(downstream, upstream, runtime, key, state, connected).await,
+            );
+        }
         let mut route = runtime
             .executor_route(
                 &selected.candidate_id,
@@ -2358,6 +2362,7 @@ async fn start_next_request(
             )
             .ok_or_else(GatewayFailure::unavailable)?;
         route.half_open_probe = selected.half_open_probe;
+        route.account_token_generation = prepared.token_generation;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(headers);
         request.apply_service_tier_for_route(runtime, &route);
@@ -2406,6 +2411,7 @@ async fn start_next_request(
     )
     .await?;
     let Connected {
+        credential_fingerprint,
         upstream: next_upstream,
         initial_messages,
         route,
@@ -2427,6 +2433,7 @@ async fn start_next_request(
         state,
         key,
         InFlightInstall {
+            credential_fingerprint,
             request,
             route,
             lease,
@@ -2453,6 +2460,7 @@ async fn handle_initial_messages(
 }
 
 struct InFlightInstall {
+    credential_fingerprint: [u8; 32],
     request: ClientRequest,
     route: ExecutorRoute,
     lease: CandidateLease,
@@ -2468,6 +2476,7 @@ fn install_in_flight(
     install: InFlightInstall,
 ) {
     let InFlightInstall {
+        credential_fingerprint,
         request,
         route,
         lease,
@@ -2491,6 +2500,7 @@ fn install_in_flight(
     clear_transient_response_affinity(runtime, state);
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
+    state.credential_fingerprint = credential_fingerprint;
     state.upstream_origin = route_error_origin(&route);
     state.last_response_id = None;
     state.in_flight = Some(InFlight {

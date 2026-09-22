@@ -87,7 +87,7 @@ pub struct ModelSummary {
     pub catalog_last_updated: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_status: Option<String>,
-    /// Advisory model metadata from models.dev. These fields describe the
+    /// Shared reference metadata and Relay defaults. These fields describe the
     /// model family, but never grant runtime access to a source or account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_reasoning: Option<bool>,
@@ -134,16 +134,14 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
-    /// The upstream omitted reasoning metadata for an otherwise unknown pooled
-    /// model. The management client may offer manual levels for discovery, but
-    /// must not treat this as an advertised upstream capability.
+    /// Legacy wire field; always false. Unknown reasoning enums are not guessed.
     #[serde(default)]
     pub reasoning_manual_fallback: bool,
-    /// Set only when a current pool route has confirmed an upstream faster tier.
+    /// The Relay model-family policy offers faster request modes.
     #[serde(default)]
     pub speed_supported: bool,
-    /// Exact request-speed tiers confirmed by current pool routes. Standard is
-    /// included for every active route; faster tiers require upstream evidence.
+    /// Relay-owned request choices; source tier declarations and runtime health
+    /// do not change the policy.
     #[serde(default)]
     pub speed_tiers: Vec<DefaultServiceTier>,
     #[serde(default)]
@@ -159,11 +157,13 @@ pub fn apply_model_speed_summary(
 ) {
     let speed_tiers = runtime
         .map(|runtime| runtime.model_supported_service_tiers(&model.id))
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            crate::catalog::model_service_tiers(&model.id, model.catalog_provider.as_deref())
+        });
     let supported = speed_tiers
         .iter()
         .any(|tier| *tier != DefaultServiceTier::Standard);
-    model.speed_tiers = speed_tiers;
+    model.speed_tiers = speed_tiers.to_vec();
     model.speed_supported = supported;
     model.speed_configurable = supported;
     model.speed_tier = if supported {
@@ -187,20 +187,17 @@ pub fn apply_pool_model_configuration(
     model_service_tier_overrides: &BTreeMap<String, DefaultServiceTier>,
     runtime: Option<&GatewayRuntime>,
 ) {
+    let routes = super::model_protocols::ModelProtocolIndex::new(sources, accounts);
     for model in models {
         let model_id = model.id.clone();
-        model.protocol_routes = super::model_protocol_routes(&model_id, sources, accounts);
+        model.protocol_routes = routes.routes_for(&model_id);
         model.codex_visible = model.enabled
             && crate::codex_model_is_picker_eligible(&model_id)
             && model
                 .protocol_routes
                 .iter()
                 .any(|route| route.client_wire_api == crate::WireApi::Responses);
-        let cache_write_route = sources.iter().any(|source| {
-            source
-                .models_with_cache_write_pricing()
-                .contains(&model_id.to_ascii_lowercase())
-        });
+        let cache_write_route = routes.has_cache_write_pricing(&model_id);
         if let Some(price) = model_price_overrides.get(&model_id.trim().to_ascii_lowercase()) {
             model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
             model.cached_input_micro_usd_per_million = price.cached_input_micro_usd_per_million;
@@ -213,33 +210,37 @@ pub fn apply_pool_model_configuration(
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
-        let has_pool_route = !model.protocol_routes.is_empty();
-        // A provider can return an explicit empty reasoning list when its
-        // generic `/models` endpoint has no capability metadata. Treat that
-        // as an absent declaration for the management projection so the
-        // official catalog can still describe a known model. A non-empty
-        // provider declaration remains authoritative and is not widened by
-        // the catalog fallback.
-        let reported_reasoning_levels = runtime
-            .and_then(|runtime| runtime.source_declared_reasoning_levels(&model_id))
-            .filter(|levels| !levels.is_empty())
-            .or_else(|| {
-                (!model.catalog_reasoning_effort_levels.is_empty())
-                    .then(|| model.catalog_reasoning_effort_levels.clone())
-            });
+        let reported_reasoning_levels = Some(runtime.map_or_else(
+            || model.catalog_reasoning_effort_levels.clone(),
+            |runtime| runtime.model_reasoning_levels(&model_id),
+        ));
+        let features = runtime.map_or_else(
+            || {
+                crate::model_metadata::ModelCapabilities {
+                    reasoning: model.catalog_reasoning,
+                    tool_call: model.catalog_tool_call,
+                    structured_output: model.catalog_structured_output,
+                    attachment: model.catalog_attachment,
+                    ..Default::default()
+                }
+                .with_defaults()
+                .protocol_features()
+            },
+            |runtime| runtime.model_capabilities(&model_id).protocol_features(),
+        );
         for route in &mut model.protocol_routes {
+            route.features = features.clone();
+            route.reasoning_efforts.clear();
             route.project_reasoning(reported_reasoning_levels.as_deref().unwrap_or_default());
         }
-        let executable_levels = model
-            .protocol_routes
-            .iter()
-            .flat_map(|route| route.reasoning_efforts.iter().cloned())
-            .collect();
+        // Model Rules edits inventory, including offline or excluded members.
+        // Keep declared modes intact here; each executable route above and the
+        // request resolver apply their own protocol-specific restrictions.
         apply_model_reasoning_summary(
             model,
-            Some(executable_levels),
+            reported_reasoning_levels,
             crate::reasoning_policy_levels(model_reasoning_allowed_levels, &model_id),
-            has_pool_route,
+            true,
         );
         apply_model_speed_summary(
             model,
@@ -279,8 +280,9 @@ pub fn apply_model_display_order(models: &mut [ModelSummary], saved_order: &[Str
     apply_model_display_order_with_catalog(models, saved_order, &ModelMetadataCatalog::empty());
 }
 
-/// Applies saved presentation order and uses the external metadata catalog
-/// only for newly discovered models. Runtime routing is never consulted here.
+/// Applies saved presentation order while placing new models through the
+/// catalog's stable release/update ordering. This changes presentation only;
+/// routing and eligibility continue to use the live pool evidence.
 pub fn apply_model_display_order_with_catalog(
     models: &mut [ModelSummary],
     saved_order: &[String],
@@ -370,15 +372,14 @@ pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadata
         // presentation projection before applying the new catalog so a model
         // removed from metadata cannot retain fields from an older snapshot.
         let metadata = catalog.resolve(&model.id);
+        model.codex_display_name = catalog.codex_display_name(&model.id);
         model.catalog_provider = metadata.map(|metadata| metadata.provider.clone());
         model.catalog_family = metadata.and_then(|metadata| metadata.family.clone());
         model.catalog_name = metadata.and_then(|metadata| metadata.name.clone());
         model.catalog_release_date = metadata.and_then(|metadata| metadata.release_date.clone());
         model.catalog_last_updated = metadata.and_then(|metadata| metadata.last_updated.clone());
         model.catalog_status = metadata.and_then(|metadata| metadata.status.clone());
-        let capabilities = metadata
-            .map(|metadata| metadata.capabilities.clone())
-            .unwrap_or_else(crate::model_metadata::ModelCapabilities::unknown_model);
+        let capabilities = catalog.capabilities_for(&model.id);
         model.catalog_reasoning = capabilities.reasoning;
         model.catalog_reasoning_method = capabilities.reasoning_method;
         model.catalog_reasoning_effort_levels = capabilities.reasoning_effort_levels;
@@ -395,7 +396,7 @@ pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadata
     }
 }
 
-/// Applies models.dev reasoning levels and a narrowing operator override to a
+/// Applies shared reference reasoning levels and a narrowing operator override to a
 /// pooled management model. A present empty override disables all levels. The
 /// route flag covers both native OAuth accounts and API sources.
 pub fn apply_model_reasoning_summary(
@@ -429,9 +430,8 @@ pub fn apply_model_reasoning_summary(
     model.reasoning_configurable = has_pool_route && !model.reasoning_supported_levels.is_empty();
 }
 
-/// Returns whether an eligible pooled API source can serve this model through
-/// any confirmed client contract. Native account capabilities stay owned by
-/// their upstream catalog and are deliberately excluded from manual settings.
+/// Returns whether an enabled pooled API source has a route for this model.
+/// Account membership is counted separately by callers.
 pub fn model_has_api_source_route(sources: &[SourceSummary], model: &str) -> bool {
     sources.iter().any(|source| {
         source.enabled

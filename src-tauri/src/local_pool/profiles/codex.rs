@@ -1101,6 +1101,7 @@ pub(crate) fn refresh_managed_model_catalog(
     codex_home: &Path,
     backup_root: &Path,
     catalog_json: &str,
+    expected_binding: Option<&ProfileBinding>,
 ) -> Result<bool> {
     let _profile_guard = lock_codex_profile();
     let _ = local_backup(codex_home, backup_root)?;
@@ -1109,6 +1110,13 @@ pub(crate) fn refresh_managed_model_catalog(
     let Some(mut backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
         return Ok(false);
     };
+    if expected_binding.is_some_and(|binding| {
+        binding.credential_kind != backup.credential_kind()
+            || binding.credential_id != backup.managed_key_id
+            || binding.bound_oauth_account_id != backup.bound_oauth_account_id
+    }) {
+        return Ok(false);
+    }
     if backup.attach_pending || backup.restore_pending {
         return Err(profile_restore_blocked());
     }

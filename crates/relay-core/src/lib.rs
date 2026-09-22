@@ -107,11 +107,10 @@ pub use sources::{
     runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
     runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, service_protocol,
     source_models_for_wire_api, source_points_to_gateway, CacheWriteTtl, CapabilityOrigin,
-    CapabilityStatus, LocalGatewayKey, ModelEndpointCapability, ProtocolFeature,
-    ProtocolSelectionMode, ProviderSource, SourceBalanceKind, SourceConnector, SourceDiscovery,
-    SourceProbeInput, SourceProbeResult, SourceProtocolBinding, SourceProtocolBindingKey,
-    SourceProtocolConfig, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
-    SourceStatsProvider, SourceStatsStatus, WireApi,
+    CapabilityStatus, LocalGatewayKey, ModelEndpointCapability, ProtocolFeature, ProviderSource,
+    SourceBalanceKind, SourceConnector, SourceDiscovery, SourceProbeInput, SourceProbeResult,
+    SourceProtocolBinding, SourceProtocolBindingKey, SourceProtocolConfig, SourceProviderStats,
+    SourceStatsAmount, SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus, WireApi,
 };
 pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{

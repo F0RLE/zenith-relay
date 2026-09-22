@@ -66,6 +66,139 @@ fn add_rebuild_failing_source(state: &AppState) {
 }
 
 #[tokio::test]
+async fn model_order_reset_clears_persisted_override_and_survives_restart() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    add_rebuild_failing_source(&server.state);
+    let mut source = server.state.store.sources().unwrap().remove(0);
+    source.weight = 1;
+    source.models = vec!["alpha-model".into(), "beta-model".into()];
+    server.state.store.save_source(&source).unwrap();
+    server.state.rebuild_runtime().await.unwrap();
+    let original = server.state.snapshot().unwrap().gateway.models;
+    let original_ids = original
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    let reversed = original_ids.iter().rev().cloned().collect::<Vec<_>>();
+    assert_eq!(original_ids.len(), 2);
+    let client = reqwest::Client::new();
+    for (requested, expected) in [(&reversed, &reversed), (&Vec::new(), &original_ids)] {
+        let response = client
+            .post(format!("{}/models/order", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({ "modelIds": requested }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        let ids = body["gateway"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, *expected);
+        assert_eq!(
+            server.state.store.model_display_order().unwrap(),
+            *requested
+        );
+    }
+    server.task.abort();
+    drop(server);
+    let reopened = spawn_server(root.path()).await;
+    assert!(reopened
+        .state
+        .store
+        .model_display_order()
+        .unwrap()
+        .is_empty());
+    let ids = reopened
+        .state
+        .snapshot()
+        .unwrap()
+        .gateway
+        .models
+        .into_iter()
+        .map(|model| model.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, original_ids);
+    reopened.task.abort();
+}
+
+#[tokio::test]
+async fn model_order_edits_use_complete_inventory_and_reject_invalid_changes_atomically() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    add_rebuild_failing_source(&server.state);
+    let mut source = server.state.store.sources().unwrap().remove(0);
+    source.enabled = false;
+    source.weight = 1;
+    source.models = vec!["Alpha".into(), "Beta".into(), "new-model".into()];
+    source.excluded_models = vec!["Beta".into()];
+    source.protocol_bindings = vec![zenith_relay_core::SourceProtocolBinding::legacy(
+        WireApi::Responses,
+        &["binding-model".into()],
+    )];
+    server.state.store.save_source(&source).unwrap();
+    let mut outside = source.clone();
+    outside.id = "outside-source".into();
+    outside.secret_ref = "source:outside".into();
+    outside.in_pool = false;
+    outside.models = vec!["outside-model".into()];
+    outside.protocol_bindings.clear();
+    server.state.store.save_source(&outside).unwrap();
+    let saved = vec!["stale-model".into(), "Beta".into(), "Alpha".into()];
+    server
+        .state
+        .store
+        .set_model_display_order(saved.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    for (requested, status, code) in [
+        (vec!["missing"], StatusCode::NOT_FOUND, "model_not_found"),
+        (
+            vec!["outside-model"],
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+        ),
+        (
+            vec!["Alpha", " ALPHA "],
+            StatusCode::BAD_REQUEST,
+            "model_order_invalid",
+        ),
+    ] {
+        let response = client
+            .post(format!("{}/models/order", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({ "modelIds": requested }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], code);
+        assert_eq!(server.state.store.model_display_order().unwrap(), saved);
+    }
+
+    let response = client
+        .post(format!("{}/models/order", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({ "modelIds": ["binding-model", " alpha "] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        server.state.store.model_display_order().unwrap(),
+        ["binding-model", "Alpha", "Beta", "new-model"]
+    );
+    server.task.abort();
+}
+
+#[tokio::test]
 async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
@@ -666,31 +799,32 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     profile_key = rotated_profile_key;
     let pool_key = profile_key.clone();
 
-    for (path, payload) in [
-        (
-            "/v1/chat/completions",
-            json!({
-                "model": "gpt-test",
-                "messages": [{"role": "user", "content": "test"}]
-            }),
-        ),
-        (
-            "/v1/images/generations",
-            json!({"model": "gpt-image-2", "prompt": "test"}),
-        ),
-    ] {
-        let unavailable = client
-            .post(format!("{}{path}", first.origin))
-            .bearer_auth(&pool_key)
-            .json(&payload)
-            .send()
-            .await
-            .unwrap();
-        let status = unavailable.status();
-        let body = unavailable.json::<Value>().await.unwrap();
-        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
-        assert_eq!(body["error"]["code"], "model_not_found", "{path}: {body}");
-    }
+    let chat = client
+        .post(format!("{}/v1/chat/completions", first.origin))
+        .bearer_auth(&pool_key)
+        .json(&json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "test"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let chat_status = chat.status();
+    let chat_body = chat.json::<Value>().await.unwrap();
+    assert_eq!(chat_status, StatusCode::OK, "{chat_body}");
+    assert_eq!(chat_body["object"], "chat.completion");
+
+    let image = client
+        .post(format!("{}/v1/images/generations", first.origin))
+        .bearer_auth(&pool_key)
+        .json(&json!({"model": "gpt-image-2", "prompt": "test"}))
+        .send()
+        .await
+        .unwrap();
+    let image_status = image.status();
+    let image_body = image.json::<Value>().await.unwrap();
+    assert_eq!(image_status, StatusCode::NOT_FOUND, "{image_body}");
+    assert_eq!(image_body["error"]["code"], "model_not_found");
 
     let models = client
         .get(format!("{}/v1/models", first.origin))
@@ -1481,8 +1615,30 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
-async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
+async fn reference_reasoning_reaches_codex_and_manual_policy_only_narrows_it() {
+    use sha2::{Digest, Sha256};
     let root = TempDir::new().unwrap();
+    // Load a validated reference fixture before server startup. Participant
+    // /models declares low/medium/high; the reference instead offers minimal.
+    let payload = json!({"openai/gpt-test":{
+        "reasoning":true, "reasoning_effort_levels":["minimal","medium","high"],
+        "default_reasoning_effort":"medium"
+    }});
+    let revision = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(serde_json::to_vec(&payload).unwrap()))
+    );
+    std::fs::write(
+        root.path().join("models-dev.json"),
+        json!({
+            "format":"zenith-relay-model-metadata-cache", "schemaVersion":1,
+            "sourceUrl":zenith_relay_core::model_metadata::MODELS_DEV_SOURCE_URL,
+            "revision":revision, "etag":null, "lastModified":null,
+            "fetchedAtMs":1, "payloadSha256":revision, "stale":true, "payload":payload
+        })
+        .to_string(),
+    )
+    .unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
@@ -1546,9 +1702,9 @@ async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
             .iter()
             .map(|level| level["effort"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        Vec::<&str>::new()
+        vec!["minimal", "medium", "high"]
     );
-    assert!(catalog_model.get("default_reasoning_level").is_none());
+    assert_eq!(catalog_model["default_reasoning_level"], "medium");
 
     let runtime = server.state.runtime().unwrap().unwrap();
     let configured_response = client
@@ -1566,7 +1722,7 @@ async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
         .iter()
         .find(|model| model["id"] == "gpt-test")
         .unwrap();
-    assert_eq!(configured_model["reasoningAllowedLevels"], json!([]));
+    assert_eq!(configured_model["reasoningAllowedLevels"], json!(["high"]));
     assert!(Arc::ptr_eq(
         &runtime,
         &server.state.runtime().unwrap().unwrap()
@@ -1596,8 +1752,11 @@ async fn unknown_model_does_not_gain_provider_or_manual_reasoning_modes() {
         .iter()
         .find(|model| model["slug"] == "gpt-test")
         .unwrap();
-    assert_eq!(filtered_model["supported_reasoning_levels"], json!([]));
-    assert!(filtered_model.get("default_reasoning_level").is_none());
+    assert_eq!(
+        filtered_model["supported_reasoning_levels"],
+        json!([{"effort":"high", "description":"high"}])
+    );
+    assert_eq!(filtered_model["default_reasoning_level"], "high");
 
     let manual = client
         .post(format!("{}/models/reasoning", server.origin))
@@ -4321,6 +4480,7 @@ async fn upstream_response(request: Request) -> Response {
         Json(json!({
             "id":"response-test",
             "object":"response",
+            "status":"completed",
             "model":"gpt-test",
             "error": null,
             "output":[],

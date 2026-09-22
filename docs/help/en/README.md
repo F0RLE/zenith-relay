@@ -55,6 +55,11 @@ own server is a separate action with confirmation.
 directly to one provider, use **Choose API** or the API source's **Launch**
 action instead of connecting to the pool.
 
+The setup wizard shows your progress through mode, connection, client and finish.
+Use **Back** to change a choice or **Set up later** to open the application.
+In **Choose API**, select a provider and enter its key. For **Custom API**, also
+enter the API address and a name before continuing.
+
 ## 1. Overview
 
 **Overview** shows the selected mode's address, available models, members,
@@ -101,39 +106,51 @@ only allows a separate reset operation. **Reset weekly quota** appears for a
 local account with an available credit, asks for confirmation, and consumes
 that provider credit.
 
-When an account requires sign-in, sign in to that account again. **Force-refresh
-sign-in** checks whether its saved session can be refreshed; it cannot replace
-a revoked sign-in with a new one. Other eligible pool members can keep working.
+When an account requires sign-in, sign in to that account again. A revoked
+sign-in cannot be restored by refreshing the saved session. Other eligible pool
+members can keep working.
 
 An account export contains sign-in credentials. Treat it as a secret file.
 It is different from a pool preset, which contains settings only.
 
+### Proxies
+
+**Connections → Proxies** lists saved addresses, assigned accounts and the last
+connection check in this session. Usernames and passwords stay hidden.
+Use **Import** to add one address per line. **Check after adding** is enabled by
+default and can be cleared before importing; the globe icon with the **Test proxy**
+tooltip runs another check later.
+Only newly added addresses are checked, with up to three checks at a time.
+
+The check makes an HTTPS request to Cloudflare through the selected proxy. It
+shows the observed exit IP, country and request duration, with a 12-second limit.
+No account, model or API key is used; a failed proxy never falls back to a direct
+connection. The declared country from a proxy's username is shown separately.
+Results describe this request, not model access or a guarantee of the next IP
+for a rotating proxy. A failed check keeps the address and account assignments.
+Check results are cleared when you leave Connections or change runtime mode.
+
 ### API sources
 
-Add a name, API address, and provider key. Use the provider's API address, not
+Select a service at the top of **Add source**, or choose **Custom API**. The key,
+API address and name appear below. Known services fill in the address and name;
+you can edit them. The provider selector stays available while you fill the form.
+Use the provider's API address, not
 a dashboard URL. A full endpoint such as `/v1/messages` also supplies a format
-hint. Relay reads the model catalog and declared endpoint support. In local
-mode, model IDs can be entered manually when discovery is unavailable;
-a manual entry does not add model support at the provider.
+hint. Relay reads the model catalog and declared endpoint support. Every model
+returned by the provider enters the source inventory immediately.
 
 The API source editor contains:
 
-- **General**: name, address, key replacement and the detected formats.
-- **Configure adapters**: automatic or manual routing. Manual routing assigns
-  each model's available provider formats separately for each application format.
-  Several paths to one model are allowed. Conversions run through the pool.
+- **General**: name, address, key replacement, and discovered models.
 - **Pricing**: prices for usage estimates; see the pool policy section below.
 
-New sources use **Automatic**. Known service settings, an explicit endpoint,
-or provider declarations can supply routes. A model list alone is not proof of
-generation support: an unknown provider keeps its catalog while waiting for a
-check or manual routing. Existing sources retain their saved manual routes.
-**Check generation** sends one small synthetic text request for the selected
-model and provider format; it can spend quota. It verifies text generation only,
-not tools, images or every reasoning level. Refreshing the catalog does not
-generate. Save changed address/key settings before checking; old results then
-become invalid. Authentication errors, timeouts and server errors leave support
-unknown. A 404/405 marks only the tested model/format unsupported.
+Relay always resolves routes automatically. For each request it prefers a matching
+native Responses, Chat Completions, Messages, or Gemini endpoint and otherwise
+uses the required adapter. Provider declarations and the entered endpoint guide
+that choice; when neither identifies a protocol, Relay uses the source fallback.
+Refreshing the catalog does not send a generation request and no probe controls
+whether a discovered model is present or routed.
 
 **Launch** on a source connects the chosen application directly to that API.
 Those requests bypass the pool, its rotation, and Relay's usage history.
@@ -143,19 +160,24 @@ in the source inventory does not by itself establish client compatibility.
 
 ### Automations
 
-In local mode, **Connections → Automations** offers two conditions:
+In local mode, **Connections → Automations** offers two actions:
 
-- **After primary quota recovery**: a small request to the selected model after
+- **Start quota countdown**: a small request to the selected model after
   the window recovers, to start its next reset countdown when the provider
-  uses that mechanism. This request consumes quota. Choose automatic execution
-  or manually run ready checks.
-- **Automatic weekly quota reset**: when the weekly window is exhausted, Relay tries
+  uses that mechanism. This request consumes quota and runs automatically
+  when the enabled rule's condition is met.
+- **Reset weekly quota**: when the weekly window is exhausted, Relay tries
   to use an available provider reset credit. It does not need a model request.
   Enabling the automation authorizes subsequent resets without confirming
   each one separately.
 
-Select the accounts and enable the task. Local automations run while Relay
+Choose the **Automation type**, then the accounts and, if it sends a request,
+the model. **Name** is optional: it defaults to the type's name. A custom name
+helps distinguish rules for different accounts.
+Save and enable the task. Local automations run while Relay
 is running; server automations depend on Relay Server capabilities.
+Existing local rules that required a manual run become automatic after an update;
+disabled rules stay disabled. No separate start button is needed.
 
 ### Your server
 
@@ -172,7 +194,13 @@ for recovery and does not receive local requests.
 
 ### Members and route selection
 
-Add saved connections in **Members** and open their policies. Removing a
+Add saved connections in **Members** and open their policies. In the add dialog,
+choose accounts or API sources, search by name or address, and select the rows
+you need. Selection persists while searching and switching sections. Review
+the complete set under **Selected** before clicking **Add to pool**.
+**Select shown** only selects the current search and filter results.
+
+Removing a
 member from the pool does not require deleting it from **Connections**.
 Disabled members and accounts requiring sign-in, denied access, or without
 available quota are skipped. Their presence does not block other members.
@@ -236,6 +264,12 @@ eligible route or wait up to 30 seconds for the check or a free slot.
 ChatGPT has a separate longer wait option in
 **API → ChatGPT → Wait for route recovery**.
 
+Relay does not limit the duration of an active generation. Long reasoning or a
+pause in output does not terminate or resend the request. Relay keeps streaming
+connections alive and waits for provider completion or failure; you can cancel
+the request in the client. The client, proxy and provider may have their own
+timeouts. Connecting to an unreachable address still has a bounded timeout.
+
 Relay can retry with another member before response data reaches the
 application. It does not combine an already-started answer with another
 provider's output. Moving a conversation continuation requires sufficient
@@ -251,6 +285,12 @@ available through an API provider when the signed-in account lacks them.
 The pool and request key still determine access. A missing native catalog card
 does not rename a model or grant it additional tools or reasoning modes.
 
+Picker names come from the specific model's
+catalog metadata. Without a name, Relay builds a compact label from the ID.
+New models do not need a separate version list. Matching names do not merge
+distinct models; technical IDs remain available for routing. Membership in
+the OpenAI group does not replace the shared reference and Relay rules for other capabilities.
+
 In **Pool member policy → Models**, a switch allows the model for that
 specific account or API. It is permission, not a quota indicator. Search and
 expandable groups help locate models.
@@ -261,12 +301,33 @@ per-model speed. Model order affects catalog presentation; member order in
 rotation controls connection selection. The application's model list is also
 limited by client compatibility.
 
-**Request speed** offers **Standard**, **Fast**, and **Ultrafast**. Set the
-pool preference above the members or save a preference for an individual
-model. Faster modes require confirmed support from the chosen model and
-source. If Ultrafast is unavailable, Relay uses supported Fast or Standard.
-This is a processing preference, not a response-time guarantee, extra quota,
-or another rotation mode.
+**Reset model order** in the pool toolbar clears manual model and group positions.
+Companies start with OpenAI, Anthropic, Google and xAI, followed by the others
+alphabetically. Within each company, catalog families stay together,
+ordered by their newest release; versions within a family run newest first.
+Version ties use the update date, then discovery order. Models without a family
+follow known families; undated versions follow dated versions in their family.
+Newly discovered models and families follow these rules automatically.
+Reset leaves model switches, prices, reasoning and rotation settings intact.
+On a remote pool, the button requires a server supporting order reset.
+
+Model Rules retains every model of pooled members. Missing sign-in, keys,
+proxies or compatible routes do not remove names, groups, prices or known
+reasoning modes. Matching model IDs share one row; similar display names do
+not merge distinct IDs. Relay checks request availability when selecting a member.
+
+**Request speed** offers **Standard**, **Fast**, and **Ultrafast** for OpenAI
+models. This is a Relay family rule: account/provider speed lists and temporary
+unavailability do not change the choices. Select a pool default or a preference
+for a model. An explicit speed from the application wins and is preserved when
+Relay switches members. This requests a processing tier; it does not guarantee
+response time or add quota.
+
+Model names, groups, reasoning, tools, images and limits come from shared
+reference catalogs. Missing fields use Relay defaults; unknown limits and
+reasoning levels remain unspecified. A participant's empty or conflicting
+capability fields do not replace this information. Prices are the exception:
+a participant's declared price is used when available.
 
 ### Prices and additional settings
 
@@ -302,11 +363,13 @@ Copy the displayed address. The usual local address is:
 http://127.0.0.1:14998/v1
 ```
 
-**Copy API key** copies Relay's request key. It is different from an external
-provider key or a server management token. **Reissue API key** immediately
-invalidates the old key; update your clients afterward. Simply copying the
-key does not change it. After changing the port, update the address or connect
-the application again.
+**Copy key** copies Relay's request key. It is different from an external
+provider key or a server management token. In the menu beside it, **Reissue API
+key** asks for confirmation, then replaces the key and copies the new one.
+Update your clients afterward. Simply copying the key does not change it.
+Local **Port** settings are below the address and key. Save a changed port to
+apply it; a running API restarts at the new address. Update the address in
+your applications or connect them again.
 
 All four formats use the same pool request key and model permissions:
 
@@ -318,10 +381,9 @@ All four formats use the same pool request key and model permissions:
 | Gemini | `http://127.0.0.1:14998/v1beta/models/{model}:generateContent` | `x-goog-api-key` or Bearer key |
 
 Gemini streaming uses `:streamGenerateContent?alt=sse`. Replace the host/port
-with the displayed server address when using a remote pool. In **Pool → Model
-Rules**, the route icon shows compatibility for each application format,
-feature status and route-specific reasoning levels. "Not verified" is not a
-promise of support. Unsupported conversion options fail before generation;
+with the displayed server address when using a remote pool. Relay selects the
+model's native format and converts the application's request automatically
+when needed. Unsupported conversion options fail before generation;
 native routes preserve provider-specific parameters. Realtime, cross-format
 WebSocket, audio/video conversion and server-side tool emulation are not offered.
 
@@ -351,6 +413,13 @@ member or a balance setting for API providers.
 
 For a server pool, the ChatGPT tab connects to your server when that capability
 is supported.
+
+Relay publishes Fast and Ultrafast for OpenAI models automatically. An open
+Codex keeps using its loaded catalog. On the next launch through Relay, pending
+updates are applied before the client opens. If an update fails, the previous
+catalog is retained and a warning appears. Reconnecting the pool also updates
+the catalog. The selected speed remains unchanged across accounts and API
+sources; observed processing tier and usage come from the upstream response.
 
 ### OpenCode
 
@@ -462,7 +531,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_edge_challenge`, `edge_security_challenge` | An edge security check replaced the API response. | Verify the API address, service status, and network configuration. Ask the provider for supported API access; signing in to Relay again cannot resolve its edge challenge. |
 | `upstream_model_not_found` · provider `model_not_found` | This provider does not expose the requested model ID. | Refresh this source's models and verify key access. Remove an obsolete permission or select an actual available ID. |
 | `upstream_model_unavailable`, `model_not_available` · 503 | This provider cannot serve the model temporarily. | Relay pauses this model on the failed route and tries another compatible member. Recovery observes the provider delay. |
-| `upstream_model_unsupported`, `model_not_supported` | The route does not support this model. | Check **Connections → API → Formats and adapters** and use a verified format and compatible member. |
+| `upstream_model_unsupported`, `model_not_supported` | The selected provider path does not support this model. | Refresh the source catalog and verify the model ID, API address, key permissions, and provider support. Relay will use another compatible member when one is available. |
 | `upstream_model_capacity`, `model_at_capacity` | The model is temporarily overloaded. | Wait or use another compatible source. Signing in again does not increase provider capacity. |
 
 ### Requests, history and tools
@@ -472,6 +541,9 @@ such as 429, explains why. More retries do not replenish quota.
 | `invalid_request`, `upstream_invalid_request` · 400 / 422 | The body or a request parameter is invalid. | Fix the field named in the redacted message. Requests need a JSON object, nonempty model, and valid `stream`; path/body models must agree. Compact responses do not support streaming. |
 | `upstream_context_too_large`, `context_too_large`, `context_length_exceeded` | History exceeds the model context. | Shorten history/attachments, summarize, start a new conversation, or choose a model with a larger context. |
 | `request_too_large`, `upstream_payload_too_large` · 413 | The request body or attachments exceed a size limit. | Reduce or split input files. Relay's incoming image-request limit is 64 MiB; the provider may impose a smaller one. |
+| `request_encoding_unsupported` · 415 | Unsupported or stacked request compression. | Use an uncompressed JSON body or a single `gzip` / `zstd` encoding. |
+| `request_encoding_invalid` · 400 | Compressed input is corrupt, incomplete or needs a decoder window above 64 MiB. | Update the client or send an uncompressed request. Both compressed and expanded JSON are limited to 64 MiB. |
+| `compaction_response_invalid` · 502 | Context compaction did not finish with a valid encrypted result. | Keep the existing conversation history and retry explicitly after checking the upstream connection. Relay does not replay this generation or fabricate a summary. |
 | `upstream_instructions_required`, `missing_required_parameter` | A required field, including instructions, is absent. | Supply the field named by the provider or update the client generating it. Retrying the same body does not fix it. |
 | `upstream_unsupported_request`, `unsupported_request` | A parameter or capability is unsupported. | Disable the named parameter, tool, or mode and use a compatible format. |
 | `upstream_content_policy`, `content_policy_violation` | Provider content rules rejected the request. | Revise the request according to the service rules. Rotating members is not a correction for that request. |
@@ -487,9 +559,9 @@ such as 429, explains why. More retries do not replenish quota.
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
-| `adapter_binding_unsupported`, `source_protocol_invalid`, `source_pool_protocol_unsupported` | The format/adapter binding is incompatible or unverified. | Choose supported **Formats and adapters** in the API editor, check and save them, then add the source to the pool. |
+| `adapter_binding_unsupported`, `source_protocol_invalid`, `source_pool_protocol_unsupported` | Relay could not build a compatible automatic route for the requested protocol and model. | Refresh the source catalog and verify its API address and model ID. Use another member when the provider does not expose a compatible native path or translatable format. |
 | `adapter_invalid_request` | The adapter cannot translate the request. | Remove the field named in the message or choose a native-format source. |
-| `adapter_parameter_unsupported` | A meaningful request parameter has no lossless mapping on the selected route. | Use a native route or remove the unsupported option. Relay does not silently discard it. |
+| `adapter_parameter_unsupported` | A meaningful request parameter has no lossless mapping on the selected route. | Check the field named in the message and `error.param`. Use a native route or change that option. Encrypted input history requires its compatible native route; do not delete it from the conversation. Relay does not silently discard it. |
 | `adapter_compaction_unsupported` | The adapter cannot perform this compaction operation. | Use a native Responses route for compaction or start a new task with summarized ordinary history. |
 | `adapter_continuation_missing`, `adapter_continuation_mismatch` | Adapter continuation state is lost or belongs to another binding. | Restore the former source/adapter. Transfer complete history or start a new conversation when it is unavailable. |
 | `adapter_tool_unsupported`, `adapter_reasoning_unsupported` | The adapter cannot represent the tool or reasoning mode. | Choose a supported capability or native format. Allowing a mode in model rules does not add upstream support. |
@@ -511,10 +583,9 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_not_found`, `not_found` · provider 404 | The API path or resource does not exist. | Verify base URL and path prefix. Restore history instead when the message concerns a previous response. |
 | `upstream_status`, `upstream_failure` | No more specific provider classification is available. | Use the actual status and redacted details: 401/403 access, 429 quota/frequency, 5xx service health. An unknown code is not success. |
 | `upstream_stream`, `stream_error`, `upstream_terminal` | A provider error event ended the stream. | Follow the embedded provider code in request details. Initial HTTP 200 does not prove successful completion. |
-| `stream_invalid` | The stream event format is invalid. | Check the protocol and whether a proxy returned HTML/login content. Update Relay and report the request ID if it persists. |
+| `stream_invalid` | The stream event format is invalid. | Open the request details. Type `relay_stream_parser` identifies Relay's JSON parser diagnostics: error category, position and frame sizes, without response content. Report these diagnostics and the request ID. Older records may lack details; reproduce on the current build. |
 | `stream_incomplete`, `upstream_websocket_closed`, `upstream_websocket` | The connection ended before completion. | Check network and proxy timeouts. Retry the unfinished step from the client; a partial answer is not a completed answer. |
-| `stream_first_output_timeout`, `stream_idle_timeout`, `websocket_idle_timeout` | First output or subsequent data did not arrive in time. | Check model latency, proxy, and overload. Retry later or choose a compatible source. |
-| `stream_semantic_timeout` | Service events continue without useful progress. | Cancel the stuck task, check the provider, and retry. Keepalive events alone do not prove model progress. |
+| `stream_first_output_timeout`, `stream_idle_timeout`, `websocket_idle_timeout`, `stream_semantic_timeout` | A stream timeout from an older Relay version or an external service. The current version does not time out an active generation while waiting for output. | Update Relay and your Relay Server. For provider or proxy errors, check that service's limits. You can cancel a stuck request in the client. |
 | `stream_event_too_large`, `upstream_body_too_large` | A response or individual event exceeded Relay's limit. | Reduce output/image volume. For a small request, verify the API and report its error ID. |
 | `upstream_websocket_unsupported`, `websocket_not_supported` | The provider cannot use WebSocket. | Use HTTP streaming. If automatic fallback fails, disable **API → ChatGPT → WebSocket for ChatGPT** and reconnect the client. |
 | `upstream_websocket_connection_limit`, `websocket_connection_limit_reached` | Too many provider connections. | Close unused connections, reduce concurrent tasks, and wait for the stated pause. |
@@ -586,11 +657,11 @@ such as 429, explains why. More retries do not replenish quota.
 | `import_serialize`, `preview_serialize`, `secret_serialize` | Import data could not be prepared. | Retry using a current original export. Update Relay and report the diagnostic code, without the package contents, if it persists. |
 | `refresh_exchange_failed`, `refresh_exchange_unavailable` | Refresh-token exchange failed or is unavailable. | Check network/proxy. Obtain a fresh sign-in for invalid tokens; otherwise retry after a pause. |
 | `source_base_url_invalid`, `source_invalid`, `source_self_route` | The API address is invalid or points back to Relay. | Use the actual external API base URL and correct prefix. Never point a source at this same pool, which creates a loop. |
-| `source_model_discovery_failed`, `source_test_failed`, `models_required` | The model list was not confirmed. | Check key/address/format and refresh models. If an explicit list is required, supply actual available IDs and verify a request. |
-| `source_probe_unavailable` | Generation could not be checked: authorization, rate limit, timeout or temporary provider failure. Existing evidence is retained. | Check the key and provider status, then run Check generation again. HTTP 401/403 does not prove a format unsupported. |
-| `source_probe_unsupported` | The selected model/format endpoint returned HTTP 404 or 405. | Verify the address and model ID, select another provider format or correct the manual routes. Other formats remain available. |
+| `source_model_discovery_failed`, `source_test_failed`, `models_required` | Relay could not read a usable model catalog. | Check the key, API address, provider permissions, and network, then refresh models. A successful catalog is enough for inventory; it does not prove every generation feature. |
+| `source_probe_unavailable` | A diagnostic or legacy generation check failed because of authorization, rate limiting, timeout, or a temporary provider failure. Existing evidence is retained. | Check the key and provider status. HTTP 401/403 does not prove that a format is unsupported; normal routing continues from catalog and endpoint evidence. |
+| `source_probe_unsupported` | The selected model/format endpoint returned HTTP 404 or 405. | Verify the address and model ID. This is diagnostic evidence; Relay continues to choose an available native path or adapter automatically. |
 | `source_probe_invalid_response` | The endpoint did not return a complete text response in the selected format. | Verify the format and provider documentation. A successful catalog or arbitrary HTTP 200 does not confirm generation. |
-| `source_probe_stale` | The connection changed while it was being checked. The result was discarded. | Refresh the connection, save any pending address/key changes, then check again. |
+| `source_probe_stale` | The connection changed during a diagnostic or legacy check, so its result was discarded. | Save the current address and key, then refresh the source catalog. |
 | `invalid_label` | The record name is invalid. | Use a short nonempty name without control characters and save again. |
 | `source_store_failed`, `account_store_failed`, `source_secret_store_failed` | The connection or secret could not be saved. | Check disk space and data/secret-store access. Refresh the list before retrying to avoid duplicates. |
 
@@ -603,7 +674,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `account_not_found`, `account_missing`, `source_not_found`, `source_priority_target_not_found`, `not_found` | A record was removed or belongs to another pool. | Refresh and select an existing connection in the correct environment. An old editor cannot restore a deleted record. |
 | `max_retry_candidates_invalid`, `cooldown_after_failures_invalid`, `source_recovery_delay_invalid` | An imported legacy retry value or member recovery delay is outside supported bounds. | Correct the imported value or the delay in member **Settings**. Pool recovery is automatic. |
 | `model_id_invalid`, `model_order_invalid` | A model ID/order is invalid or duplicated. | Refresh the catalog and select actual model IDs without duplicates. |
-| `reasoning_levels_invalid`, `model_service_tier_unsupported`, `model_reasoning_recovery_failed` | The model does not confirm a mode/tier or its settings could not be recovered. | Refresh models and choose a supported mode or standard speed. Reopen model rules after a recovery failure. |
+| `reasoning_levels_invalid`, `model_service_tier_unsupported`, `model_reasoning_recovery_failed` | The selected reasoning mode is absent from reference metadata, the speed is outside Relay family policy, or model settings could not be recovered. | Refresh models and choose a supported mode or standard speed. Reopen model rules after a recovery failure. |
 | `configuration_preset_invalid`, `configuration_reference_missing` | A preset is invalid or references missing connections. | Export it again with a compatible version; map members to existing connections in preview. Presets do not transfer secrets. |
 | `configuration_store_failed`, `configuration_runtime_failed`, `runtime_reload_failed`, `gateway_sync_failed`, `source_runtime_invalid` | Configuration could not be saved or applied to the runtime. | Refresh and inspect actual pool membership/settings, fix the named connection, and apply again. Use diagnostics if it persists; a closed dialog is not proof of success. |
 | `wake_task_not_found`, `wake_account_missing` | A background task/account is absent from this environment. | Open the task in its owning environment and select an existing account. |
@@ -629,6 +700,10 @@ such as 429, explains why. More retries do not replenish quota.
 | "remote protocol is incompatible", "remote server response is invalid/too large" | Server versions are incompatible or the response is not its management API. | Update desktop and server to compatible versions and check reverse-proxy routing. |
 | `proxy_invalid`, `proxy_unavailable`, `proxy_route_ambiguous` | Proxy configuration is invalid or both bypass and proxy use are selected. | Choose one route: shared proxy, individual proxy, or bypass. Correct URL and credentials. |
 | `proxy_assignment_invalid`, `proxy_assignment_duplicate` | Bulk proxy assignment does not match the selected accounts. | Supply one URL per selected account and remove duplicate assignments. |
+| `proxy_check_timeout` | The connection check exceeded 12 seconds. | Check the address and port, or retry later. The saved proxy is retained. |
+| `proxy_check_connection_failed`, `proxy_check_auth_failed` | The selected proxy could not be reached or rejected authentication. | Correct its address, port, username and password. No direct connection is attempted. |
+| `proxy_check_rejected`, `proxy_check_invalid_response` | The check service rejected the request or returned no valid exit IP. | Retry later and check whether this proxy permits HTTPS traffic to Cloudflare. This does not establish model availability. |
+| `proxy_check_unavailable` | The saved proxy could not be read or was removed during a check. | Refresh the list and restore access to protected storage before retrying. |
 | `secret_store_unavailable`, `credential_store_unavailable`, `vault_failed` | Protected storage is unavailable. | Restore OS-user access; for a server, check the vault and its encryption key. Do not replace the key for an existing database with a new one. |
 | `io`, `store_failed`, `persistence_failed`, `account_token_persistence`, `credential_persist_failed`, `metadata_persist_failed` | Reading/writing data or refreshed credentials failed. | Check disk space, permissions, and file locks; close duplicate Relay processes. Preserve a backup before recovery and inspect diagnostics if persistent. |
 | `usage_persistence_failed`, `response_affinity_persistence_failed` | Usage or response ownership could not be persisted. | Restore disk writes. Usage may have gaps, and continuation after restart may require complete history. |

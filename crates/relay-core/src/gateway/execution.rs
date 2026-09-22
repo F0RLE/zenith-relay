@@ -51,6 +51,17 @@ pub(super) fn finish_request_failure(
             );
         }
     }
+    attempt_error_response(failure, preserved, failure_origin, request_id)
+}
+
+/// Keep the safe upstream error only when it belongs to this exact failure.
+/// Terminal JSON, stream bootstrap and exhausted retries share this policy.
+pub(super) fn attempt_error_response(
+    failure: AttemptFailure,
+    preserved: Option<&PreservedUpstreamError>,
+    failure_origin: ErrorOrigin,
+    request_id: &str,
+) -> Response<Body> {
     if let Some(preserved) = preserved.filter(|preserved| {
         preserved.status == failure.status && preserved.category == failure.category
     }) {

@@ -3,71 +3,13 @@ use crate::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
-use crate::catalog::source_reasoning_capabilities;
-use crate::{CandidateHealth, CandidateQuota, ToolUseDiagnostics, QUOTA_STALE_AFTER_MS};
-use axum::extract::State;
-use axum::routing::get;
-use axum::{Json, Router};
+use crate::{
+    CandidateHealth, CandidateQuota, CapabilityOrigin, CapabilityStatus, ModelEndpointCapability,
+    ToolUseDiagnostics, QUOTA_STALE_AFTER_MS,
+};
 use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-
-#[derive(Clone)]
-struct MetadataServerState {
-    response: serde_json::Value,
-    request_count: Arc<AtomicUsize>,
-    release: Option<Arc<AtomicBool>>,
-}
-
-struct MetadataTestServer {
-    url: String,
-    request_count: Arc<AtomicUsize>,
-    task: JoinHandle<()>,
-}
-
-impl Drop for MetadataTestServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn metadata_models(State(state): State<MetadataServerState>) -> Json<serde_json::Value> {
-    state.request_count.fetch_add(1, AtomicOrdering::AcqRel);
-    if let Some(release) = state.release {
-        while !release.load(AtomicOrdering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-    }
-    Json(state.response)
-}
-
-async fn spawn_metadata_server(
-    response: serde_json::Value,
-    release: Option<Arc<AtomicBool>>,
-) -> MetadataTestServer {
-    let request_count = Arc::new(AtomicUsize::new(0));
-    let state = MetadataServerState {
-        response,
-        request_count: request_count.clone(),
-        release: release.clone(),
-    };
-    let app = Router::new()
-        .route("/v1/models", get(metadata_models))
-        .with_state(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    MetadataTestServer {
-        url: format!("http://{address}"),
-        request_count,
-        task,
-    }
-}
 
 #[test]
 fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
@@ -78,52 +20,97 @@ fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
     let capabilities = runtime.model_capabilities("gpt-test");
     assert_eq!(capabilities.input_modalities, ["text", "image"]);
     assert!(capabilities.reasoning_effort_levels.is_empty());
-    assert_eq!(capabilities.tool_call, Some(false));
+    assert_eq!(capabilities.tool_call, Some(true));
 }
 
-fn runtime_for_metadata_server(server: &MetadataTestServer) -> GatewayRuntime {
-    let mut provider = source("source-1", "upstream-secret", &["provider/fable"]);
-    provider.base_url = format!("{}/v1", server.url);
-    GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(provider)],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
+#[test]
+fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
+    let sources = [
+        ("messages", WireApi::Messages),
+        ("native", WireApi::Responses),
+    ]
+    .map(|(id, upstream)| {
+        let mut configured = RuntimeSource::unrestricted(source(id, "synthetic", &["test"]));
+        configured.protocol_config.capabilities = vec![ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: upstream,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: vec!["low".into(), "xhigh".into()],
+        }];
+        configured
+    });
+    let runtime = GatewayRuntime::from_pool(
+        sources.into(),
+        vec![RuntimeLocalKey {
+            source_ids: Some(vec!["messages".into()]),
+            ..RuntimeLocalKey::unrestricted(key("key", "synthetic-pool"))
+        }],
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    r#"{"test/test":{"reasoning":true,"reasoning_effort_levels":["low","xhigh"]}}"#,
+                )
+                .unwrap(),
+            )),
+            ..GatewayRuntimeOptions::default()
+        },
         Arc::new(|_| {}),
     )
-    .unwrap()
-}
-
-fn runtime_for_metadata_sources(server: &MetadataTestServer) -> GatewayRuntime {
-    let mut first = source("source-1", "upstream-secret", &["provider/fable"]);
-    first.base_url = format!("{}/v1", server.url);
-    let mut second = source("source-2", "upstream-secret", &["provider/ember"]);
-    second.base_url = format!("{}/v1", server.url);
-    GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(first),
-            RuntimeSource::unrestricted(second),
-        ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap()
+    .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer synthetic-pool")))
+        .unwrap();
+    assert_eq!(
+        runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
+        ["low"]
+    );
+    assert_eq!(
+        runtime.client_reasoning_levels(&key, "test", WireApi::Messages),
+        ["low", "xhigh"]
+    );
+    runtime.update_key_scope(
+        "key",
+        CandidateScope {
+            source_ids: Some(BTreeSet::from(["native".into()])),
+            account_ids: None,
+            ..CandidateScope::default()
+        },
+    );
+    assert_eq!(
+        runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
+        ["low", "xhigh"]
+    );
+    assert!(runtime
+        .client_reasoning_levels(&key, "missing", WireApi::Responses)
+        .is_empty());
 }
 
 #[test]
 fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
     use crate::scheduler::CooldownReason;
     let mut configured = RuntimeSource::unrestricted(source("multi", "synthetic", &["test"]));
-    configured.protocol_bindings = vec![
-        SourceProtocolBinding::legacy(WireApi::Responses, &["test".into()]),
-        SourceProtocolBinding {
-            wire_api: WireApi::ChatCompletions,
-            adapter: SourceAdapter::ChatCompletionsToResponses,
-            reasoning_mode: MessagesReasoningMode::Adaptive,
-            cache_write_ttl: CacheWriteTtl::Provider,
-            model_ids: vec!["test".into()],
+    configured.protocol_config.capabilities = vec![
+        ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: WireApi::Responses,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: Vec::new(),
         },
-        SourceProtocolBinding::legacy(WireApi::Messages, &["test".into()]),
+        ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: WireApi::Messages,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: Vec::new(),
+        },
     ];
     let runtime = GatewayRuntime::from_pool(
         vec![configured],
@@ -132,6 +119,29 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
         Arc::new(|_| {}),
     )
     .unwrap();
+    let route_upstreams = runtime
+        .source_candidate_bindings
+        .iter()
+        .filter(|(_, binding)| binding.source_id == "multi")
+        .map(|(id, binding)| {
+            (
+                id.clone(),
+                binding.adapter.upstream_protocol(binding.wire_api),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(route_upstreams.len(), WireApi::ALL.len());
+    let seed_upstream = route_upstreams
+        .iter()
+        .find(|(id, _)| id == "multi")
+        .map(|(_, upstream)| *upstream)
+        .unwrap();
+    assert!(route_upstreams
+        .iter()
+        .any(|(id, upstream)| id != "multi" && *upstream == seed_upstream));
+    assert!(route_upstreams
+        .iter()
+        .any(|(_, upstream)| *upstream != seed_upstream));
     for (reason, scope, shared) in [
         (CooldownReason::Mandatory, "test", false),
         (CooldownReason::RateLimit, "test", true),
@@ -150,21 +160,13 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
-        let cooled = |id: &str| {
-            scheduler
+        for (id, upstream) in &route_upstreams {
+            let cooled = scheduler
                 .candidate(id)
                 .unwrap()
                 .cooldowns
-                .contains_key(scope)
-        };
-        assert!(cooled("multi"));
-        assert!(cooled("multi::chat_completions_to_responses"));
-        assert_eq!(cooled("multi::messages"), shared);
-        for id in [
-            "multi",
-            "multi::chat_completions_to_responses",
-            "multi::messages",
-        ] {
+                .contains_key(scope);
+            assert_eq!(cooled, shared || *upstream == seed_upstream, "{id}");
             scheduler.clear_cooldown(id, scope);
         }
     }
@@ -261,7 +263,7 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
 }
 
 #[test]
-fn messages_source_models_stay_on_the_explicit_messages_route() {
+fn messages_source_models_are_automatically_available_to_responses_clients() {
     let mut provider = source("anthropic-source", "provider-secret", &["claude-test"]);
     provider.wire_api = WireApi::Messages;
     let runtime = GatewayRuntime::from_pool(
@@ -275,7 +277,7 @@ fn messages_source_models_stay_on_the_explicit_messages_route() {
     assert_eq!(
         runtime
             .visible_models_for_secret("local-secret", &[WireApi::Responses], current_time_ms(),),
-        Vec::<String>::new()
+        ["claude-test"]
     );
     assert_eq!(
         runtime.visible_models_for_secret("local-secret", &[WireApi::Messages], current_time_ms(),),
@@ -288,7 +290,7 @@ fn messages_source_models_stay_on_the_explicit_messages_route() {
         .map(|route| route.candidate_id)
         .collect::<Vec<_>>();
     assert!(route_ids.iter().any(|id| id == "anthropic-source"));
-    assert!(!route_ids
+    assert!(route_ids
         .iter()
         .any(|id| id == "anthropic-source::responses_to_messages"));
 }
@@ -1704,125 +1706,49 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
         .any(|binding| binding.wire_api == WireApi::ChatCompletions));
 }
 
-#[tokio::test]
-async fn generic_source_reasoning_metadata_survives_a_codex_catalog_cache_update() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["provider/fable"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "context_window": 1_000_000,
-                "reasoningEffortModes": ["low", "high"],
-                "defaultReasoningLevel": "high",
-            }]
-        }),
-        now_ms,
-    );
-    // Codex asks the same source for a different payload shape. It must
-    // not overwrite the generic source metadata that powers the selector.
-    runtime.remember_codex_model_manifest(
-        "source-1",
-        serde_json::json!({"models": [{"slug": "provider/fable"}]}),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert_eq!(
-        metadata.context_windows,
-        BTreeMap::from([("provider/fable".to_string(), 1_000_000)])
-    );
-    assert_eq!(
-        metadata.reasoning_catalog_templates["provider/fable"],
-        serde_json::json!({
-            "supported_reasoning_levels": [
-                {"effort": "low", "description": "low"},
-                {"effort": "high", "description": "high"}
-            ]
-        })
-        .as_object()
-        .unwrap()
-        .clone()
-    );
-}
-
 #[test]
-fn fast_service_tier_requires_explicit_upstream_catalog_evidence() {
+fn speed_choices_and_preferences_are_independent_of_source_metadata_and_health() {
+    let model = "gpt-future-synthetic";
     let runtime = GatewayRuntime::from_pool(
         vec![
-            RuntimeSource::unrestricted(source("source-1", "upstream-secret", &["provider/model"])),
-            RuntimeSource::unrestricted(source("source-2", "other-secret", &["provider/model"])),
+            RuntimeSource::unrestricted(source("source-1", "synthetic-one", &[model])),
+            RuntimeSource::unrestricted(source("source-2", "synthetic-two", &[model])),
         ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-pool",
+        ))],
         GatewayRuntimeOptions::default(),
         Arc::new(|_| {}),
     )
     .unwrap();
-
-    assert!(!runtime.model_supports_fast_service_tier("provider/model"));
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/model",
-                "default_service_tier": "priority"
-            }]
-        }),
-        current_time_ms(),
-    );
-    assert!(!runtime.model_supports_fast_service_tier("provider/model"));
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/model",
-                "additional_speed_tiers": ["priority"]
-            }]
-        }),
-        current_time_ms(),
-    );
-    assert!(runtime.model_supports_fast_service_tier("provider/model"));
-    assert!(runtime.candidate_supports_fast_service_tier("source-1", "provider/model"));
-    assert!(!runtime.candidate_supports_fast_service_tier("source-2", "provider/model"));
+    let tiers = [
+        DefaultServiceTier::Standard,
+        DefaultServiceTier::Fast,
+        DefaultServiceTier::Ultrafast,
+    ];
+    assert_eq!(runtime.model_supported_service_tiers(model), tiers);
     runtime
         .set_model_service_tier_overrides(BTreeMap::from([(
-            "provider/model".to_string(),
-            DefaultServiceTier::Fast,
+            model.into(),
+            DefaultServiceTier::Ultrafast,
         )]))
         .unwrap();
+    runtime.set_candidate_cooldown("source-1", model, current_time_ms() + 60_000);
+    runtime.remove_candidate("source-2");
     assert_eq!(
-        runtime.model_service_tier_for_candidate("source-1", "provider/model"),
-        DefaultServiceTier::Fast
+        runtime.model_effective_service_tier(model),
+        DefaultServiceTier::Ultrafast
     );
+    assert_eq!(runtime.model_supported_service_tiers(model), tiers);
     assert_eq!(
-        runtime.model_service_tier_for_candidate("source-2", "provider/model"),
-        DefaultServiceTier::Standard
+        runtime.model_supported_service_tiers("claude-synthetic"),
+        [DefaultServiceTier::Standard]
     );
-    assert!(!runtime.model_supports_fast_service_tier("provider/other"));
-    runtime.set_candidate_cooldown("source-1", "provider/model", current_time_ms() + 60_000);
-    assert!(!runtime.model_supports_fast_service_tier("provider/model"));
 }
 
 #[test]
-fn service_tier_normalization_preserves_valid_ids_until_runtime_evidence() {
+fn service_tier_normalization_preserves_valid_ids_for_model_policy() {
     let normalized = normalize_model_service_tier_overrides(BTreeMap::from([
         ("provider/gpt-5".to_string(), DefaultServiceTier::Fast),
         ("provider/claude-5".to_string(), DefaultServiceTier::Fast),
@@ -1836,1236 +1762,6 @@ fn service_tier_normalization_preserves_valid_ids_until_runtime_evidence() {
             ("provider/claude-5".to_string(), DefaultServiceTier::Fast),
         ])
     );
-}
-
-#[tokio::test]
-async fn fresh_source_metadata_does_not_wait_for_another_refresh() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["provider/fable"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"],
-            }]
-        }),
-        now_ms,
-    );
-
-    let guard = runtime.model_metadata.refresh_lock.lock().await;
-    let metadata = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        runtime.codex_source_model_metadata(&key, &[WireApi::Responses], now_ms),
-    )
-    .await
-    .expect("fresh metadata must not wait for the refresh lock");
-    drop(guard);
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("provider/fable"));
-}
-
-#[tokio::test]
-async fn explicit_source_metadata_refresh_bypasses_active_prefetch_throttle() {
-    let server = spawn_metadata_server(
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"]
-            }]
-        }),
-        None,
-    )
-    .await;
-    let runtime = Arc::new(runtime_for_metadata_server(&server));
-    let now_ms = current_time_ms();
-    runtime
-        .model_metadata
-        .prefetch_not_before_ms
-        .store(now_ms.saturating_add(60_000), AtomicOrdering::Release);
-
-    runtime.refresh_source_model_metadata().await;
-
-    assert_eq!(
-        server.request_count.load(AtomicOrdering::Acquire),
-        1,
-        "an explicit refresh must ignore the background prefetch throttle"
-    );
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn explicit_source_metadata_refresh_only_discovers_the_selected_source() {
-    let server = spawn_metadata_server(
-        serde_json::json!({
-            "data": [
-                { "id": "provider/fable", "reasoningEffortModes": ["low"] },
-                { "id": "provider/ember", "reasoningEffortModes": ["high"] }
-            ]
-        }),
-        None,
-    )
-    .await;
-    let runtime = Arc::new(runtime_for_metadata_sources(&server));
-
-    runtime
-        .refresh_source_model_metadata_for_source("source-1")
-        .await;
-
-    assert_eq!(server.request_count.load(AtomicOrdering::Acquire), 1);
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string()]
-    );
-    assert!(runtime
-        .declared_source_reasoning_levels("provider/ember")
-        .is_empty());
-
-    runtime
-        .refresh_source_model_metadata_for_source("source-2")
-        .await;
-
-    assert_eq!(server.request_count.load(AtomicOrdering::Acquire), 2);
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/ember"),
-        vec!["high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn simultaneous_explicit_source_refreshes_share_one_upstream_request() {
-    let release = Arc::new(AtomicBool::new(false));
-    let server = spawn_metadata_server(
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["medium"]
-            }]
-        }),
-        Some(release.clone()),
-    )
-    .await;
-    let runtime = Arc::new(runtime_for_metadata_server(&server));
-
-    let first_runtime = runtime.clone();
-    let first = tokio::spawn(async move {
-        first_runtime.refresh_source_model_metadata().await;
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while server.request_count.load(AtomicOrdering::Acquire) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first refresh reaches the upstream server");
-
-    let second_runtime = runtime.clone();
-    let second = tokio::spawn(async move {
-        second_runtime.refresh_source_model_metadata().await;
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(
-        server.request_count.load(AtomicOrdering::Acquire),
-        1,
-        "a refresh waiting for the lock must not start a duplicate request"
-    );
-
-    release.store(true, AtomicOrdering::Release);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        first.await.unwrap();
-        second.await.unwrap();
-    })
-    .await
-    .expect("both refresh callers complete");
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["medium".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_populates_reasoning_before_codex_catalog_request() {
-    let runtime = Arc::new(
-        GatewayRuntime::from_pool(
-            vec![RuntimeSource::unrestricted(source(
-                "source-1",
-                "upstream-secret",
-                &["provider/fable"],
-            ))],
-            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "medium", "high"],
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("management prefetch completes");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-    let not_before = runtime
-        .model_metadata
-        .prefetch_not_before_ms
-        .load(Ordering::Acquire);
-    assert!(not_before > runtime_now_ms());
-    runtime.prefetch_source_model_metadata();
-    assert_eq!(
-        runtime
-            .model_metadata
-            .prefetch_not_before_ms
-            .load(Ordering::Acquire),
-        not_before
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_reports_chat_completions_reasoning_as_catalog_metadata() {
-    let mut chat_source = source("chat-source", "upstream-secret", &["provider/fable"]);
-    chat_source.wire_api = WireApi::ChatCompletions;
-    let runtime = Arc::new(
-        GatewayRuntime::from_pool(
-            vec![RuntimeSource::unrestricted(chat_source)],
-            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    runtime.remember_source_model_manifest(
-        "chat-source",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["high"],
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("management prefetch reports the Chat Completions route");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_ignores_sources_outside_the_active_key_scope() {
-    let runtime = Arc::new(
-        GatewayRuntime::from_pool(
-            vec![
-                RuntimeSource::unrestricted(source(
-                    "source-in-pool",
-                    "in-pool-secret",
-                    &["provider/fable"],
-                )),
-                RuntimeSource::unrestricted(source(
-                    "source-outside-pool",
-                    "outside-pool-secret",
-                    &["provider/fable"],
-                )),
-            ],
-            vec![RuntimeLocalKey {
-                key: key("key-1", "local-secret"),
-                enabled: true,
-                source_ids: Some(vec!["source-in-pool".into()]),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-            }],
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-in-pool",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-outside-pool",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["ultra"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("management prefetch completes");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_includes_sources_for_an_account_only_key_scope() {
-    let runtime = Arc::new(
-        GatewayRuntime::build(
-            vec![RuntimeSource::unrestricted(source(
-                "source-shared",
-                "shared-secret",
-                &["provider/fable"],
-            ))],
-            Vec::new(),
-            vec![RuntimeMixedLocalKey {
-                key: key("key-account-only", "local-secret"),
-                enabled: true,
-                source_ids: None,
-                account_ids: Some(vec!["account-only".into()]),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: None,
-            }],
-            None,
-            ReachabilityRequirement::AllowUnroutable,
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-shared",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("an account-only key leaves source access unrestricted");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn scoped_catalog_refresh_keeps_reasoning_declared_by_another_route() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(source("source-a", "source-a-secret", &["provider/fable"])),
-            RuntimeSource::unrestricted(source("source-b", "source-b-secret", &["provider/fable"])),
-        ],
-        vec![
-            RuntimeLocalKey::unrestricted(key("key-all", "all-secret")),
-            RuntimeLocalKey {
-                key: key("key-a", "source-a-only-secret"),
-                enabled: true,
-                source_ids: Some(vec!["source-a".to_string()]),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-            },
-        ],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let all_key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer all-secret")))
-        .unwrap();
-    let source_a_key = runtime
-        .authenticate(Some(&HeaderValue::from_static(
-            "Bearer source-a-only-secret",
-        )))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-a",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-b",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["ultra"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime
-        .codex_source_model_metadata(&all_key, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "ultra".to_string()]
-    );
-
-    let scoped_metadata = runtime
-        .codex_source_model_metadata(&source_a_key, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        scoped_metadata.reasoning_catalog_templates["provider/fable"]["supported_reasoning_levels"],
-        serde_json::json!([{"effort": "low", "description": "low"}])
-    );
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "ultra".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn provider_reasoning_metadata_is_catalog_only_for_each_route() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(source("source-a", "source-a-secret", &["provider/fable"])),
-            RuntimeSource::unrestricted(source("source-b", "source-b-secret", &["provider/fable"])),
-        ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-a",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-b",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        metadata.reasoning_catalog_templates["provider/fable"]["supported_reasoning_levels"],
-        serde_json::json!([
-            {"effort": "low", "description": "low"},
-            {"effort": "high", "description": "high"}
-        ])
-    );
-}
-
-#[tokio::test]
-async fn stale_source_metadata_survives_a_transient_models_failure() {
-    let mut unavailable_source = source("source-1", "upstream-secret", &["provider/fable"]);
-    unavailable_source.base_url = "http://127.0.0.1:1/v1".to_string();
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(unavailable_source)],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "medium", "high"],
-            }]
-        }),
-        now_ms.saturating_sub(CODEX_SOURCE_MODEL_MANIFEST_TTL_MS + 1),
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("provider/fable"));
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn source_reasoning_union_keeps_unknown_route_in_catalog() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(source(
-                "source-confirmed",
-                "confirmed-secret",
-                &["provider/fable"],
-            )),
-            RuntimeSource::unrestricted(source(
-                "source-unknown",
-                "unknown-secret",
-                &["provider/fable"],
-            )),
-        ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-confirmed",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-unknown",
-        serde_json::json!({"data": [{"id": "provider/fable"}]}),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("provider/fable"));
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "high".to_string()]
-    );
-    assert_eq!(
-        runtime.api_source_candidate_ids(),
-        HashSet::from(["source-confirmed".to_string(), "source-unknown".to_string(),])
-    );
-}
-
-#[tokio::test]
-async fn non_claude_source_catalog_preserves_source_declared_efforts_and_uses_medium_auto_default()
-{
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["grok-4.5", "glm-5.2"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {
-                    "id": "grok-4.5",
-                    "reasoningEffortModes": [
-                        "low", "medium", "high", "xhigh", "max", "very_high"
-                    ],
-                    "defaultReasoningLevel": "very_high",
-                },
-                {
-                    "id": "glm-5.2",
-                    "reasoningEffortModes": ["low", "medium", "high", "xhigh", "max"],
-                    "defaultReasoningLevel": "max",
-                }
-            ]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    for (model_id, expected) in [
-        (
-            "grok-4.5",
-            serde_json::json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"},
-                    {"effort": "medium", "description": "medium"},
-                    {"effort": "high", "description": "high"},
-                    {"effort": "xhigh", "description": "xhigh"},
-                    {"effort": "max", "description": "max"},
-                    {"effort": "very_high", "description": "very_high"}
-                ],
-                "default_reasoning_level": "medium"
-            }),
-        ),
-        (
-            "glm-5.2",
-            serde_json::json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"},
-                    {"effort": "medium", "description": "medium"},
-                    {"effort": "high", "description": "high"},
-                    {"effort": "xhigh", "description": "xhigh"},
-                    {"effort": "max", "description": "max"}
-                ],
-                "default_reasoning_level": "medium"
-            }),
-        ),
-    ] {
-        assert_eq!(
-            metadata.reasoning_catalog_templates[model_id],
-            expected.as_object().unwrap().clone()
-        );
-    }
-}
-
-#[tokio::test]
-async fn source_catalog_does_not_cross_model_reasoning_metadata() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["grok-4.5", "glm-5.2"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {
-                    "id": "grok-4.5",
-                    "reasoningEffortModes": ["low", "very_high"],
-                    "defaultReasoningLevel": "very_high",
-                },
-                {"id": "glm-5.2"}
-            ]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("grok-4.5"));
-    assert!(!metadata.reasoning_catalog_templates.contains_key("glm-5.2"));
-}
-
-#[tokio::test]
-async fn known_group_modes_reach_codex_without_being_reported_as_detected() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["vendor/claude-fable-5", "vendor/gpt-future"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {"id": "vendor/claude-fable-5"},
-                {"id": "vendor/gpt-future"}
-            ]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(!metadata
-        .reasoning_catalog_templates
-        .contains_key("vendor/claude-fable-5"));
-    assert!(runtime
-        .declared_source_reasoning_levels("vendor/claude-fable-5")
-        .is_empty());
-    assert!(!metadata
-        .reasoning_catalog_templates
-        .contains_key("vendor/gpt-future"));
-    assert!(runtime
-        .declared_source_reasoning_levels("vendor/gpt-future")
-        .is_empty());
-}
-
-#[tokio::test]
-async fn provider_reasoning_modes_override_known_model_fallback_for_catalog() {
-    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
-
-    let catalog = ModelMetadataCatalog::from_models_dev_json(
-        r#"{
-            "openai/gpt-5.6-terra": {
-                "reasoning": true,
-                "reasoning_effort_levels": ["minimal", "medium", "max"]
-            }
-        }"#,
-    )
-    .unwrap();
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-5.6-terra"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions {
-            model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(catalog)),
-            ..GatewayRuntimeOptions::default()
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "gpt-5.6-terra",
-                "reasoningEffortModes": ["ultra"],
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], current_time_ms())
-        .await;
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("gpt-5.6-terra"),
-        vec!["ultra".to_string()]
-    );
-    assert_eq!(
-        runtime.source_declared_reasoning_levels("gpt-5.6-terra"),
-        Some(vec!["ultra".to_string()])
-    );
-}
-
-#[tokio::test]
-async fn refreshed_source_metadata_clears_removed_reasoning_declarations() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-5.6-terra"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "gpt-5.6-terra",
-                "reasoningEffortModes": ["low", "high"]
-            }]
-        }),
-        now_ms,
-    );
-    runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("gpt-5.6-terra"),
-        vec!["low".to_string(), "high".to_string()]
-    );
-
-    // The route is still configured, but its refreshed manifest no longer
-    // declares reasoning. That must not leave stale selector options behind.
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{"id": "gpt-5.6-terra"}]
-        }),
-        now_ms + 1,
-    );
-    runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], now_ms + 1)
-        .await;
-    assert!(runtime
-        .declared_source_reasoning_levels("gpt-5.6-terra")
-        .is_empty());
-}
-
-#[tokio::test]
-async fn explicit_empty_reasoning_metadata_suppresses_known_model_fallback() {
-    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
-
-    let catalog = ModelMetadataCatalog::from_models_dev_json(
-        r#"{
-            "openai/gpt-5.6-terra": {
-                "reasoning": true,
-                "reasoning_effort_levels": ["minimal", "medium", "max"]
-            }
-        }"#,
-    )
-    .unwrap();
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-5.6-terra"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions {
-            model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(catalog)),
-            ..GatewayRuntimeOptions::default()
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "gpt-5.6-terra",
-                "reasoningEffortModes": []
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], current_time_ms())
-        .await;
-
-    assert_eq!(
-        metadata.reasoning_catalog_templates["gpt-5.6-terra"]["supported_reasoning_levels"],
-        serde_json::json!([])
-    );
-    assert_eq!(
-        runtime.source_declared_reasoning_levels("gpt-5.6-terra"),
-        Some(Vec::new())
-    );
-}
-
-#[tokio::test]
-async fn explicit_empty_source_reasoning_keeps_native_astra_levels() {
-    let model = "gpt-6-astra";
-    let mut account = quota_account(QuotaSnapshot::default());
-    account.models = vec![model.to_string()];
-    let runtime = GatewayRuntime::from_mixed_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &[model],
-        ))],
-        vec![account],
-        vec![RuntimeMixedLocalKey {
-            key: key("key-1", "local-secret"),
-            enabled: true,
-            source_ids: None,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
-        }],
-        RuntimeChatGptAuth {
-            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
-            refresh_adapter: Arc::new(NeverRefresh),
-            persistence_adapter: Arc::new(NoopPersistence),
-            refresh_skew_ms: 60_000,
-            agent_identities: HashMap::new(),
-        },
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": model,
-                "reasoningEffortModes": []
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_codex_model_manifest(
-        "account-1",
-        serde_json::json!({
-            "models": [{
-                "slug": model,
-                "supported_reasoning_levels": [
-                    {"effort": "low"},
-                    {"effort": "high"},
-                    {"effort": "xhigh"},
-                    {"effort": "ultra"}
-                ]
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert_eq!(
-        runtime.source_declared_reasoning_levels(model),
-        Some(vec![
-            "low".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-            "ultra".to_string(),
-        ])
-    );
-}
-
-#[test]
-fn management_model_rules_fall_back_to_catalog_for_empty_provider_modes() {
-    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
-    use crate::protocol::{
-        apply_model_metadata, apply_pool_model_configuration, pool_model_summaries,
-        OperationalStatus, SourceSummary,
-    };
-
-    let catalog = ModelMetadataCatalog::from_models_dev_json(
-        r#"{
-            "openai/gpt-6-astra": {
-                "reasoning": true,
-                "reasoning_effort_levels": ["low", "medium", "high", "xhigh", "max"]
-            },
-            "anthropic/claude-fable-5-1": {
-                "reasoning": true,
-                "reasoning_effort_levels": ["low", "medium", "high", "xhigh", "max"]
-            }
-        }"#,
-    )
-    .unwrap();
-    let source = source(
-        "source-1",
-        "upstream-secret",
-        &["gpt-6-astra", "claude-fable-5-1"],
-    );
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source.clone())],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions {
-            model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(catalog.clone())),
-            ..GatewayRuntimeOptions::default()
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {"id": "gpt-6-astra", "reasoningEffortModes": []},
-                {"id": "claude-fable-5-1", "reasoningEffortModes": []}
-            ]
-        }),
-        current_time_ms(),
-    );
-
-    let source_summary = SourceSummary {
-        resolved_protocol_bindings: None,
-        id: source.id,
-        name: source.name,
-        enabled: true,
-        in_pool: true,
-        draining: false,
-        operational_status: OperationalStatus::Rotation,
-        base_url: source.base_url,
-        pricing_provider: None,
-        official_provider_family: None,
-        wire_api: source.wire_api,
-        protocol_bindings: Vec::new(),
-        protocol_config: crate::SourceProtocolConfig::default(),
-        models: source.models,
-        allowed_models: Vec::new(),
-        excluded_models: Vec::new(),
-        priority: 0,
-        weight: 1,
-        recovery_delay_seconds: 0,
-        model_price_overrides: BTreeMap::new(),
-        detected_model_prices: BTreeMap::new(),
-        api_equivalent: crate::ApiEquivalentSummary::default(),
-        secret_available: true,
-        last_error_code: None,
-    };
-    let mut models = pool_model_summaries(std::slice::from_ref(&source_summary), &[], &[]);
-    apply_model_metadata(&mut models, &catalog);
-    apply_pool_model_configuration(
-        &mut models,
-        std::slice::from_ref(&source_summary),
-        &[],
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        Some(&runtime),
-    );
-
-    for (model_id, expected) in [
-        (
-            "gpt-6-astra",
-            ["low", "medium", "high", "xhigh", "max"].as_slice(),
-        ),
-        (
-            "claude-fable-5-1",
-            ["low", "medium", "high", "xhigh", "max"].as_slice(),
-        ),
-    ] {
-        let model = models
-            .iter()
-            .find(|model| model.id.eq_ignore_ascii_case(model_id))
-            .expect("model is present in the pool");
-        assert_eq!(model.reasoning_supported_levels, expected);
-        assert_eq!(model.reasoning_levels, expected);
-        assert!(model.reasoning_configurable);
-    }
-}
-
-#[tokio::test]
-async fn codex_source_metadata_marks_bridge_images_but_requires_native_declaration() {
-    let mut bridged = RuntimeSource::unrestricted(source(
-        "source-bridge",
-        "bridge-secret",
-        &["vendor/claude-fable-5"],
-    ));
-    bridged.protocol_bindings = vec![SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::ResponsesToMessages,
-        reasoning_mode: MessagesReasoningMode::Disabled,
-        cache_write_ttl: Default::default(),
-        model_ids: vec!["vendor/claude-fable-5".into()],
-    }];
-    let mut native = RuntimeSource::unrestricted(source(
-        "source-native",
-        "native-secret",
-        &["provider/text-only"],
-    ));
-    native.protocol_bindings = vec![SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::Native,
-        reasoning_mode: MessagesReasoningMode::Disabled,
-        cache_write_ttl: Default::default(),
-        model_ids: vec!["provider/text-only".into()],
-    }];
-    let runtime = GatewayRuntime::from_pool(
-        vec![bridged, native],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-bridge",
-        serde_json::json!({"data": [{"id": "vendor/claude-fable-5"}]}),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-native",
-        serde_json::json!({
-            "data": [{"id": "provider/text-only", "input_modalities": ["text"]}]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(!metadata.image_models.contains("vendor/claude-fable-5"));
-    assert!(!metadata.image_models.contains("provider/text-only"));
-}
-
-#[test]
-fn messages_bridge_hides_provider_efforts_it_cannot_translate() {
-    let configured_models = ["provider/fable"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    let manifest = serde_json::json!({
-        "data": [{
-            "id": "provider/fable",
-            "reasoningEffortModes": ["low", "provider-defined"],
-            "supportsReasoningSummaryParameter": true,
-            "supportsReasoningSummaries": true,
-            "defaultReasoningSummary": "detailed",
-        }]
-    });
-    let capabilities = source_reasoning_capabilities(&manifest, &configured_models)
-        .remove("provider/fable")
-        .unwrap();
-
-    for reasoning_mode in [
-        MessagesReasoningMode::Budget,
-        MessagesReasoningMode::Adaptive,
-    ] {
-        let template = source_reasoning_for_route(
-            capabilities.clone(),
-            SourceAdapter::ResponsesToMessages,
-            reasoning_mode,
-        )
-        .unwrap()
-        .codex_catalog_template();
-
-        assert_eq!(
-            template,
-            serde_json::json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"}
-                ]
-            })
-            .as_object()
-            .unwrap()
-            .clone()
-        );
-    }
 }
 
 #[test]

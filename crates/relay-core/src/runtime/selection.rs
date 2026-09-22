@@ -23,25 +23,6 @@ impl GatewayRuntime {
             .collect()
     }
 
-    pub(crate) fn route_capabilities(
-        &self,
-        candidate_id: &str,
-        model: &str,
-    ) -> Option<&crate::ModelEndpointCapability> {
-        let binding = self.source_candidate_bindings.get(candidate_id)?;
-        self.source_capabilities
-            .get(&binding.source_id)?
-            .iter()
-            .find(|entry| {
-                entry.model_id.eq_ignore_ascii_case(model)
-                    && entry.upstream_wire_api
-                        == binding
-                            .adapter
-                            .upstream_protocol(binding.wire_api)
-                            .wire_api()
-            })
-    }
-
     /// Waits for either a pool mutation or the next known cooldown to expire.
     /// The bounded poll prevents a missed `Notify` wake-up from turning a
     /// persistent ChatGPT request into a hot loop while still allowing

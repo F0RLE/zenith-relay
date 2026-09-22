@@ -12,9 +12,35 @@ info:
     authorization headers, prompts, and provider response bodies never appear
     in those management responses. The /v1 data plane may carry the user's
     request and provider response as required by the selected API contract.
+    Runtime JSON generation and account compact/search bodies accept identity,
+    gzip or zstd Content-Encoding with 64 MiB limits on both wire and decoded
+    bodies. Stacked encodings are unsupported. This does not apply to multipart
+    image edits or management requests.
 servers:
   - url: https://relay.example.com
 paths:
+  /models/order:
+    post:
+      security: [{ managementToken: [] }]
+      description: >
+        Save model presentation order. An empty modelIds array clears the override
+        and restores catalog ordering for all groups, including future discoveries.
+        Reset requires the model_order_reset capability. Does not change routing
+        priority, model visibility, reasoning or pricing settings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [modelIds]
+              properties:
+                modelIds: { type: array, uniqueItems: true, items: { type: string } }
+      responses:
+        "200": { description: Updated runtime snapshot with the saved or default model order. }
+        "400": { description: Invalid model order. }
+        "404": { description: Model is not part of the pool. }
   /sources:
     get:
       security: [{ managementToken: [] }]
@@ -337,7 +363,6 @@ components:
     SourceProtocolConfig:
       type: object
       properties:
-        mode: { type: string, enum: [auto, manual], default: manual, description: Missing in stored legacy records means manual. New UI connections explicitly select auto. }
         revision: { type: integer, minimum: 0 }
         endpointHint: { oneOf: [{ $ref: "#/components/schemas/WireApi" }, { type: "null" }] }
         capabilities: { type: array, items: { $ref: "#/components/schemas/ModelEndpointCapability" } }
@@ -360,7 +385,6 @@ components:
         baseUrl: { type: string, format: uri }
         apiKey: { type: string, writeOnly: true }
         wireApi: { $ref: "#/components/schemas/WireApi" }
-        protocolMode: { type: string, enum: [auto, manual], description: Send only to servers advertising source_protocols_v1. }
         protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
         models: { type: array, items: { type: string } }
     SourceInput:
@@ -391,7 +415,7 @@ components:
     ConfigurationPreset:
       type: object
       properties:
-        schemaVersion: { type: integer, const: 4, description: Imports accept versions 2 through 4. Version 4 preserves auto/manual selection; secrets and probe confirmations are not exported. }
+        schemaVersion: { type: integer, const: 4, description: Imports accept versions 2 through 4. Legacy protocolMode fields are accepted and ignored; secrets and probe confirmations are not exported. }
     PoolRoutingPolicy:
       type: object
       additionalProperties: false
@@ -427,7 +451,7 @@ components:
         serverId: { type: string, minLength: 1 }
         protocolMin: { type: integer, minimum: 1 }
         protocolMax: { type: integer, minimum: 1 }
-        features: { type: array, items: { type: string }, uniqueItems: true, description: source_protocols_v1 enables protocolMode, endpoint evidence, computed routes and explicit generation checks. }
+        features: { type: array, items: { type: string }, uniqueItems: true, description: source_protocols_v1 enables endpoint evidence, automatic computed routes and explicit diagnostic generation checks. }
     SourceProviderStats:
       type: object
       required: [provider, balanceMicroUsd, spentMicroUsd, requests, totalTokens]

@@ -8,11 +8,12 @@ use crate::{
     codex_model_display_name, codex_model_is_picker_eligible, normalize_image_base_model,
     normalize_model_ids, normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
     normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
-    normalize_subscription_plan_order, ApiModelPriceOverride, DefaultServiceTier, ModelRules,
-    RoutingStrategy, SourceProtocolBinding, TokenPrice, WireApi,
+    normalize_subscription_plan_order, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    SourceProtocolBinding, TokenPrice, WireApi,
 };
 mod account;
 mod model;
+mod model_policy;
 mod model_protocols;
 mod routing;
 mod usage;
@@ -28,8 +29,12 @@ pub use model::{
     model_has_api_source_route, pool_candidate_count, pooled_source_runtime_available,
     source_runtime_available, GatewaySummary, ModelCatalogIdentity, ModelSummary,
 };
+pub use model_policy::{
+    canonical_pool_model_id, complete_model_display_order, update_model_reasoning_policy,
+    ModelPolicyError,
+};
 pub use model_protocols::{
-    codex_catalog_supports_websockets, model_protocol_routes, ModelProtocolRoute,
+    apply_model_protocol_routes, codex_catalog_supports_websockets, ModelProtocolRoute,
 };
 pub use routing::{
     account_candidate_enabled, account_operational_state, operational_status, pool_routing_summary,
@@ -353,6 +358,13 @@ fn normalize_source_preset_rules(rules: &mut [SourcePresetRule]) -> Result<(), S
         rule.model_price_overrides =
             normalize_model_price_overrides(std::mem::take(&mut rule.model_price_overrides))
                 .map_err(|message| format!("configuration preset {message}"))?;
+        if rule
+            .legacy_protocol_mode
+            .as_deref()
+            .is_some_and(|mode| !matches!(mode, "auto" | "manual"))
+        {
+            return Err("configuration preset protocol mode is invalid".into());
+        }
         if !rule.protocol_bindings.is_empty() {
             rule.protocol_bindings = normalize_source_protocol_bindings(
                 std::mem::take(&mut rule.protocol_bindings),
@@ -551,11 +563,10 @@ pub struct SourcePresetRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_provider_family: Option<String>,
     pub wire_api: WireApi,
-    #[serde(
-        default,
-        skip_serializing_if = "crate::ProtocolSelectionMode::is_manual"
-    )]
-    pub protocol_mode: crate::ProtocolSelectionMode,
+    /// Accepted only so presets exported by pre-1.1.3 builds remain readable.
+    /// Routing is always automatic and the legacy field is never exported.
+    #[serde(default, rename = "protocolMode", skip_serializing)]
+    pub legacy_protocol_mode: Option<String>,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub enabled: bool,
@@ -699,8 +710,10 @@ pub fn pool_model_summaries(
     )
 }
 
-/// Builds pool model rows from the immutable LiteLLM snapshot and explicit
-/// source/account pricing context.
+/// Builds the complete configured pool inventory, enriched with pricing.
+/// Runtime eligibility belongs to protocol routes and request admission, not
+/// to this editable catalog: missing credentials or capabilities cannot erase
+/// a model's name, order, prices, or saved policy.
 pub fn pool_model_summaries_with_pricing(
     sources: &[SourceSummary],
     accounts: &[AccountSummary],
@@ -767,32 +780,27 @@ fn collect_pool_models(
 ) -> BTreeMap<String, PoolModel> {
     let mut models = BTreeMap::<String, PoolModel>::new();
     let mut upstream_order = 0usize;
-    for source in sources.iter().filter(|source| {
-        source.enabled && source.in_pool && !source.draining && source.secret_available
-    }) {
-        let pool_models = source.models_for_any_wire_api();
+    for source in sources.iter().filter(|source| source.in_pool) {
+        let pool_models = crate::normalize_model_ids(
+            source.models.iter().chain(
+                source
+                    .protocol_bindings
+                    .iter()
+                    .flat_map(|binding| &binding.model_ids),
+            ),
+        );
         add_member_models(
             &mut models,
             &format!("source:{}", source.id),
             &pool_models,
-            &source.allowed_models,
-            &source.excluded_models,
             &mut upstream_order,
         );
     }
-    for account in accounts.iter().filter(|account| {
-        account.enabled
-            && account.in_pool
-            && !account.draining
-            && account.secret_available
-            && account.proxy_available
-    }) {
+    for account in accounts.iter().filter(|account| account.in_pool) {
         add_member_models(
             &mut models,
             &format!("account:{}", account.id),
             &account.models,
-            &account.allowed_models,
-            &account.excluded_models,
             &mut upstream_order,
         );
     }
@@ -916,20 +924,11 @@ fn add_member_models(
     models: &mut BTreeMap<String, PoolModel>,
     member_id: &str,
     member_models: &[String],
-    allowed_models: &[String],
-    excluded_models: &[String],
     upstream_order: &mut usize,
 ) {
-    let rules = ModelRules {
-        allowed: allowed_models.iter().cloned().collect(),
-        excluded: excluded_models.iter().cloned().collect(),
-    };
     for model in member_models {
         let model_order = *upstream_order;
         *upstream_order = upstream_order.saturating_add(1);
-        if !rules.allows(model) {
-            continue;
-        }
         let key = model.to_ascii_lowercase();
         let entry = models.entry(key).or_insert_with(|| PoolModel {
             id: model.clone(),
@@ -1341,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn model_summaries_apply_member_rules_hidden_state_and_discovery_order() {
+    fn model_summaries_keep_member_exclusions_and_apply_pool_hidden_state() {
         let source = SourceSummary {
             resolved_protocol_bindings: None,
             id: "source_1".into(),
@@ -1381,14 +1380,120 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.4-mini", "gpt-5.4", "gpt-future-codex"]
+            ["gpt-old", "gpt-5.4-mini", "gpt-5.4", "gpt-future-codex"]
         );
-        assert!(!models[0].enabled);
-        assert!(models[1].enabled);
+        assert!(models[0].enabled);
+        assert!(!models[1].enabled);
         assert!(models[2].enabled);
-        assert_eq!(models[1].member_count, 1);
-        assert!(models[1].output_micro_usd_per_million.is_some());
-        assert!(models[2].output_micro_usd_per_million.is_none());
+        assert!(models[3].enabled);
+        assert_eq!(models[2].member_count, 1);
+        assert!(models[2].output_micro_usd_per_million.is_some());
+        assert!(models[3].output_micro_usd_per_million.is_none());
+    }
+
+    #[test]
+    fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
+        let mut source = source_summary("source", &["future", "older", "unknown"]);
+        source.enabled = false;
+        source.secret_available = false;
+        source.draining = true;
+        source.excluded_models = vec!["*".into()];
+        source.protocol_config = crate::SourceProtocolConfig::automatic(&source.base_url);
+        source.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["binding-only".into(), "FUTURE".into()],
+        }];
+        let mut outside = source_summary("outside", &["not-in-pool", "future"]);
+        outside.in_pool = false;
+        let mut account = account_summary(true, &["FUTURE", "account-only"]);
+        account.enabled = false;
+        account.secret_available = false;
+        account.proxy_available = false;
+        account.draining = true;
+        account.excluded_models = vec!["*".into()];
+        let sources = [source, outside];
+        let accounts = [account, account_summary(false, &["outside-account"])];
+        let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{
+            "synthetic/future": {"name":"Future Model","family":"test","release_date":"2026-01-01","reasoning_effort_levels":["low","high"]},
+            "synthetic/older": {"name":"Older Model","family":"test","release_date":"2025-01-01"}
+        }"#).unwrap();
+        let mut models = pool_model_summaries(&sources, &accounts, &["future".into()]);
+        apply_model_metadata(&mut models, &metadata);
+        apply_pool_model_configuration(
+            &mut models,
+            &sources,
+            &accounts,
+            &BTreeMap::from([(
+                "future".into(),
+                ApiModelPriceOverride {
+                    input_micro_usd_per_million: 12,
+                    cached_input_micro_usd_per_million: Some(3),
+                    cache_write_5m_micro_usd_per_million: None,
+                    cache_write_1h_micro_usd_per_million: None,
+                    output_micro_usd_per_million: 34,
+                },
+            )]),
+            &BTreeMap::from([("future".into(), vec!["high".into()])]),
+            &BTreeMap::new(),
+            None,
+        );
+        apply_model_display_order_with_catalog(&mut models, &[], &metadata);
+        assert_eq!(models.len(), 5);
+        let future = models.iter().find(|model| model.id == "future").unwrap();
+        assert_eq!(future.member_count, 2);
+        assert!(!future.enabled);
+        assert_eq!(future.catalog_name.as_deref(), Some("Future Model"));
+        assert_eq!(future.catalog_provider.as_deref(), Some("synthetic"));
+        assert_eq!(future.input_micro_usd_per_million, Some(12));
+        assert_eq!(future.output_micro_usd_per_million, Some(34));
+        assert_eq!(future.reasoning_supported_levels, ["low", "high"]);
+        assert_eq!(future.reasoning_allowed_levels, ["high"]);
+        assert!(future.reasoning_configurable);
+        assert!(models
+            .iter()
+            .all(|model| model.protocol_routes.is_empty() && !model.codex_visible));
+        assert!(
+            models.iter().position(|m| m.id == "future")
+                < models.iter().position(|m| m.id == "older")
+        );
+        assert!(models
+            .iter()
+            .find(|m| m.id == "unknown")
+            .unwrap()
+            .reasoning_supported_levels
+            .is_empty());
+    }
+
+    #[test]
+    fn pool_inventory_does_not_treat_saved_provider_modes_as_model_metadata() {
+        let mut source = source_summary("source", &["future-model"]);
+        source.secret_available = false;
+        source.protocol_config = serde_json::from_value(serde_json::json!({
+            "mode": "auto",
+            "capabilities": [{
+                "modelId": "future-model", "upstreamWireApi": "messages",
+                "status": "declared", "origin": "catalog", "checkedAtMs": 1,
+                "reasoningEfforts": ["high", "low"]
+            }]
+        }))
+        .unwrap();
+        let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+        apply_pool_model_configuration(
+            &mut models,
+            &[source],
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(models[0].reasoning_supported_levels.is_empty());
+        assert!(models[0].reasoning_levels.is_empty());
+        assert!(!models[0].reasoning_configurable);
+        assert!(models[0].protocol_routes.is_empty());
     }
 
     #[test]
@@ -1535,17 +1640,19 @@ mod tests {
         let source = source_summary("source", &["test/model"]);
         let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
         let metadata = ModelMetadataCatalog::from_models_dev_json(
-            r#"{"test/model":{"name":"Model","family":"test","status":"active"}}"#,
+            r#"{"test/model":{"name":"Catalog Name","family":"test","status":"active"}}"#,
         )
         .unwrap();
 
         apply_model_metadata(&mut models, &metadata);
-        assert_eq!(models[0].catalog_name.as_deref(), Some("Model"));
+        assert_eq!(models[0].catalog_name.as_deref(), Some("Catalog Name"));
+        assert_eq!(models[0].codex_display_name, "Catalog Name");
         assert_eq!(models[0].catalog_provider.as_deref(), Some("test"));
 
         apply_model_metadata(&mut models, &ModelMetadataCatalog::empty());
 
         assert_eq!(models[0].catalog_provider, None);
+        assert_eq!(models[0].codex_display_name, "Model");
         assert_eq!(models[0].catalog_family, None);
         assert_eq!(models[0].catalog_name, None);
         assert_eq!(models[0].catalog_release_date, None);
@@ -1773,7 +1880,7 @@ mod tests {
     fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
         let mut settings = ConfigurationPresetSettings {
             sources: vec![SourcePresetRule {
-                protocol_mode: crate::ProtocolSelectionMode::Manual,
+                legacy_protocol_mode: None,
                 id: "source".into(),
                 name: "Source".into(),
                 base_url: "https://example.test/v1".into(),
@@ -1824,18 +1931,25 @@ mod tests {
         let source = legacy["settings"]["sources"][0].as_object_mut().unwrap();
         source.remove("pricingProvider");
         source.remove("officialProviderFamily");
+        source.insert("protocolMode".into(), serde_json::json!("manual"));
 
         let decoded: ConfigurationPreset = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.settings.sources[0].pricing_provider, None);
         assert_eq!(decoded.settings.sources[0].official_provider_family, None);
+        assert_eq!(
+            decoded.settings.sources[0].legacy_protocol_mode.as_deref(),
+            Some("manual")
+        );
         settings.sources[0].pricing_provider = None;
         settings.sources[0].official_provider_family = None;
+        settings.sources[0].legacy_protocol_mode = Some("manual".into());
         assert_eq!(decoded.settings.sources, settings.sources);
 
         let encoded = serde_json::to_value(decoded).unwrap();
         let source = encoded["settings"]["sources"][0].as_object().unwrap();
         assert!(!source.contains_key("pricingProvider"));
         assert!(!source.contains_key("officialProviderFamily"));
+        assert!(!source.contains_key("protocolMode"));
     }
 
     fn valid_configuration_preset() -> ConfigurationPreset {
@@ -1940,7 +2054,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_snapshot_configuration_hides_speed_without_runtime_evidence() {
+    fn pool_snapshot_configuration_keeps_model_speed_without_a_running_listener() {
         let source = SourceSummary {
             resolved_protocol_bindings: None,
             id: "source_1".into(),
@@ -2002,14 +2116,14 @@ mod tests {
         assert_eq!(model.cache_write_1h_micro_usd_per_million, None);
         assert_eq!(model.output_micro_usd_per_million, Some(34));
         assert!(model.reasoning_levels.is_empty());
-        assert_eq!(model.speed_tier, DefaultServiceTier::Standard);
-        assert!(!model.speed_supported);
-        assert!(!model.speed_configurable);
+        assert_eq!(model.speed_tier, DefaultServiceTier::Fast);
+        assert!(model.speed_supported);
+        assert!(model.speed_configurable);
         assert_eq!(pool_candidate_count(&[source], &[]), 1);
     }
 
     #[test]
-    fn pool_snapshot_does_not_infer_speed_from_a_runtime_default() {
+    fn pool_snapshot_applies_the_model_speed_policy_without_participant_evidence() {
         let source = SourceSummary {
             resolved_protocol_bindings: None,
             id: "source_1".into(),
@@ -2068,9 +2182,9 @@ mod tests {
             Some(&runtime),
         );
 
-        assert_eq!(models[0].speed_tier, DefaultServiceTier::Standard);
-        assert!(!models[0].speed_supported);
-        assert!(!models[0].speed_configurable);
+        assert_eq!(models[0].speed_tier, DefaultServiceTier::Fast);
+        assert!(models[0].speed_supported);
+        assert!(models[0].speed_configurable);
     }
 
     #[test]
@@ -2135,13 +2249,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["gpt-routed", "claude-native"]
         );
-        assert!(!models[0].speed_supported);
+        assert!(models[0].speed_supported);
         assert!(!models[1].speed_supported);
         assert_eq!(models[1].speed_tier, DefaultServiceTier::Standard);
     }
 
     #[test]
-    fn source_summary_preserves_legacy_and_native_protocol_model_boundaries() {
+    fn source_summary_projects_every_catalog_model_to_all_client_protocols() {
         let legacy = SourceSummary {
             resolved_protocol_bindings: None,
             id: "legacy".into(),
@@ -2172,7 +2286,10 @@ mod tests {
             legacy.models_for_wire_api(WireApi::Responses),
             ["gpt-legacy"]
         );
-        assert!(!legacy.supports_wire_api(WireApi::Messages));
+        for wire_api in WireApi::ALL {
+            assert_eq!(legacy.models_for_wire_api(wire_api), ["gpt-legacy"]);
+            assert!(legacy.supports_wire_api(wire_api));
+        }
 
         let mixed = SourceSummary {
             protocol_bindings: vec![
@@ -2205,40 +2322,13 @@ mod tests {
             ],
             ..legacy
         };
-        assert_eq!(
-            mixed.models_for_wire_api(WireApi::Responses),
-            ["gpt-native", "claude-bridged"]
-        );
-        assert_eq!(
-            mixed.models_for_wire_api(WireApi::Messages),
-            ["claude-native"]
-        );
-        assert!(mixed.supports_wire_api(WireApi::Messages));
-        assert!(!mixed.supports_wire_api(WireApi::ChatCompletions));
-
-        let unconfirmed = SourceSummary {
-            protocol_bindings: vec![
-                SourceProtocolBinding {
-                    wire_api: WireApi::Responses,
-                    adapter: SourceAdapter::Native,
-                    reasoning_mode: MessagesReasoningMode::Disabled,
-                    cache_write_ttl: Default::default(),
-                    model_ids: vec!["gpt-native".into()],
-                },
-                SourceProtocolBinding {
-                    wire_api: WireApi::Messages,
-                    adapter: SourceAdapter::Native,
-                    reasoning_mode: MessagesReasoningMode::Disabled,
-                    cache_write_ttl: Default::default(),
-                    model_ids: Vec::new(),
-                },
-            ],
-            ..mixed
-        };
-        assert!(unconfirmed
-            .models_for_wire_api(WireApi::Messages)
-            .is_empty());
-        assert!(!unconfirmed.supports_wire_api(WireApi::Messages));
+        for wire_api in WireApi::ALL {
+            assert_eq!(
+                mixed.models_for_wire_api(wire_api),
+                ["gpt-native", "claude-bridged", "claude-native"]
+            );
+            assert!(mixed.supports_wire_api(wire_api));
+        }
     }
 
     #[test]

@@ -779,9 +779,9 @@ fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
         models[0]["supported_reasoning_levels"][2]["effort"],
         "ultra"
     );
-    assert_eq!(models[0]["service_tiers"][0]["id"], "priority");
-    assert_eq!(models[0]["additional_speed_tiers"], json!(["fast"]));
-    assert_eq!(models[0]["default_service_tier"], "priority");
+    assert_eq!(models[0]["service_tiers"], json!([]));
+    assert_eq!(models[0]["additional_speed_tiers"], json!([]));
+    assert!(models[0].get("default_service_tier").is_none());
     assert_eq!(models[0]["supports_reasoning_summary_parameter"], true);
     assert_eq!(models[0]["supports_reasoning_summaries"], true);
     assert_eq!(models[0]["default_reasoning_summary"], "detailed");
@@ -1060,6 +1060,7 @@ fn managed_catalog_preserves_native_model_settings() {
     let mut native = routed_codex_catalog_entry(None, "gpt-native", 1, None);
     native["slug"] = Value::String("gpt-native".into());
     native["comp_hash"] = Value::String("official".into());
+    native["display_name"] = json!("Native model title");
     native["input_modalities"] = json!(["text", "image"]);
     native["default_reasoning_level"] = Value::String("ultra".into());
     native["supported_reasoning_levels"] = json!([
@@ -1081,6 +1082,7 @@ fn managed_catalog_preserves_native_model_settings() {
     let managed = catalog::build_managed_model_catalog(&home, None, None, &catalog).unwrap();
     let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
 
+    assert_eq!(model["display_name"], "Native model title");
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["default_reasoning_level"], "ultra");
     assert_eq!(
@@ -1136,11 +1138,12 @@ fn managed_gpt_catalog_refresh_keeps_native_ids_without_copying_cached_capabilit
     let document: Value = serde_json::from_str(&managed).unwrap();
     let models = document["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    for (model, id) in models.iter().zip(ids) {
+    for ((model, id), label) in models.iter().zip(ids).zip(["6 Astra", "5.6 Sol"]) {
         assert_eq!(model["slug"], id);
+        assert_eq!(model["display_name"], label);
         assert_eq!(model["comp_hash"], CODEX_RELAY_CATALOG_HASH);
         assert_eq!(model["supported_reasoning_levels"], json!([]));
-        assert_eq!(model["supports_parallel_tool_calls"], false);
+        assert_eq!(model["supports_parallel_tool_calls"], true);
         assert!(model.get("context_window").is_none());
         assert!(model.get("default_reasoning_level").is_none());
         assert!(!catalog::is_native_catalog_entry(model));
@@ -1216,10 +1219,13 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     )
     .unwrap();
 
-    assert!(
-        refresh_managed_model_catalog(&home, &backups, r#"{"models":[{"slug":"new-model"}]}"#)
-            .unwrap()
-    );
+    assert!(refresh_managed_model_catalog(
+        &home,
+        &backups,
+        r#"{"models":[{"slug":"new-model"}]}"#,
+        None
+    )
+    .unwrap());
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let catalog: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
@@ -1232,7 +1238,54 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     assert!(!refresh_managed_model_catalog(
         &home,
         &backups,
-        r#"{"models":[{"slug":"new-model"}]}"#
+        r#"{"models":[{"slug":"new-model"}]}"#,
+        None,
+    )
+    .unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_catalog_refresh_cannot_replace_a_different_profile_binding() {
+    let (root, home, backups) = profile_dirs("catalog-owner-change");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"current-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+    let current = profile_bindings(&home, &backups)
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.active)
+        .unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let before = fs::read(&catalog_path).unwrap();
+    for account_changed in [false, true] {
+        let mut stale = current.clone();
+        if account_changed {
+            stale.bound_oauth_account_id = Some("synthetic-previous-account".into());
+        } else {
+            stale.credential_id = "synthetic-previous-key".into();
+        }
+        assert!(!refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"stale-model"}]}"#,
+            Some(&stale)
+        )
+        .unwrap());
+        assert_eq!(fs::read(&catalog_path).unwrap(), before);
+    }
+    assert!(refresh_managed_model_catalog(
+        &home,
+        &backups,
+        r#"{"models":[{"slug":"new-model"}]}"#,
+        Some(&current)
     )
     .unwrap());
     fs::remove_dir_all(root).unwrap();
@@ -1280,6 +1333,96 @@ fn repeated_attach_applies_changed_reasoning_catalog_to_an_active_profile() {
 }
 
 #[test]
+fn repeated_oauth_pool_attach_refreshes_missing_and_empty_speed_tiers() {
+    let (root, home, backups) = profile_dirs("reattach-speed-tiers");
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new(
+        "fixture-access",
+        Some("fixture-refresh".into()),
+        Some("fixture-id".into()),
+        None,
+        1,
+        1,
+    )
+    .unwrap();
+    let mut models = ["gpt-future-a", "gpt-future-b"]
+        .iter()
+        .map(|id| {
+            let mut model = routed_codex_catalog_entry(None, id, 1_000, None);
+            model["slug"] = json!(id);
+            model
+        })
+        .collect::<Vec<_>>();
+    for key in ["service_tiers", "additional_speed_tiers"] {
+        models[0].as_object_mut().unwrap().remove(key);
+        models[1][key] = json!([]);
+    }
+    let attach = |catalog: &str| {
+        switch_to_local_with(
+            &home,
+            &backups,
+            "fixture-key-id",
+            "http://127.0.0.1:14998/v1",
+            "fixture-key",
+            LocalAttachOptions {
+                catalog_json: Some(catalog),
+                bound_oauth: Some(BoundOAuthProfile {
+                    account_id: "fixture-account",
+                    tokens: &tokens,
+                    provider_account_id: "fixture-provider-account",
+                }),
+                ..LocalAttachOptions::default()
+            },
+            &secrets,
+        )
+        .unwrap()
+    };
+    attach(&json!({"models": models}).to_string());
+    let auth_before = fs::read(home.join(AUTH_FILE)).unwrap();
+    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
+    fs::write(
+        home.join(MODELS_CACHE_FILE),
+        json!({"models": models}).to_string(),
+    )
+    .unwrap();
+    let tiers = json!([
+        {"id": "priority", "name": "Fast", "description": ""},
+        {"id": "ultrafast", "name": "Ultrafast", "description": ""}
+    ]);
+    for model in &mut models {
+        model["service_tiers"] = tiers.clone();
+        model["additional_speed_tiers"] = json!(["fast", "ultrafast"]);
+    }
+    let binding = attach(&json!({"models": models}).to_string());
+    assert!(binding.active);
+    assert_eq!(
+        binding.bound_oauth_account_id.as_deref(),
+        Some("fixture-account")
+    );
+    assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth_before);
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+    assert!(!home.join(MODELS_CACHE_FILE).exists());
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let saved = fs::read(&catalog_path).unwrap();
+    let catalog: Value = serde_json::from_slice(&saved).unwrap();
+    for (index, model) in catalog["models"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(model["slug"], models[index]["slug"]);
+        assert_eq!(model["service_tiers"], tiers);
+        assert_eq!(
+            model["additional_speed_tiers"],
+            json!(["fast", "ultrafast"])
+        );
+    }
+    let backup = local_backup(&home, &backups).unwrap().unwrap();
+    assert!(valid_managed_model_catalog(
+        &backup,
+        &catalog_path,
+        &Some(saved)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn catalog_refresh_recovers_an_interrupted_catalog_commit() {
     let (root, home, backups) = profile_dirs("model-catalog-interrupted-refresh");
     let secrets = MemorySecrets::default();
@@ -1317,7 +1460,7 @@ fn catalog_refresh_recovers_an_interrupted_catalog_commit() {
     fs::write(&backup_path, serialize_backup(&backup).unwrap()).unwrap();
 
     assert!(
-        !refresh_managed_model_catalog(&home, &backups, next_source_catalog).unwrap(),
+        !refresh_managed_model_catalog(&home, &backups, next_source_catalog, None).unwrap(),
         "the recovered catalog already matches the requested catalog"
     );
     let recovered = local_backup(&home, &backups)
@@ -3002,7 +3145,7 @@ fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context
     let (root, home, _backups) = profile_dirs("direct-source-models-dev");
     ensure_test_native_catalog(&home);
     let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{
-        "test/text-only":{"modalities":{"input":["text"],"output":["text"]},
+        "test/text-only":{"name":"Catalog Display Name","modalities":{"input":["text"],"output":["text"]},
         "reasoning":true,"reasoning_effort_levels":["low","high"],"tool_call":true,"limit":{"context":64000}}
     }"#).unwrap();
     let catalog = direct_source_model_catalog_with_capabilities(
@@ -3013,6 +3156,9 @@ fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context
     .unwrap()
     .unwrap();
     let value: Value = serde_json::from_str(&catalog).unwrap();
+    assert_eq!(value["models"][0]["display_name"], "Catalog Display Name");
+    assert_eq!(value["models"][0]["slug"], "text-only");
+    assert_eq!(value["models"][1]["display_name"], "Unknown");
     assert_eq!(value["models"][0]["input_modalities"], json!(["text"]));
     assert!(value["models"][0].get("context_window").is_none());
     assert_eq!(

@@ -62,6 +62,18 @@ pub(crate) fn api_error_with_origin_and_category(
     origin: ErrorOrigin,
     request_id: Option<&str>,
 ) -> Response<Body> {
+    api_error_with_parameter(status, message, code, category, origin, request_id, None)
+}
+
+pub(crate) fn api_error_with_parameter(
+    status: StatusCode,
+    message: &str,
+    code: &str,
+    category: &str,
+    origin: ErrorOrigin,
+    request_id: Option<&str>,
+    parameter: Option<&str>,
+) -> Response<Body> {
     let origin = origin.for_category(category);
     let code = api_error_code(code);
     let error_type = api_error_type(status, code);
@@ -72,7 +84,7 @@ pub(crate) fn api_error_with_origin_and_category(
                 "message": message,
                 "type": error_type,
                 "code": code,
-                "param": null,
+                "param": parameter,
                 "zenith_relay": {
                     "origin": origin.as_str(),
                     "category": category,

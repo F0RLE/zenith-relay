@@ -17,9 +17,11 @@ use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, ErrorOrigin, GatewayRuntime,
-    GatewayRuntimeOptions, LocalGatewayKey, MessagesReasoningMode, ProviderSource, RuntimeLocalKey,
-    RuntimeSource, SourceAdapter, SourceProtocolBinding, UsageEvent, WireApi,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    CapabilityOrigin, CapabilityStatus, ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, MessagesReasoningMode, ModelEndpointCapability, ProviderSource,
+    RuntimeLocalKey, RuntimeSource, SourceAdapter, SourceProtocolBinding, SourceProtocolConfig,
+    UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "local-test-key";
@@ -29,6 +31,9 @@ const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[path = "support/protocol_matrix.rs"]
 mod protocol_matrix;
+
+#[path = "support/native_admission.rs"]
+mod native_admission;
 
 #[tokio::test]
 async fn native_catalogs_details_and_generation_share_key_model_permissions() {
@@ -922,6 +927,125 @@ async fn native_model_discovery_keeps_each_protocol_catalog_separate() {
 }
 
 #[tokio::test]
+async fn discovery_retains_prices_outside_legacy_binding_lists() {
+    let upstream = spawn(Router::new().route(
+        "/v1/models",
+        get(|headers: HeaderMap| async move {
+            let messages = has_messages_source_key(&headers);
+            Json(json!({"data": [
+                {"id": "saved"},
+                {"id": "new-model", "pricing": {
+                    "inputMicroUsdPerMillion": 3_000_000,
+                    "outputMicroUsdPerMillion": 15_000_000,
+                    "cacheWrite5mMicroUsdPerMillion": 3_750_000,
+                    "cacheWrite1hMicroUsdPerMillion": 6_000_000
+                }},
+                {"id": "conflicting", "pricing": {
+                    "inputMicroUsdPerMillion": if messages { 2_000_000 } else { 1_000_000 },
+                    "outputMicroUsdPerMillion": 4_000_000
+                }}
+            ]}))
+        }),
+    ))
+    .await;
+    let source = ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic priced catalog".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: SOURCE_KEY.into(),
+        wire_api: WireApi::Responses,
+        models: Vec::new(),
+    };
+    let bindings = [WireApi::Responses, WireApi::Messages].map(|wire_api| SourceProtocolBinding {
+        wire_api,
+        adapter: SourceAdapter::Native,
+        reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: Default::default(),
+        model_ids: vec!["saved".into()],
+    });
+    let discovery =
+        discover_source_with_protocol_config(&source, &bindings, &SourceProtocolConfig::default())
+            .await
+            .unwrap();
+    assert_eq!(discovery.models, ["saved", "new-model", "conflicting"]);
+    let price = &discovery.detected_model_prices["new-model"];
+    assert_eq!(price.input_micro_usd_per_million, 3_000_000);
+    assert_eq!(price.output_micro_usd_per_million, 15_000_000);
+    assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(3_750_000));
+    assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(6_000_000));
+    assert!(!discovery.detected_model_prices.contains_key("conflicting"));
+}
+
+#[tokio::test]
+async fn configured_discovery_hints_union_physical_catalogs_without_filtering_runtime_routes() {
+    let (upstream, _) = spawn_upstream().await;
+    let source = ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic mixed upstream".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: SOURCE_KEY.into(),
+        wire_api: WireApi::Responses,
+        models: Vec::new(),
+    };
+    let hints = [
+        SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: Vec::new(),
+        },
+        SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: Vec::new(),
+        },
+    ];
+
+    let discovery =
+        discover_source_with_protocol_config(&source, &hints, &SourceProtocolConfig::default())
+            .await
+            .unwrap();
+
+    assert_eq!(
+        discovery.models,
+        ["gpt-test", "hidden-model", "claude-test", "claude-hidden"]
+    );
+    assert_eq!(discovery.protocol_bindings.len(), 2);
+    let routes = SourceProtocolConfig {
+        capabilities: discovery.capabilities,
+        ..Default::default()
+    }
+    .resolve(
+        &source.base_url,
+        &discovery.models,
+        &discovery.protocol_bindings,
+        source.wire_api,
+    )
+    .unwrap();
+    for model in &discovery.models {
+        let upstream = if model.starts_with("claude-") {
+            WireApi::Messages
+        } else {
+            WireApi::Responses
+        };
+        assert!(routes
+            .iter()
+            .filter(|route| route.model_ids.contains(model))
+            .all(|route| route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream));
+        assert_eq!(
+            routes
+                .iter()
+                .filter(|route| route.model_ids.contains(model))
+                .count(),
+            WireApi::ALL.len()
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_and_bridged_responses_discovery_keep_route_catalogs_separate() {
     let (upstream, state) = spawn_upstream().await;
     let discovery = discover_source_models_and_protocol_bindings(
@@ -1332,7 +1456,7 @@ async fn failed_terminal_sse_is_not_recorded_as_success() {
 }
 
 #[tokio::test]
-async fn responses_never_bridge_to_chat_completions_sources() {
+async fn responses_route_to_chat_completions_sources() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let usage_events = events.clone();
     let runtime = GatewayRuntime::new(
@@ -1365,8 +1489,11 @@ async fn responses_never_bridge_to_chat_completions_sources() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(events[0].wire_api, WireApi::Responses);
 }
 
 #[tokio::test]
@@ -2204,10 +2331,13 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
             name: format!("Synthetic {id}"),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.to_string(),
-            wire_api: WireApi::Responses,
+            wire_api: WireApi::Messages,
             models: vec!["claude-test".to_string()],
         },
-        protocol_config: Default::default(),
+        protocol_config: SourceProtocolConfig {
+            endpoint_hint: Some(WireApi::Messages),
+            ..SourceProtocolConfig::default()
+        },
         protocol_bindings: vec![SourceProtocolBinding {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
@@ -2902,7 +3032,7 @@ async fn spawn_messages_bridge_gateway(
         name: "Synthetic Messages source".to_string(),
         base_url: format!("{upstream_base_url}/v1"),
         api_key: SOURCE_KEY.to_string(),
-        wire_api: WireApi::Responses,
+        wire_api: WireApi::Messages,
         models: vec!["claude-test".to_string()],
     };
     let mut options = GatewayRuntimeOptions::default();
@@ -2914,7 +3044,10 @@ async fn spawn_messages_bridge_gateway(
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource {
             source,
-            protocol_config: Default::default(),
+            protocol_config: SourceProtocolConfig {
+                endpoint_hint: Some(WireApi::Messages),
+                ..SourceProtocolConfig::default()
+            },
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
@@ -2962,7 +3095,30 @@ async fn spawn_mixed_responses_gateway(
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource {
             source,
-            protocol_config: Default::default(),
+            protocol_config: SourceProtocolConfig {
+                capabilities: vec![
+                    ModelEndpointCapability {
+                        model_id: "gpt-test".to_string(),
+                        upstream_wire_api: WireApi::Responses,
+                        status: CapabilityStatus::Declared,
+                        origin: CapabilityOrigin::Catalog,
+                        checked_at_ms: 1,
+                        features: Default::default(),
+                        reasoning_efforts: Vec::new(),
+                    },
+                    ModelEndpointCapability {
+                        model_id: "claude-test".to_string(),
+                        upstream_wire_api: WireApi::Messages,
+                        status: CapabilityStatus::Declared,
+                        origin: CapabilityOrigin::Catalog,
+                        checked_at_ms: 1,
+                        features: Default::default(),
+                        reasoning_efforts: Vec::new(),
+                    },
+                ],
+                endpoint_hint: None,
+                ..SourceProtocolConfig::default()
+            },
             protocol_bindings: vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
@@ -3036,10 +3192,13 @@ async fn spawn_gemini_bridge_gateway(
                 name: "Synthetic Gemini source".to_string(),
                 base_url: format!("{upstream_base_url}/v1"),
                 api_key: SOURCE_KEY.to_string(),
-                wire_api: WireApi::Responses,
+                wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
             },
-            protocol_config: Default::default(),
+            protocol_config: SourceProtocolConfig {
+                endpoint_hint: Some(WireApi::Gemini),
+                ..SourceProtocolConfig::default()
+            },
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToGemini,
@@ -3481,6 +3640,46 @@ async fn original_errors_reach_usage_for_http_failed_json_and_sse() {
             details.message.as_deref(),
             Some("Invalid field: temperature")
         );
+    }
+}
+
+#[tokio::test]
+async fn malformed_sse_records_parser_diagnostics_before_output() {
+    let upstream = spawn(Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            Response::builder()
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(
+                    "event: synthetic-private\ndata: {\"synthetic-private\":\n\n",
+                ))
+                .unwrap()
+        }),
+    ))
+    .await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-test", "input":"synthetic input", "stream":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(response["error"]["code"], "stream_invalid");
+    let events = events.lock().unwrap();
+    assert!(!events.is_empty());
+    for event in events.iter() {
+        assert!(!event.success);
+        assert_eq!(event.error_category.as_deref(), Some("stream_invalid"));
+        assert!(event.ttft_ms.is_none());
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(200));
+        assert_eq!(details.error_type.as_deref(), Some("relay_stream_parser"));
+        let message = details.message.as_deref().unwrap();
+        assert!(message.contains("category=Eof"));
+        assert!(!message.contains("synthetic-private"));
     }
 }
 

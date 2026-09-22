@@ -25,24 +25,47 @@ pub(super) fn incompatible_routes(
     for route in runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
     {
         let validate = || {
-            if let Some(capability) =
-                runtime.route_capabilities(&route.candidate_id, &route.source_model)
-            {
-                if features.iter().any(|feature| {
-                    capability.features.get(feature) == Some(&CapabilityStatus::Unsupported)
-                }) {
-                    return Err(AdapterError::parameter_unsupported());
+            // Reference model capabilities constrain conversions, never the
+            // participant's optional /models fields. Native payloads pass through.
+            if !route.adapter.is_passthrough() {
+                let capability = runtime.model_capabilities(&route.source_model);
+                let supported = capability.protocol_features();
+                if let Some(feature) = features
+                    .iter()
+                    .find(|feature| supported.get(feature) == Some(&CapabilityStatus::Unsupported))
+                {
+                    return Err(AdapterError::parameter_unsupported_for(match feature {
+                        ProtocolFeature::Streaming => "stream",
+                        ProtocolFeature::FunctionTools => "tools",
+                        ProtocolFeature::ToolChoice => "tool_choice",
+                        ProtocolFeature::StructuredOutput => "response_format",
+                        ProtocolFeature::Reasoning => "reasoning",
+                        ProtocolFeature::Images => "input.image",
+                        _ => "input",
+                    }));
                 }
                 if effort.as_ref().is_some_and(|effort| {
-                    !capability.reasoning_efforts.is_empty()
+                    !capability.reasoning_effort_levels.is_empty()
                         && !capability
-                            .reasoning_efforts
+                            .reasoning_effort_levels
                             .iter()
                             .any(|level| level.eq_ignore_ascii_case(effort))
                 }) {
                     return Err(AdapterError::reasoning_unsupported());
                 }
             }
+
+            // Native routes for these protocols do not inspect or rewrite the
+            // request during preparation. Avoid cloning a large request for
+            // every candidate; execution still prepares it after reservation.
+            // Messages must validate its configured cache TTL before admission.
+            if route.adapter.is_passthrough() && client != WireApi::Messages {
+                return route
+                    .adapter
+                    .validate(client, route.reasoning_mode)
+                    .map(drop);
+            }
+
             let previous = if route.adapter.uses_local_continuation_state() {
                 request
                     .get("previous_response_id")
@@ -58,7 +81,7 @@ pub(super) fn incompatible_routes(
             let mut body = request.clone();
             tier_policy.prepare_for_candidate(
                 &mut body,
-                runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model),
+                tier_policy.select_for_model(runtime, &route.source_model),
                 client,
             );
             route
@@ -99,24 +122,26 @@ fn requested_features(request: &Value, stream: bool) -> Vec<ProtocolFeature> {
     {
         result.push(ProtocolFeature::FunctionTools);
     }
-    if request.get("tool_choice").is_some() || request.get("toolConfig").is_some() {
+    let present = |value: Option<&Value>| value.is_some_and(|v| !v.is_null());
+    if present(request.get("tool_choice")) || present(request.get("toolConfig")) {
         result.push(ProtocolFeature::ToolChoice);
     }
-    if request.get("response_format").is_some()
-        || request.pointer("/text/format").is_some()
-        || request.pointer("/output_config/format").is_some()
+    let structured = |value: Option<&Value>| {
+        value.is_some_and(|v| !v.is_null() && v.get("type").and_then(Value::as_str) != Some("text"))
+    };
+    if structured(request.get("response_format"))
+        || structured(request.pointer("/text/format"))
+        || structured(request.pointer("/output_config/format"))
         || request
             .pointer("/generationConfig/responseMimeType")
-            .is_some()
+            .is_some_and(|v| !v.is_null() && v != "text/plain")
     {
         result.push(ProtocolFeature::StructuredOutput);
     }
-    if request.get("reasoning").is_some()
-        || request.get("reasoning_effort").is_some()
-        || request.get("thinking").is_some()
-        || request
-            .pointer("/generationConfig/thinkingConfig")
-            .is_some()
+    if present(request.pointer("/reasoning/effort"))
+        || present(request.get("reasoning_effort"))
+        || present(request.get("thinking"))
+        || present(request.pointer("/generationConfig/thinkingConfig"))
     {
         result.push(ProtocolFeature::Reasoning);
     }
@@ -164,5 +189,32 @@ fn has_image(value: &Value) -> bool {
                     .any(|key| object.get(*key).is_some_and(has_image))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn neutral_controls_do_not_require_unsupported_features() {
+        for request in [
+            json!({"reasoning":null,"tool_choice":null,"text":{"format":{"type":"text"}}}),
+            json!({"reasoning":{},"response_format":{"type":"text"}}),
+            json!({"generationConfig":{"responseMimeType":"text/plain","thinkingConfig":null}}),
+        ] {
+            assert_eq!(requested_features(&request, false), [ProtocolFeature::Text]);
+        }
+        let features = requested_features(
+            &json!({
+                "text":{"format":{"type":"json_schema","schema":{}}},
+                "reasoning":{"effort":"high"}
+            }),
+            true,
+        );
+        assert!(features.contains(&ProtocolFeature::StructuredOutput));
+        assert!(features.contains(&ProtocolFeature::Reasoning));
+        assert!(features.contains(&ProtocolFeature::Streaming));
     }
 }

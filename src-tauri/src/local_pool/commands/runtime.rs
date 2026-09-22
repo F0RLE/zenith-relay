@@ -743,9 +743,6 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         "gateway_started",
         &[("port", next_port.to_string())],
     );
-    if let Some(runtime) = state.gateway.runtime().await {
-        runtime.prefetch_source_model_metadata();
-    }
     crate::diagnostics::breadcrumb("gateway-runtime", "catalog_refresh_started", &[]);
     let result = profiles::refresh_active_client_catalogs(state).await;
     record_catalog_refresh_result(state, &result);
@@ -970,13 +967,7 @@ mod tests {
         };
         let valid = source("valid_source", valid_secret_ref.clone(), "gpt-valid");
         let mut invalid = source("invalid_source", invalid_secret_ref.clone(), "gpt-invalid");
-        invalid.protocol_bindings = vec![zenith_relay_core::SourceProtocolBinding {
-            wire_api: WireApi::Messages,
-            adapter: zenith_relay_core::SourceAdapter::ResponsesToMessages,
-            reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
-            cache_write_ttl: Default::default(),
-            model_ids: vec!["gpt-invalid".into()],
-        }];
+        invalid.base_url = "not-a-url".into();
         state
             .store()
             .unwrap()
@@ -997,7 +988,7 @@ mod tests {
                 .unwrap()
                 .source("invalid_source")
                 .and_then(|source| source.last_error.as_deref()),
-            Some("source_protocol_invalid")
+            Some("source_runtime_invalid")
         );
 
         secret_store::delete(&valid_secret_ref).unwrap();
@@ -1489,13 +1480,7 @@ mod tests {
         invalid_source.name = "Invalid".into();
         invalid_source.secret_ref = invalid_secret_ref.clone();
         invalid_source.models = vec!["invalid-model".into()];
-        invalid_source.protocol_bindings = vec![zenith_relay_core::SourceProtocolBinding {
-            wire_api: WireApi::Messages,
-            adapter: zenith_relay_core::SourceAdapter::ResponsesToMessages,
-            reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
-            cache_write_ttl: Default::default(),
-            model_ids: vec!["invalid-model".into()],
-        }];
+        invalid_source.base_url = "not-a-url".into();
         state
             .store()
             .unwrap()

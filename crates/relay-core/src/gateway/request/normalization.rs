@@ -1,26 +1,19 @@
-use crate::{runtime::DefaultServiceTier, WireApi};
+use crate::{runtime::DefaultServiceTier, GatewayRuntime, WireApi};
 use serde_json::{json, Map, Number, Value};
+
+mod schema;
 
 const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
 
 /// Owns the service-tier field for one routed request.
 ///
-/// Managed Codex requests use the pool's speed policy for native speed values
-/// (`fast`, `priority`, and `ultrafast`). Those values are route-local: a retry
-/// can land on a candidate with a different confirmed entitlement, so the
-/// value is recalculated for every attempt. Generic client-owned values such
-/// as `flex` remain opaque and are forwarded unchanged.
+/// Managed Codex requests prefer an explicit native speed selection over the
+/// pool default. Every retry preserves that selection, independently of source
+/// declarations. Generic client values such as `flex` remain opaque.
 #[derive(Clone, Debug)]
 pub(in crate::gateway) struct ServiceTierPolicy {
     owner: ServiceTierOwner,
     client_tier: Option<Value>,
-    pool_tier: Option<PoolServiceTier>,
-}
-
-#[derive(Clone, Debug)]
-struct PoolServiceTier {
-    requested: DefaultServiceTier,
-    original: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,20 +30,25 @@ impl ServiceTierPolicy {
                 .as_object()
                 .and_then(|object| object.get("service_tier"))
                 .cloned(),
-            pool_tier: None,
         }
     }
 
     pub(in crate::gateway) fn pool_owned(request: &Value) -> Self {
-        let incoming = request
-            .as_object()
-            .and_then(|object| object.get("service_tier"));
-        let pool_tier = incoming.and_then(parse_pool_service_tier);
         Self {
             owner: ServiceTierOwner::Pool,
-            client_tier: incoming.filter(|_| pool_tier.is_none()).cloned(),
-            pool_tier,
+            ..Self::client_owned(request)
         }
+    }
+
+    pub(in crate::gateway) fn select_for_model(
+        &self,
+        runtime: &GatewayRuntime,
+        model: &str,
+    ) -> DefaultServiceTier {
+        self.client_tier.as_ref().map_or_else(
+            || runtime.model_effective_service_tier(model),
+            |tier| DefaultServiceTier::from_storage_value(tier.as_str().unwrap_or_default()),
+        )
     }
 
     pub(in crate::gateway) fn prepare_for_candidate(
@@ -59,15 +57,13 @@ impl ServiceTierPolicy {
         default: DefaultServiceTier,
         wire_api: WireApi,
     ) {
-        // Remove the previous attempt's route-local value first. A fallback
-        // from Ultrafast/Fast to Standard must not inherit a stale tier.
+        // Restore the original client selection before each attempt. Pool
+        // defaults apply only when the client did not choose a tier.
         request
             .as_object_mut()
             .expect("request object was validated before routing")
             .remove("service_tier");
-        if let Some(pool_tier) = self.pool_tier.as_ref() {
-            apply_pool_service_tier(request, pool_tier, default);
-        } else if let Some(client_tier) = self.client_tier.as_ref() {
+        if let Some(client_tier) = self.client_tier.as_ref() {
             request
                 .as_object_mut()
                 .expect("request object was validated before routing")
@@ -91,45 +87,6 @@ impl ServiceTierPolicy {
         } else {
             DefaultServiceTier::Standard
         }
-    }
-}
-
-fn parse_pool_service_tier(value: &Value) -> Option<PoolServiceTier> {
-    let original = value.as_str()?.trim();
-    let requested = if original.eq_ignore_ascii_case("ultrafast") {
-        DefaultServiceTier::Ultrafast
-    } else if original.eq_ignore_ascii_case("priority") || original.eq_ignore_ascii_case("fast") {
-        DefaultServiceTier::Fast
-    } else {
-        return None;
-    };
-    Some(PoolServiceTier {
-        requested,
-        original: original.to_string(),
-    })
-}
-
-fn apply_pool_service_tier(
-    request: &mut Value,
-    pool_tier: &PoolServiceTier,
-    selected: DefaultServiceTier,
-) {
-    let value = match selected {
-        DefaultServiceTier::Standard => return,
-        // Preserve the client's native spelling when the selected route can
-        // satisfy the same tier. A downgrade/upgrade uses the canonical
-        // upstream spelling for the selected route.
-        DefaultServiceTier::Fast if pool_tier.requested == DefaultServiceTier::Fast => {
-            pool_tier.original.as_str()
-        }
-        DefaultServiceTier::Fast => "priority",
-        DefaultServiceTier::Ultrafast if pool_tier.requested == DefaultServiceTier::Ultrafast => {
-            pool_tier.original.as_str()
-        }
-        DefaultServiceTier::Ultrafast => "ultrafast",
-    };
-    if let Some(object) = request.as_object_mut() {
-        object.insert("service_tier".to_string(), Value::String(value.to_string()));
     }
 }
 
@@ -296,6 +253,11 @@ fn normalize_codex_tool(tool: &mut Value) {
 }
 
 fn normalize_codex_schema(value: &mut Value) {
+    schema::inline_local_refs(value);
+    normalize_codex_schema_nodes(value);
+}
+
+fn normalize_codex_schema_nodes(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
@@ -305,11 +267,11 @@ fn normalize_codex_schema(value: &mut Value) {
     // tool metadata or choice constraints.
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
         for property in properties.values_mut() {
-            normalize_codex_schema(property);
+            normalize_codex_schema_nodes(property);
         }
     }
     if let Some(items) = object.get_mut("items") {
-        normalize_codex_schema(items);
+        normalize_codex_schema_nodes(items);
     }
 
     let union_name = match (object.contains_key("oneOf"), object.contains_key("anyOf")) {
@@ -492,39 +454,19 @@ mod tests {
     }
 
     #[test]
-    fn pool_native_service_tier_is_recomputed_for_each_retry_candidate() {
-        let mut request = json!({"service_tier": "ultrafast"});
-        let policy = ServiceTierPolicy::pool_owned(&request);
-
-        // The first candidate has only the confirmed Fast entitlement, so an
-        // Ultrafast request must be downgraded to the native Fast spelling.
-        policy.prepare_for_candidate(&mut request, DefaultServiceTier::Fast, WireApi::Responses);
-        assert_eq!(request["service_tier"], "priority");
-        assert_eq!(
-            policy.effective_tier(&request, DefaultServiceTier::Fast, WireApi::Responses),
-            DefaultServiceTier::Fast
-        );
-
-        // A retry on a Standard-only candidate must remove the previous
-        // candidate's native value entirely.
-        policy.prepare_for_candidate(
-            &mut request,
-            DefaultServiceTier::Standard,
-            WireApi::Responses,
-        );
-        assert!(request.get("service_tier").is_none());
-        assert_eq!(
-            policy.effective_tier(&request, DefaultServiceTier::Standard, WireApi::Responses),
-            DefaultServiceTier::Standard
-        );
-
-        // If a later candidate confirms Ultrafast, restore the requested tier.
-        policy.prepare_for_candidate(
-            &mut request,
-            DefaultServiceTier::Ultrafast,
-            WireApi::Responses,
-        );
-        assert_eq!(request["service_tier"], "ultrafast");
+    fn explicit_speed_survives_retries_independently_of_pool_defaults() {
+        for value in ["fast", "priority", "ultrafast", "default", "flex"] {
+            let mut request = json!({"service_tier": value});
+            let policy = ServiceTierPolicy::pool_owned(&request);
+            for default in [
+                DefaultServiceTier::Fast,
+                DefaultServiceTier::Standard,
+                DefaultServiceTier::Ultrafast,
+            ] {
+                policy.prepare_for_candidate(&mut request, default, WireApi::Responses);
+                assert_eq!(request["service_tier"], value);
+            }
+        }
     }
 
     #[test]
@@ -634,6 +576,81 @@ mod tests {
         assert!(request["tools"][0]["parameters"]["properties"]["kind"]
             .get("oneOf")
             .is_none());
+    }
+
+    #[test]
+    fn codex_tool_schema_normalization_inlines_local_definitions() {
+        let mut request = json!({
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {
+                        "call": {
+                            "type": "object",
+                            "properties": {
+                                "localId": {"type": "string"}
+                            },
+                            "required": ["localId"]
+                        }
+                    },
+                    "properties": {
+                        "edits": {
+                            "anyOf": [{
+                                "type": "array",
+                                "items": {
+                                    "anyOf": [
+                                        {"type": "null"},
+                                        {"$ref": "#/$defs/call"}
+                                    ]
+                                }
+                            }]
+                        }
+                    }
+                }
+            }]
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), false);
+
+        let parameters = &request["tools"][0]["parameters"];
+        assert!(parameters.get("$defs").is_none());
+        assert_eq!(
+            parameters["properties"]["edits"]["anyOf"][0]["items"]["anyOf"][1],
+            json!({
+                "type": "object",
+                "properties": {
+                    "localId": {"type": "string"}
+                },
+                "required": ["localId"]
+            })
+        );
+    }
+
+    #[test]
+    fn codex_tool_schema_normalization_preserves_unresolved_local_refs() {
+        let mut request = json!({
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {
+                        "known": {"type": "string"}
+                    },
+                    "properties": {
+                        "value": {"$ref": "#/$defs/missing"}
+                    }
+                }
+            }]
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), false);
+
+        let parameters = &request["tools"][0]["parameters"];
+        assert_eq!(parameters["properties"]["value"]["$ref"], "#/$defs/missing");
+        assert_eq!(parameters["$defs"]["known"]["type"], "string");
     }
 
     #[test]

@@ -37,8 +37,35 @@ const LOCAL_KEY: &str = "p3-local-key";
 const MODEL: &str = "gpt-p3";
 const OFFICIAL_CODEX_MODEL: &str = "gpt-5.6-terra";
 
+fn reference_metadata_options() -> GatewayRuntimeOptions {
+    use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+    let mut records = serde_json::Map::new();
+    for model in [MODEL, OFFICIAL_CODEX_MODEL] {
+        records.insert(
+            format!("openai/{model}"),
+            json!({
+                "name": "Reference Model", "reasoning": true,
+                "reasoning_effort_levels": ["low", "high", "xhigh"],
+                "default_reasoning_effort": "high", "tool_call": true,
+                "modalities": {"input": ["text", "image"], "output": ["text"]}
+            }),
+        );
+    }
+    GatewayRuntimeOptions {
+        model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(
+            ModelMetadataCatalog::from_models_dev_json(&Value::Object(records).to_string())
+                .unwrap(),
+        )),
+        ..GatewayRuntimeOptions::default()
+    }
+}
+
+#[path = "support/client_compatibility.rs"]
+mod client_compatibility;
 #[path = "support/compaction.rs"]
 mod compaction;
+#[path = "support/long_requests.rs"]
+mod long_requests;
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -48,6 +75,7 @@ struct ObservedRequest {
     originator: Option<String>,
     responses_lite: Option<String>,
     session_id: Option<String>,
+    turn_state: Option<String>,
     body: Value,
 }
 
@@ -723,13 +751,12 @@ async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
 }
 
 #[tokio::test]
-async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy() {
+async fn account_catalog_uses_reference_metadata_and_preserves_native_transport() {
     let mut upstream_catalog = default_upstream_model_catalog();
     upstream_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     upstream_catalog["models"][0]["display_name"] = Value::String("GPT-5.6 Terra".to_string());
-    // The account still owns this model even while the upstream API capability
-    // flag is false. Relay must retain it in the account catalog and preserve
-    // its native manifest, rather than advertising a hardcoded fallback.
+    // Inventory and transport belong to the account. Its capability fields
+    // cannot replace reference semantics or remove an inventoried model.
     upstream_catalog["models"][0]["supported_in_api"] = Value::Bool(false);
     upstream_catalog["models"][0]["default_reasoning_level"] = Value::String("ultra".to_string());
     upstream_catalog["models"][0]["supported_reasoning_levels"] = json!([
@@ -750,13 +777,12 @@ async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
         GatewayRuntimeOptions {
-            // A saved API/pool policy must not rewrite a native ChatGPT
-            // account's upstream Codex catalog.
+            // A saved pool selection narrows the reference modes on every row.
             model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
                 OFFICIAL_CODEX_MODEL.to_string(),
                 vec!["low".to_string()],
             )]),
-            ..GatewayRuntimeOptions::default()
+            ..reference_metadata_options()
         },
     )
     .await;
@@ -778,41 +804,31 @@ async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy
         .unwrap()
         .iter()
         .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL));
-    // Native ChatGPT rows retain the account-owned catalog controls.
+    // Native ChatGPT rows retain account transport, with shared model semantics.
     assert!(catalog["models"][0].get("service_tiers").is_some());
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+    assert_eq!(catalog["models"][0]["supported_in_api"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
-    assert_eq!(catalog["models"][0]["default_reasoning_level"], "ultra");
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
         json!([
-            {"effort": "low", "description": "Low"},
-            {"effort": "high", "description": "High"},
-            {"effort": "xhigh", "description": "Extra high"},
-            {"effort": "ultra", "description": "Ultra"}
+            {"effort": "low", "description": "low"}
         ])
     );
     assert_eq!(
         catalog["models"][0]["supports_reasoning_summary_parameter"],
-        true
+        false
     );
-    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
-    assert_eq!(
-        catalog["models"][0]["default_reasoning_summary"],
-        "detailed"
-    );
+    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+    assert_eq!(catalog["models"][0]["default_reasoning_summary"], "none");
     assert_eq!(
         gateway
             .runtime
             .as_ref()
             .unwrap()
-            .source_declared_reasoning_levels(OFFICIAL_CODEX_MODEL),
-        Some(vec![
-            "low".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-            "ultra".to_string()
-        ])
+            .model_reasoning_levels(OFFICIAL_CODEX_MODEL),
+        ["low", "high", "xhigh"]
     );
 
     // The pool may classify a tier for quota telemetry, but must never
@@ -887,7 +903,7 @@ async fn official_codex_model_keeps_native_reasoning_metadata_outside_api_policy
 }
 
 #[tokio::test]
-async fn pool_catalog_combines_native_metadata_from_each_available_account() {
+async fn pool_catalog_combines_account_inventory_with_reference_semantics() {
     let (first_upstream, first_state) =
         spawn_upstream_with_catalog(Vec::new(), json!({"models": []})).await;
     let (second_upstream, second_state) =
@@ -895,7 +911,7 @@ async fn pool_catalog_combines_native_metadata_from_each_available_account() {
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "first-account", "first-access").await;
     register_ready(&authority, "second-account", "second-access").await;
-    let (gateway, _, _, _) = spawn_mixed_gateway(
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![
             account("first-account", "provider-first", &first_upstream, 100),
@@ -905,6 +921,7 @@ async fn pool_catalog_combines_native_metadata_from_each_available_account() {
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        reference_metadata_options(),
     )
     .await;
 
@@ -938,13 +955,13 @@ async fn pool_catalog_combines_native_metadata_from_each_available_account() {
         ["low", "high", "xhigh"]
     );
     assert!(model.get("service_tiers").is_some());
-    assert_eq!(model["supports_reasoning_summaries"], true);
+    assert_eq!(model["supports_reasoning_summaries"], false);
     assert_eq!(first_state.requests.lock().unwrap().len(), 1);
     assert_eq!(second_state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
+async fn pool_catalog_keeps_transport_owned_and_model_semantics_stable_across_accounts() {
     let mut first_catalog = default_upstream_model_catalog();
     first_catalog["models"][0]["display_name"] = Value::String("GPT First Account".into());
     first_catalog["models"][0]["default_reasoning_level"] = Value::String("low".into());
@@ -971,7 +988,7 @@ async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "first-account", "first-access").await;
     register_ready(&authority, "second-account", "second-access").await;
-    let (gateway, _, _, _) = spawn_mixed_gateway(
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![
             account("first-account", "provider-first", &first_upstream, 100),
@@ -981,6 +998,7 @@ async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        reference_metadata_options(),
     )
     .await;
     let url = format!(
@@ -1004,17 +1022,17 @@ async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
         .iter()
         .find(|model| model["slug"] == MODEL)
         .unwrap();
-    assert_eq!(first_model["display_name"], "GPT First Account");
-    assert_eq!(first_model["default_reasoning_level"], "low");
+    assert_eq!(first_model["display_name"], "Reference Model");
+    assert_eq!(first_model["default_reasoning_level"], "high");
     assert_eq!(
         first_model["supported_reasoning_levels"]
             .as_array()
             .unwrap()
             .len(),
-        1
+        3
     );
     assert_eq!(first_model["use_responses_lite"], false);
-    assert_eq!(first_model["supports_parallel_tool_calls"], false);
+    assert_eq!(first_model["supports_parallel_tool_calls"], true);
 
     // If the first account is temporarily unreachable, the stale manifest is
     // retained only for that account and cannot overwrite the live second
@@ -1035,19 +1053,91 @@ async fn pool_catalog_keeps_same_slug_metadata_bound_to_one_oauth_account() {
         .iter()
         .find(|model| model["slug"] == MODEL)
         .unwrap();
-    assert_eq!(second_model["display_name"], "GPT Second Account");
+    assert_eq!(second_model["display_name"], first_model["display_name"]);
     assert_eq!(second_model["default_reasoning_level"], "high");
     assert_eq!(
         second_model["supported_reasoning_levels"]
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
     );
     assert_eq!(second_model["use_responses_lite"], true);
     assert_eq!(second_model["supports_parallel_tool_calls"], true);
+    assert_eq!(
+        second_model["supported_reasoning_levels"],
+        first_model["supported_reasoning_levels"]
+    );
+    assert_eq!(second_model["service_tiers"], first_model["service_tiers"]);
     assert_eq!(first_state.requests.lock().unwrap().len(), 1);
     assert_eq!(second_state.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn pool_catalog_fetches_account_manifests_concurrently_without_changing_rank() {
+    let barrier = Arc::new(Barrier::new(2));
+    let first_arrived = Arc::new(AtomicUsize::new(0));
+    let mut upstreams = Vec::new();
+    for index in 0..2 {
+        let barrier = barrier.clone();
+        let first_arrived = first_arrived.clone();
+        let app = Router::new().route(
+            "/v1/models",
+            get(move || {
+                let barrier = barrier.clone();
+                let first_arrived = first_arrived.clone();
+                async move {
+                    first_arrived.fetch_add(1, Ordering::SeqCst);
+                    // A sequential implementation cannot cross this barrier.
+                    barrier.wait().await;
+                    if index == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    let mut catalog = default_upstream_model_catalog();
+                    catalog["models"][0]["use_responses_lite"] = Value::Bool(index == 0);
+                    Json(catalog)
+                }
+            }),
+        );
+        upstreams.push(spawn(app).await);
+    }
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "account-a", "synthetic-a").await;
+    register_ready(&authority, "account-b", "synthetic-b").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
+        Vec::new(),
+        vec![
+            account("account-a", "provider-a", &upstreams[0], 100),
+            account("account-b", "provider-b", &upstreams[1], 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+        reference_metadata_options(),
+    )
+    .await;
+    let request = async {
+        reqwest::Client::new()
+            .get(format!(
+                "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+                gateway.base_url
+            ))
+            .bearer_auth(LOCAL_KEY)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    let catalog = tokio::time::timeout(Duration::from_secs(3), request)
+        .await
+        .unwrap();
+    assert_eq!(first_arrived.load(Ordering::SeqCst), 2);
+    assert_eq!(catalog["models"][0]["use_responses_lite"], true);
 }
 
 #[tokio::test]
@@ -1059,7 +1149,7 @@ async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_c
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "first-account", "first-access").await;
     register_ready(&authority, "second-account", "second-access").await;
-    let (gateway, _, _, _) = spawn_mixed_gateway(
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![
             account("first-account", "provider-first", &first_upstream, 100),
@@ -1069,6 +1159,7 @@ async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_c
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        reference_metadata_options(),
     )
     .await;
     let url = format!(
@@ -1106,7 +1197,7 @@ async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_c
 }
 
 #[tokio::test]
-async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
+async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model() {
     let (source_upstream, source_state) = spawn_upstream_with_catalog(
         Vec::new(),
         json!({
@@ -1121,11 +1212,13 @@ async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
     let mut native_catalog = default_upstream_model_catalog();
     native_catalog["models"][0]["context_window"] = 128_000.into();
     native_catalog["models"][0]["max_context_window"] = 120_000.into();
-    native_catalog["models"][0]["input_modalities"] = json!(["text"]);
+    native_catalog["models"][0]["input_modalities"] = json!({"invalid":"participant value"});
+    native_catalog["models"][0]["supported_reasoning_levels"] = json!("malformed participant enum");
+    native_catalog["models"][0]["display_name"] = json!([]);
     let (account_upstream, account_state) =
         spawn_upstream_with_catalog(Vec::new(), native_catalog).await;
     let authority = ready_authority("relay-account", "account-access").await;
-    let (gateway, _, _, _) = spawn_mixed_gateway(
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         vec![source(
             "generic-source",
             &source_upstream,
@@ -1142,6 +1235,7 @@ async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        reference_metadata_options(),
     )
     .await;
 
@@ -1176,12 +1270,13 @@ async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
     );
     assert!(model.get("service_tiers").is_some());
     assert_eq!(model["use_responses_lite"], true);
-    assert_eq!(model["supports_reasoning_summaries"], true);
-    assert_eq!(model["input_modalities"], json!(["text"]));
-    assert_eq!(model["context_window"], 128_000);
-    assert_eq!(model["max_context_window"], 120_000);
+    assert_eq!(model["supports_reasoning_summaries"], false);
+    assert_eq!(model["input_modalities"], json!(["text", "image"]));
+    assert!(model.get("context_window").is_none());
+    assert!(model.get("max_context_window").is_none());
 
     let source_requests_before = source_state.requests.lock().unwrap().len();
+    assert_eq!(source_requests_before, 0);
     let account_requests_before = account_state.requests.lock().unwrap().len();
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1366,7 +1461,12 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
         StatusCode::OK
     );
 
-    assert!(source_state.requests.lock().unwrap().is_empty());
+    assert!(source_state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.path == "/v1/models"));
     let requests = account_state.requests.lock().unwrap();
     let response_requests = requests
         .iter()
@@ -1595,7 +1695,12 @@ async fn mixed_websocket_routes_disable_automatic_lite_but_preserve_explicit_cli
         "response.completed"
     );
 
-    assert!(source_state.requests.lock().unwrap().is_empty());
+    assert!(source_state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.path == "/v1/models"));
     let headers = account_state.headers.lock().unwrap();
     assert_eq!(headers.len(), 2);
     assert!(headers[0]
@@ -7550,6 +7655,7 @@ async fn upstream(
         originator: header(&headers, "originator"),
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         session_id: header(&headers, "x-session-id"),
+        turn_state: header(&headers, "x-codex-turn-state"),
         body: body_value.clone(),
     });
     if let Some(request_barrier) = &state.request_barrier {
@@ -7637,6 +7743,7 @@ async fn held_stream_upstream(
         originator: header(&headers, "originator"),
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         session_id: header(&headers, "x-session-id"),
+        turn_state: header(&headers, "x-codex-turn-state"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
     held_stream_response(state.release)
@@ -7657,6 +7764,7 @@ async fn held_then_json_upstream(
             originator: header(&headers, "originator"),
             responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
             session_id: header(&headers, "x-session-id"),
+            turn_state: header(&headers, "x-codex-turn-state"),
             body: serde_json::from_slice(&body).unwrap_or(Value::Null),
         });
         requests.len()
@@ -7952,6 +8060,7 @@ async fn upstream_models(
         originator: header(&headers, "originator"),
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         session_id: header(&headers, "x-session-id"),
+        turn_state: header(&headers, "x-codex-turn-state"),
         body: json!({ "client_version": client_version }),
     });
     let status = if client_version == CODEX_MODELS_CLIENT_VERSION {

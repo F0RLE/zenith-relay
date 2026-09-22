@@ -105,22 +105,11 @@ pub(in crate::gateway) enum TerminalOutcome {
 }
 
 pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
-    let mut data = Vec::new();
-    let mut event_name = None;
-    for line in event.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if let Some(value) = line.strip_prefix(b"event:") {
-            event_name = std::str::from_utf8(value.trim_ascii()).ok();
-            continue;
-        }
-        let Some(value) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push(b'\n');
-        }
-        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
-    }
+    let data = crate::protocol::sse_data(event);
+    let event_name = crate::protocol::sse_lines(event)
+        .filter_map(|line| line.strip_prefix(b"event:"))
+        .last()
+        .and_then(|value| std::str::from_utf8(value.trim_ascii()).ok());
     if data.is_empty() {
         return TerminalEvent::default();
     }
@@ -146,25 +135,29 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             raw_data: None,
         };
     }
-    let Ok(value) = serde_json::from_slice::<Value>(&data) else {
-        // Responses context compaction is an opaque provider-owned stream. A
-        // few upstream implementations send its delta as a raw/encrypted
-        // payload even though ordinary Responses events are JSON. It must be
-        // passed through unchanged; rejecting it here turns a valid ongoing
-        // compaction into the misleading 502 `stream_invalid` error.
-        if event_name.is_some_and(is_opaque_compaction_event) {
+    let value = match serde_json::from_slice::<Value>(&data) {
+        Ok(value) => value,
+        Err(error) => {
+            // Responses context compaction is an opaque provider-owned stream. A
+            // few upstream implementations send its delta as a raw/encrypted
+            // payload even though ordinary Responses events are JSON. It must be
+            // passed through unchanged; rejecting it here turns a valid ongoing
+            // compaction into the misleading 502 `stream_invalid` error.
+            if event_name.is_some_and(is_opaque_compaction_event) {
+                return TerminalEvent {
+                    has_data: true,
+                    valid: true,
+                    is_compaction: true,
+                    raw_data: Some(data),
+                    ..TerminalEvent::default()
+                };
+            }
             return TerminalEvent {
                 has_data: true,
-                valid: true,
-                is_compaction: true,
-                raw_data: Some(data),
+                upstream_error: Some(super::diagnostics::invalid_event(event, &data, &error)),
                 ..TerminalEvent::default()
             };
         }
-        return TerminalEvent {
-            has_data: true,
-            ..TerminalEvent::default()
-        };
     };
     let event_type = value.get("type").and_then(Value::as_str);
     let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
@@ -416,6 +409,34 @@ fn gemini_candidate_has_output_delta(candidate: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_json_keeps_data_lines_with_all_sse_line_endings() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let frame = format!("event: response.output_text.delta{ending}data: {{\"type\":{ending}data: \"response.output_text.delta\",{ending}data: \"delta\":\"synthetic\"}}{ending}{ending}");
+            let event = parse_sse_event(frame.as_bytes());
+            assert!(event.has_data && event.valid && event.semantic_output);
+            assert_eq!(event.payload.unwrap()["delta"], "synthetic");
+        }
+    }
+
+    #[test]
+    fn repeated_events_with_mixed_cr_separators_are_not_one_json_payload() {
+        let mut bytes = Vec::new();
+        for index in 0..5 {
+            let ending = if index == 4 { "\n\n" } else { "\n\r" };
+            bytes.extend_from_slice(format!("event: response.created\ndata: {{\"type\":\"response.created\",\"sequence_number\":{index}}}{ending}").as_bytes());
+        }
+        let mut count = 0;
+        while let Some(end) = sse_event_end(&bytes) {
+            let event = parse_sse_event(&bytes.drain(..end).collect::<Vec<_>>());
+            assert!(event.valid);
+            assert_eq!(event.payload.unwrap()["sequence_number"], count);
+            count += 1;
+        }
+        assert_eq!(count, 5);
+        assert!(bytes.is_empty());
+    }
 
     #[test]
     fn raw_responses_compaction_delta_is_forwarded_without_stream_invalid() {

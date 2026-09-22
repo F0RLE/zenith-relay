@@ -59,7 +59,8 @@ impl SourceSummary {
     /// expose more than one connector route for the same client protocol,
     /// such as native Responses and a Responses-to-Messages bridge.
     ///
-    /// Legacy records without bindings retain their single `wire_api` surface.
+    /// Persisted legacy bindings do not restrict the automatic client surface.
+    /// Relay selects a native upstream when available and otherwise adapts.
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
         self.protocol_config
             .models_for(

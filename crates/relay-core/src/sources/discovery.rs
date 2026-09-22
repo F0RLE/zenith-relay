@@ -1,7 +1,7 @@
 use super::{
     capabilities::catalog_capabilities, normalize_source_protocol_bindings, service_protocol,
-    ModelEndpointCapability, ProtocolSelectionMode, ProviderSource, SourceAdapter, SourceConnector,
-    SourceProtocolBinding, SourceProtocolBindingKey, SourceProtocolConfig,
+    ModelEndpointCapability, ProviderSource, SourceAdapter, SourceConnector, SourceProtocolBinding,
+    SourceProtocolBindingKey, SourceProtocolConfig,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 mod pricing;
-
 use pricing::detected_model_price;
 
 pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<String>> {
@@ -36,9 +35,9 @@ pub async fn discover_source_models_for_protocol_bindings(
 /// binding after its explicit allow-list is applied. A successful automatic
 /// source-wide binding is preserved with an empty `model_ids`; `models` still
 /// holds its current discovered catalog. A successful `/models` response is
-/// catalog evidence, not a completion capability probe; operators must assign
-/// a model only to routes the upstream documents or has safely verified. A
-/// valid empty response is still success and is represented by a binding with
+/// catalog evidence, not a completion capability probe. Runtime routes are
+/// resolved automatically from the catalog and protocol hints. A valid empty
+/// response is still success and is represented by a binding with
 /// an empty `model_ids` list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceDiscovery {
@@ -60,20 +59,16 @@ pub async fn discover_source_with_protocol_config(
     bindings: &[SourceProtocolBinding],
     config: &SourceProtocolConfig,
 ) -> Result<SourceDiscovery> {
-    if config.mode == ProtocolSelectionMode::Manual {
-        return discover_source_models_and_protocol_bindings(source, bindings).await;
-    }
     let mut catalog_source = source.clone();
     catalog_source.wire_api = config
         .endpoint_hint
         .or_else(|| super::endpoint_url_protocol(&source.base_url))
         .or_else(|| service_protocol(&source.base_url))
         .unwrap_or(source.wire_api);
-    let mut discovery = discover_source_models_and_protocol_bindings(&catalog_source, &[]).await?;
-    // Stored bindings are manual assignments. Automatic routes are computed
-    // from evidence, and must never replace assignments when changing modes.
-    discovery.protocol_bindings = bindings.to_vec();
-    Ok(discovery)
+    // Stored bindings are discovery hints for providers that expose distinct
+    // catalogs per physical protocol. Runtime routes are still recomputed from
+    // the resulting catalog and capability evidence.
+    discover_source_models_and_protocol_bindings(&catalog_source, bindings).await
 }
 
 /// Discovers models independently for every configured binding.
@@ -278,10 +273,29 @@ async fn discover_protocol_bindings_with_client(
         successful_responses += 1;
         capabilities.extend(catalog_capabilities(&body, crate::unix_time_ms()));
 
-        // Inventory is independent of route allow-lists and compatibility.
-        for (model, _) in &upstream_models {
-            if discovered_model_keys.insert(model.to_ascii_lowercase()) {
+        // Inventory and price metadata are independent of legacy route lists.
+        for (model, price) in &upstream_models {
+            let model_key = model.to_ascii_lowercase();
+            if discovered_model_keys.insert(model_key.clone()) {
                 discovered_models.push(model.clone());
+            }
+            let Some(price) = price else {
+                continue;
+            };
+            if conflicting_model_prices.contains(&model_key) {
+                continue;
+            }
+            if let Some(existing) = detected_model_prices.get(&model_key) {
+                if existing != price {
+                    if let Some(merged) = merge_route_model_price(*existing, *price) {
+                        detected_model_prices.insert(model_key, merged);
+                    } else {
+                        detected_model_prices.remove(&model_key);
+                        conflicting_model_prices.insert(model_key);
+                    }
+                }
+            } else {
+                detected_model_prices.insert(model_key, *price);
             }
         }
 
@@ -330,30 +344,6 @@ async fn discover_protocol_bindings_with_client(
                     .is_none_or(|allowed| allowed.contains(&model.to_ascii_lowercase()))
             })
             .collect::<Vec<_>>();
-        for (model, price) in &models {
-            let model_key = model.to_ascii_lowercase();
-            if discovered_model_keys.insert(model_key.clone()) {
-                discovered_models.push(model.clone());
-            }
-            let Some(price) = price else {
-                continue;
-            };
-            if conflicting_model_prices.contains(&model_key) {
-                continue;
-            }
-            if let Some(existing) = detected_model_prices.get(&model_key) {
-                if existing != price {
-                    if let Some(merged) = merge_route_model_price(*existing, *price) {
-                        detected_model_prices.insert(model_key, merged);
-                    } else {
-                        detected_model_prices.remove(&model_key);
-                        conflicting_model_prices.insert(model_key);
-                    }
-                }
-            } else {
-                detected_model_prices.insert(model_key, *price);
-            }
-        }
         discovered_bindings.push(SourceProtocolBinding {
             wire_api: binding.wire_api,
             adapter: binding.adapter,

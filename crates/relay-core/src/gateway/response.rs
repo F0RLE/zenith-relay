@@ -332,9 +332,10 @@ pub(super) fn completed_upstream_response(
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
         if terminal.has_data && !terminal.valid {
-            return Err(Box::new(
-                AttemptFailure::stream(error_codes::STREAM_INVALID).into(),
-            ));
+            return Err(Box::new(StreamBootstrapFailure {
+                upstream_error: terminal.upstream_error,
+                ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
+            }));
         }
         if let Some(item) = terminal.output_item {
             output.push(item);

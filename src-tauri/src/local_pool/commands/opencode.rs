@@ -590,16 +590,20 @@ pub async fn launch_opencode_source(
 }
 
 fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, LocalPoolError> {
-    let mut seen = HashSet::new();
-    let models = source
+    let native_models = source
         .effective_protocol_bindings()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
         .into_iter()
         .filter(|binding| binding.adapter == SourceAdapter::Native)
         .flat_map(|binding| binding.model_ids)
-        .filter(|model| !model.trim().is_empty())
-        .filter(|model| seen.insert(model.clone()))
-        .collect::<Vec<_>>();
+        .map(|model| model.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let models = zenith_relay_core::normalize_model_ids(
+        source
+            .models
+            .iter()
+            .filter(|model| native_models.contains(&model.to_ascii_lowercase())),
+    );
     if models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -662,8 +666,8 @@ pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<b
 mod tests {
     use super::{
         apply_managed_provider, managed_provider, model_ids, normalize_snapshot_name, parse_jsonc,
-        remove_managed_configuration, source_opencode_models, ErrorCode, ProviderSourceRecord,
-        SourceAdapter, PROVIDER_ID, PROVIDER_NPM,
+        remove_managed_configuration, source_opencode_models, ProviderSourceRecord, SourceAdapter,
+        PROVIDER_ID, PROVIDER_NPM,
     };
     use serde_json::{json, Map, Value};
     use std::collections::BTreeMap;
@@ -826,7 +830,7 @@ mod tests {
             json!(["text", "image"])
         );
         assert_eq!(pooled["unknown"]["reasoning"], false);
-        assert_eq!(pooled["unknown"]["tool_call"], false);
+        assert_eq!(pooled["unknown"]["tool_call"], true);
         assert!(pooled["unknown"].get("limit").is_none());
         models[0].reasoning_configurable = true;
         models[0].reasoning_allowed_levels = vec!["high".into(), "max".into()];
@@ -860,16 +864,26 @@ mod tests {
 
         assert_eq!(
             source_opencode_models(&source).unwrap(),
-            ["gpt-test", "gpt-other", "chat-only"]
+            ["gpt-test", "gpt-other", "chat-only", "claude"]
         );
     }
 
     #[test]
-    fn direct_source_models_reject_bridge_only_routes() {
+    fn direct_source_models_use_the_native_upstream_of_legacy_bridges() {
         let mut binding = SourceProtocolBinding::legacy(WireApi::Responses, &["claude".into()]);
         binding.adapter = SourceAdapter::ResponsesToMessages;
-        let error = source_opencode_models(&source(vec![binding])).unwrap_err();
-        assert_eq!(error.code, ErrorCode::Conflict);
+        let source = source(vec![binding]);
+        assert_eq!(
+            source_opencode_models(&source).unwrap(),
+            ["gpt-test", "gpt-other", "chat-only", "claude"]
+        );
+        assert!(source
+            .effective_protocol_bindings()
+            .unwrap()
+            .iter()
+            .any(|route| {
+                route.wire_api == WireApi::Messages && route.adapter == SourceAdapter::Native
+            }));
     }
 
     #[test]

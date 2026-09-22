@@ -1,23 +1,8 @@
-use super::{normalize_source_protocol_bindings, SourceProtocolBinding, WireApi};
+use super::{SourceProtocolBinding, WireApi};
 use crate::{CacheWriteTtl, MessagesReasoningMode, Result, SourceAdapter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
-
-/// Absence in old records is deliberately manual: migration must not invent routes.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProtocolSelectionMode {
-    Auto,
-    #[default]
-    Manual,
-}
-
-impl ProtocolSelectionMode {
-    pub fn is_manual(&self) -> bool {
-        *self == Self::Manual
-    }
-}
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,8 +59,6 @@ pub struct ModelEndpointCapability {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceProtocolConfig {
-    #[serde(default)]
-    pub mode: ProtocolSelectionMode,
     /// Incremented whenever the address or credential changes. Probe results
     /// are applied only to the revision they actually tested.
     #[serde(default)]
@@ -91,77 +74,79 @@ impl SourceProtocolConfig {
         &self,
         base_url: &str,
         models: &[String],
-        manual_bindings: &[SourceProtocolBinding],
-        fallback: WireApi,
     ) -> Vec<ModelEndpointCapability> {
         let hint = self
             .endpoint_hint
             .or_else(|| endpoint_url_protocol(base_url));
         let profile = service_protocol(base_url);
-        let manual = if self.mode == ProtocolSelectionMode::Manual {
-            normalize_source_protocol_bindings(manual_bindings.to_vec(), fallback, models)
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let mut indexed = BTreeMap::<_, Vec<_>>::new();
+        for entry in &self.capabilities {
+            if entry.status == CapabilityStatus::Unknown
+                && (entry.origin != CapabilityOrigin::Catalog
+                    || (entry.features.is_empty() && entry.reasoning_efforts.is_empty()))
+            {
+                continue;
+            }
+            // Failed legacy probes are diagnostic only; they cannot override
+            // catalog support or remove an otherwise configured model.
+            if entry.origin == CapabilityOrigin::GenerationProbe
+                && (!entry.status.available()
+                    || entry.features.get(&ProtocolFeature::Text)
+                        == Some(&CapabilityStatus::Unsupported))
+            {
+                continue;
+            }
+            indexed
+                .entry((entry.model_id.to_ascii_lowercase(), entry.upstream_wire_api))
+                .or_default()
+                .push(entry);
+        }
+        for observations in indexed.values_mut() {
+            observations.sort_by_key(|entry| {
+                (
+                    entry.origin == CapabilityOrigin::GenerationProbe,
+                    entry.checked_at_ms,
+                )
+            });
+        }
         let mut result = Vec::new();
         for model in models {
+            let model_key = model.to_ascii_lowercase();
             for upstream in WireApi::ALL {
-                let mut observations = self
-                    .capabilities
-                    .iter()
-                    .filter(|entry| {
-                        entry.model_id.eq_ignore_ascii_case(model)
-                            && entry.upstream_wire_api == upstream
-                            && entry.status != CapabilityStatus::Unknown
-                    })
-                    .collect::<Vec<_>>();
-                observations.sort_by_key(|entry| {
-                    (
-                        entry.origin == CapabilityOrigin::GenerationProbe,
-                        entry.checked_at_ms,
-                    )
-                });
-                let declaration = if self.mode == ProtocolSelectionMode::Manual {
-                    manual
-                        .iter()
-                        .any(|route| {
-                            route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream
-                                && route
-                                    .model_ids
-                                    .iter()
-                                    .any(|id| id.eq_ignore_ascii_case(model))
-                        })
-                        .then_some(CapabilityOrigin::Manual)
-                } else if hint == Some(upstream) {
+                let observations = indexed
+                    .get(&(model_key.clone(), upstream))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let declaration = if hint == Some(upstream) {
                     Some(CapabilityOrigin::EndpointUrl)
                 } else if hint.is_none() && profile == Some(upstream) {
                     Some(CapabilityOrigin::ServiceProfile)
                 } else {
                     None
                 };
-                let mut merged = observations
-                    .first()
-                    .map(|entry| (*entry).clone())
-                    .or_else(|| {
-                        declaration.map(|origin| ModelEndpointCapability {
-                            model_id: model.clone(),
-                            upstream_wire_api: upstream,
-                            status: CapabilityStatus::Declared,
-                            origin,
-                            checked_at_ms: 0,
-                            features: BTreeMap::from([(
-                                ProtocolFeature::Text,
-                                CapabilityStatus::Declared,
-                            )]),
-                            reasoning_efforts: vec![],
-                        })
-                    });
+                let mut merged = declaration
+                    .map(|origin| ModelEndpointCapability {
+                        model_id: model.clone(),
+                        upstream_wire_api: upstream,
+                        status: CapabilityStatus::Declared,
+                        origin,
+                        checked_at_ms: 0,
+                        features: BTreeMap::from([(
+                            ProtocolFeature::Text,
+                            CapabilityStatus::Declared,
+                        )]),
+                        reasoning_efforts: vec![],
+                    })
+                    .or_else(|| observations.first().map(|entry| (*entry).clone()));
                 if let Some(entry) = merged.as_mut() {
                     for observation in observations {
-                        entry.status = observation.status;
-                        entry.origin = observation.origin;
-                        entry.checked_at_ms = observation.checked_at_ms;
+                        // Feature-only catalog rows do not establish or erase
+                        // the protocol selected by an endpoint declaration.
+                        if observation.status != CapabilityStatus::Unknown {
+                            entry.status = observation.status;
+                            entry.origin = observation.origin;
+                            entry.checked_at_ms = observation.checked_at_ms;
+                        }
                         entry.features.extend(observation.features.clone());
                         if !observation.reasoning_efforts.is_empty() {
                             entry.reasoning_efforts = observation.reasoning_efforts.clone();
@@ -174,15 +159,9 @@ impl SourceProtocolConfig {
         result
     }
 
-    pub fn with_effective_capabilities(
-        &self,
-        base_url: &str,
-        models: &[String],
-        bindings: &[SourceProtocolBinding],
-        fallback: WireApi,
-    ) -> Self {
+    pub fn with_effective_capabilities(&self, base_url: &str, models: &[String]) -> Self {
         Self {
-            capabilities: self.effective_capabilities(base_url, models, bindings, fallback),
+            capabilities: self.effective_capabilities(base_url, models),
             ..self.clone()
         }
     }
@@ -196,18 +175,23 @@ impl SourceProtocolConfig {
         client: Option<WireApi>,
     ) -> Result<Vec<String>> {
         let routes = self.resolve(base_url, models, bindings, fallback)?;
+        let routed_models = routes
+            .into_iter()
+            .filter(|route| client.is_none_or(|client| route.wire_api == client))
+            .flat_map(|route| route.model_ids)
+            .map(|model| model.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
         Ok(crate::normalize_model_ids(
-            routes
-                .into_iter()
-                .filter(|route| client.is_none_or(|client| route.wire_api == client))
-                .flat_map(|route| route.model_ids)
+            models
+                .iter()
+                .filter(|model| routed_models.contains(&model.to_ascii_lowercase()))
+                .cloned()
                 .collect::<Vec<_>>(),
         ))
     }
 
     pub fn automatic(base_url: &str) -> Self {
         Self {
-            mode: ProtocolSelectionMode::Auto,
             endpoint_hint: endpoint_url_protocol(base_url),
             ..Self::default()
         }
@@ -244,52 +228,101 @@ impl SourceProtocolConfig {
         self.capabilities.extend(observations);
     }
 
-    /// Resolve only from protocol evidence. Names, families and prices never
-    /// participate. Unknown automatic connections have no generation routes.
+    /// Resolve every catalog model. Protocol evidence selects the upstream
+    /// wire format, while missing or failed probes never remove a model from
+    /// the pool. Names, families and prices never participate.
     pub fn resolve(
         &self,
         base_url: &str,
         models: &[String],
-        manual_bindings: &[SourceProtocolBinding],
+        legacy_bindings: &[SourceProtocolBinding],
         fallback: WireApi,
     ) -> Result<Vec<SourceProtocolBinding>> {
-        let capabilities = self.effective_capabilities(base_url, models, manual_bindings, fallback);
-        if self.mode == ProtocolSelectionMode::Manual {
-            let mut bindings =
-                normalize_source_protocol_bindings(manual_bindings.to_vec(), fallback, models)?;
-            for binding in &mut bindings {
-                let upstream = binding
-                    .adapter
-                    .upstream_protocol(binding.wire_api)
-                    .wire_api();
-                binding.model_ids.retain(|model| {
-                    !capabilities.iter().any(|capability| {
-                        capability.model_id.eq_ignore_ascii_case(model)
-                            && capability.upstream_wire_api == upstream
-                            && (capability.status == CapabilityStatus::Unsupported
-                                || capability.features.get(&ProtocolFeature::Text)
-                                    == Some(&CapabilityStatus::Unsupported))
-                    })
-                });
+        let mut capabilities = BTreeMap::<_, Vec<_>>::new();
+        for capability in self.effective_capabilities(base_url, models) {
+            if capability.status.available() {
+                capabilities
+                    .entry(capability.model_id.to_ascii_lowercase())
+                    .or_default()
+                    .push(capability);
             }
-            bindings.retain(|binding| !binding.model_ids.is_empty());
-            return Ok(bindings);
         }
+        let endpoint_fallback = self
+            .endpoint_hint
+            .or_else(|| endpoint_url_protocol(base_url))
+            .or_else(|| service_protocol(base_url));
+        let mut legacy_by_model = BTreeMap::<_, Vec<_>>::new();
+        for binding in legacy_bindings {
+            let upstream = binding
+                .adapter
+                .upstream_protocol(binding.wire_api)
+                .wire_api();
+            for model in &binding.model_ids {
+                legacy_by_model
+                    .entry(model.to_ascii_lowercase())
+                    .or_default()
+                    .push(upstream);
+            }
+        }
+        let single_legacy = if legacy_bindings.len() == 1 {
+            let binding = &legacy_bindings[0];
+            vec![binding
+                .adapter
+                .upstream_protocol(binding.wire_api)
+                .wire_api()]
+        } else {
+            Vec::new()
+        };
         let mut routes = BTreeMap::new();
-        for capability in capabilities.iter().filter(|capability| {
-            capability.status.available()
-                && capability.features.get(&ProtocolFeature::Text)
-                    != Some(&CapabilityStatus::Unsupported)
-        }) {
+        let mut seen_models = BTreeSet::new();
+        for model in models {
+            let key = model.to_ascii_lowercase();
+            if !seen_models.insert(key.clone()) {
+                continue;
+            }
+            // Keep old physical endpoints as hints, without retaining their
+            // client-protocol restrictions or requiring generation probes.
+            let legacy_upstreams = legacy_by_model
+                .get(&key)
+                .map(Vec::as_slice)
+                .unwrap_or(&single_legacy);
+            let available = capabilities
+                .get(&key)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             for client in WireApi::ALL {
-                let Some(adapter) = SourceAdapter::between(client, capability.upstream_wire_api)
-                else {
-                    continue;
-                };
-                routes
-                    .entry((client, adapter))
-                    .or_insert_with(Vec::new)
-                    .push(capability.model_id.clone());
+                // Resolve each client protocol independently. If the model
+                // accepts that protocol upstream, keep it native. Otherwise
+                // use the strongest available upstream evidence and bridge
+                // to it. Missing or failed probes fall back to the source
+                // protocol, so catalog membership remains routable.
+                let upstream = available
+                    .iter()
+                    .find(|capability| capability.upstream_wire_api == client)
+                    .or_else(|| {
+                        available.iter().max_by_key(|capability| {
+                            (
+                                capability.status == CapabilityStatus::Confirmed,
+                                capability.checked_at_ms,
+                                std::cmp::Reverse(capability.upstream_wire_api),
+                            )
+                        })
+                    })
+                    .map(|capability| capability.upstream_wire_api)
+                    .unwrap_or_else(|| {
+                        endpoint_fallback.unwrap_or_else(|| {
+                            legacy_upstreams
+                                .iter()
+                                .find(|upstream| **upstream == client)
+                                .or_else(|| legacy_upstreams.first())
+                                .copied()
+                                .unwrap_or(fallback)
+                        })
+                    });
+                if let Some(adapter) = SourceAdapter::between(client, upstream) {
+                    let model_ids = routes.entry((client, adapter)).or_insert_with(Vec::new);
+                    model_ids.push(model.clone());
+                }
             }
         }
         Ok(routes
@@ -330,7 +363,7 @@ pub fn endpoint_url_protocol(base_url: &str) -> Option<WireApi> {
 pub fn service_protocol(base_url: &str) -> Option<WireApi> {
     let url = url::Url::parse(base_url).ok()?;
     match url.host_str()? {
-        "api.openai.com" => Some(WireApi::Responses),
+        "api.openai.com" | "api.zenithmarket.dev" => Some(WireApi::Responses),
         "openrouter.ai" | "api.deepseek.com" | "api.groq.com" | "api.mistral.ai" => {
             Some(WireApi::ChatCompletions)
         }
@@ -382,10 +415,10 @@ pub(crate) fn catalog_capabilities(
             .or_else(|| model.get("supported_endpoints"))
             .or_else(|| model.get("supportedGenerationMethods"))
             .and_then(Value::as_array);
-        let Some(endpoints) = endpoints else { continue };
         let mut protocols = Vec::new();
         for endpoint in endpoints
-            .iter()
+            .into_iter()
+            .flatten()
             .filter_map(Value::as_str)
             .filter_map(endpoint_type)
         {
@@ -400,64 +433,26 @@ pub(crate) fn catalog_capabilities(
             &WireApi::ALL
         };
         for &upstream_wire_api in advertised_protocols {
-            let status = if protocols.contains(&upstream_wire_api) {
+            let status = if endpoints.is_none() {
+                CapabilityStatus::Unknown
+            } else if protocols.contains(&upstream_wire_api) {
                 CapabilityStatus::Declared
             } else {
                 CapabilityStatus::Unsupported
             };
-            let mut features = BTreeMap::from([(ProtocolFeature::Text, status)]);
-            if model
-                .get("supportedGenerationMethods")
-                .and_then(Value::as_array)
-                .is_some_and(|methods| {
-                    methods
-                        .iter()
-                        .any(|method| method.as_str() == Some("streamGenerateContent"))
-                })
-            {
-                features.insert(ProtocolFeature::Streaming, CapabilityStatus::Declared);
+            // Participant catalogs identify endpoints, not model capabilities.
+            // Semantic fields come from the shared trusted model catalog.
+            if endpoints.is_none() {
+                continue;
             }
-            // Providers may advertise explicit feature flags. Missing flags
-            // remain unknown; successful catalog retrieval cannot confirm them.
-            if let Some(declared) = model.get("capabilities").and_then(Value::as_object) {
-                for (key, feature) in [
-                    ("vision", ProtocolFeature::Images),
-                    ("tools", ProtocolFeature::FunctionTools),
-                    ("structured_output", ProtocolFeature::StructuredOutput),
-                    ("reasoning", ProtocolFeature::Reasoning),
-                    ("streaming", ProtocolFeature::Streaming),
-                ] {
-                    if let Some(value) = declared.get(key).and_then(Value::as_bool) {
-                        features.insert(
-                            feature,
-                            if value {
-                                CapabilityStatus::Declared
-                            } else {
-                                CapabilityStatus::Unsupported
-                            },
-                        );
-                    }
-                }
-            }
-            let reasoning_efforts = model
-                .get("supported_reasoning_efforts")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
             capabilities.push(ModelEndpointCapability {
                 model_id: model_id.to_owned(),
                 upstream_wire_api,
                 status,
                 origin: CapabilityOrigin::Catalog,
                 checked_at_ms,
-                features,
-                reasoning_efforts,
+                features: BTreeMap::new(),
+                reasoning_efforts: Vec::new(),
             });
         }
     }
@@ -470,13 +465,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn unknown_catalog_does_not_create_generation_routes() {
+    fn catalog_models_are_routable_without_generation_probes() {
         let config = SourceProtocolConfig::automatic("https://example.test/v1");
         let models = vec!["claude-test".into(), "gpt-test".into()];
         let routes = config
             .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
             .unwrap();
-        assert!(routes.is_empty());
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|route| route.model_ids == models));
         assert!(catalog_capabilities(
             &json!({"data":[{"id":"gpt-test","pricing":{"input":1}}]}),
             1
@@ -485,7 +481,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_manual_catalog_preserves_the_native_configured_wire_api() {
+    fn participant_catalog_only_supplies_endpoint_identity() {
+        let mut row = json!({"id":"future-model", "supported_reasoning_efforts":["low","high"],
+            "capabilities":{"reasoning":true,"tools":false}});
+        assert!(catalog_capabilities(&json!({"data":[row.clone()]}), 42).is_empty());
+        row["supported_endpoint_types"] = json!(["messages"]);
+        let observations = catalog_capabilities(&json!({"data":[row]}), 42);
+        assert!(observations
+            .iter()
+            .all(|entry| entry.features.is_empty() && entry.reasoning_efforts.is_empty()));
+        assert!(observations
+            .iter()
+            .any(|entry| entry.upstream_wire_api == WireApi::Messages && entry.status.available()));
+    }
+
+    #[test]
+    fn legacy_configuration_uses_automatic_routes() {
         let config = SourceProtocolConfig::default();
         let routes = config
             .resolve(
@@ -495,10 +506,35 @@ mod tests {
                 WireApi::Responses,
             )
             .unwrap();
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].wire_api, WireApi::Responses);
-        assert_eq!(routes[0].adapter, SourceAdapter::Native);
-        assert_eq!(routes[0].model_ids, ["gpt-test"]);
+        assert_eq!(routes.len(), WireApi::ALL.len());
+        assert!(routes.iter().all(|route| route.model_ids == ["gpt-test"]));
+    }
+
+    #[test]
+    fn legacy_bridge_supplies_physical_protocol_without_restricting_clients() {
+        let legacy = [SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode: MessagesReasoningMode::Adaptive,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            model_ids: vec![],
+        }];
+        for (url, upstream) in [
+            ("https://example.test/v1", WireApi::Messages),
+            (
+                "https://example.test/v1/chat/completions",
+                WireApi::ChatCompletions,
+            ),
+        ] {
+            let routes = SourceProtocolConfig::automatic(url)
+                .resolve(url, &["future-model".into()], &legacy, WireApi::Responses)
+                .unwrap();
+            assert_eq!(routes.len(), WireApi::ALL.len());
+            assert!(routes.iter().all(|route| {
+                route.model_ids == ["future-model"]
+                    && route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream
+            }));
+        }
     }
 
     #[test]
@@ -543,69 +579,115 @@ mod tests {
             )
             .unwrap();
         assert_eq!(routes.len(), 4);
-        assert!(routes.iter().all(|route| route.model_ids == ["test"]));
+        assert!(routes
+            .iter()
+            .all(|route| route.model_ids == ["test", "embed"]));
     }
 
     #[test]
-    fn rejected_generation_is_excluded_in_auto_and_manual_without_erasing_other_endpoints() {
-        for mode in [ProtocolSelectionMode::Auto, ProtocolSelectionMode::Manual] {
-            let models = vec!["test".into()];
-            let bindings = [WireApi::Responses, WireApi::Messages]
-                .map(|wire| SourceProtocolBinding::legacy(wire, &models));
-            let mut config = SourceProtocolConfig {
-                mode,
-                capabilities: catalog_capabilities(
-                    &json!({"data":[{
-                        "id":"test", "supported_endpoint_types":["responses", "anthropic"]
-                    }]}),
-                    1,
-                ),
-                ..Default::default()
-            };
-            config.capabilities.push(ModelEndpointCapability {
-                model_id: "test".into(),
-                upstream_wire_api: WireApi::Responses,
-                status: CapabilityStatus::Confirmed,
-                origin: CapabilityOrigin::GenerationProbe,
-                checked_at_ms: 2,
+    fn each_client_protocol_prefers_its_native_upstream() {
+        let models = vec!["mixed".into()];
+        let mut config = SourceProtocolConfig::default();
+        config.merge_catalog(catalog_capabilities(
+            &json!({"data":[{
+                "id":"mixed",
+                "supported_endpoint_types":["responses", "messages"]
+            }]}),
+            42,
+        ));
+
+        let routes = config
+            .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
+            .unwrap();
+        let responses = routes
+            .iter()
+            .find(|route| route.wire_api == WireApi::Responses)
+            .unwrap();
+        let messages = routes
+            .iter()
+            .find(|route| route.wire_api == WireApi::Messages)
+            .unwrap();
+
+        assert_eq!(responses.adapter, SourceAdapter::Native);
+        assert_eq!(messages.adapter, SourceAdapter::Native);
+    }
+
+    #[test]
+    fn failed_generation_probe_does_not_remove_catalog_models() {
+        let models = vec!["test".into()];
+        let mut config = SourceProtocolConfig {
+            capabilities: catalog_capabilities(
+                &json!({"data":[{"id":"test","supported_endpoint_types":["responses"]}]}),
+                1,
+            ),
+            ..Default::default()
+        };
+        config.capabilities.push(ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: WireApi::Responses,
+            status: CapabilityStatus::Confirmed,
+            origin: CapabilityOrigin::GenerationProbe,
+            checked_at_ms: 2,
+            features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Unsupported)]),
+            reasoning_efforts: vec![],
+        });
+        let resolved = config
+            .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
+            .unwrap();
+        assert_eq!(resolved.len(), 4);
+        assert!(resolved.iter().all(|route| route.model_ids == ["test"]));
+        assert!(resolved
+            .iter()
+            .any(|route| route.wire_api == WireApi::Responses));
+        let capabilities = config.effective_capabilities("https://example.test/v1", &models);
+        let responses = capabilities
+            .iter()
+            .find(|entry| entry.upstream_wire_api == WireApi::Responses)
+            .unwrap();
+        assert_eq!(responses.origin, CapabilityOrigin::Catalog);
+        assert_eq!(responses.status, CapabilityStatus::Declared);
+        assert_ne!(
+            responses.features.get(&ProtocolFeature::Text),
+            Some(&CapabilityStatus::Unsupported)
+        );
+    }
+
+    #[test]
+    fn stored_participant_features_do_not_override_endpoint_identity() {
+        let config = SourceProtocolConfig {
+            capabilities: vec![ModelEndpointCapability {
+                model_id: "synthetic-model".into(),
+                upstream_wire_api: WireApi::Messages,
+                status: CapabilityStatus::Declared,
+                origin: CapabilityOrigin::Catalog,
+                checked_at_ms: 1,
                 features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Unsupported)]),
                 reasoning_efforts: vec![],
-            });
-            let resolved = config
-                .resolve(
-                    "https://example.test/v1",
-                    &models,
-                    &bindings,
-                    WireApi::Responses,
-                )
-                .unwrap();
-            assert!(!resolved.is_empty());
-            assert!(resolved.iter().all(|route| route
-                .adapter
-                .upstream_protocol(route.wire_api)
-                .wire_api()
-                == WireApi::Messages));
-            config.capabilities.last_mut().unwrap().features.clear();
-            config.capabilities.last_mut().unwrap().status = CapabilityStatus::Unsupported;
-            assert_eq!(
-                config
-                    .resolve(
-                        "https://example.test/v1",
-                        &models,
-                        &bindings,
-                        WireApi::Responses
-                    )
-                    .unwrap(),
-                resolved
-            );
-            assert_eq!(models, ["test"]);
-        }
+            }],
+            ..Default::default()
+        };
+        let routes = config
+            .resolve(
+                "https://example.test/v1",
+                &["synthetic-model".into()],
+                &[],
+                WireApi::Responses,
+            )
+            .unwrap();
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|route| route
+            .adapter
+            .upstream_protocol(route.wire_api)
+            .wire_api()
+            == WireApi::Messages));
     }
 
     #[test]
-    fn old_configuration_stays_manual_and_probe_revision_is_checked() {
+    fn old_configuration_ignores_legacy_mode_and_checks_probe_revision() {
         let mut config: SourceProtocolConfig = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(config.mode, ProtocolSelectionMode::Manual);
+        let legacy: SourceProtocolConfig =
+            serde_json::from_value(json!({"mode":"manual"})).unwrap();
+        assert_eq!(legacy, SourceProtocolConfig::default());
         let observation = ModelEndpointCapability {
             model_id: "test".into(),
             upstream_wire_api: WireApi::Responses,
@@ -636,5 +718,55 @@ mod tests {
             service_protocol("https://openrouter.ai.example.test/v1"),
             None
         );
+        assert_eq!(
+            service_protocol("https://api.zenithmarket.dev/v1"),
+            Some(WireApi::Responses)
+        );
+        assert_eq!(
+            service_protocol("https://api.zenithmarket.dev.example.test/v1"),
+            None
+        );
+    }
+
+    #[test]
+    fn known_responses_service_keeps_unprobed_catalog_models_routable() {
+        let models = vec![
+            "gpt-5.6-sol".into(),
+            "claude-fable-5".into(),
+            "gemini-3.8-flash".into(),
+            "grok-4.6".into(),
+        ];
+        let mut config = SourceProtocolConfig::automatic("https://api.zenithmarket.dev/v1");
+        config.capabilities.push(ModelEndpointCapability {
+            model_id: "gpt-5.6-sol".into(),
+            upstream_wire_api: WireApi::Responses,
+            status: CapabilityStatus::Confirmed,
+            origin: CapabilityOrigin::GenerationProbe,
+            checked_at_ms: 42,
+            features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Confirmed)]),
+            reasoning_efforts: vec![],
+        });
+
+        let routes = config
+            .resolve(
+                "https://api.zenithmarket.dev/v1",
+                &models,
+                &[],
+                WireApi::Responses,
+            )
+            .unwrap();
+
+        assert_eq!(routes.len(), WireApi::ALL.len());
+        for client in WireApi::ALL {
+            let route = routes
+                .iter()
+                .find(|route| route.wire_api == client)
+                .expect("every client protocol should have an adapter route");
+            assert_eq!(route.model_ids, models);
+            assert_eq!(
+                route.adapter.upstream_protocol(client).wire_api(),
+                WireApi::Responses
+            );
+        }
     }
 }

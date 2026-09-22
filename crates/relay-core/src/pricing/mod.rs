@@ -351,19 +351,18 @@ fn source_context_id(candidate_id: &str) -> String {
     let Some((source_id, suffix)) = candidate_id.rsplit_once("::") else {
         return candidate_id.to_string();
     };
-    matches!(
-        suffix,
-        "responses"
-            | "responses_to_messages"
-            | "responses_to_gemini"
-            | "chat_completions"
-            | "messages"
-            | "gemini"
-            | "bridge"
-    )
-    .then_some(source_id)
-    .unwrap_or(candidate_id)
-    .to_string()
+    let known_route = suffix == "bridge"
+        || crate::WireApi::ALL.iter().any(|client| {
+            crate::WireApi::ALL.iter().any(|upstream| {
+                crate::SourceAdapter::between(*client, *upstream)
+                    .is_some_and(|adapter| adapter.route_suffix(*client) == suffix)
+            })
+        });
+    if known_route {
+        source_id.to_string()
+    } else {
+        candidate_id.to_string()
+    }
 }
 
 impl CatalogEntry {
@@ -851,6 +850,16 @@ mod tests {
         let source = context.candidate_price(&catalog, "source", "SOURCE", Some("gpt-test"));
         assert_eq!(source.source, PriceSource::Provider);
         assert_eq!(source.quote.unwrap(), provider);
+        for client in crate::WireApi::ALL {
+            for upstream in crate::WireApi::ALL {
+                let adapter = crate::SourceAdapter::between(client, upstream).unwrap();
+                let candidate_id = format!("source::{}", adapter.route_suffix(client));
+                let price =
+                    context.candidate_price(&catalog, "source", &candidate_id, Some("gpt-test"));
+                assert_eq!(price.source, PriceSource::Provider, "{candidate_id}");
+                assert_eq!(price.quote, Some(provider), "{candidate_id}");
+            }
+        }
         let account = context.candidate_price(&catalog, "account", "acct", Some("gpt-test"));
         assert_eq!(account.source, PriceSource::Unpriced);
     }

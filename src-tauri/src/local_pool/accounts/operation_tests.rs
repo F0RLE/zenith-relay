@@ -63,6 +63,37 @@ fn account_record(account_id: &str) -> LocalAccountRecord {
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn bulk_quota_refresh_keeps_a_small_future_and_reports_every_failed_account() {
+    let root = std::env::temp_dir().join(format!("relay-quota-batch-{}", Uuid::new_v4()));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let ids = (0..QUOTA_REFRESH_BATCH_SIZE + 2)
+        .map(|_| format!("missing_{}", Uuid::new_v4().simple()))
+        .collect::<Vec<_>>();
+    let refresh = refresh_account_quotas(&state, ids.clone());
+
+    // Tauri constructs command futures on the Windows UI thread (1 MiB).
+    // Embedding five complete refreshes in this future multiplies its stack
+    // footprint again in the generated IPC dispatcher, even for other commands.
+    assert!(
+        std::mem::size_of_val(&refresh) < 16 * 1024,
+        "bulk quota refresh must keep concurrent account futures off the IPC stack"
+    );
+    let results = refresh.await;
+    assert_eq!(results.len(), ids.len());
+    for (result, id) in results.iter().zip(&ids) {
+        assert_eq!(&result.account_id, id);
+        assert_eq!(result.status, AccountQuotaRefreshStatus::Failed);
+        assert!(result.response.is_none());
+        assert!(result.error.is_some());
+        assert!(!state.quota_refresh_in_flight(id).unwrap());
+    }
+    assert!(refresh_account_quotas(&state, Vec::new()).await.is_empty());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn wake_task(id: &str, account_ids: &[&str]) -> WakeTask {
     WakeTask {
         id: id.into(),
@@ -1064,7 +1095,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
 }
 
 #[tokio::test]
-async fn source_import_rejects_an_invalid_existing_protocol_before_persisting() {
+async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
     let id = Uuid::new_v4().simple().to_string();
     let root = std::env::temp_dir().join(format!("zenith-relay-source-import-invalid-{id}"));
     let secret_ref = format!("source:import-invalid-{id}");
@@ -1116,8 +1147,11 @@ async fn source_import_rejects_an_invalid_existing_protocol_before_persisting() 
     .unwrap();
     let item = parsed.items.remove(0);
     let result = import_source_item(&state, item, false, false, &["gpt-test".to_string()]).await;
-    let error = result.unwrap_err();
-    assert_eq!(error.code, "source_protocol_invalid");
+    let updated = result.unwrap();
+    assert_eq!(updated.id, source.id);
+    let routes = updated.effective_protocol_bindings().unwrap();
+    assert_eq!(routes.len(), WireApi::ALL.len());
+    assert!(routes.iter().all(|route| route.model_ids == ["gpt-test"]));
     assert_eq!(state.store().unwrap().source(&source.id), Some(&source));
 
     secret_store::delete(&secret_ref).unwrap();

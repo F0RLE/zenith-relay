@@ -1,6 +1,6 @@
 use super::{
     enrich_reasoning_metadata_with_models_dev_details, payload_hash, validate_payload,
-    MetadataCacheEnvelope, MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataCatalogHandle,
+    MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataCatalogHandle,
     LITELLM_MODELS_SOURCE_URL, MODELS_DEV_DETAILS_SOURCE_URL, MODELS_DEV_SOURCE_URL,
     OPENROUTER_MODELS_SOURCE_URL,
 };
@@ -10,13 +10,15 @@ use crate::{
 };
 use reqwest::{header, Client, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{value::RawValue, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
 };
+
+mod cache;
 
 const REFRESH_INTERVAL_MS: u64 = 60 * 60 * 1_000;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -64,7 +66,9 @@ struct SourceEnvelope {
     last_modified: Option<String>,
     fetched_at_ms: u64,
     stale: bool,
-    payload: Value,
+    // Requests use the resolved catalog. Keep source data as compact JSON
+    // between refreshes instead of retaining thousands of allocated objects.
+    payload: Arc<RawValue>,
 }
 impl SourceEnvelope {
     fn new(index: usize, payload: Value, now: u64) -> Result<Self, ModelMetadataError> {
@@ -78,18 +82,25 @@ impl SourceEnvelope {
             last_modified: None,
             fetched_at_ms: now,
             stale: false,
-            payload,
+            payload: serde_json::value::to_raw_value(&payload)
+                .map(Arc::from)
+                .map_err(|_| ModelMetadataError::InvalidCatalog)?,
         })
     }
-    fn validate(&self, index: usize) -> Result<(), ModelMetadataError> {
-        if self.source_url != URLS[index]
-            || self.fetched_at_ms == 0
-            || self.revision != payload_hash(&self.payload)?
-            || !valid_payload(index, &self.payload)
-        {
+    fn validate(&self, index: usize) -> Result<Value, ModelMetadataError> {
+        if self.source_url != URLS[index] || self.fetched_at_ms == 0 {
             return Err(ModelMetadataError::InvalidCache);
         }
-        Ok(())
+        let payload = self
+            .parse_payload()
+            .map_err(|_| ModelMetadataError::InvalidCache)?;
+        if self.revision != payload_hash(&payload)? || !valid_payload(index, &payload) {
+            return Err(ModelMetadataError::InvalidCache);
+        }
+        Ok(payload)
+    }
+    fn parse_payload(&self) -> Result<Value, ModelMetadataError> {
+        serde_json::from_str(self.payload.get()).map_err(|_| ModelMetadataError::InvalidCatalog)
     }
     fn validators(&mut self, headers: &header::HeaderMap) {
         for (target, name) in [
@@ -202,7 +213,7 @@ struct CacheBundle {
 }
 impl CacheBundle {
     fn new(states: &[SourceState; 4]) -> Result<Self, ModelMetadataError> {
-        let merged_payload = merged_payload(states);
+        let merged_payload = merged_payload(states)?;
         Ok(Self {
             format: CACHE_FORMAT.into(),
             schema_version: 2,
@@ -216,9 +227,21 @@ impl CacheBundle {
         })
     }
 }
-fn merged_payload(states: &[SourceState; 4]) -> Value {
+fn merged_payload(states: &[SourceState; 4]) -> Result<Value, ModelMetadataError> {
+    let mut parsed: [Option<Value>; 4] = std::array::from_fn(|_| None);
+    for (slot, state) in parsed.iter_mut().zip(states) {
+        *slot = state
+            .envelope
+            .as_ref()
+            .map(SourceEnvelope::parse_payload)
+            .transpose()?;
+    }
+    Ok(merge_payloads(&parsed))
+}
+
+fn merge_payloads(parsed: &[Option<Value>; 4]) -> Value {
     let empty = serde_json::json!({});
-    let payload = |index: usize| states[index].envelope.as_ref().map(|e| &e.payload);
+    let payload = |index: usize| parsed[index].as_ref();
     enrich_reasoning_metadata_with_models_dev_details(
         payload(0).unwrap_or(&empty),
         payload(1),
@@ -227,7 +250,19 @@ fn merged_payload(states: &[SourceState; 4]) -> Value {
     )
 }
 fn build_catalog(states: &[SourceState; 4], now: u64, max_age: u64) -> ModelMetadataCatalog {
-    let payload = merged_payload(states);
+    let Ok(payload) = merged_payload(states) else {
+        return ModelMetadataCatalog::empty();
+    };
+    catalog_from_payload(states, &payload, payload_hash(&payload).ok(), now, max_age)
+}
+
+fn catalog_from_payload(
+    states: &[SourceState; 4],
+    payload: &Value,
+    revision: Option<String>,
+    now: u64,
+    max_age: u64,
+) -> ModelMetadataCatalog {
     let statuses: BTreeMap<_, _> = states
         .iter()
         .enumerate()
@@ -247,8 +282,8 @@ fn build_catalog(states: &[SourceState; 4], now: u64, max_age: u64) -> ModelMeta
         .collect();
     let stale = statuses.values().any(|s| s.stale);
     let mut catalog = ModelMetadataCatalog::from_payload(
-        &payload,
-        payload_hash(&payload).ok(),
+        payload,
+        revision,
         states
             .iter()
             .filter_map(|s| s.envelope.as_ref().map(|e| e.fetched_at_ms))
@@ -285,57 +320,18 @@ impl ModelMetadataCatalogLoader {
         let path = path.into();
         let max_age_ms = max_age_ms.max(1);
         let now = catalog_io::unix_time_ms();
-        let mut states = std::array::from_fn(|_| SourceState::new(None, None, now, max_age_ms));
-        match catalog_io::read_json::<Value>(&path, MAX_CACHE_BYTES) {
-            Ok(Some(raw)) if raw.get("format").and_then(Value::as_str) == Some(CACHE_FORMAT) => {
-                // Validate sources independently: one damaged source cannot
-                // erase the other two. Never trust the stored merged payload.
-                if raw.get("schemaVersion").and_then(Value::as_u64) == Some(2) {
-                    for (i, state) in states.iter_mut().enumerate() {
-                        if let Some(value) = raw.get("sources").and_then(|v| v.get(SOURCES[i])) {
-                            let envelope = serde_json::from_value::<SourceEnvelope>(value.clone())
-                                .map_err(|_| ModelMetadataError::InvalidCache)
-                                .and_then(|e| {
-                                    e.validate(i)?;
-                                    Ok(e)
-                                });
-                            *state = loaded_state(envelope, now, max_age_ms);
-                        }
-                    }
-                } else {
-                    states[0] =
-                        loaded_state(Err(ModelMetadataError::InvalidCache), now, max_age_ms);
-                }
-            }
-            Ok(Some(raw)) => {
-                let envelope = serde_json::from_value::<MetadataCacheEnvelope>(raw)
-                    .map_err(|_| ModelMetadataError::InvalidCache)
-                    .and_then(|e| {
-                        e.validate()?;
-                        Ok(SourceEnvelope {
-                            source_url: e.source_url,
-                            revision: e.revision,
-                            etag: e.etag,
-                            last_modified: e.last_modified,
-                            fetched_at_ms: e.fetched_at_ms,
-                            stale: e.stale,
-                            payload: e.payload,
-                        })
-                    });
-                states[0] = loaded_state(envelope, now, max_age_ms);
-                // Migrate validated auxiliary caches from the earlier format.
-                for (i, file) in [(2, "openrouter-models.json"), (3, "litellm-models.json")] {
-                    if let Ok(Some(e)) = catalog_io::read_json::<SourceEnvelope>(
-                        &path.with_file_name(file),
-                        MAX_AUXILIARY_RESPONSE_BYTES,
-                    ) {
-                        states[i] = loaded_state(e.validate(i).map(|()| e), now, max_age_ms);
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(error) => states[0] = loaded_state(Err(map_io_error(error, true)), now, max_age_ms),
-        }
+        let (states, parsed) = cache::read_states(&path, now, max_age_ms);
+        let payload = merge_payloads(&parsed);
+        // Validation already parsed these sources. Reuse that work once, then
+        // release the trees before constructing the long-lived catalog.
+        drop(parsed);
+        let catalog = catalog_from_payload(
+            &states,
+            &payload,
+            payload_hash(&payload).ok(),
+            now,
+            max_age_ms,
+        );
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
@@ -345,7 +341,7 @@ impl ModelMetadataCatalogLoader {
         Ok(Self {
             path,
             client,
-            handle: ModelMetadataCatalogHandle::new(build_catalog(&states, now, max_age_ms)),
+            handle: ModelMetadataCatalogHandle::new(catalog),
             state: Arc::new(RwLock::new(states)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             schedule_changed: Arc::new(tokio::sync::Notify::new()),
@@ -461,7 +457,7 @@ impl ModelMetadataCatalogLoader {
                         state.fail(error, failure_at);
                     }
                 }
-                self.publish(failed);
+                self.publish(failed, None);
                 return Err(error);
             }
         };
@@ -474,12 +470,12 @@ impl ModelMetadataCatalogLoader {
                     state.fail(error, now);
                 }
             }
-            self.publish(next);
+            self.publish(next, None);
             return Err(error);
         }
         let old_revision = self.snapshot().revision.clone();
-        let revision = bundle.merged_revision;
-        self.publish(next);
+        let revision = bundle.merged_revision.clone();
+        self.publish(next, Some(&bundle));
         if successes == 0 {
             if let Some(error) = first_error {
                 return Err(error);
@@ -491,12 +487,19 @@ impl ModelMetadataCatalogLoader {
             CatalogRefreshOutcome::Updated { revision }
         })
     }
-    fn publish(&self, states: [SourceState; 4]) {
-        self.handle.replace(build_catalog(
-            &states,
-            catalog_io::unix_time_ms(),
-            self.max_age_ms,
-        ));
+    fn publish(&self, states: [SourceState; 4], prepared: Option<&CacheBundle>) {
+        let now = catalog_io::unix_time_ms();
+        let catalog = match prepared {
+            Some(bundle) => catalog_from_payload(
+                &states,
+                &bundle.merged_payload,
+                Some(bundle.merged_revision.clone()),
+                now,
+                self.max_age_ms,
+            ),
+            None => build_catalog(&states, now, self.max_age_ms),
+        };
+        self.handle.replace(catalog);
         *self.state.write().expect("metadata state lock poisoned") = states;
         self.schedule_changed.notify_one();
     }

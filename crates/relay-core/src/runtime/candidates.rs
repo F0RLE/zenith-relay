@@ -1,6 +1,6 @@
 use super::{
-    apply_candidate_policy, declared_source_reasoning_levels, model_rules, runtime_now_ms,
-    ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
+    apply_candidate_policy, model_rules, runtime_now_ms, ExecutionFence, GatewayRuntime,
+    RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
 };
 use crate::error_codes;
 use crate::quota::QuotaSnapshot;
@@ -8,7 +8,7 @@ use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateScope, UsageEvent,
 };
 use reqwest::{header::HeaderMap, StatusCode};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
@@ -561,46 +561,44 @@ impl GatewayRuntime {
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
+        let candidate_ids = {
+            let source_routes = self
+                .source_candidate_bindings
+                .iter()
+                .filter(|(_, binding)| binding.source_id == candidate_id)
+                .map(|(route_id, _)| route_id.clone())
+                .collect::<Vec<_>>();
+            if source_routes.is_empty() {
+                vec![candidate_id.to_string()]
+            } else {
+                source_routes
+            }
+        };
         // Scheduler removal is graceful when a lease is active: keep the
         // executor alive until the request reaches its terminal outcome.
         let (removed, deferred) = {
             let mut scheduler = self.lock_scheduler();
-            let removed = scheduler.remove(candidate_id).is_some();
-            let deferred = scheduler.candidate(candidate_id).is_some();
+            let mut removed = false;
+            let mut deferred = BTreeSet::new();
+            for route_id in &candidate_ids {
+                removed |= scheduler.remove(route_id).is_some();
+                if scheduler.candidate(route_id).is_some() {
+                    deferred.insert(route_id.clone());
+                }
+            }
             (removed, deferred)
         };
-        self.model_metadata
-            .codex_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(candidate_id);
-        self.model_metadata
-            .source_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(candidate_id);
         {
-            let mut declared = self
+            let mut manifests = self
                 .model_metadata
-                .declared_reasoning
+                .codex_manifests
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for routes in declared.efforts.values_mut() {
-                routes.remove(candidate_id);
+            for route_id in &candidate_ids {
+                manifests.remove(route_id);
             }
-            declared.efforts.retain(|_, routes| !routes.is_empty());
-            for routes in declared.empty_routes.values_mut() {
-                routes.remove(candidate_id);
-            }
-            declared.empty_routes.retain(|_, routes| !routes.is_empty());
-            let previous_levels = declared.levels.clone();
-            declared.levels = declared_source_reasoning_levels(
-                &declared.efforts,
-                &previous_levels,
-                &BTreeMap::new(),
-            );
         }
-        if !deferred {
+        if !deferred.contains(candidate_id) {
             self.passive_quotas
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -614,7 +612,9 @@ impl GatewayRuntime {
             }
         }
         if let Some(store) = self.response_affinity_store.as_ref() {
-            let _ = store.delete_candidate(candidate_id);
+            for route_id in &candidate_ids {
+                let _ = store.delete_candidate(route_id);
+            }
         }
         removed
     }

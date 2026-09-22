@@ -3,13 +3,12 @@ use super::super::continuation::{
     RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
 use super::super::errors::{
-    api_error, api_error_with_origin, api_error_with_origin_and_category,
-    apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
-    apply_failure_state, cooldown_error, failure_category_is_request_terminal,
-    failure_category_requires_cooldown, preserved_upstream_error, previous_response_not_found,
-    previous_response_requires_websocket, prompt_cache_write_rejected,
-    recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_custom_tool_item_id_requires_ctc_prefix,
+    api_error, apply_attempt_failure_cooldown, apply_cooldown_for_model,
+    apply_failure_cooldown_with_body, apply_failure_state, cooldown_error,
+    failure_category_is_request_terminal, failure_category_requires_cooldown,
+    preserved_upstream_error, previous_response_not_found, previous_response_requires_websocket,
+    prompt_cache_write_rejected, recoverable_response_affinity_miss,
+    recoverable_response_model_switch, responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
@@ -34,9 +33,9 @@ use super::super::response::{
 };
 use super::super::streaming::{bootstrap_stream, StreamExecution};
 use super::super::turn_state::{
-    guard_account_request, relay_account_response_header, CODEX_TURN_STATE_HEADER,
+    relay_account_response_header, request_scope, CODEX_TURN_STATE_HEADER,
 };
-use super::finish_request_failure;
+use super::{attempt_error_response, finish_request_failure};
 use super::{wait_for_candidate_retry, AutomaticRecovery, CandidateRetryContext};
 use crate::error_codes;
 use crate::protocol::{
@@ -442,7 +441,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             continue;
         };
         let selected_service_tier =
-            runtime.model_service_tier_for_candidate(&route.candidate_id, &route.source_model);
+            service_tier_policy.select_for_model(&runtime, &route.source_model);
         service_tier_policy.prepare_for_candidate(&mut request, selected_service_tier, wire_api);
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
@@ -555,7 +554,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         attempt = attempt.saturating_add(1);
         attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
-        let client = runtime.request_client(&route.candidate_id, upstream_stream);
+        let client = runtime.request_client(&route.candidate_id);
         let mut upstream_headers = if adapter_request.requires_bridge_headers() {
             match route.adapter.upstream_protocol(wire_api) {
                 crate::UpstreamProtocol::Messages => {
@@ -572,15 +571,18 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         for (name, value) in &route.upstream_headers {
             upstream_headers.insert(name.clone(), value.clone());
         }
-        if account_route && wire_api == WireApi::Responses && route.adapter.is_passthrough() {
-            guard_account_request(
-                &runtime,
-                &key.id,
-                &mut upstream_headers,
-                route.account_id.as_deref().unwrap_or_default(),
-                now_ms(),
-            );
-        } else {
+        let turn_scope =
+            (account_route && wire_api == WireApi::Responses && route.adapter.is_passthrough())
+                .then(|| {
+                    request_scope(
+                        &key.id,
+                        &forwarded_headers,
+                        route.account_id.as_deref(),
+                        &route.source_model,
+                    )
+                })
+                .flatten();
+        if turn_scope.is_none() {
             upstream_headers.remove(CODEX_TURN_STATE_HEADER);
         }
         if account_route {
@@ -607,6 +609,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 &route.candidate_id,
                 upstream_request.body(request_body),
                 codex_client_version(&forwarded_headers),
+                turn_scope.as_ref(),
             )
             .await;
         let upstream = match upstream {
@@ -930,22 +933,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             if !adapter_is_passthrough {
                 emit_usage(&runtime, event);
-                if let Some(preserved) = last_preserved_upstream_error.as_ref() {
-                    return api_error_with_origin_and_category(
-                        preserved.status,
-                        &preserved.message,
-                        &preserved.code,
-                        preserved.category,
-                        selected_error_origin,
-                        Some(&request_id),
-                    );
-                }
-                return api_error_with_origin(
-                    failure.status,
-                    failure.message,
-                    failure.category,
+                return attempt_error_response(
+                    failure,
+                    last_preserved_upstream_error.as_ref(),
                     selected_error_origin,
-                    Some(&request_id),
+                    &request_id,
                 );
             }
             populate_tokens(&mut event, &bytes);
@@ -959,17 +951,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 Some(&request_id),
             );
             if account_route && adapter_is_passthrough {
-                if let Some(account_id) = route.account_id.as_deref() {
-                    relay_account_response_header(
-                        &runtime,
-                        &key.id,
-                        &forwarded_headers,
-                        account_id,
-                        &response_headers,
-                        &mut response,
-                        now_ms(),
-                    );
-                }
+                relay_account_response_header(&forwarded_headers, &response_headers, &mut response);
             }
             return response;
         }
@@ -1093,27 +1075,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         }
                         emit_usage(&runtime, event);
                         if failure_category_is_request_terminal(failure.category) {
-                            if let Some(preserved) =
-                                last_preserved_upstream_error.as_ref().filter(|preserved| {
-                                    preserved.status == failure.status
-                                        && preserved.category == failure.category
-                                })
-                            {
-                                return api_error_with_origin_and_category(
-                                    preserved.status,
-                                    &preserved.message,
-                                    &preserved.code,
-                                    preserved.category,
-                                    selected_error_origin,
-                                    Some(&request_id),
-                                );
-                            }
-                            return api_error_with_origin(
-                                failure.status,
-                                failure.message,
-                                failure.category,
+                            return attempt_error_response(
+                                failure,
+                                last_preserved_upstream_error.as_ref(),
                                 selected_error_origin,
-                                Some(&request_id),
+                                &request_id,
                             );
                         }
                         last_failure = Some(failure);
@@ -1216,17 +1182,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 let mut response =
                     proxy_json_response(status, &response_headers, Body::from(bytes));
                 if account_route && adapter_is_passthrough {
-                    if let Some(account_id) = route.account_id.as_deref() {
-                        relay_account_response_header(
-                            &runtime,
-                            &key.id,
-                            &forwarded_headers,
-                            account_id,
-                            &response_headers,
-                            &mut response,
-                            now_ms(),
-                        );
-                    }
+                    relay_account_response_header(
+                        &forwarded_headers,
+                        &response_headers,
+                        &mut response,
+                    );
                 }
                 return response;
             }
@@ -1254,16 +1214,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     started,
                 }
                 .into_response(status, headers.clone(), first, remaining);
-                if let Some(account_id) = account_id.as_deref() {
-                    relay_account_response_header(
-                        &runtime,
-                        &key.id,
-                        &forwarded_headers,
-                        account_id,
-                        &headers,
-                        &mut response,
-                        now_ms(),
-                    );
+                if account_id.is_some() {
+                    relay_account_response_header(&forwarded_headers, &headers, &mut response);
                 }
                 return response;
             }
@@ -1381,27 +1333,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 }
                 emit_usage(&runtime, event);
                 if failure_category_is_request_terminal(failure.category) {
-                    if let Some(preserved) =
-                        last_preserved_upstream_error.as_ref().filter(|preserved| {
-                            preserved.status == failure.status
-                                && preserved.category == failure.category
-                        })
-                    {
-                        return api_error_with_origin_and_category(
-                            preserved.status,
-                            &preserved.message,
-                            &preserved.code,
-                            preserved.category,
-                            selected_error_origin,
-                            Some(&request_id),
-                        );
-                    }
-                    return api_error_with_origin(
-                        failure.status,
-                        failure.message,
-                        failure.category,
+                    return attempt_error_response(
+                        failure,
+                        last_preserved_upstream_error.as_ref(),
                         selected_error_origin,
-                        Some(&request_id),
+                        &request_id,
                     );
                 }
                 last_failure = Some(failure);
@@ -1658,7 +1594,18 @@ fn adapter_error_response_for_origin(
     } else {
         StatusCode::BAD_REQUEST
     };
-    api_error_with_origin(status, error.message(), error.code(), origin, None)
+    let message = error
+        .parameter()
+        .map(|parameter| format!("{} (parameter: {parameter})", error.message()));
+    super::super::errors::api_error_with_parameter(
+        status,
+        message.as_deref().unwrap_or(error.message()),
+        error.code(),
+        error.code(),
+        origin,
+        None,
+        error.parameter(),
+    )
 }
 
 #[cfg(test)]
@@ -1671,6 +1618,24 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn adapter_error_response_exposes_safe_parameter_name() {
+        let response = super::adapter_error_response(
+            crate::AdapterError::parameter_unsupported_for("text.verbosity"),
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["param"], "text.verbosity");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("text.verbosity"));
+        assert_eq!(body["error"]["code"], "adapter_parameter_unsupported");
+    }
 
     #[test]
     fn requested_reasoning_effort_uses_only_the_matching_client_contract() {

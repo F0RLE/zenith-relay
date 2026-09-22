@@ -16,12 +16,14 @@ pub(crate) use crate::unix_time_ms as now_ms;
 
 mod auth;
 mod catalog;
+mod compaction;
 mod continuation;
 mod errors;
 mod execution;
 mod images;
 mod messages;
 mod request;
+mod request_body;
 mod response;
 mod streaming;
 mod turn_state;

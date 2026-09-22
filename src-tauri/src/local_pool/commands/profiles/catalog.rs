@@ -9,7 +9,7 @@ use crate::{
     },
     platform::default_codex_home,
 };
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 use url::Url;
 use zenith_relay_core::{
     providers::chatgpt::configured_codex_client_version, SourceAdapter, WireApi,
@@ -104,6 +104,17 @@ pub(in crate::local_pool) enum CodexCatalogRefreshStatus {
     Updated,
     Skipped,
     Deferred,
+}
+
+pub(super) async fn refresh_client_catalogs(
+    opencode: impl Future<Output = LocalResult<()>>,
+    codex: impl Future<Output = LocalResult<CodexCatalogRefreshStatus>>,
+) -> LocalResult<CodexCatalogRefreshStatus> {
+    // These profiles are independent: an invalid OpenCode file must not
+    // prevent Codex from applying or scheduling its own catalog update.
+    let opencode_result = opencode.await;
+    let codex_result = codex.await;
+    codex_result.and_then(|status| opencode_result.map(|()| status))
 }
 
 pub(super) fn active_catalog_refresh_target(
@@ -204,7 +215,9 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
         })
         .transpose()?
         .flatten();
-    if let Err(error) = codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog) {
+    if let Err(error) =
+        codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog, Some(&binding))
+    {
         if let Some(previous) = previous_transport {
             codex::set_local_gateway_websockets_with_previous(
                 &profile_dir,
@@ -283,4 +296,30 @@ fn is_zenith_api_base_url(base_url: &str) -> bool {
         && url.fragment().is_none()
         && url.username().is_empty()
         && url.password().is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[tokio::test]
+    async fn opencode_failure_does_not_prevent_codex_catalog_refresh() {
+        let refreshed = Cell::new(false);
+        let result = refresh_client_catalogs(
+            async {
+                Err(LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "synthetic invalid config",
+                ))
+            },
+            async {
+                refreshed.set(true);
+                Ok(CodexCatalogRefreshStatus::Updated)
+            },
+        )
+        .await;
+        assert!(refreshed.get());
+        assert!(matches!(result.unwrap_err().code, ErrorCode::InvalidState));
+    }
 }

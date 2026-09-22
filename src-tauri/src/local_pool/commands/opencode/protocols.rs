@@ -297,42 +297,13 @@ pub(super) fn apply_source(
         });
         groups.entry(protocol).or_default().push(model);
     }
-    let capabilities = source.protocol_config.effective_capabilities(
-        &source.base_url,
-        &source.models,
-        &source.protocol_bindings,
-        source.wire_api,
-    );
     let mut generated_groups = Vec::new();
     for (protocol, _, _) in GROUPS {
         let models = groups.remove(&protocol).unwrap_or_default();
         let mut configured = model_config_ids(&models, metadata);
         // Direct connections cannot execute Relay translations. The SDK must
         // speak the exact native protocol declared by this source.
-        for (model, value) in &mut configured {
-            if let Some(capability) = capabilities.iter().find(|capability| {
-                capability.model_id.eq_ignore_ascii_case(model)
-                    && capability.upstream_wire_api == protocol
-            }) {
-                use zenith_relay_core::{CapabilityStatus, ProtocolFeature};
-                if let Some(variants) = value.get_mut("variants").and_then(Value::as_object_mut) {
-                    variants.retain(|effort, _| {
-                        capability.features.get(&ProtocolFeature::Reasoning)
-                            != Some(&CapabilityStatus::Unsupported)
-                            && (capability.reasoning_efforts.is_empty()
-                                || capability.reasoning_efforts.contains(effort))
-                    });
-                }
-                for (key, feature) in [
-                    ("reasoning", ProtocolFeature::Reasoning),
-                    ("tool_call", ProtocolFeature::FunctionTools),
-                    ("attachment", ProtocolFeature::Images),
-                ] {
-                    if capability.features.get(&feature) == Some(&CapabilityStatus::Unsupported) {
-                        value[key] = false.into();
-                    }
-                }
-            }
+        for value in configured.values_mut() {
             set_variants(value, protocol);
         }
         let generated = provider_with_models(&source.base_url, secret, configured, protocol)?;
@@ -477,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_refresh_preserves_protocol_ids_and_external_selection_and_filters_capabilities() {
+    fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
         use zenith_relay_core::{
             CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ProtocolFeature,
             SourceProtocolBinding,
@@ -516,18 +487,21 @@ mod tests {
         assert_eq!(config["model"], "user-provider/selected");
         let models = &config["provider"]["zenith-relay-messages"]["models"];
         assert!(models.get("gpt-test").is_some());
-        assert_eq!(models["claude"]["tool_call"], false);
+        assert_eq!(models["claude"]["tool_call"], true);
         assert_eq!(
             models["claude"]["variants"],
             json!({
                 "none":{"thinking":{"type":"disabled"}},
+                "low":{"thinking":{"type":"adaptive"},"effort":"low"},
                 "high":{"thinking":{"type":"adaptive"},"effort":"high"}
             })
         );
-        assert!(config["provider"]["zenith-relay"]["models"]
+        let fallback_models = config["provider"]["zenith-relay"]["models"]
             .as_object()
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        assert_eq!(fallback_models.len(), 2);
+        assert!(fallback_models.contains_key("gpt-other"));
+        assert!(fallback_models.contains_key("chat-only"));
     }
 
     #[test]

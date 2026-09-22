@@ -3,7 +3,7 @@ use crate::{
     CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter, WireApi,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Executable paths, independent from advisory model metadata and prices.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -37,106 +37,110 @@ impl ModelProtocolRoute {
     }
 }
 
-pub fn model_protocol_routes(
-    model: &str,
-    sources: &[SourceSummary],
-    accounts: &[AccountSummary],
-) -> Vec<ModelProtocolRoute> {
-    let mut routes = Vec::new();
-    for source in sources.iter().filter(|source| {
-        source.enabled && source.in_pool && !source.draining && source.secret_available
-    }) {
-        if !allowed(model, &source.allowed_models, &source.excluded_models) {
-            continue;
-        }
-        let capabilities = source.protocol_config.effective_capabilities(
-            &source.base_url,
-            &source.models,
-            &source.protocol_bindings,
-            source.wire_api,
-        );
-        for binding in source
-            .protocol_config
-            .resolve(
-                &source.base_url,
-                &source.models,
-                &source.protocol_bindings,
-                source.wire_api,
-            )
-            .unwrap_or_default()
-        {
-            if !binding
-                .model_ids
-                .iter()
-                .any(|id| id.eq_ignore_ascii_case(model))
-            {
-                continue;
-            }
-            let upstream = binding
-                .adapter
-                .upstream_protocol(binding.wire_api)
-                .wire_api();
-            let capability = capabilities.iter().find(|entry| {
-                entry.model_id.eq_ignore_ascii_case(model) && entry.upstream_wire_api == upstream
-            });
-            if capability.is_some_and(|entry| {
-                entry.status == CapabilityStatus::Unsupported
-                    || entry.features.get(&ProtocolFeature::Text)
-                        == Some(&CapabilityStatus::Unsupported)
-            }) {
-                continue;
-            }
-            routes.push(ModelProtocolRoute {
-                client_wire_api: binding.wire_api,
-                upstream_wire_api: upstream,
-                features: capability
-                    .map(|entry| entry.features.clone())
-                    .unwrap_or_default(),
-                reasoning_efforts: capability
-                    .map(|entry| entry.reasoning_efforts.clone())
-                    .unwrap_or_default(),
-            });
-        }
-    }
-    if accounts.iter().any(|account| {
-        account.enabled
-            && account.in_pool
-            && !account.draining
-            && account.secret_available
-            && account.proxy_available
-            && allowed(model, &account.allowed_models, &account.excluded_models)
-            && account
-                .models
-                .iter()
-                .any(|id| id.eq_ignore_ascii_case(model))
-    }) {
-        for client in WireApi::ALL {
-            routes.push(ModelProtocolRoute {
-                client_wire_api: client,
-                upstream_wire_api: WireApi::Responses,
-                features: BTreeMap::from([
-                    (ProtocolFeature::Text, CapabilityStatus::Declared),
-                    (ProtocolFeature::Streaming, CapabilityStatus::Declared),
-                ]),
-                reasoning_efforts: Vec::new(),
-            });
-        }
-    }
-    let mut unique = Vec::new();
-    for route in routes {
-        if !unique.contains(&route) {
-            unique.push(route);
-        }
-    }
-    unique
+/// Resolve each member once for a whole catalog projection. The index lives
+/// only for this snapshot, so policy edits cannot leave cached routes behind.
+#[derive(Default)]
+pub(super) struct ModelProtocolIndex {
+    routes: BTreeMap<String, Vec<ModelProtocolRoute>>,
+    cache_write_models: BTreeSet<String>,
 }
 
-fn allowed(model: &str, allowed: &[String], excluded: &[String]) -> bool {
-    ModelRules {
-        allowed: allowed.iter().cloned().collect(),
-        excluded: excluded.iter().cloned().collect(),
+impl ModelProtocolIndex {
+    pub(super) fn new(sources: &[SourceSummary], accounts: &[AccountSummary]) -> Self {
+        let mut index = Self::default();
+        for source in sources {
+            let enabled =
+                source.enabled && source.in_pool && !source.draining && source.secret_available;
+            let rules = ModelRules {
+                allowed: source.allowed_models.iter().cloned().collect(),
+                excluded: source.excluded_models.iter().cloned().collect(),
+            };
+            for binding in source
+                .protocol_config
+                .resolve(
+                    &source.base_url,
+                    &source.models,
+                    &source.protocol_bindings,
+                    source.wire_api,
+                )
+                .unwrap_or_default()
+            {
+                let upstream = binding
+                    .adapter
+                    .upstream_protocol(binding.wire_api)
+                    .wire_api();
+                for model in binding.model_ids {
+                    let key = model.to_ascii_lowercase();
+                    // Editable inventory keeps its price fields while a member
+                    // is offline or excluded; this does not grant a route.
+                    if upstream == WireApi::Messages {
+                        index.cache_write_models.insert(key.clone());
+                    }
+                    if enabled && rules.allows(&model) {
+                        index.insert(key, binding.wire_api, upstream);
+                    }
+                }
+            }
+        }
+        for account in accounts.iter().filter(|account| {
+            account.enabled
+                && account.in_pool
+                && !account.draining
+                && account.secret_available
+                && account.proxy_available
+        }) {
+            let rules = ModelRules {
+                allowed: account.allowed_models.iter().cloned().collect(),
+                excluded: account.excluded_models.iter().cloned().collect(),
+            };
+            for model in account.models.iter().filter(|model| rules.allows(model)) {
+                for client in WireApi::ALL {
+                    index.insert(model.to_ascii_lowercase(), client, WireApi::Responses);
+                }
+            }
+        }
+        index
     }
-    .allows(model)
+
+    fn insert(&mut self, model: String, client: WireApi, upstream: WireApi) {
+        let routes = self.routes.entry(model).or_default();
+        if routes
+            .iter()
+            .any(|route| route.client_wire_api == client && route.upstream_wire_api == upstream)
+        {
+            return;
+        }
+        routes.push(ModelProtocolRoute {
+            client_wire_api: client,
+            upstream_wire_api: upstream,
+            // Reference metadata fills semantic fields after physical paths.
+            features: BTreeMap::new(),
+            reasoning_efforts: Vec::new(),
+        });
+    }
+
+    pub(super) fn routes_for(&self, model: &str) -> Vec<ModelProtocolRoute> {
+        self.routes
+            .get(&model.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn has_cache_write_pricing(&self, model: &str) -> bool {
+        self.cache_write_models
+            .contains(&model.to_ascii_lowercase())
+    }
+}
+
+pub fn apply_model_protocol_routes(
+    models: &mut [ModelSummary],
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+) {
+    let index = ModelProtocolIndex::new(sources, accounts);
+    for model in models {
+        model.protocol_routes = index.routes_for(&model.id);
+    }
 }
 
 pub fn codex_catalog_supports_websockets(models: &[ModelSummary]) -> bool {
@@ -155,6 +159,131 @@ pub fn codex_catalog_supports_websockets(models: &[ModelSummary]) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn catalog_projection_preserves_filters_and_offline_cache_prices() {
+        let ids = (0..256).map(|i| format!("model-{i}")).collect::<Vec<_>>();
+        let source: SourceSummary = serde_json::from_value(json!({
+            "id":"source", "name":"Synthetic", "enabled":true, "inPool":true,
+            "draining":false, "operationalStatus":"rotation",
+            "baseUrl":"https://example.test/v1", "wireApi":"responses",
+            "models":ids, "allowedModels":[], "excludedModels":["MODEL-4"],
+            "priority":0, "weight":1, "secretAvailable":true,
+            "protocolConfig":{"capabilities":ids.iter().enumerate().map(|(i, id)| json!({
+                "modelId":id, "upstreamWireApi":if i % 2 == 0 { "messages" } else { "responses" },
+                "status":"declared", "origin":"catalog", "checkedAtMs":1
+            })).collect::<Vec<_>>()}
+        }))
+        .unwrap();
+        let mut offline = source.clone();
+        offline.id = "offline".into();
+        offline.enabled = false;
+        offline.models = vec!["offline-model".into()];
+        offline.protocol_config =
+            crate::SourceProtocolConfig::automatic("https://example.test/v1/messages");
+        let mut duplicate = source.clone();
+        duplicate.id = "duplicate".into();
+        let mut models = ids
+            .iter()
+            .chain(&offline.models)
+            .map(|id| {
+                serde_json::from_value(json!({"id":id,"enabled":true,"memberCount":1})).unwrap()
+            })
+            .collect::<Vec<ModelSummary>>();
+        let prices = BTreeMap::from([(
+            "offline-model".into(),
+            crate::ApiModelPriceOverride {
+                input_micro_usd_per_million: 1_000_000,
+                cached_input_micro_usd_per_million: None,
+                cache_write_5m_micro_usd_per_million: Some(1_250_000),
+                cache_write_1h_micro_usd_per_million: Some(2_000_000),
+                output_micro_usd_per_million: 5_000_000,
+            },
+        )]);
+        super::super::apply_pool_model_configuration(
+            &mut models,
+            &[source, offline, duplicate],
+            &[],
+            &prices,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(models.len(), ids.len() + 1);
+        for (i, model) in models[..ids.len()].iter().enumerate() {
+            if i == 4 {
+                assert!(model.protocol_routes.is_empty());
+                assert!(!model.codex_visible);
+                continue;
+            }
+            assert_eq!(model.protocol_routes.len(), 4);
+            assert!(model
+                .protocol_routes
+                .iter()
+                .all(|route| route.upstream_wire_api
+                    == if i % 2 == 0 {
+                        WireApi::Messages
+                    } else {
+                        WireApi::Responses
+                    }));
+        }
+        let offline = models.last().unwrap();
+        assert!(offline.protocol_routes.is_empty());
+        assert!(!offline.codex_visible);
+        assert_eq!(
+            offline.cache_write_5m_micro_usd_per_million,
+            Some(1_250_000)
+        );
+        assert_eq!(
+            offline.cache_write_1h_micro_usd_per_million,
+            Some(2_000_000)
+        );
+    }
+
+    #[test]
+    fn model_projection_collects_paths_without_participant_semantic_fields() {
+        let source: SourceSummary = serde_json::from_value(json!({
+            "id":"source", "name":"Synthetic", "enabled":true, "inPool":true,
+            "draining":false, "operationalStatus":"rotation",
+            "baseUrl":"https://example.test/v1", "wireApi":"responses",
+            "models":["future-model"], "allowedModels":[], "excludedModels":[],
+            "priority":0, "weight":1, "secretAvailable":true,
+            "protocolConfig":{"capabilities":[{
+                "modelId":"future-model", "upstreamWireApi":"responses",
+                "status":"unsupported", "origin":"catalog", "checkedAtMs":1,
+                "features":{"text":"unsupported", "reasoning":"unsupported"}
+            }]}
+        }))
+        .unwrap();
+        let expected = source
+            .protocol_config
+            .resolve(
+                &source.base_url,
+                &source.models,
+                &source.protocol_bindings,
+                source.wire_api,
+            )
+            .unwrap();
+        let mut other = source.clone();
+        other.id = "second-source".into();
+        other.protocol_config.capabilities.clear();
+        let index = ModelProtocolIndex::new(&[source, other], &[]);
+        let routes = index.routes_for("future-model");
+        assert_eq!(routes, index.routes_for("FUTURE-MODEL"));
+        assert_eq!(routes.len(), expected.len());
+        for route in routes {
+            assert!(expected.iter().any(|binding| {
+                binding.wire_api == route.client_wire_api
+                    && binding
+                        .adapter
+                        .upstream_protocol(binding.wire_api)
+                        .wire_api()
+                        == route.upstream_wire_api
+            }));
+            assert!(route.features.is_empty());
+            assert!(route.reasoning_efforts.is_empty());
+        }
+    }
 
     #[test]
     fn reasoning_projection_uses_the_selected_route_and_honors_explicit_unsupported() {

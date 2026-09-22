@@ -119,9 +119,7 @@ mod tests {
     use reqwest::StatusCode;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
-    use zenith_relay_core::{
-        CandidateHealth, CandidateQuota, CandidateScope, LocalGatewayKey, ProviderSource, WireApi,
-    };
+    use zenith_relay_core::{CandidateScope, LocalGatewayKey, ProviderSource, WireApi};
 
     #[tokio::test]
     async fn stop_waits_until_the_same_port_can_be_rebound() {
@@ -233,11 +231,17 @@ mod tests {
 
         let running_runtime = manager.runtime().await.unwrap();
         assert!(Arc::ptr_eq(&running_runtime, &runtime));
-        assert!(running_runtime.update_candidate_availability(
+        assert!(running_runtime.update_source_policy(
             "source",
-            false,
-            CandidateHealth::Healthy,
-            CandidateQuota::Exhausted,
+            zenith_relay_core::RuntimeCandidatePolicy {
+                enabled: false,
+                draining: false,
+                priority: 0,
+                weight: 1,
+                allowed_models: vec![],
+                excluded_models: vec![],
+            },
+            0,
         ));
         assert_eq!(manager.address().await, Some(address));
         assert!(!client

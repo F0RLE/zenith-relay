@@ -237,7 +237,7 @@ pub(crate) async fn build_local_runtime_state(
     );
     let visible_model_ids = models
         .iter()
-        .filter(|model| model.enabled)
+        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
         .map(|model| model.id.clone())
         .collect();
     let candidate_count = pool_candidate_count(&source_summaries, &account_summaries);
@@ -368,12 +368,9 @@ fn local_source_summary(
         pricing_provider: record.pricing_provider.clone(),
         official_provider_family: record.official_provider_family.clone(),
         wire_api: record.wire_api,
-        protocol_config: record.protocol_config.with_effective_capabilities(
-            &record.base_url,
-            &record.models,
-            &record.protocol_bindings,
-            record.wire_api,
-        ),
+        protocol_config: record
+            .protocol_config
+            .with_effective_capabilities(&record.base_url, &record.models),
         protocol_bindings: record.protocol_bindings.clone(),
         resolved_protocol_bindings: Some(record.effective_protocol_bindings().unwrap_or_default()),
         models: record.models.clone(),
