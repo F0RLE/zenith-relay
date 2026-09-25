@@ -26,41 +26,31 @@ pub(super) fn source_runtime_policy_compatible(
         })
 }
 
+pub(super) fn source_dispatch_permission_changed(
+    previous: &SourceRecord,
+    next: &SourceRecord,
+    credential_replaced: bool,
+) -> bool {
+    credential_replaced
+        || !source_runtime_policy_compatible(
+            std::slice::from_ref(previous),
+            std::slice::from_ref(next),
+        )
+        || previous.enabled != next.enabled
+        || previous.in_pool != next.in_pool
+        || previous.draining != next.draining
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use zenith_relay_core::WireApi;
-
-    fn source() -> SourceRecord {
-        SourceRecord {
-            id: "source-test".into(),
-            name: "Test source".into(),
-            enabled: true,
-            in_pool: true,
-            draining: false,
-            base_url: "https://example.test/v1".into(),
-            secret_ref: "source:test".into(),
-            pricing_provider: None,
-            official_provider_family: None,
-            wire_api: WireApi::Responses,
-            protocol_config: Default::default(),
-            protocol_bindings: Vec::new(),
-            models: vec!["gpt-test".into()],
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            priority: 0,
-            weight: 1,
-            recovery_delay_seconds: 0,
-            model_price_overrides: BTreeMap::new(),
-            detected_model_prices: BTreeMap::new(),
-            last_error_code: None,
-        }
-    }
+    use crate::test_fixtures::pooled_source;
 
     #[test]
     fn source_policy_changes_stay_hot_but_transport_changes_rebuild() {
-        let previous = source();
+        let previous = pooled_source("source-test", "gpt-test");
         let mut policy = previous.clone();
         policy.enabled = false;
         policy.in_pool = false;
@@ -111,6 +101,34 @@ mod tests {
         assert!(!source_runtime_policy_compatible(
             std::slice::from_ref(&previous),
             std::slice::from_ref(&transport_change)
+        ));
+    }
+
+    #[test]
+    fn dispatch_fence_only_follows_permission_or_transport_edits() {
+        let previous = pooled_source("source-test", "gpt-test");
+        let mut weighting = previous.clone();
+        weighting.priority = 2;
+        weighting.weight = 3;
+        weighting.recovery_delay_seconds = 15;
+        assert!(!source_dispatch_permission_changed(
+            &previous, &weighting, false
+        ));
+        assert!(source_dispatch_permission_changed(
+            &previous, &weighting, true
+        ));
+
+        let mut membership = previous.clone();
+        membership.in_pool = false;
+        assert!(source_dispatch_permission_changed(
+            &previous,
+            &membership,
+            false
+        ));
+        let mut transport = previous.clone();
+        transport.base_url = "https://other.example.test/v1".into();
+        assert!(source_dispatch_permission_changed(
+            &previous, &transport, false
         ));
     }
 }

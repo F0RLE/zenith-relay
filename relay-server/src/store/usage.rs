@@ -295,7 +295,8 @@ impl Store {
                             .and_then(zenith_relay_core::normalize_reasoning_effort),
                         event
                             .cache_write_ttl
-                            .and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
+                            .as_deref()
+                            .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls,),
                         candidate_id,
                         event
                             .upstream_error
@@ -447,7 +448,7 @@ impl Store {
                             cache_write_ttl: row
                                 .get::<_, Option<String>>(28)?
                                 .as_deref()
-                                .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
+                                .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls),
                             reasoning_tokens: optional_u64(row.get(17)?),
                             output_tokens: optional_u64(row.get(18)?),
                             total_tokens: optional_u64(row.get(19)?),
@@ -467,13 +468,9 @@ impl Store {
                 .as_deref()
                 .or(event.requested_model.as_deref());
             let (cache_write_5m, cache_write_1h, unknown_cache_write) =
-                match event.tokens.cache_write_ttl {
-                    Some(zenith_relay_core::CacheWriteTtl::FiveMinutes) => {
-                        (event.tokens.cache_write_input_tokens, Some(0), Some(0))
-                    }
-                    Some(zenith_relay_core::CacheWriteTtl::OneHour) => {
-                        (Some(0), event.tokens.cache_write_input_tokens, Some(0))
-                    }
+                match event.tokens.cache_write_ttl.as_deref() {
+                    Some("5m") => (event.tokens.cache_write_input_tokens, Some(0), Some(0)),
+                    Some("1h") => (Some(0), event.tokens.cache_write_input_tokens, Some(0)),
                     _ => (Some(0), Some(0), event.tokens.cache_write_input_tokens),
                 };
             event.api_equivalent = resolver.estimate(
@@ -801,12 +798,19 @@ mod tests {
             http_status: 503,
             error_category: Some("upstream_unavailable".into()),
             tool_use: ToolUseDiagnostics {
-                client_tool_count: 2,
-                forwarded_tool_count: 2,
+                client_tool_count: 73,
+                forwarded_tool_count: 73,
                 tool_choice: ToolChoiceMode::Auto,
                 tool_call_count: 1,
                 text_output: false,
                 terminal_output: TerminalOutputKind::ToolCall,
+                client_schema_bytes: Some(12345),
+                forwarded_schema_bytes: Some(12345),
+                filtered_tool_count: 0,
+                policy_mode: Some(zenith_relay_core::ToolPolicyMode::Automatic),
+                policy_outcome: Some(zenith_relay_core::ToolPolicyOutcome::Deferred),
+                policy_fallback: false,
+                deferred_tool_search: true,
             },
             cooldown_scope: Some("*".into()),
             retry_at_ms: Some(60_000),
@@ -877,6 +881,7 @@ mod tests {
             .find(|event| event.request_id == "req_fallback")
             .unwrap();
         assert!(fallback.success);
+        assert_eq!(fallback.tool_use.as_ref(), Some(&event.tool_use));
         assert!(fallback.upstream_error.is_none());
         assert_eq!(fallback.http_status, 200);
         assert_eq!(fallback.service_tier, DefaultServiceTier::Fast);

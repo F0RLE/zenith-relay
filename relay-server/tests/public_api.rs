@@ -31,6 +31,12 @@ use zenith_relay_server::{
     store::{Store, Vault},
 };
 
+#[path = "support/tool_policy.rs"]
+mod tool_policy;
+
+#[path = "support/rotation_upgrade.rs"]
+mod rotation_upgrade;
+
 fn add_rebuild_failing_source(state: &AppState) {
     state
         .vault
@@ -248,6 +254,83 @@ async fn routing_policy_hot_update_does_not_rebuild_unrelated_invalid_source() {
 }
 
 #[tokio::test]
+async fn basis_points_switch_updates_running_server_account_without_rebuild() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let management_key = "synthetic-management-token-value";
+    let preview: Value = client
+        .post(format!("{}/accounts/import/preview", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "label": "OAuth account",
+            "accessToken": "synthetic-access-token",
+            "refreshToken": "synthetic-refresh-token",
+            "expiresAtMs": 4_000_000_000_000_u64,
+            "chatgptAccountId": "synthetic-chatgpt-account-id",
+            "responsesUrl": format!("{upstream}/account/responses"),
+            "models": ["gpt-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account: Value = client
+        .post(format!("{}/accounts/import/confirm", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"sessionId": preview["sessionId"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_id = account["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"accountIds": [account_id], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let runtime = server.state.runtime().unwrap().unwrap();
+    for enabled in [true, false] {
+        let response = client
+            .post(format!("{}/routing/settings", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"maxRetryCandidates": 4, "basisPointsEnabled": enabled}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot: Value = response.json().await.unwrap();
+        assert_eq!(snapshot["gateway"]["basisPointsEnabled"], enabled);
+        assert_eq!(
+            snapshot["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|account| account["id"] == account_id)
+                .unwrap()["basisPointsEnabled"],
+            enabled
+        );
+        assert!(Arc::ptr_eq(
+            &runtime,
+            &server.state.runtime().unwrap().unwrap()
+        ));
+    }
+    server.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn profile_can_be_prepared_before_the_first_account_transfer() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
@@ -294,7 +377,18 @@ async fn source_creation_persists_only_models_confirmed_by_each_protocol() {
     assert_eq!(source.status(), StatusCode::CREATED);
     let source: Value = source.json().await.unwrap();
     assert_eq!(source["wireApi"], "responses");
-    assert_eq!(source["models"], json!(["gpt-native", "claude-native"]));
+    // Unknown model identities use deterministic alphabetical snapshot order;
+    // discovery order and exact route bindings must still be persisted intact.
+    assert_eq!(source["models"], json!(["claude-native", "gpt-native"]));
+    let stored_source = server
+        .state
+        .store
+        .sources()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.id == source["id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(stored_source.models, ["gpt-native", "claude-native"]);
     assert_eq!(
         source["protocolBindings"],
         json!([
@@ -356,7 +450,18 @@ async fn source_creation_preserves_native_and_bridged_responses_routes() {
     let source_id = source["id"].as_str().unwrap();
 
     assert_eq!(source["wireApi"], "responses");
-    assert_eq!(source["models"], json!(["gpt-native", "claude-native"]));
+    // Unknown model identities use deterministic alphabetical snapshot order;
+    // discovery order and exact route bindings must still be persisted intact.
+    assert_eq!(source["models"], json!(["claude-native", "gpt-native"]));
+    let stored_source = server
+        .state
+        .store
+        .sources()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.id == source["id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(stored_source.models, ["gpt-native", "claude-native"]);
     assert_eq!(
         source["protocolBindings"],
         json!([
@@ -2826,7 +2931,9 @@ async fn adaptive_quota_refresh_has_no_remote_interval_setting() {
         .json(&json!({
             "maxRetryCandidates": 5,
             "routingStrategy": "subscription_plan",
-            "subscriptionPlanOrder": ["business", "plus"],
+            "subscriptionPlanOrder": ["not a valid\nplan"],
+            "cooldownAfterFailures": 0,
+            "keepLastCandidateAvailable": false,
             "imageBaseModel": "gpt-5.4-mini"
         }))
         .send()
@@ -2840,11 +2947,14 @@ async fn adaptive_quota_refresh_has_no_remote_interval_setting() {
     assert!(routing["gateway"]
         .get("sessionAffinityTtlSeconds")
         .is_none());
-    assert_eq!(routing["gateway"]["routingStrategy"], "subscription_plan");
-    assert_eq!(
-        routing["gateway"]["subscriptionPlanOrder"],
-        json!(["business", "plus"])
-    );
+    for old in [
+        "cooldownAfterFailures",
+        "keepLastCandidateAvailable",
+        "routingStrategy",
+        "subscriptionPlanOrder",
+    ] {
+        assert!(routing["gateway"].get(old).is_none());
+    }
     assert_eq!(routing["gateway"]["imageBaseModel"], "gpt-5.4-mini");
     assert!(routing["capabilities"]["features"]
         .as_array()
@@ -3836,7 +3946,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     }
     let document: Value = serde_json::from_str(&document_text).unwrap();
     assert_eq!(document["preset"]["format"], "zenith-relay-configuration");
-    assert_eq!(document["preset"]["schemaVersion"], 4);
+    assert_eq!(document["preset"]["schemaVersion"], 6);
     assert!(document["revision"]
         .as_str()
         .is_some_and(|revision| revision.starts_with("cfg_")));
@@ -3864,7 +3974,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     account_rule["priority"] = json!(9);
     preset["settings"]["routing"]["maxRetryCandidates"] = json!(4);
     preset["settings"]["routing"]["poolRouting"] = json!({
-        "version": 1,
+        "version": 2,
         "mode": "round_robin",
         "members": [
             {"kind": "source", "id": "source_local_record", "weight": 3, "maxConcurrency": 2},
@@ -3979,7 +4089,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     assert_eq!(applied_state["configurationRevision"], applied["revision"]);
     assert_eq!(applied_state["gateway"]["maxRetryCandidates"], 4);
     let expected_pool_routing = json!({
-        "version": 1,
+        "version": 2,
         "mode": "round_robin",
         "members": [
             {"kind": "source", "id": source_id, "weight": 3, "maxConcurrency": 2},
@@ -3992,7 +4102,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     );
     let mut stale_expected_pool_routing =
         document["preset"]["settings"]["routing"]["poolRouting"].clone();
-    stale_expected_pool_routing["mode"] = json!("smart");
+    stale_expected_pool_routing["mode"] = json!("automatic");
     let stale_routing = client
         .post(format!("{}/routing/settings", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -4018,7 +4128,8 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     assert_eq!(applied_state["gateway"]["visibleModelIds"], json!([]));
 
     let mut unsupported_schema = fresh_preview["preset"].clone();
-    unsupported_schema["schemaVersion"] = json!(5);
+    unsupported_schema["schemaVersion"] =
+        json!(zenith_relay_core::protocol::CONFIGURATION_PRESET_SCHEMA_VERSION + 1);
     let unsupported = client
         .post(format!("{}/configuration/preset/preview", server.origin))
         .bearer_auth("synthetic-management-token-value")

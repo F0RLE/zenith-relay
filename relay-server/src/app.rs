@@ -18,12 +18,88 @@ mod snapshot;
 
 pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};
 
+/// Hold across a durable configuration edit and its hot apply, replacement or
+/// rollback. Acquire configuration_lock first when both are needed. Builds
+/// never acquire configuration_lock internally or perform provider HTTP.
+pub(crate) struct RuntimeBuildGuard<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl RuntimeBuildGuard<'_> {
+    fn retire_after_failed_restore(state: &AppState, error: String) -> String {
+        match state.replace_runtime(None) {
+            Ok(()) => error,
+            Err(retire_error) => {
+                format!("{error}; failed to retire previous runtime: {retire_error}")
+            }
+        }
+    }
+
+    pub(crate) async fn rebuild(&self, state: &Arc<AppState>) -> Result<(), String> {
+        runtime_build::rebuild(state).await
+    }
+
+    pub(crate) async fn rebuild_or_rollback<F>(
+        &self,
+        state: &Arc<AppState>,
+        rollback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let Err(error) = self.rebuild(state).await else {
+            return Ok(());
+        };
+        if let Err(rollback_error) = rollback() {
+            return Err(Self::retire_after_failed_restore(
+                state,
+                format!("{error}; failed to restore persisted state: {rollback_error}"),
+            ));
+        }
+        if let Err(restore_error) = self.rebuild(state).await {
+            return Err(Self::retire_after_failed_restore(
+                state,
+                format!("{error}; failed to rebuild previous runtime: {restore_error}"),
+            ));
+        }
+        Err(error)
+    }
+
+    pub(crate) async fn rollback_and_rebuild<F>(
+        &self,
+        state: &Arc<AppState>,
+        rollback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        if let Err(error) = rollback() {
+            return Err(Self::retire_after_failed_restore(
+                state,
+                format!("failed to restore persisted state: {error}"),
+            ));
+        }
+        self.rebuild(state).await.map_err(|error| {
+            Self::retire_after_failed_restore(
+                state,
+                format!("failed to rebuild previous runtime: {error}"),
+            )
+        })
+    }
+}
+
 impl AppState {
     pub async fn prepare_account_tokens(
         self: &Arc<Self>,
-        account_id: &str,
+        expected: &ServerAccountRecord,
     ) -> Result<TokenSet, String> {
-        let record = find_account(self, account_id)?;
+        // Import holds this lock through the new record commit and slot
+        // removal. A late preparation cannot register an old login afterward.
+        let configuration = self.configuration_lock.lock().await;
+        let record = find_account(self, &expected.id)?;
+        if record.secret_ref != expected.secret_ref {
+            return Err("account login changed during authorization".into());
+        }
         let secret = self
             .vault
             .load(&record.secret_ref)?
@@ -31,36 +107,56 @@ impl AppState {
         let credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
         self.token_authority
-            .register_if_absent(account_id, credential.tokens()?, record.auth_state)
+            .register_if_absent(&record.id, credential.tokens()?, record.auth_state)
             .map_err(|error| error.to_string())?;
         let proxy = account_proxy_config(self, &record, &credential)?;
         let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
-        let persistence = ServerTokenPersistence {
-            state: self.clone(),
-        };
-        self.token_authority
-            .prepare_and_persist(account_id, now_ms(), 60_000, &refresh, &persistence)
+        let persistence = ServerTokenPersistence::for_account(self.clone(), &record);
+        drop(configuration);
+        let tokens = self
+            .token_authority
+            .prepare_and_persist(&record.id, now_ms(), 60_000, &refresh, &persistence)
             .await
             .map(|prepared| prepared.tokens)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let _configuration = self.configuration_lock.lock().await;
+        if find_account(self, &record.id)?.secret_ref != record.secret_ref {
+            return Err("account login changed during authorization".into());
+        }
+        Ok(tokens)
     }
 
     pub async fn recover_account_tokens_after_unauthorized(
         self: &Arc<Self>,
-        account_id: &str,
+        expected: &ServerAccountRecord,
+        rejected_tokens: &TokenSet,
     ) -> Result<TokenSet, String> {
-        let persistence = ServerTokenPersistence {
-            state: self.clone(),
-        };
-        self.token_authority
-            .invalidate_access_and_persist(account_id, now_ms(), &persistence)
+        let persistence = ServerTokenPersistence::for_account(self.clone(), expected);
+        if !self
+            .token_authority
+            .invalidate_access_if_current_and_persist(
+                &expected.id,
+                rejected_tokens,
+                now_ms(),
+                &persistence,
+            )
             .await
-            .map_err(|error| error.to_string())?;
-        self.prepare_account_tokens(account_id).await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("rejected OAuth token is no longer current".into());
+        }
+        self.prepare_account_tokens(expected).await
     }
 
     pub async fn rebuild_runtime(self: &Arc<Self>) -> Result<(), String> {
-        runtime_build::rebuild(self).await
+        let guard = self.lock_runtime_rebuild().await;
+        guard.rebuild(self).await
+    }
+
+    pub(crate) async fn lock_runtime_rebuild(&self) -> RuntimeBuildGuard<'_> {
+        RuntimeBuildGuard {
+            _guard: self.runtime_build_lock.lock().await,
+        }
     }
 
     /// Rebuilds the runtime from persisted state and restores the previous
@@ -73,31 +169,8 @@ impl AppState {
     where
         F: FnOnce() -> Result<(), String>,
     {
-        let Err(error) = self.rebuild_runtime().await else {
-            return Ok(());
-        };
-        rollback().map_err(|rollback_error| {
-            format!("{error}; failed to restore persisted state: {rollback_error}")
-        })?;
-        self.rebuild_runtime().await.map_err(|restore_error| {
-            format!("{error}; failed to rebuild previous runtime: {restore_error}")
-        })?;
-        Err(error)
-    }
-
-    /// Restores persisted state after an in-place activation failed, then
-    /// rebuilds the runtime from that restored state.
-    pub(crate) async fn rollback_and_rebuild_runtime<F>(
-        self: &Arc<Self>,
-        rollback: F,
-    ) -> Result<(), String>
-    where
-        F: FnOnce() -> Result<(), String>,
-    {
-        rollback().map_err(|error| format!("failed to restore persisted state: {error}"))?;
-        self.rebuild_runtime()
-            .await
-            .map_err(|error| format!("failed to rebuild previous runtime: {error}"))
+        let build = self.lock_runtime_rebuild().await;
+        build.rebuild_or_rollback(self, rollback).await
     }
 
     /// Updates the scopes of all active internal profile keys after a candidate
@@ -110,30 +183,27 @@ impl AppState {
         let sources = self.store.sources()?;
         let accounts = self.store.accounts()?;
         let routing = self.store.routing_policy()?;
-        runtime
-            .set_pool_routing_policy(
-                runtime_build::resolve_pool_routing(&routing, &sources, &accounts),
-                routing.max_retry_candidates,
-                routing.cooldown_after_failures,
-                routing.keep_last_candidate_available,
-            )
-            .map_err(|error| error.to_string())?;
         let keys = self
             .store
             .keys()?
             .into_iter()
             .filter(|key| key.enabled && is_internal_gateway_key(key))
             .collect::<Vec<_>>();
-        if keys.is_empty() {
-            // There is no internal profile scope to synchronize. The policy
-            // has already been applied to the live runtime, so this is a
-            // successful no-op rather than a reason to replace it.
-            return Ok(true);
-        }
-        let scope = Self::active_internal_gateway_scope(&sources, &accounts, runtime);
-        Ok(keys
-            .iter()
-            .all(|key| runtime.update_key_scope(&key.id, scope.clone())))
+        let scopes = if keys.is_empty() {
+            Vec::new()
+        } else {
+            let scope = Self::active_internal_gateway_scope(&sources, &accounts, runtime);
+            keys.into_iter()
+                .map(|key| (key.id, scope.clone()))
+                .collect()
+        };
+        runtime
+            .set_pool_routing_policy_with_key_scopes(
+                runtime_build::resolve_pool_routing(&routing, &sources, &accounts),
+                routing.max_retry_candidates,
+                &scopes,
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn active_internal_gateway_scope(
@@ -188,8 +258,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::account_runtime::{account_summary, runtime_account};
+    use super::account_runtime::{account_summary, runtime_account, AccountSummaryInputs};
     use super::*;
+    use crate::test_fixtures::pooled_source;
     use crate::{
         config::Config,
         store::{Store, Vault},
@@ -212,29 +283,9 @@ mod tests {
     }
 
     fn snapshot_test_source(id: &str, model: &str) -> SourceRecord {
-        SourceRecord {
-            id: id.into(),
-            name: "Snapshot source".into(),
-            enabled: true,
-            in_pool: true,
-            draining: false,
-            base_url: "https://example.test/v1".into(),
-            secret_ref: format!("source:{id}"),
-            pricing_provider: None,
-            official_provider_family: None,
-            wire_api: WireApi::Responses,
-            protocol_config: Default::default(),
-            protocol_bindings: Vec::new(),
-            models: vec![model.into()],
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            priority: 0,
-            weight: 1,
-            recovery_delay_seconds: 0,
-            model_price_overrides: BTreeMap::new(),
-            detected_model_prices: BTreeMap::new(),
-            last_error_code: None,
-        }
+        let mut source = pooled_source(id, model);
+        source.name = "Snapshot source".into();
+        source
     }
 
     fn snapshot_test_account(id: &str, model: &str) -> ServerAccountRecord {
@@ -365,6 +416,68 @@ mod tests {
         );
 
         state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publishing_replacement_retires_the_previous_server_runtime() {
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let source = snapshot_test_source("replacement", "model-replacement");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let previous = state.runtime().unwrap().unwrap();
+        let order =
+            || previous.candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID);
+        assert!(order().iter().any(|candidate| candidate.available));
+
+        state.rebuild_runtime().await.unwrap();
+        let current = state.runtime().unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&previous, &current));
+        assert!(order().iter().all(|candidate| !candidate.available));
+        assert!(current
+            .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
+            .iter()
+            .any(|candidate| candidate.available));
+        state.shutdown_runtime().await.unwrap();
+        assert!(current
+            .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
+            .iter()
+            .all(|candidate| !candidate.available));
+    }
+
+    #[tokio::test]
+    async fn failed_rollback_retires_the_old_runtime_instead_of_serving_stale_permissions() {
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let source = snapshot_test_source("previous", "model-previous");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let previous = state.runtime().unwrap().unwrap();
+
+        let invalid = snapshot_test_account("invalid-build", "model-invalid");
+        state.store.save_account(&invalid).unwrap();
+        state
+            .vault
+            .save(&invalid.secret_ref, "not-a-credential")
+            .unwrap();
+        let error = state
+            .rebuild_runtime_or_rollback(|| Err("synthetic rollback unavailable".into()))
+            .await
+            .unwrap_err();
+        assert!(error.contains("failed to restore persisted state"));
+        assert!(state.runtime().unwrap().is_none());
+        assert!(previous
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
     }
 
     #[tokio::test]
@@ -672,6 +785,7 @@ mod tests {
                 record.clone(),
                 &credential,
                 None,
+                false,
                 zenith_relay_core::QUOTA_STALE_AFTER_MS,
             )
             .enabled
@@ -698,6 +812,7 @@ mod tests {
                 exhausted,
                 &credential,
                 None,
+                false,
                 zenith_relay_core::QUOTA_STALE_AFTER_MS,
             )
             .enabled,
@@ -705,12 +820,16 @@ mod tests {
         );
         let summary = account_summary(
             &record,
-            true,
-            ProxyMode::Direct,
-            true,
-            ApiEquivalentSummary::default(),
-            None,
-            zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            AccountSummaryInputs {
+                secret_available: true,
+                basis_points_available: true,
+                basis_points_enabled: false,
+                proxy_mode: ProxyMode::Direct,
+                proxy_available: true,
+                api_equivalent: ApiEquivalentSummary::default(),
+                quota_window_usage: None,
+                quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            },
         );
         assert_eq!(summary.operational_status, OperationalStatus::Rotation);
         assert!(summary.enabled);

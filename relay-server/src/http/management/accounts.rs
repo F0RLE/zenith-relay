@@ -165,6 +165,10 @@ pub async fn update_account(
     Path(id): Path<String>,
     Json(input): Json<AccountPatch>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
+    // Keep other runtime publications out of the durable-save -> hot-apply
+    // window. The dispatch fence is acquired before writing the new policy.
+    let _configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
     let mut record = find_account(&state, &id)?;
     let old = record.clone();
     if let Some(value) = input.label {
@@ -201,13 +205,21 @@ pub async fn update_account(
         record.purchase_cost_micro_usd = (value > 0).then_some(value);
     }
     let policy_changed = account_runtime_policy_changed(&old, &record);
+    let runtime = state.runtime().map_err(runtime_error)?;
+    let _dispatch_fence = if account_dispatch_permission_changed(&old, &record) {
+        runtime
+            .as_ref()
+            .and_then(|runtime| runtime.fence_candidate_dispatch(&record.id))
+    } else {
+        None
+    };
     state.store.save_account(&record).map_err(store_error)?;
     let runtime_applied = if policy_changed || old.in_pool != record.in_pool {
         match apply_account_policy_if_running(&state, &record) {
             Ok(applied) => applied,
             Err(error) => {
-                state
-                    .rollback_and_rebuild_runtime(|| state.store.save_account(&old))
+                build
+                    .rollback_and_rebuild(&state, || state.store.save_account(&old))
                     .await
                     .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
                 return Err(runtime_error(error));
@@ -217,8 +229,8 @@ pub async fn update_account(
         true
     };
     if !runtime_applied {
-        state
-            .rebuild_runtime_or_rollback(|| state.store.save_account(&old))
+        build
+            .rebuild_or_rollback(&state, || state.store.save_account(&old))
             .await
             .map_err(runtime_error)?;
     }
@@ -314,6 +326,17 @@ fn account_runtime_policy_changed(
         || previous.excluded_models != next.excluded_models
 }
 
+fn account_dispatch_permission_changed(
+    previous: &ServerAccountRecord,
+    next: &ServerAccountRecord,
+) -> bool {
+    previous.enabled != next.enabled
+        || previous.in_pool != next.in_pool
+        || previous.draining != next.draining
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PoolMembershipInput {
@@ -343,6 +366,11 @@ pub async fn set_pool_membership(
         ));
     }
 
+    // Serialize validation, durable membership and runtime publication with
+    // single-member edits. Final dispatch has no access to this host lock, so
+    // changed members also need physical candidate fences before the commit.
+    let _configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
     let accounts = state.store.accounts().map_err(store_error)?;
     let sources = state.store.sources().map_err(store_error)?;
     let old_accounts = account_ids
@@ -396,6 +424,20 @@ pub async fn set_pool_membership(
         .iter()
         .map(|id| (id.clone(), input.in_pool))
         .collect::<Vec<_>>();
+    let _dispatch_fences = state.runtime().map_err(runtime_error)?.map(|runtime| {
+        let mut fences = old_accounts
+            .iter()
+            .filter(|(_, previous)| *previous != input.in_pool)
+            .filter_map(|(id, _)| runtime.fence_candidate_dispatch(id))
+            .collect::<Vec<_>>();
+        for (id, _) in old_sources
+            .iter()
+            .filter(|(_, previous)| *previous != input.in_pool)
+        {
+            fences.extend(runtime.fence_source_dispatch(id));
+        }
+        fences
+    });
     state
         .store
         .replace_pool_membership(&next_sources, &next_accounts)
@@ -412,8 +454,8 @@ pub async fn set_pool_membership(
     let runtime_applied = match apply_account_policies_if_running(&state, &changed_accounts) {
         Ok(applied) => applied,
         Err(error) => {
-            state
-                .rollback_and_rebuild_runtime(|| {
+            build
+                .rollback_and_rebuild(&state, || {
                     state
                         .store
                         .replace_pool_membership(&old_sources, &old_accounts)
@@ -424,8 +466,8 @@ pub async fn set_pool_membership(
         }
     };
     if !runtime_applied {
-        state
-            .rebuild_runtime_or_rollback(|| {
+        build
+            .rebuild_or_rollback(&state, || {
                 state
                     .store
                     .replace_pool_membership(&old_sources, &old_accounts)
@@ -482,6 +524,9 @@ pub async fn delete_account(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ManagementError> {
     let _wake_guard = state.wake_lock.lock().await;
+    let configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
+    let credential = state.account_credential_lock.lock().await;
     let record = find_account(&state, &id)?;
     let secret = state
         .vault
@@ -493,26 +538,279 @@ pub async fn delete_account(
                 "account secret missing",
             )
         })?;
+    // Close the old login before either durable store or vault changes. Hold
+    // the fence through replacement/rollback; only already-started attempts
+    // may settle after deletion begins.
+    let previous_runtime = state.runtime().map_err(runtime_error)?;
+    let _dispatch_fence = previous_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.fence_candidate_dispatch(&id));
     state.store.delete_account(&id).map_err(store_error)?;
-    state
-        .vault
-        .delete(&record.secret_ref)
-        .map_err(vault_error)?;
+    if let Err(error) = state.vault.delete(&record.secret_ref) {
+        drop(credential);
+        drop(configuration);
+        build
+            .rollback_and_rebuild(&state, || state.store.save_account(&record))
+            .await
+            .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
+        return Err(vault_error(error));
+    }
     state.token_authority.remove(&id);
-    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+    if let Some(runtime) = previous_runtime.as_ref() {
         runtime.remove_candidate(&id);
     }
-    state
-        .rebuild_runtime_or_rollback(|| {
-            state.vault.save(&record.secret_ref, &secret)?;
-            state.store.save_account(&record)?;
-            Ok(())
-        })
-        .await
-        .map_err(runtime_error)?;
+    drop(credential);
+    drop(configuration);
+    if let Err(error) = build.rebuild(&state).await {
+        build
+            .rollback_and_rebuild(&state, || {
+                state.vault.save(&record.secret_ref, &secret)?;
+                state.store.save_account(&record)
+            })
+            .await
+            .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
+        return Err(runtime_error(error));
+    }
+    drop(build);
     state
         .store
         .remove_account_from_wake_tasks(&id, now_ms())
         .map_err(store_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::pooled_source;
+    use crate::{
+        config::Config,
+        store::{Store, Vault},
+    };
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
+    use zenith_relay_core::{
+        accounts::{AccountAuthState, AccountHealthState},
+        quota::{QuotaSnapshot, Subscription},
+    };
+
+    fn test_state(root: &TempDir) -> Arc<AppState> {
+        let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        AppState::new(config, store, vault).unwrap()
+    }
+
+    fn test_account(id: &str) -> ServerAccountRecord {
+        ServerAccountRecord {
+            id: id.into(),
+            label: "Synthetic account".into(),
+            identity_hint: "synthetic-hint".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "openai_codex".into(),
+            secret_ref: format!("account:{id}"),
+            provider_family: Some("openai".into()),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec!["gpt-test".into()],
+            discovered_models: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Subscription::default(),
+            quota: QuotaSnapshot::default(),
+            purchase_cost_micro_usd: None,
+            cooldowns: BTreeMap::new(),
+            consecutive_failures: 0,
+            created_at_ms: 1,
+            last_used_at_ms: None,
+            last_error_code: None,
+            proxy_id: None,
+            bypass_common_proxy: false,
+        }
+    }
+
+    fn test_credential() -> AccountCredential {
+        AccountCredential {
+            access_token: "synthetic-access".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: None,
+            issued_at_ms: 1,
+            generation: 0,
+            chatgpt_account_id: "synthetic-provider".into(),
+            responses_url: "http://127.0.0.1:9/v1/responses".into(),
+            proxy_url: None,
+            agent_private_key: None,
+            agent_runtime_id: None,
+            agent_task_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_vault_delete_restores_account_and_retires_old_runtime() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root);
+        let record = test_account("delete-rollback");
+        let secret = serde_json::to_string(&test_credential()).unwrap();
+        state.store.save_account(&record).unwrap();
+        state.vault.save(&record.secret_ref, &secret).unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let previous = state.runtime().unwrap().unwrap();
+        assert!(previous
+            .candidate_runtime_order()
+            .iter()
+            .any(|candidate| candidate.candidate_id == record.id && candidate.available));
+
+        // Force the vault's atomic replace to fail before it writes anything.
+        // This is synthetic filesystem state, never a real credential.
+        let backup = root.path().join("vault/secrets.enc.bak");
+        if backup.is_file() {
+            std::fs::remove_file(&backup).unwrap();
+        }
+        std::fs::create_dir(&backup).unwrap();
+        assert!(
+            delete_account(State(state.clone()), Path(record.id.clone()))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.store.account(&record.id).unwrap().unwrap().secret_ref,
+            record.secret_ref
+        );
+        assert_eq!(
+            state.vault.load(&record.secret_ref).unwrap().as_deref(),
+            Some(secret.as_str())
+        );
+        let restored = state.runtime().unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&previous, &restored));
+        assert!(previous
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.candidate_id != record.id || !candidate.available));
+        assert!(restored
+            .candidate_runtime_order()
+            .iter()
+            .any(|candidate| candidate.candidate_id == record.id && candidate.available));
+        std::fs::remove_dir(&backup).unwrap();
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_disable_updates_the_live_runtime_without_a_replacement() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root);
+        let record = test_account("synthetic-account");
+        let credential = test_credential();
+        let mut weighting = record.clone();
+        weighting.weight = 3;
+        weighting.priority = 2;
+        assert!(!account_dispatch_permission_changed(&record, &weighting));
+        let mut removed = record.clone();
+        removed.in_pool = false;
+        assert!(account_dispatch_permission_changed(&record, &removed));
+        state.store.save_account(&record).unwrap();
+        state
+            .vault
+            .save(
+                &record.secret_ref,
+                &serde_json::to_string(&credential).unwrap(),
+            )
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let runtime = state.runtime().unwrap().unwrap();
+        assert!(runtime
+            .candidate_runtime_order()
+            .iter()
+            .any(|candidate| candidate.available));
+
+        let Json(summary) = update_account(
+            State(state.clone()),
+            Path(record.id.clone()),
+            Json(AccountPatch {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!summary.enabled);
+        assert!(!state.store.account(&record.id).unwrap().unwrap().enabled);
+        assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
+        assert!(runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root);
+        let account = test_account("batch-account");
+        let source = pooled_source("batch-source", "gpt-test");
+        state.store.save_account(&account).unwrap();
+        state
+            .vault
+            .save(
+                &account.secret_ref,
+                &serde_json::to_string(&test_credential()).unwrap(),
+            )
+            .unwrap();
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let runtime = state.runtime().unwrap().unwrap();
+        let next = || {
+            runtime
+                .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
+                .into_iter()
+                .any(|candidate| candidate.next_for_new_request)
+        };
+        assert!(next());
+
+        // Validation must happen before any candidate is fenced or any durable
+        // member is changed, even when another id in the same batch exists.
+        let missing = set_pool_membership(
+            State(state.clone()),
+            Json(PoolMembershipInput {
+                account_ids: vec![account.id.clone()],
+                source_ids: vec!["missing-source".into()],
+                in_pool: false,
+            }),
+        )
+        .await;
+        assert!(missing.is_err());
+        assert!(next());
+        assert!(state.store.account(&account.id).unwrap().unwrap().in_pool);
+
+        let membership = |in_pool| PoolMembershipInput {
+            account_ids: vec![account.id.clone()],
+            source_ids: vec![source.id.clone()],
+            in_pool,
+        };
+        let Json(removed) = set_pool_membership(State(state.clone()), Json(membership(false)))
+            .await
+            .unwrap();
+        assert!(removed.accounts.iter().all(|account| !account.in_pool));
+        assert!(removed.sources.iter().all(|source| !source.in_pool));
+        assert!(!next());
+        assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
+
+        let Json(joined) = set_pool_membership(State(state.clone()), Json(membership(true)))
+            .await
+            .unwrap();
+        assert!(joined.accounts.iter().all(|account| account.in_pool));
+        assert!(joined.sources.iter().all(|source| source.in_pool));
+        assert!(next());
+        assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
+        state.shutdown_runtime().await.unwrap();
+    }
 }

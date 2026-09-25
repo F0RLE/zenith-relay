@@ -777,6 +777,11 @@ async fn confirm_one_account_import(
             "import session not found",
         ));
     }
+    // Serialize the credential switch with token persistence/preparation.
+    // Never hold this lock across metadata HTTP or a runtime rebuild.
+    let configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
+    let credential = state.account_credential_lock.lock().await;
     let existing = state
         .store
         .accounts()
@@ -861,23 +866,36 @@ async fn confirm_one_account_import(
             .as_ref()
             .is_some_and(|value| value.bypass_common_proxy),
     };
+    // A replacement login must close pending final dispatches before its
+    // durable reference changes. The build lock prevents another publication;
+    // this fence closes the still-live runtime through commit and replacement.
+    let previous_runtime = state.runtime().map_err(super::runtime_error)?;
+    let _dispatch_fence = previous_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.fence_candidate_dispatch(&record.id));
     let created = state
         .store
         .save_account_and_consume_pending_import(&record, session_id)
         .map_err(store_error)?;
+    state.token_authority.remove(&record.id);
+    if let Some(runtime) = previous_runtime.as_ref() {
+        runtime.remove_candidate(&record.id);
+    }
+    drop(credential);
+    drop(configuration);
+    // Publish the new incarnation before metadata HTTP. A build that captured
+    // the old login finished before our commit; newer builds wait for this one.
+    let rebuilt = build.rebuild(state).await.is_ok();
+    drop(build);
     if probe_metadata {
         match jobs::refresh_account_now(state, record.clone()).await {
             Ok(updated) => record = updated,
             Err(_) => {
-                record.health = AccountHealthState::Degraded;
-                record.last_error_code = Some("metadata_refresh_failed".to_string());
-                let _ = state.store.save_account(&record);
+                mark_import_failure(state, &record, "metadata_refresh_failed");
             }
         }
-    } else if state.rebuild_runtime().await.is_err() {
-        record.health = AccountHealthState::Degraded;
-        record.last_error_code = Some("runtime_rebuild_failed".to_string());
-        let _ = state.store.save_account(&record);
+    } else if !rebuilt {
+        mark_import_failure(state, &record, "runtime_rebuild_failed");
     }
     if let Some(previous) = existing {
         if previous.secret_ref != record.secret_ref {
@@ -888,6 +906,20 @@ async fn confirm_one_account_import(
         account: record,
         created,
     })
+}
+
+fn mark_import_failure(state: &AppState, imported: &ServerAccountRecord, code: &str) {
+    // A later import may already have installed another credential under the
+    // same account id. Never save the captured pre-HTTP record over it.
+    if let Ok((current, fence)) = state.store.account_refresh_scope(&imported.id) {
+        if current.secret_ref == imported.secret_ref {
+            let _ = state.store.apply_account_refresh(&fence, |record| {
+                record.health = AccountHealthState::Degraded;
+                record.last_error_code = Some(code.to_string());
+                Ok(())
+            });
+        }
+    }
 }
 
 fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {
@@ -965,11 +997,14 @@ async fn authenticate_import_account(
                 "ChatGPT account lookup client could not be created",
             )
         })?;
-    let response = http
-        .get(state.config.account_check_url.clone())
-        .header(AUTHORIZATION, authorization)
-        .header(ACCEPT, "application/json")
-        .send()
+    let (response, permit) = zenith_relay_core::scheduler::refresh::http::management_http_gate()
+        .send(
+            &http,
+            http.get(state.config.account_check_url.clone())
+                .header(AUTHORIZATION, authorization)
+                .header(ACCEPT, "application/json"),
+            zenith_relay_core::scheduler::refresh::http::HttpClass::Auth,
+        )
         .await
         .map_err(|_| {
             ManagementError::validation(
@@ -984,6 +1019,7 @@ async fn authenticate_import_account(
             "ChatGPT account lookup response could not be read",
         )
     })?;
+    drop(permit);
     if body.len() > MAX_ACCOUNT_CHECK_RESPONSE_BYTES {
         return Err(ManagementError::validation(
             error_codes::ACCOUNT_CHECK_RESPONSE_TOO_LARGE,
@@ -1102,6 +1138,177 @@ fn nonempty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_batch_import_input, BatchImportPreviewInput};
+
+    #[tokio::test]
+    async fn import_and_delete_wait_for_old_build_before_changing_account_incarnation() {
+        use super::{confirm_one_account_import, AccountImportPreview};
+        use crate::{
+            config::Config,
+            state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
+            store::{PendingImport, Store, Vault},
+        };
+        use std::{sync::Arc, time::Duration};
+        use tempfile::TempDir;
+        use zenith_relay_core::accounts::{AccountAuthState, TokenSet};
+
+        let root = TempDir::new().unwrap();
+        let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        let state = AppState::new(config, store, vault).unwrap();
+        let old: ServerAccountRecord = serde_json::from_value(serde_json::json!({
+            "id": "synthetic", "label": "Synthetic", "identityHint": "synthetic",
+            "enabled": true, "inPool": true, "draining": false,
+            "sourceId": "openai_codex", "secretRef": "account:synthetic:old",
+            "authState": AccountAuthState::Active, "health": "healthy", "models": ["test"],
+            "allowedModels": [], "excludedModels": [], "priority": 0, "weight": 1,
+            "subscription": zenith_relay_core::quota::Subscription::default(),
+            "quota": zenith_relay_core::quota::QuotaSnapshot::default(),
+            "cooldowns": {}, "consecutiveFailures": 0
+        }))
+        .unwrap();
+        let credential = |access_token: &str, generation| AccountCredential {
+            access_token: access_token.into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: Some(now_ms() + 3_600_000),
+            issued_at_ms: now_ms(),
+            generation,
+            chatgpt_account_id: "synthetic-provider-account".into(),
+            responses_url: "https://provider.example.test/v1/responses".into(),
+            proxy_url: None,
+            agent_private_key: None,
+            agent_runtime_id: None,
+            agent_task_id: None,
+        };
+        state.store.save_account(&old).unwrap();
+        state
+            .vault
+            .save(
+                &old.secret_ref,
+                &serde_json::to_string(&credential("old-access", 7)).unwrap(),
+            )
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let old_runtime = state.runtime().unwrap().unwrap();
+        assert_eq!(
+            state
+                .token_authority
+                .tokens(&old.id)
+                .await
+                .unwrap()
+                .generation(),
+            7
+        );
+
+        let session_id = format!("import_{}", uuid::Uuid::new_v4().simple());
+        let new_ref = "account:synthetic:new";
+        let preview = AccountImportPreview {
+            session_id: session_id.clone(),
+            account_id: old.id.clone(),
+            duplicate_account_id: Some(old.id.clone()),
+            label: old.label.clone(),
+            identity_hint: old.identity_hint.clone(),
+            models: old.models.clone(),
+            auth_state: AccountAuthState::Active,
+            expires_at_ms: None,
+            plan_type: None,
+            subscription_active_until_ms: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            batch_session_id: None,
+        };
+        state
+            .vault
+            .save(
+                new_ref,
+                &serde_json::to_string(&credential("new-access", 0)).unwrap(),
+            )
+            .unwrap();
+        state
+            .store
+            .save_pending_import(&PendingImport {
+                id: session_id.clone(),
+                preview_json: serde_json::to_string(&preview).unwrap(),
+                secret_ref: new_ref.into(),
+                created_at_ms: now_ms(),
+            })
+            .unwrap();
+
+        let old_build = state.lock_runtime_rebuild().await;
+        let worker_state = state.clone();
+        let worker = tokio::spawn(async move {
+            confirm_one_account_import(&worker_state, &session_id, None, false, false).await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.store.account(&old.id).unwrap().unwrap().secret_ref,
+            old.secret_ref
+        );
+        assert!(!worker.is_finished());
+        // Complete a build using the old snapshot while the import is queued.
+        // Its publication must precede, not follow, the new login's commit.
+        old_build.rebuild(&state).await.unwrap();
+        assert_eq!(
+            state
+                .token_authority
+                .tokens(&old.id)
+                .await
+                .unwrap()
+                .generation(),
+            7
+        );
+        drop(old_build);
+
+        let confirmed = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed.account.secret_ref, new_ref);
+        assert_eq!(
+            state.store.account(&old.id).unwrap().unwrap().secret_ref,
+            new_ref
+        );
+        assert!(state.vault.load(&old.secret_ref).unwrap().is_none());
+        assert!(!Arc::ptr_eq(
+            &old_runtime,
+            &state.runtime().unwrap().unwrap()
+        ));
+        let current: TokenSet = state.token_authority.tokens(&old.id).await.unwrap();
+        assert_eq!(current.generation(), 0);
+        assert_eq!(current.access_token(), "new-access");
+
+        let active_build = state.lock_runtime_rebuild().await;
+        let delete_state = state.clone();
+        let account_id = old.id.clone();
+        let deletion = tokio::spawn(async move {
+            crate::http::management::accounts::delete_account(
+                axum::extract::State(delete_state),
+                axum::extract::Path(account_id),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(state.store.account(&old.id).unwrap().is_some());
+        assert!(!deletion.is_finished());
+        drop(active_build);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), deletion)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            axum::http::StatusCode::NO_CONTENT
+        );
+        assert!(state.store.account(&old.id).unwrap().is_none());
+        assert!(state.token_authority.tokens(&old.id).await.is_none());
+        assert!(state.runtime().unwrap().is_none());
+        state.shutdown_runtime().await.unwrap();
+        state.refresh.shutdown().await;
+    }
 
     #[test]
     fn batch_import_parses_raw_token_lines() {

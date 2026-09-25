@@ -29,7 +29,7 @@ use zenith_relay_core::{
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 36;
+pub const SERVER_SCHEMA_VERSION: u32 = 39;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -305,7 +305,19 @@ pub struct AppState {
     pub started_at_ms: u64,
     pub wake_lock: tokio::sync::Mutex<()>,
     pub configuration_lock: tokio::sync::Mutex<()>,
+    /// Serializes runtime construction/publication with account incarnation
+    /// switches. A stale build must finish before an import/delete commits.
+    pub(crate) runtime_build_lock: tokio::sync::Mutex<()>,
+    /// Serializes credential-reference switches with vault token/task writes.
+    /// Separate from configuration_lock: runtime rebuild may await the token
+    /// authority while holding configuration_lock.
+    pub(crate) account_credential_lock: tokio::sync::Mutex<()>,
     pub quota_reset_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) refresh: Arc<
+        zenith_relay_core::scheduler::refresh::service::RefreshService<
+            crate::jobs::RefreshReadResult,
+        >,
+    >,
     pub(crate) failed_usage_writes: AtomicU64,
     pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
     pricing: Arc<PricingCatalogLoader>,
@@ -339,7 +351,15 @@ impl AppState {
             started_at_ms: now_ms(),
             wake_lock: tokio::sync::Mutex::new(()),
             configuration_lock: tokio::sync::Mutex::new(()),
+            runtime_build_lock: tokio::sync::Mutex::new(()),
+            account_credential_lock: tokio::sync::Mutex::new(()),
             quota_reset_locks: Mutex::new(HashMap::new()),
+            refresh:
+                zenith_relay_core::scheduler::refresh::service::RefreshService::with_cache_policy(
+                    Default::default(),
+                    crate::jobs::cache_observation,
+                )
+                .map_err(str::to_string)?,
             failed_usage_writes: AtomicU64::new(0),
             usage_writer: Mutex::new(None),
             pricing,
@@ -445,10 +465,19 @@ impl AppState {
     }
 
     pub fn replace_runtime(&self, runtime: Option<Arc<GatewayRuntime>>) -> Result<(), String> {
-        *self
+        let mut active = self
             .runtime
             .write()
-            .map_err(|_| "runtime lock poisoned".to_string())? = runtime;
+            .map_err(|_| "runtime lock poisoned".to_string())?;
+        if let Some(previous) = active.as_ref() {
+            if runtime
+                .as_ref()
+                .is_none_or(|next| !Arc::ptr_eq(previous, next))
+            {
+                previous.retire_for_replacement();
+            }
+        }
+        *active = runtime;
         Ok(())
     }
 

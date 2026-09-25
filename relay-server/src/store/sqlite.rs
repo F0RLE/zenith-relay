@@ -16,6 +16,7 @@ pub(super) use zenith_relay_core::unix_time_ms;
 
 pub struct Store {
     connection: Mutex<Connection>,
+    pub(super) refresh_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl Store {
@@ -60,13 +61,15 @@ impl Store {
             }
         }
         validate_migration_ledger(&connection)?;
-        drop(migration_lock);
         connection
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .map_err(db_error)?;
         let store = Self {
             connection: Mutex::new(connection),
+            refresh_changed: tokio::sync::watch::channel(0).0,
         };
+        store.upgrade_rotation_policy()?;
+        drop(migration_lock);
         let _ = store.server_id()?;
         Ok(store)
     }
@@ -96,6 +99,7 @@ impl Store {
                 params![key, value],
             )
             .map_err(db_error)?;
+        self.notify_refresh_changed();
         Ok(())
     }
 
@@ -123,6 +127,7 @@ impl Store {
         self.lock()?
             .execute(&sql, params![id, to_json(value)?, secret_ref])
             .map_err(db_error)?;
+        self.notify_refresh_changed();
         Ok(())
     }
 

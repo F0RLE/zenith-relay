@@ -1,3 +1,4 @@
+mod rotation;
 mod validation;
 
 use super::sqlite::{db_error, parse_json, to_json, Store};
@@ -17,13 +18,11 @@ use zenith_relay_core::ApiModelPriceSources;
 use zenith_relay_core::{
     normalize_image_base_model, normalize_model_ids, normalize_model_price_overrides,
     normalize_model_reasoning_allowed_levels, normalize_model_service_tier_overrides,
-    normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, DEFAULT_COOLDOWN_AFTER_FAILURES,
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
@@ -85,7 +84,9 @@ impl Store {
                 )
                 .map_err(db_error)?;
         }
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
+        Ok(())
     }
 
     pub fn account_proxy_required(&self) -> Result<bool, String> {
@@ -120,38 +121,37 @@ impl Store {
     }
 
     pub fn set_routing_policy(&self, policy: &PresetRoutingPolicy) -> Result<(), String> {
+        let tool_policy = policy
+            .tool_policy
+            .clone()
+            .unwrap_or(self.routing_policy()?.tool_policy.unwrap_or_default())
+            .normalized()
+            .map_err(str::to_string)?;
+        let tool_policy = serde_json::to_string(&tool_policy)
+            .map_err(|_| "tool policy could not be serialized")?;
         if let Some(pool) = &policy.pool_routing {
             pool.validate().map_err(str::to_string)?;
         }
         let pool_routing = serde_json::to_string(&policy.pool_routing)
             .map_err(|_| "pool routing policy is invalid")?;
-        validate_routing_policy(policy.max_retry_candidates, policy.cooldown_after_failures)?;
+        validate_routing_policy(policy.max_retry_candidates)?;
         let image_base_model = normalize_image_base_model(policy.image_base_model.clone())
             .map_err(|error| error.to_string())?
             .unwrap_or_default();
-        let subscription_plan_order =
-            normalize_subscription_plan_order(policy.subscription_plan_order.clone())
-                .map_err(str::to_string)?;
-        let subscription_plan_order = serde_json::to_string(&subscription_plan_order)
-            .map_err(|_| "subscription plan order is invalid".to_string())?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         for (key, value) in [
+            ("tool_policy", tool_policy),
             ("pool_routing", pool_routing),
+            (
+                "basis_points_enabled",
+                policy.basis_points_enabled.to_string(),
+            ),
             (
                 "max_retry_candidates",
                 policy.max_retry_candidates.to_string(),
-            ),
-            (
-                "routing_strategy",
-                match policy.routing_strategy {
-                    RoutingStrategy::Adaptive => "adaptive".to_string(),
-                    RoutingStrategy::QuotaHighest => "quota_highest".to_string(),
-                    RoutingStrategy::SubscriptionExpiry => "subscription_expiry".to_string(),
-                    RoutingStrategy::SubscriptionPlan => "subscription_plan".to_string(),
-                },
             ),
             (
                 "default_service_tier",
@@ -162,15 +162,6 @@ impl Store {
                 },
             ),
             ("image_base_model", image_base_model),
-            ("subscription_plan_order", subscription_plan_order),
-            (
-                "cooldown_after_failures",
-                policy.cooldown_after_failures.to_string(),
-            ),
-            (
-                "keep_last_candidate_available",
-                policy.keep_last_candidate_available.to_string(),
-            ),
         ] {
             transaction
                 .execute(
@@ -179,7 +170,9 @@ impl Store {
                 )
                 .map_err(db_error)?;
         }
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
+        Ok(())
     }
 
     pub fn hidden_models(&self) -> Result<Vec<String>, String> {
@@ -338,6 +331,7 @@ impl Store {
             .commit()
             .map_err(db_error)
             .map_err(ConfigurationReplaceError::Store)?;
+        self.notify_refresh_changed();
         Ok(ConfigurationReplacement {
             previous,
             previous_revision,
@@ -354,7 +348,9 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         write_configuration(&transaction, settings).map_err(configuration_replace_message)?;
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
+        Ok(())
     }
 }
 
@@ -547,12 +543,6 @@ fn write_configuration(
         record.bypass_common_proxy = rule.bypass_common_proxy;
         update_record(transaction, "accounts", &record.id, record)?;
     }
-    let routing_strategy = match settings.routing.routing_strategy {
-        RoutingStrategy::Adaptive => "adaptive",
-        RoutingStrategy::QuotaHighest => "quota_highest",
-        RoutingStrategy::SubscriptionExpiry => "subscription_expiry",
-        RoutingStrategy::SubscriptionPlan => "subscription_plan",
-    };
     let default_service_tier = match settings.routing.default_service_tier {
         DefaultServiceTier::Standard => "standard",
         DefaultServiceTier::Fast => "fast",
@@ -583,7 +573,15 @@ fn write_configuration(
             "max_retry_candidates",
             settings.routing.max_retry_candidates.to_string(),
         ),
-        ("routing_strategy", routing_strategy.to_string()),
+        (
+            "tool_policy",
+            to_json(&settings.routing.tool_policy.clone().unwrap_or_default())
+                .map_err(ConfigurationReplaceError::Store)?,
+        ),
+        (
+            "basis_points_enabled",
+            settings.routing.basis_points_enabled.to_string(),
+        ),
         ("default_service_tier", default_service_tier.to_string()),
         (
             "image_base_model",
@@ -592,19 +590,6 @@ fn write_configuration(
                 .image_base_model
                 .clone()
                 .unwrap_or_default(),
-        ),
-        (
-            "subscription_plan_order",
-            to_json(&settings.routing.subscription_plan_order)
-                .map_err(ConfigurationReplaceError::Store)?,
-        ),
-        (
-            "cooldown_after_failures",
-            settings.routing.cooldown_after_failures.to_string(),
-        ),
-        (
-            "keep_last_candidate_available",
-            settings.routing.keep_last_candidate_available.to_string(),
         ),
         (
             "hidden_model_ids",
@@ -707,13 +692,6 @@ fn routing_policy_from_connection(connection: &Connection) -> Result<PresetRouti
     if let Some(pool) = &pool_routing {
         pool.validate().map_err(str::to_string)?;
     }
-    let routing_strategy = match metadata_from(connection, "routing_strategy")?.as_deref() {
-        None | Some("adaptive") => RoutingStrategy::Adaptive,
-        Some("quota_highest") => RoutingStrategy::QuotaHighest,
-        Some("subscription_expiry") => RoutingStrategy::SubscriptionExpiry,
-        Some("subscription_plan") => RoutingStrategy::SubscriptionPlan,
-        Some(_) => return Err("routing strategy is invalid".to_string()),
-    };
     let default_service_tier = match metadata_from(connection, "default_service_tier")?.as_deref() {
         None | Some("standard") => DefaultServiceTier::Standard,
         Some("fast") | Some("priority") => DefaultServiceTier::Fast,
@@ -723,33 +701,24 @@ fn routing_policy_from_connection(connection: &Connection) -> Result<PresetRouti
     let image_base_model =
         normalize_image_base_model(metadata_from(connection, "image_base_model")?)
             .map_err(|error| error.to_string())?;
-    let subscription_plan_order =
-        metadata_from(connection, "subscription_plan_order")?.map_or(Ok(Vec::new()), |value| {
-            serde_json::from_str::<Vec<String>>(&value)
-                .map_err(|_| "subscription plan order is invalid".to_string())
-        })?;
-    let subscription_plan_order =
-        normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
-    let cooldown_after_failures = metadata_from(connection, "cooldown_after_failures")?.map_or(
-        Ok(DEFAULT_COOLDOWN_AFTER_FAILURES),
-        |value| {
-            value
-                .parse::<u8>()
-                .map_err(|_| "cooldown after failures is invalid".to_string())
-        },
-    )?;
-    let keep_last_candidate_available = metadata_from(connection, "keep_last_candidate_available")?
-        .map_or(DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE, |value| {
-            value == "true"
-        });
-    validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
+    let basis_points_enabled =
+        metadata_from(connection, "basis_points_enabled")?.is_some_and(|value| value == "true");
+    validate_routing_policy(max_retry_candidates)?;
     Ok(PresetRoutingPolicy {
+        tool_policy: Some(
+            metadata_from(connection, "tool_policy")?
+                .map(|value| {
+                    serde_json::from_str::<zenith_relay_core::ToolPolicy>(&value)
+                        .map_err(|_| "stored tool policy is invalid".to_string())
+                })
+                .transpose()?
+                .unwrap_or_default()
+                .normalized()
+                .map_err(str::to_string)?,
+        ),
         pool_routing,
+        basis_points_enabled,
         max_retry_candidates,
-        cooldown_after_failures,
-        keep_last_candidate_available,
-        routing_strategy,
-        subscription_plan_order,
         default_service_tier,
         image_base_model,
     })
@@ -801,36 +770,30 @@ mod tests {
         assert_eq!(
             store.routing_policy().unwrap(),
             PresetRoutingPolicy {
-                pool_routing: None,
+                tool_policy: Some(Default::default()),
+                pool_routing: Some(Default::default()),
+                basis_points_enabled: false,
                 max_retry_candidates: 3,
-                cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
-                keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-                routing_strategy: RoutingStrategy::Adaptive,
-                subscription_plan_order: Vec::new(),
                 default_service_tier: DefaultServiceTier::Standard,
                 image_base_model: None,
             }
         );
         assert!(store
             .set_routing_policy(&PresetRoutingPolicy {
+                tool_policy: None,
                 pool_routing: None,
+                basis_points_enabled: false,
                 max_retry_candidates: 0,
-                cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
-                keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-                routing_strategy: RoutingStrategy::Adaptive,
-                subscription_plan_order: Vec::new(),
                 default_service_tier: DefaultServiceTier::Standard,
                 image_base_model: None,
             })
             .is_err());
         store
             .set_routing_policy(&PresetRoutingPolicy {
+                tool_policy: None,
                 pool_routing: None,
+                basis_points_enabled: true,
                 max_retry_candidates: 5,
-                cooldown_after_failures: 5,
-                keep_last_candidate_available: false,
-                routing_strategy: RoutingStrategy::SubscriptionPlan,
-                subscription_plan_order: vec!["business".into(), "plus".into()],
                 default_service_tier: DefaultServiceTier::Fast,
                 image_base_model: Some("gpt-5.4-mini".into()),
             })
@@ -841,12 +804,10 @@ mod tests {
         assert_eq!(
             reopened.routing_policy().unwrap(),
             PresetRoutingPolicy {
-                pool_routing: None,
+                tool_policy: Some(Default::default()),
+                pool_routing: Some(Default::default()),
+                basis_points_enabled: true,
                 max_retry_candidates: 5,
-                cooldown_after_failures: 5,
-                keep_last_candidate_available: false,
-                routing_strategy: RoutingStrategy::SubscriptionPlan,
-                subscription_plan_order: vec!["business".into(), "plus".into()],
                 default_service_tier: DefaultServiceTier::Fast,
                 image_base_model: Some("gpt-5.4-mini".into()),
             }

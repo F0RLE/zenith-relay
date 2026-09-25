@@ -5,7 +5,7 @@ use crate::token_refresh::ServerTokenPersistence;
 use reqwest::{header::HeaderValue, redirect::Policy};
 use std::{sync::Arc, time::Duration};
 use zenith_relay_core::{
-    accounts::TokenPersistenceAdapter,
+    accounts::{TokenPersistenceAdapter, TokenSet},
     protocol::{
         account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
         ProxyMode, QuotaWindowUsage, SourceSummary,
@@ -81,18 +81,25 @@ pub(crate) async fn ensure_server_agent_identity_task(
         .register_task(&client)
         .await
         .map_err(|error| format!("failed to register Agent Identity task: {error}"))?;
-    ServerTokenPersistence {
-        state: state.clone(),
-    }
-    .persist_agent_task_id(&record.id, agent.task_id(), &new_task_id)
-    .await
-    .map_err(|error| error.code)?;
+    ServerTokenPersistence::for_account(state.clone(), record)
+        .persist_agent_task_id_for_identity(&record.id, &agent, &new_task_id)
+        .await
+        .map_err(|error| error.code)?;
     let secret = state
         .vault
         .load(&record.secret_ref)?
         .ok_or_else(|| "stored Agent Identity credential is unavailable".to_string())?;
     let updated = serde_json::from_str(&secret)
         .map_err(|_| "stored Agent Identity credential is invalid".to_string())?;
+    if state
+        .store
+        .account(&record.id)?
+        .as_ref()
+        .map(|current| &current.secret_ref)
+        != Some(&record.secret_ref)
+    {
+        return Err("account login changed during Agent task registration".into());
+    }
     state.rebuild_runtime().await?;
     Ok(updated)
 }
@@ -102,24 +109,24 @@ pub(crate) async fn prepare_server_account_authorization(
     record: &ServerAccountRecord,
     credential: AccountCredential,
     expected_task_id: Option<&str>,
-) -> Result<(AccountCredential, HeaderValue), String> {
+) -> Result<(AccountCredential, HeaderValue, Option<TokenSet>), String> {
     if credential.is_agent_identity() {
         match ensure_server_agent_identity_task(state, record, credential.clone(), expected_task_id)
             .await
         {
             Ok(credential) => {
                 let authorization = credential.authorization(now_ms())?;
-                return Ok((credential, authorization));
+                return Ok((credential, authorization, None));
             }
             Err(error) if !credential.has_oauth() => return Err(error),
             Err(_) => {}
         }
     }
-    let tokens = state.prepare_account_tokens(&record.id).await?;
+    let tokens = state.prepare_account_tokens(record).await?;
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
         .map_err(|_| "stored account access token is invalid".to_string())?;
     authorization.set_sensitive(true);
-    Ok((credential, authorization))
+    Ok((credential, authorization, Some(tokens)))
 }
 
 fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
@@ -213,18 +220,37 @@ pub(super) fn source_summary(
         api_equivalent,
         secret_available,
         last_error_code: record.last_error_code.clone(),
+        refresh_revision: None,
+        refresh_state: Default::default(),
+        provider_stats: None,
     }
+}
+
+pub(super) struct AccountSummaryInputs {
+    pub(super) secret_available: bool,
+    pub(super) basis_points_available: bool,
+    pub(super) basis_points_enabled: bool,
+    pub(super) proxy_mode: ProxyMode,
+    pub(super) proxy_available: bool,
+    pub(super) api_equivalent: ApiEquivalentSummary,
+    pub(super) quota_window_usage: Option<QuotaWindowUsage>,
+    pub(super) quota_stale_after_ms: u64,
 }
 
 pub(super) fn account_summary(
     record: &ServerAccountRecord,
-    secret_available: bool,
-    proxy_mode: ProxyMode,
-    proxy_available: bool,
-    api_equivalent: ApiEquivalentSummary,
-    quota_window_usage: Option<QuotaWindowUsage>,
-    quota_stale_after_ms: u64,
+    inputs: AccountSummaryInputs,
 ) -> AccountSummary {
+    let AccountSummaryInputs {
+        secret_available,
+        basis_points_available,
+        basis_points_enabled,
+        proxy_mode,
+        proxy_available,
+        api_equivalent,
+        quota_window_usage,
+        quota_stale_after_ms,
+    } = inputs;
     let operational = account_operational_state(AccountOperationalInput {
         enabled: record.enabled,
         in_pool: record.in_pool,
@@ -244,6 +270,8 @@ pub(super) fn account_summary(
         label: record.label.clone(),
         identity_hint: record.identity_hint.clone(),
         provider_family: record.provider_family.clone(),
+        basis_points_available,
+        basis_points_enabled: basis_points_available && basis_points_enabled,
         enabled: record.enabled,
         in_pool: record.in_pool,
         draining: record.draining,
@@ -265,6 +293,7 @@ pub(super) fn account_summary(
             &record.quota,
             false,
         ),
+        refresh_state: Default::default(),
         secret_available,
         remote_location: None,
         proxy_mode,

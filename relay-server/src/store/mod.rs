@@ -5,6 +5,8 @@ mod configuration;
 mod imports;
 mod migrations;
 mod records;
+mod refresh;
+mod source_refresh;
 mod sqlite;
 mod usage;
 pub mod vault;
@@ -13,6 +15,8 @@ pub use configuration::{
     configuration_revision, ConfigurationReplaceError, ConfigurationReplacement,
 };
 pub use imports::PendingImport;
+pub(crate) use refresh::AccountRefreshFence;
+pub(crate) use source_refresh::SourceRefreshFence;
 pub use sqlite::Store;
 pub use vault::Vault;
 

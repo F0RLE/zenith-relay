@@ -347,12 +347,10 @@ mod tests {
             sources: Vec::new(),
             accounts: Vec::new(),
             routing: PresetRoutingPolicy {
+                tool_policy: None,
                 pool_routing: None,
+                basis_points_enabled: false,
                 max_retry_candidates: 3,
-                cooldown_after_failures: 3,
-                keep_last_candidate_available: true,
-                routing_strategy: Default::default(),
-                subscription_plan_order: Vec::new(),
                 default_service_tier: Default::default(),
                 image_base_model: None,
             },
@@ -385,18 +383,45 @@ mod tests {
     }
 
     #[test]
-    fn preset_rejects_an_invalid_cooldown_threshold() {
+    fn old_presets_preserve_tool_policy_and_explicit_reset_is_supported() {
+        let mut current = settings();
+        current.routing.tool_policy = Some(zenith_relay_core::ToolPolicy {
+            mode: zenith_relay_core::ToolPolicyMode::Automatic,
+        });
+        let mut requested = settings();
+        let merged = merge_settings(&current, &requested).unwrap();
+        assert_eq!(merged.routing.tool_policy, current.routing.tool_policy);
+        requested.routing.tool_policy = Some(Default::default());
+        let merged = merge_settings(&current, &requested).unwrap();
+        assert_eq!(merged.routing.tool_policy, Some(Default::default()));
+    }
+
+    #[test]
+    fn preset_ignores_legacy_routing_settings() {
         let mut preset = zenith_relay_core::protocol::ConfigurationPreset {
             format: zenith_relay_core::protocol::CONFIGURATION_PRESET_FORMAT.to_string(),
             schema_version: zenith_relay_core::protocol::CONFIGURATION_PRESET_SCHEMA_VERSION,
             settings: settings(),
         };
-        preset.settings.routing.cooldown_after_failures = 0;
-
-        assert!(matches!(
-            super::normalize_preset(preset),
-            Err(super::PresetError::Invalid(_))
-        ));
+        let mut raw = serde_json::to_value(&preset).unwrap();
+        raw["settings"]["routing"]["cooldownAfterFailures"] = serde_json::json!(0);
+        raw["settings"]["routing"]["subscriptionPlanOrder"] =
+            serde_json::json!(["not a valid\nplan"]);
+        raw["settings"]["routing"]["routingStrategy"] = serde_json::json!("quota_highest");
+        raw["settings"]["routing"]["keepLastCandidateAvailable"] = serde_json::json!(false);
+        let imported: zenith_relay_core::protocol::ConfigurationPreset =
+            serde_json::from_value(raw).unwrap();
+        preset = super::normalize_preset(imported).unwrap();
+        assert_eq!(preset.settings.routing.max_retry_candidates, 3);
+        let serialized = serde_json::to_value(preset).unwrap();
+        for old in [
+            "cooldownAfterFailures",
+            "subscriptionPlanOrder",
+            "routingStrategy",
+            "keepLastCandidateAvailable",
+        ] {
+            assert!(serialized["settings"]["routing"].get(old).is_none());
+        }
     }
 
     #[test]

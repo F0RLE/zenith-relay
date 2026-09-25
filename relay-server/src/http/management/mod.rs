@@ -11,6 +11,7 @@ mod proxies;
 mod quota;
 mod routing;
 mod sources;
+mod tool_policy;
 mod usage;
 
 pub use error::ManagementError;
@@ -54,6 +55,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .merge(models::routes())
         .merge(usage::routes())
         .merge(gateway::routes())
+        .merge(tool_policy::routes())
         .merge(automations::routes())
 }
 

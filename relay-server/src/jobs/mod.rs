@@ -1,9 +1,9 @@
-mod account_refresh;
+mod account_models;
 mod codex_release;
-mod health_probe;
 mod model_metadata;
 mod pricing;
 pub(crate) mod quota_refresh;
+mod refresh;
 mod retention;
 mod wake_automation;
 mod weekly_reset;
@@ -16,7 +16,10 @@ use zenith_relay_core::{
     pricing::{pricing_refresh_delay, CatalogRefreshDeadline, PricingCatalogLoader},
 };
 
-pub(crate) use account_refresh::{refresh_account_now, refresh_all_accounts_now};
+pub(crate) use refresh::{
+    cache_observation, refresh_account_now, refresh_all_accounts_now, RefreshReadResult,
+};
+pub(crate) use refresh::{cached_source_stats, request_source_models, request_source_stats};
 
 pub struct BackgroundJobs {
     handles: Vec<JoinHandle<()>>,
@@ -156,10 +159,9 @@ pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> Backgroun
     BackgroundJobs {
         handles: vec![
             codex_release::start(state.clone(), shutdown.clone()),
-            health_probe::start(state.clone(), shutdown.clone()),
             model_metadata::start(state.clone(), shutdown.clone()),
             pricing::start(state.clone(), shutdown.clone()),
-            quota_refresh::start(state.clone(), shutdown.clone()),
+            refresh::start(state.clone(), shutdown.clone()),
             retention::start(state.clone(), shutdown.clone()),
             wake_automation::start(state, shutdown),
         ],
