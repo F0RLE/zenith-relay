@@ -809,20 +809,20 @@ fn is_windows_opencode_desktop_path(path: &Path) -> bool {
         .any(|root| path.contains(root))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(not(target_os = "windows"), test))]
 fn is_macos_opencode_desktop_path(path: &Path) -> bool {
     ["opencode", "opencode beta", "opencode dev"]
         .iter()
         .any(|bundle| is_macos_app_executable(path, bundle, "opencode"))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(not(target_os = "windows"), test))]
 fn is_macos_app_executable(path: &Path, bundle: &str, executable: &str) -> bool {
     let path = path.to_string_lossy().to_ascii_lowercase();
     path.ends_with(&format!("/{bundle}.app/contents/macos/{executable}"))
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(not(target_os = "windows"), test))]
 fn is_linux_opencode_desktop_path(path: &Path) -> bool {
     let path = path.to_string_lossy().to_ascii_lowercase();
     path.ends_with(".appimage") && path.contains("opencode")
