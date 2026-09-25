@@ -668,7 +668,7 @@
 
 .model-speed-select,
 .model-speed-select .relay-option-trigger {
-  width: 148px;
+  width: 164px;
   min-width: 0;
 }
 
@@ -752,6 +752,14 @@
   }
   .model-rules-table tbody tr[data-model-id] td:first-child { border-bottom: 0; }
   .model-rules-table tbody tr[data-model-id] td:last-child { padding-top: 0; }
+  .model-speed-select,
+  .model-speed-select .relay-option-trigger { width: 148px; }
+  .model-speed-select .relay-option-trigger > span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: center;
+    line-height: 1.15;
+  }
 }
 
 .relay-dialog.member-policy-dialog {
