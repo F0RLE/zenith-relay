@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, CheckCheck, CircleAlert, CircleCheck, CirclePause, Clock3, Cloud, Coins, Cpu, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ArrowRight, CheckCheck, CircleAlert, CircleCheck, CirclePause, Clock3, Cloud, Coins, Cpu, DollarSign, ListMinus, Loader2, Pencil, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier } from "../../api/types";
@@ -23,7 +23,7 @@ import { activeRequestCount, upcomingModelRetries } from "../../routingOrder";
 import { memberName, type PoolMember } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { SourceStatsPanel } from "../../components/SourceStatsPanel";
-import { settledSourceStats, type SourceStatsState } from "../../sourceStatsModel";
+import { useSourceStats } from "../../hooks/useSourceStats";
 import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayActivity, useRelayState } from "../../state/relayStateContext";
 import { AccountErrorDialog } from "../connections/AccountsTable";
@@ -33,7 +33,6 @@ import {
   poolActivityState,
   poolMemberRuntimeStates,
   poolMembersFromRuntime,
-  poolMemberSourceIds,
   poolMemberStatusCounts,
   poolProviderCreditsSummary,
   poolRoutingAvailability,
@@ -53,13 +52,9 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
   const [pendingServiceTier, setPendingServiceTier] = useState<DefaultServiceTier | null>(null);
   const serviceTier = pendingServiceTier ?? runtime?.gateway.defaultServiceTier ?? "standard";
-  const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
-  const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
-  const sourceStatsGeneration = useRef(0);
-  const sourceStatsRequests = useRef<Record<string, number>>({});
   const poolMembers: Member[] = useMemo(
     () => runtime ? poolMembersFromRuntime(runtime) : EMPTY_POOL_MEMBERS,
     [runtime?.accounts, runtime?.sources],
@@ -77,8 +72,9 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       ? "∞"
       : formatNumber(providerCredits.availableCredits, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 1 });
   const visibleModelIds = runtime?.gateway.visibleModelIds ?? EMPTY_VISIBLE_MODELS;
-  const sourceIds = useMemo(() => poolMemberSourceIds(members), [members]);
-  const sourceStatsScope = JSON.stringify(members.filter((member) => member.kind === "source").map((source) => [source.id, source.baseUrl, source.secretAvailable]).sort());
+  const sourceMembers = members.filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source");
+  const rotationMode = runtime?.gateway.poolRouting?.version === 2 ? runtime.gateway.poolRouting.mode : null;
+  const { stats: sourceStats, refresh: readSourceStats } = useSourceStats(mode, sourceMembers);
   const memberTimestamps = useMemo(() => members.flatMap((member) => [
     ...(member.kind === "account" ? [
       member.subscription.activeUntilMs,
@@ -89,16 +85,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     runtimeByMember.get(member.id)?.nextRetryAtMs,
   ]), [members, runtimeByMember]);
   const nowMs = useRelativeTimeClock(memberTimestamps);
-  const refreshSourceStats = useCallback(async (sourceId: string, refreshModels = false, operationManaged = false) => {
+  const refreshSourceStats = async (sourceId: string, refreshModels = false, operationManaged = false) => {
     if (mode === "zenith") return;
-    const generation = sourceStatsGeneration.current;
-    const request = (sourceStatsRequests.current[sourceId] ?? 0) + 1;
-    sourceStatsRequests.current[sourceId] = request;
-    const isCurrent = () => generation === sourceStatsGeneration.current && sourceStatsRequests.current[sourceId] === request;
-    setSourceStats((current) => ({
-      ...current,
-      [sourceId]: { value: current[sourceId]?.value ?? null, loading: true, failed: false },
-    }));
     let modelRefreshError: unknown;
     if (refreshModels && mode === "local") {
       const refreshModels = () => relayCommands.refreshSourceData(sourceId);
@@ -106,27 +94,9 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         try { await refreshModels(); } catch (error) { modelRefreshError = error; }
       } else await perform(`source-data-refresh-${sourceId}`, refreshModels, "feedback.refreshed");
     }
-    try {
-      const value = await (mode === "local" ? relayCommands.localSourceStats(sourceId) : relayCommands.remoteSourceStats(sourceId));
-      if (!isCurrent()) return;
-      setSourceStats((current) => ({ ...current, [sourceId]: settledSourceStats(current[sourceId]?.value ?? null, value) }));
-    } catch {
-      if (!isCurrent()) return;
-      setSourceStats((current) => ({
-        ...current,
-        [sourceId]: { value: current[sourceId]?.value ?? null, loading: false, failed: true },
-      }));
-    }
+    await readSourceStats(sourceId, refreshModels || operationManaged);
     if (modelRefreshError) throw modelRefreshError;
-  }, [mode]);
-  useEffect(() => {
-    sourceStatsGeneration.current += 1;
-    sourceStatsRequests.current = {};
-    setSourceStats({});
-    if (mode === "zenith" || !sourceIds) return;
-    for (const sourceId of sourceIds.split("\n")) void refreshSourceStats(sourceId);
-    return () => { sourceStatsGeneration.current += 1; };
-  }, [mode, refreshSourceStats, sourceIds, sourceStatsScope]);
+  };
   const {
     activeMembers,
     nextMember,
@@ -221,11 +191,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     try {
       await perform("pool-service-tier", () => persistRoutingPolicy(mode, {
         maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
-        cooldownAfterFailures: runtime?.gateway.cooldownAfterFailures ?? 3,
-        keepLastCandidateAvailable: runtime?.gateway.keepLastCandidateAvailable ?? true,
-        routingStrategy,
         defaultServiceTier,
-        subscriptionPlanOrder: runtime?.gateway.subscriptionPlanOrder ?? [],
       }));
     } finally {
       setPendingServiceTier(null);
@@ -234,9 +200,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
   return <>
     <div className="pool-controls" role="group" aria-label={t("pool.priorityTitle")}>
-      <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><Activity aria-hidden /><h2>{t("pool.priorityTitle")}</h2></div>
-        <div className="inline-actions pool-quota-actions">
+      <div className="pool-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
+        <div data-tone={counts.rotation ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{counts.rotation}</strong><span>{t("pool.memberStatus.rotation")}</span></div>
+        <div data-tone={counts.quotaWait ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.quotaWait}</strong><span>{t("pool.memberStatus.quotaWait")}</span></div>
+        <div data-tone={counts.errors ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{counts.errors}</strong><span>{t("accounts.summary.errors")}</span></div>
+        <div data-tone="muted"><CirclePause aria-hidden /><strong>{counts.disabled}</strong><span>{t("pool.memberStatus.disabled")}</span></div>
+        {providerCreditsValue != null ? <div data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
+      </div>
+      <div className="pool-member-toolbar">
+        <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><h2>{t("pool.priorityTitle")}</h2></div>
+        <div className="pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <PoolSpeedControl
               key={mode}
@@ -245,7 +218,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
               saving={pendingServiceTier !== null || busy === "pool-service-tier"}
               onChange={(value) => void updateServiceTier(value)}
             />
-            <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
+            <IconButton label={t("pool.routingSettings")} icon={<SlidersHorizontal aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
             {hasAccountMembers ? <IconButton className="account-calculation-toggle" label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<DollarSign aria-hidden />} aria-pressed={accountValueVisible} onClick={() => setAccountValueVisible(!accountValueVisible)} /> : null}
@@ -259,13 +232,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           {nextRouteSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
         </div>
         {activeRequestSummary ? <span className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")}><Cpu aria-hidden /><span>{activeRequestSummary}</span></span> : null}
-      </div>
-      <div className="pool-summary connection-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
-        <div data-tone={counts.rotation ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{counts.rotation}</strong><span>{t("pool.memberStatus.rotation")}</span></div>
-        <div data-tone={counts.quotaWait ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.quotaWait}</strong><span>{t("pool.memberStatus.quotaWait")}</span></div>
-        <div data-tone={counts.errors ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{counts.errors}</strong><span>{t("accounts.summary.errors")}</span></div>
-        <div data-tone="muted"><CirclePause aria-hidden /><strong>{counts.disabled}</strong><span>{t("pool.memberStatus.disabled")}</span></div>
-        {providerCreditsValue != null ? <div className="pool-summary-provider-credits" data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
       </div>
     </div>
     {routingAlert}
@@ -348,7 +314,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
             {mode === "local" && member.kind === "account" ? <ResetCreditsControl account={member} onCompleted={() => refresh()} /> : null}
           </div>
           {member.kind === "account" ? <AccountProviderQuotaStrip account={member} /> : null}
-          {member.kind === "account" ? <><AccountSubscriptionLine activeUntilMs={member.subscription.activeUntilMs} nowMs={nowMs} />{runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}</> : <div className="pool-member-context" data-kind="source"><div className="pool-member-runtime-meta"><div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${runtime?.gateway.poolRouting?.mode ?? "smart"}`)}</strong></div><div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div></div>}
+          {member.kind === "account" ? <><AccountSubscriptionLine activeUntilMs={member.subscription.activeUntilMs} nowMs={nowMs} />{runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}</> : <div className="pool-member-context" data-kind="source"><div className="pool-member-runtime-meta">{rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode}`)}</strong></div> : null}<div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div></div>}
           {member.kind === "account" && accountValueVisible ? <AccountValueStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">

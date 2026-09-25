@@ -6,7 +6,6 @@ import { isCodexOauthAccountEligible } from "../../accountStatus";
 import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader, SettingToggle, Tabs, formatAccountPlan } from "../../components/Ui";
 import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTasksControl";
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
-import { ChatgptRetryUntilAvailableControl } from "../../components/ChatgptRetryUntilAvailableControl";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { GatewayApiTab } from "./GatewayApiTab";
 
@@ -104,7 +103,7 @@ function GatewayChatGPTTab() {
   const { mode, runtime } = useRelayState();
   if (mode === "zenith") return <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />;
   const showSettings = mode === "local" || runtime?.capabilities.features.some((feature) =>
-    feature === "codex_background_tasks" || feature === "codex_websockets" || feature === "chatgpt_retry_until_available",
+    feature === "codex_background_tasks" || feature === "codex_websockets",
   );
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.chatgpt")}>
     <div className="gateway-workspace">
@@ -112,7 +111,6 @@ function GatewayChatGPTTab() {
       {showSettings ? <div className="gateway-settings-panel gateway-application-panel">
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
-        <ChatgptRetryUntilAvailableControl className="gateway-setting-row" />
       </div> : null}
     </div>
   </section>;

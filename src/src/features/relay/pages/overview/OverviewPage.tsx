@@ -6,7 +6,7 @@ import type { SourceSummary } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { SourceStatsPanel } from "../../components/SourceStatsPanel";
-import { settledSourceStats, type SourceStatsState } from "../../sourceStatsModel";
+import { useSourceStats } from "../../hooks/useSourceStats";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useRelayUsageContext } from "../../state/relayStateContext";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
@@ -160,27 +160,9 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
   const { t } = useTranslation();
   const { busy } = useRelayState();
   const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
-  const [stats, setStats] = useState<SourceStatsState>({ value: null, loading: false, failed: false });
-  const [statsRevision, setStatsRevision] = useState(0);
-  const lastStatsSourceId = useRef<string | null>(null);
   const source = sources.find((item) => item.id === selection) ?? sources[0] ?? null;
-
-  useEffect(() => {
-    if (!source) {
-      lastStatsSourceId.current = null;
-      setStats({ value: null, loading: false, failed: false });
-      return;
-    }
-    let active = true;
-    const identity = JSON.stringify([source.id, source.baseUrl, source.secretAvailable]);
-    const sourceChanged = lastStatsSourceId.current !== identity;
-    lastStatsSourceId.current = identity;
-    setStats((current) => ({ value: sourceChanged ? null : current.value, loading: true, failed: false }));
-    void relayCommands.localSourceStats(source.id)
-      .then((value) => { if (active) setStats((current) => settledSourceStats(current.value, value)); })
-      .catch(() => { if (active) setStats((current) => ({ ...current, loading: false, failed: true, error: "unavailable" })); });
-    return () => { active = false; };
-  }, [source?.id, source?.baseUrl, source?.secretAvailable, statsRevision]);
+  const { stats: sourceStats, refresh: readSourceStats } = useSourceStats("zenith", source ? [source] : []);
+  const stats = source ? sourceStats[source.id] : undefined;
 
   const select = (sourceId: string) => {
     localStorage.setItem("relay.directSourceId", sourceId);
@@ -189,15 +171,15 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
   const refreshSourceData = async () => {
     if (!source) return;
     await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed");
-    setStatsRevision((value) => value + 1);
+    await readSourceStats(source.id, true);
   };
   const sourceRefreshBusy = busy === "source-data-refresh";
-  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={stats.loading || sourceRefreshBusy} disabled={!source || sourceRefreshBusy} onClick={() => void refreshSourceData()}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
+  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={stats?.loading || sourceRefreshBusy} disabled={!source || sourceRefreshBusy} onClick={() => void refreshSourceData()}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
     {!source ? <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>} /> : <div className="direct-api-overview">
       <div className="direct-api-toolbar"><div><strong>{source.name}</strong><code>{source.baseUrl}</code></div><OptionMenu className="direct-api-source-menu" label={t("overview.selectedSource")} value={source.id} onChange={select} options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))} /></div>
-      <SourceStatsPanel source={source} state={stats} overview />
+      <SourceStatsPanel source={source} {...(stats ? { state: stats } : {})} overview />
       <section className="direct-api-models"><header><div><h2>{t("overview.availableModels")}</h2><p>{t("overview.availableModelsHint")}</p></div><strong>{source.models.length}</strong></header><ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul></section>
     </div>}
   </section>;

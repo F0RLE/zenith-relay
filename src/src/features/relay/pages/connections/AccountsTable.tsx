@@ -271,6 +271,13 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   return (
     <>
     <div className="connections-account-controls">
+    <div className="connections-account-summary connection-status-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"} aria-label={t("accounts.summary.label")}>
+      <div><UserRound aria-hidden /><strong>{allAccounts.length}</strong><span>{t("accounts.summary.total")}</span></div>
+      <div data-tone={inPoolCount ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{inPoolCount}</strong><span>{t("accounts.summary.inPool")}</span></div>
+      <div data-tone={errorCount ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{errorCount}</strong><span>{t("accounts.summary.errors")}</span></div>
+      <div data-tone="muted"><CirclePause aria-hidden /><strong>{disabledCount}</strong><span>{t("accounts.summary.disabled")}</span></div>
+      {providerCreditsValue != null ? <div data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
+    </div>
     <div className="account-command-bar" data-selection={selectedCount > 0}>
       <div className="account-command-context">
         <input type="checkbox" aria-label={t("accounts.selectAll")} data-relay-tooltip={t("accounts.selectAll")} checked={allSelected} disabled={!accounts.length} onChange={(event) => toggleAllVisible(event.target.checked)} />
@@ -299,13 +306,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           </ActionMenu>
         </>}
       </div>
-    </div>
-    <div className="connections-account-summary connection-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"} aria-label={t("accounts.summary.label")}>
-      <div><UserRound aria-hidden /><strong>{allAccounts.length}</strong><span>{t("accounts.summary.total")}</span></div>
-      <div data-tone={inPoolCount ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{inPoolCount}</strong><span>{t("accounts.summary.inPool")}</span></div>
-      <div data-tone={errorCount ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{errorCount}</strong><span>{t("accounts.summary.errors")}</span></div>
-      <div data-tone="muted"><CirclePause aria-hidden /><strong>{disabledCount}</strong><span>{t("accounts.summary.disabled")}</span></div>
-      {providerCreditsValue != null ? <div className="connections-summary-provider-credits" data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
     </div>
     </div>
     {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><Check aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}

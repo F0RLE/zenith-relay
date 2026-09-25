@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, ChevronDown, ChevronRight, GripVertical, Zap } from "lucide-react";
+import { BrainCircuit, Check, ChevronDown, ChevronRight, GripVertical, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
@@ -277,7 +277,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
     <div className="model-reasoning-form">
       <code className="model-reasoning-model" data-relay-tooltip={model.id}>{model.id}</code>
       <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
-        {supportedLevels.map((level) => <button key={level} type="button" role="checkbox" aria-checked={allowedLevels.includes(level)} className={allowedLevels.includes(level) ? "selected" : undefined} disabled={!editable || manualBusy} onClick={() => toggleAllowedLevel(level)}>{label(level)}</button>)}
+        {supportedLevels.map((level) => <button key={level} type="button" role="checkbox" aria-checked={allowedLevels.includes(level)} className={allowedLevels.includes(level) ? "selected" : undefined} disabled={!editable || manualBusy} onClick={() => toggleAllowedLevel(level)}><Check aria-hidden /><span>{label(level)}</span></button>)}
       </div>
     </div>
   </Dialog>;

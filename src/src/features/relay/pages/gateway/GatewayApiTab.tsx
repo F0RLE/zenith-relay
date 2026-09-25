@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, CirclePause, Copy, KeyRound, Link2, RefreshCw, Save } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import { ActionMenu, ActionMenuItem, Button, CopyButton, EmptyState, copyText, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, CopyButton, EmptyState, IconButton, copyText, useConfirm } from "../../components/Ui";
 import { sourcePort } from "../../sourceUrl";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { ToolPolicyControl } from "./ToolPolicyControl";
+import { ModelProtectionControl } from "./ModelProtectionControl";
+import { RouteRecoveryControl } from "./RouteRecoveryControl";
 
 export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: string }) {
   const { t } = useTranslation();
@@ -72,40 +75,43 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
 
       <div className="gateway-api-fields">
         <div className="gateway-api-field gateway-api-endpoint">
-          <h3><Link2 aria-hidden />{t("gateway.endpoint")}</h3>
+          <header>
+            <h3><Link2 aria-hidden />{t("gateway.endpoint")}</h3>
+            <CopyButton value={endpoint} label={t("gateway.copyEndpoint")} />
+          </header>
           <code className="gateway-api-address">{endpoint}</code>
-          <div className="gateway-api-field-actions">
-            <CopyButton value={endpoint} label={t("gateway.copyEndpoint")}>
-              {t("gateway.copyEndpoint")}
-            </CopyButton>
-          </div>
         </div>
         {mode !== "zenith" ? <div className="gateway-api-field gateway-api-key">
-          <h3><KeyRound aria-hidden />{t("gateway.apiKey")}</h3>
+          <header>
+            <h3><KeyRound aria-hidden />{t("gateway.apiKey")}</h3>
+            <div className="gateway-api-field-actions">
+              <IconButton label={t("gateway.copyApiKey")} title={apiKeyDisabledHint} icon={<Copy aria-hidden />} busy={copyingApiKey || rotatingApiKey} disabled={!canCopyApiKey} onClick={() => void copyApiKey()} />
+              <ActionMenu label={t("gateway.apiKeyActions")}>
+                <ActionMenuItem icon={<RefreshCw aria-hidden />} title={apiKeyRotationDisabledHint} disabled={!canRotateApiKey || copyingApiKey || rotatingApiKey} onClick={() => void rotateApiKey()}>
+                  {t("gateway.regenerateApiKey")}
+                </ActionMenuItem>
+              </ActionMenu>
+            </div>
+          </header>
           <p>{apiKeyDisabledHint ?? t("gateway.apiKeyHint")}</p>
-          <div className="gateway-api-field-actions">
-            <Button icon={<Copy aria-hidden />} busy={copyingApiKey || rotatingApiKey} disabled={!canCopyApiKey} onClick={() => void copyApiKey()}>
-              {t("gateway.copyApiKey")}
-            </Button>
-            <ActionMenu label={t("gateway.apiKeyActions")}>
-              <ActionMenuItem icon={<RefreshCw aria-hidden />} title={apiKeyRotationDisabledHint} disabled={!canRotateApiKey || copyingApiKey || rotatingApiKey} onClick={() => void rotateApiKey()}>
-                {t("gateway.regenerateApiKey")}
-              </ActionMenuItem>
-            </ActionMenu>
-          </div>
         </div> : null}
       </div>
 
-      {mode === "local" ? <form className="gateway-api-settings" onSubmit={(event) => { event.preventDefault(); savePort(); }}>
-        <div className="gateway-api-port-heading">
-          <label htmlFor="gateway-api-port">{t("gateway.port")}</label>
-          <p id="gateway-api-port-hint">{portChanged && running ? t("gateway.portRestartHint") : t("gateway.portHint")}</p>
-        </div>
-        <div className="gateway-api-port-control">
-          <input id="gateway-api-port" aria-describedby="gateway-api-port-hint" type="number" min="1024" max="65535" required disabled={savingPort} value={port} onChange={(event) => setPort(event.target.value)} />
-          <Button type="submit" icon={<Save aria-hidden />} aria-label={running ? t("gateway.applyRestart") : t("common.save")} disabled={!canSavePort} busy={savingPort}>{t("common.save")}</Button>
-        </div>
-      </form> : null}
+      <div className="gateway-api-options">
+        {mode === "local" ? <form className="gateway-api-settings" onSubmit={(event) => { event.preventDefault(); savePort(); }}>
+          <div className="gateway-api-port-heading">
+            <label htmlFor="gateway-api-port">{t("gateway.port")}</label>
+            <p id="gateway-api-port-hint">{portChanged && running ? t("gateway.portRestartHint") : t("gateway.portHint")}</p>
+          </div>
+          <div className="gateway-api-port-control">
+            <input id="gateway-api-port" aria-describedby="gateway-api-port-hint" type="number" min="1024" max="65535" required disabled={savingPort} value={port} onChange={(event) => setPort(event.target.value)} />
+            <IconButton type="submit" icon={<Save aria-hidden />} label={running ? t("gateway.applyRestart") : t("common.save")} disabled={!canSavePort} busy={savingPort} />
+          </div>
+        </form> : null}
+        <ToolPolicyControl />
+        <ModelProtectionControl />
+        <RouteRecoveryControl />
+      </div>
     </div>
   </section>;
 }

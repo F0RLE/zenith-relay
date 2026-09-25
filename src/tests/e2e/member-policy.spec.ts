@@ -89,6 +89,7 @@ test("member groups retain excluded models and search opens their group", async 
   await expect(model).not.toBeChecked();
   await expect(group.locator("summary")).toContainText("0 / 1");
   await expect(dialog.locator('[data-model-provider="openai"] code')).toHaveText(["gpt-5.4", "gpt-5.4-mini"]);
+  await expect(dialog.getByText("Claude Opus", { exact: true })).toHaveCount(0);
   await dialog.getByRole("tab", { name: "Pricing", exact: true }).click();
   await expect(dialog.locator(".source-price-group").filter({ hasText: "Anthropic" }).getByRole("textbox", { name: "Input token price for claude-opus-4-8", exact: true })).toBeVisible();
 });

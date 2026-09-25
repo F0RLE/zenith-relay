@@ -1,4 +1,8 @@
 
+.model-rules {
+  container-type: inline-size;
+}
+
 .model-rules > header {
   display: block;
   padding: 0 0 12px;
@@ -42,15 +46,13 @@
 
 .model-rules-table {
   width: 100%;
-  /* Keep the model identity and action buttons readable on compact windows;
-     the wrapper already provides horizontal scrolling when necessary. */
-  min-width: 680px;
+  min-width: 0;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
 }
 
-.model-rules-table col[data-column="actions"] { width: 318px; }
+.model-rules-table col[data-column="actions"] { width: 286px; }
 
 .model-rules-table th,
 .model-rules-table td {
@@ -68,6 +70,10 @@
   font-weight: 700;
   letter-spacing: .02em;
   text-transform: uppercase;
+}
+
+.model-rules-table thead th:last-child {
+  text-align: right;
 }
 
 .model-rules-table tbody tr[data-model-id] td {
@@ -98,8 +104,8 @@
 
 .model-rules-table .model-group-row th {
   position: static;
-  height: 46px;
-  padding: 9px 14px;
+  height: 50px;
+  padding: 10px 16px;
   border-top: 1px solid var(--relay-border);
   border-bottom: 1px solid var(--relay-border);
   background: color-mix(in srgb, var(--relay-subtle) 78%, var(--relay-surface));
@@ -114,14 +120,14 @@
 
 .model-group-toggle,
 .model-rule-drag-handle {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
   padding: 0;
-  border: 0;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--relay-muted);
   cursor: pointer;
@@ -132,6 +138,7 @@
 .model-group-toggle:focus-visible,
 .model-rule-drag-handle:hover,
 .model-rule-drag-handle:focus-visible {
+  border-color: var(--relay-border-strong);
   background: var(--relay-surface);
   color: var(--relay-text);
 }
@@ -150,7 +157,10 @@
 
 .model-group-drag-handle {
   display: inline-grid;
-  margin-right: 7px;
+  width: 20px;
+  height: 30px;
+  place-items: center;
+  margin-right: 1px;
   color: var(--relay-muted);
   vertical-align: middle;
   cursor: grab;
@@ -205,7 +215,7 @@
   display: inline-flex;
   align-items: center;
   min-width: min(100%, 420px);
-  gap: 7px;
+  gap: 6px;
 }
 
 .model-group-content small {
@@ -387,6 +397,7 @@
 }
 
 .model-rule-actions {
+  min-height: 34px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -394,10 +405,20 @@
 }
 
 .model-rule-actions .relay-icon-button {
-  width: 34px;
   height: 34px;
   flex: 0 0 34px;
-  border-radius: 6px;
+  color: var(--relay-secondary);
+}
+
+.model-rule-actions .relay-icon-button:hover:not(:disabled),
+.model-rule-actions .relay-icon-button:focus-visible {
+  border-color: var(--relay-accent);
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent);
+}
+
+.model-rule-actions .relay-icon-button:disabled {
+  color: var(--relay-muted);
 }
 
 .model-price-form {
@@ -438,33 +459,41 @@
   gap: 8px;
 }
 
-.model-reasoning-options button,
-.model-reasoning-mode {
+.model-reasoning-options button {
   min-width: 0;
-  min-height: 50px;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 8px 6px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 8px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-secondary);
   font: inherit;
   font-size: 12px;
-  font-weight: 650;
-  line-height: 1.2;
+  font-weight: 500;
+  line-height: 18px;
   text-align: center;
   overflow-wrap: anywhere;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 120ms ease;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
-.model-reasoning-mode {
-  display: grid;
-  place-items: center;
+.model-reasoning-options button > svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
 }
 
-.model-reasoning-options button:hover {
+.model-reasoning-options button[aria-checked="false"] > svg {
+  visibility: hidden;
+}
+
+.model-reasoning-options button:hover:not(:disabled) {
   border-color: var(--relay-focus);
-  color: var(--relay-text);
-  transform: translateY(-1px);
+  background: var(--relay-subtle);
 }
 
 .model-reasoning-options button:focus-visible {
@@ -474,10 +503,14 @@
 }
 
 .model-reasoning-options button.selected {
-  border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
-  background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-surface));
-  color: var(--relay-accent-hover);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent);
+}
+
+.model-reasoning-options button:disabled {
+  cursor: not-allowed;
+  opacity: .6;
 }
 
 @media (max-width: 560px) {
@@ -635,38 +668,35 @@
 
 .model-speed-select,
 .model-speed-select .relay-option-trigger {
-  width: 164px;
+  width: 148px;
   min-width: 0;
 }
 
 .model-speed-select .relay-option-trigger {
-  min-height: 34px;
   height: 34px;
-  padding: 3px 6px;
-  border-radius: 6px;
-  border-color: var(--relay-border-strong);
-  color: var(--relay-muted);
+  gap: 7px;
+  padding: 4px 9px;
+  color: var(--relay-secondary);
+  font-weight: 500;
 }
 
-.model-speed-select .relay-option-trigger:hover,
+.model-speed-select .relay-option-trigger:hover:not(:disabled),
 .model-speed-select .relay-option-trigger[aria-expanded="true"] {
-  border-color: color-mix(in srgb, var(--relay-warning) 58%, var(--relay-border));
-  background: color-mix(in srgb, var(--relay-warning) 14%, var(--relay-surface));
-  color: var(--relay-warning);
+  border-color: var(--relay-accent);
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent);
 }
 
-.model-speed-toggle[data-speed-tier="standard"] .relay-option-trigger {
-  background: transparent;
-}
-
+.model-speed-toggle[data-speed-tier="fast"] .relay-option-trigger,
 .model-speed-toggle[data-speed-tier="ultrafast"] .relay-option-trigger {
-  border-color: color-mix(in srgb, var(--relay-warning) 70%, var(--relay-border));
-  color: var(--relay-warning);
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent);
 }
 
 .model-speed-select .relay-option-trigger > svg {
   width: 15px;
   height: 15px;
+  color: inherit;
 }
 
 .model-speed-unavailable {
@@ -707,8 +737,8 @@
 
 }
 
-@media (max-width: 600px) {
-  .relay-shell[data-page="pool"] .model-rules .model-rules-table { display: block; min-width: 0; }
+@container (max-width: 600px) {
+  .model-rules-table { display: block; }
   .model-rules-table colgroup,
   .model-rules-table thead { display: none; }
   .model-rules-table tbody,
@@ -722,11 +752,6 @@
   }
   .model-rules-table tbody tr[data-model-id] td:first-child { border-bottom: 0; }
   .model-rules-table tbody tr[data-model-id] td:last-child { padding-top: 0; }
-  .model-speed-select,
-  .model-speed-select .relay-option-trigger { width: 34px; }
-  .model-speed-select .relay-option-trigger { justify-content: center; padding: 0; }
-  .model-speed-select .relay-option-trigger > span,
-  .model-speed-select .relay-option-trigger > svg:last-child { display: none; }
 }
 
 .relay-dialog.member-policy-dialog {
@@ -825,20 +850,22 @@
 }
 
 .member-editor {
-  gap: 18px;
+  gap: 16px;
 }
 
 .member-editor-identity {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px 12px;
   min-width: 0;
-  text-align: center;
 }
 
 .member-editor-identity > strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
 }
 
 .member-editor-identity > span,
@@ -848,7 +875,7 @@
 }
 
 .member-editor > .relay-tabs {
-  justify-content: center;
+  justify-content: flex-start;
   margin: 0;
 }
 
@@ -905,19 +932,17 @@
   background: var(--relay-subtle);
 }
 
-.member-policy-dialog .source-price-group > summary > svg {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  color: var(--relay-muted);
-}
-
-.member-policy-dialog .source-price-group[open] > summary > svg {
-  transform: rotate(180deg);
+.member-policy-dialog .source-price-group > summary span {
+  font-variant-numeric: tabular-nums;
 }
 
 .member-model-rules li:not(:last-child) {
   border-bottom: 1px solid var(--relay-border);
+}
+
+.member-model-rules li:hover,
+.member-model-rules li:focus-within {
+  background: var(--relay-subtle);
 }
 
 .member-model-rules li > label {
@@ -1075,6 +1100,10 @@
   .member-price-section .source-price-fields {
     grid-template-columns: minmax(0, 1fr);
     gap: 6px;
+  }
+
+  .member-price-section .source-price-empty {
+    display: none;
   }
 
   .member-price-section .source-price-field {

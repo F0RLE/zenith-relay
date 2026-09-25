@@ -72,7 +72,7 @@ function runtime(overrides: Partial<RuntimeSnapshot>): RuntimeSnapshot {
       candidateCount: 0,
       visibleModelIds: [],
       maxRetryCandidates: 3,
-      routingStrategy: "adaptive",
+
       defaultServiceTier: "standard",
     },
     platform: "test",
@@ -108,7 +108,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["unused"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [{ id: "gpt-test", enabled: false, memberCount: 2, codexVisible: true, codexDisplayName: "", catalogProvider: "openai", catalogFamily: "gpt", inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
       },
@@ -122,7 +122,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["gpt-test"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
       },
       accounts: [account({ models: ["GPT-TEST"] })],
@@ -139,7 +139,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: [],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [
           { id: "gpt-test", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-test", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
@@ -167,7 +167,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: [],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [
           {
@@ -269,7 +269,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["gpt-live"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         // The derived rows currently contain only the native account model.
         models: [{ id: "gpt-live", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "GPT Live", catalogProvider: "openai", catalogFamily: "gpt", inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
@@ -305,7 +305,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: [],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [
           { id: "gpt-live", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "gpt-live", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
@@ -347,7 +347,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["provider-model"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [{ id: "provider-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Provider model", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
         routingOrder: [],
@@ -366,7 +366,7 @@ describe("pool helpers", () => {
         candidateCount: 2,
         visibleModelIds: ["shared-model"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         // The derived catalog has not caught up with the account/source
         // refresh yet, so both member-only models are intentionally absent.
@@ -402,7 +402,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["cooling", "healthy"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [
           { id: "cooling", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Cooling", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
@@ -431,7 +431,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["temporarily-unavailable"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [{ id: "temporarily-unavailable", enabled: true, memberCount: 1, codexVisible: true, codexDisplayName: "Temporary", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false }],
         routingOrder: [{ candidateId: "account-a", kind: "oauth_account", available: false, inFlight: 0, lastUsedAtMs: null, nextRetryAtMs: Date.now() + 60_000, halfOpen: false, dispatches: 0, modelRetries: [] }],
@@ -450,7 +450,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: [],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [],
         routingOrder: [],
@@ -469,7 +469,7 @@ describe("pool helpers", () => {
         candidateCount: 2,
         visibleModelIds: ["provider-model", "account-model"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [
           { id: "provider-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Provider model", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },
@@ -501,7 +501,7 @@ describe("pool helpers", () => {
         candidateCount: 1,
         visibleModelIds: ["unconfirmed-model", "confirmed-model"],
         maxRetryCandidates: 3,
-        routingStrategy: "adaptive",
+
         defaultServiceTier: "standard",
         models: [
           { id: "unconfirmed-model", enabled: true, memberCount: 1, codexVisible: false, codexDisplayName: "Unconfirmed", catalogProvider: null, catalogFamily: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null, customPrice: false },

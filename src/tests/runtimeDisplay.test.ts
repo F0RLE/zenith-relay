@@ -38,7 +38,7 @@ function runtime(accounts: AccountSummary[]): RuntimeSnapshot {
       candidateCount: accounts.length,
       visibleModelIds: [],
       maxRetryCandidates: 3,
-      routingStrategy: "adaptive",
+
       defaultServiceTier: "standard",
     },
     platform: "test",

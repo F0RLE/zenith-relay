@@ -34,6 +34,7 @@ export async function persistPoolRoutingEdits(mode: RelayMode, edits: readonly P
     const runtime = await readRoutingRuntime(mode);
     const current = runtime?.gateway.poolRouting;
     if (!runtime || !current) throw { code: "unsupported_schema", message: "pool routing is unavailable" };
+    if (current.version !== 2 || !runtime.capabilities.features.includes("rotation_v2")) throw { code: "unsupported_schema", message: "pool rotation is unavailable on this server" };
     const next = applyPoolRoutingEdits(current, edits);
     if (JSON.stringify(next) === JSON.stringify(current)) return current;
     try {
@@ -41,11 +42,7 @@ export async function persistPoolRoutingEdits(mode: RelayMode, edits: readonly P
         poolRouting: next,
         expectedPoolRouting: current,
         maxRetryCandidates: runtime.gateway.maxRetryCandidates,
-        cooldownAfterFailures: runtime.gateway.cooldownAfterFailures ?? 3,
-        keepLastCandidateAvailable: runtime.gateway.keepLastCandidateAvailable ?? true,
-        routingStrategy: runtime.gateway.routingStrategy,
         defaultServiceTier: runtime.gateway.defaultServiceTier,
-        subscriptionPlanOrder: runtime.gateway.subscriptionPlanOrder ?? [],
       });
       return next;
     } catch (error) {

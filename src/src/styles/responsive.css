@@ -9,48 +9,9 @@
     gap: 8px;
   }
 
-  .usage-filter-primary { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
   .relay-shell[data-page="connections"] .relay-page .relay-table:not(.connection-table) { min-width: 820px; }
-  .relay-shell[data-page="pool"] .relay-table { min-width: 720px; }
-  .relay-shell[data-page="usage"] .relay-table { min-width: 720px; }
+  .relay-shell[data-page="pool"] .relay-table:not(.model-rules-table) { min-width: 720px; }
   .relay-shell[data-page="profiles"] .relay-table { min-width: 720px; }
-  .relay-shell[data-page="usage"] .usage-request-table { min-width: 0; }
-  .usage-request-table [data-column="connection"],
-  .usage-request-table [data-column="speed"],
-  .usage-request-table [data-column="tier"],
-  .usage-request-table [data-column="tokens"] {
-    display: none;
-  }
-  .usage-request-table col[data-column="time"] { width: 14%; }
-  .usage-request-table col[data-column="status"] { width: 8%; }
-  .usage-request-table col[data-column="model"] { width: 17%; }
-  .usage-request-table col[data-column="protocol"] { width: 14%; }
-  .usage-request-table col[data-column="timing"] { width: 18%; }
-  .usage-request-table col[data-column="equivalent"] { width: 13%; }
-  .usage-request-table col[data-column="request"] { width: 16%; }
-  .usage-request-table th {
-    height: auto;
-    padding-inline: 4px;
-    font-size: 11px;
-    line-height: 14px;
-    overflow-wrap: normal;
-  }
-  .usage-request-table .usage-column-heading {
-    padding-inline: 4px;
-  }
-  .usage-request-table th[data-column="request"] .usage-column-heading > span {
-    overflow: visible;
-    text-overflow: clip;
-    white-space: normal;
-  }
-  .usage-request-table .usage-column-heading > svg {
-    display: none;
-  }
-  .usage-request-table td[data-column="timing"] {
-    line-height: 15px;
-    overflow-wrap: normal;
-    word-break: normal;
-  }
 
 }
 
@@ -78,22 +39,6 @@
 
   .source-configuration-summary > .relay-button {
     width: 100%;
-  }
-
-  .pool-member-toolbar .pool-priority-label,
-  .pool-member-toolbar .pool-quota-actions {
-    width: 100%;
-  }
-
-  .pool-member-toolbar .pool-quota-actions {
-    justify-content: flex-start;
-    margin-left: 0;
-  }
-
-  .pool-member-toolbar .pool-control-group + .pool-control-group {
-    margin-left: 0;
-    padding-left: 0;
-    border-left: 0;
   }
 
 }
@@ -246,9 +191,6 @@
   .overview-chart-title small {
     white-space: normal;
   }
-  .usage-filters {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
-  }
   .client-oauth-binding {
     max-width: none;
   }
@@ -270,10 +212,6 @@
     border-bottom: 0;
   }
 
-  .usage-view-toolbar {
-    grid-template-columns: 1fr;
-    gap: 0;
-  }
 
   .source-connection-check {
     grid-template-columns: 22px minmax(0, 1fr);
@@ -293,42 +231,6 @@
     border-left: 0;
   }
 
-  .usage-scope-controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .usage-range-menu {
-    padding: 8px 0 0;
-  }
-
-  .usage-metrics,
-  .usage-account-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .usage-metrics > div:nth-child(2n) {
-    border-right: 0;
-  }
-
-  .usage-account-metrics > div:nth-child(2n) {
-    border-right: 0;
-  }
-
-  .usage-account-metrics > div:nth-child(odd) {
-    border-right: 1px solid var(--relay-border);
-  }
-
-  .usage-account-metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--relay-border);
-  }
-
-  .usage-metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--relay-border);
-  }
-
-  .usage-filter-primary {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
-  }
 
   .direct-api-toolbar {
     grid-template-columns: minmax(0, 1fr);

@@ -9,8 +9,8 @@ for (const width of [1160, 840, 390, 360]) {
     await page.addStyleTag({ content: ".app { font-family: Verdana, sans-serif !important; }" });
 
     for (const [view, label, selector, maxHeight] of [
-      ["connections", "Подключения", ".connections-account-controls", 100],
-      ["pool", "Пул", ".pool-controls", 120],
+      ["connections", "Подключения", ".connections-account-controls", 90],
+      ["pool", "Пул", ".pool-controls", 140],
     ] as const) {
       await page.getByRole("button", { name: label, exact: true }).click();
       const panel = page.locator(selector);

@@ -66,7 +66,10 @@ export function currentAccountErrorCode(account: AccountSummary) {
   const quotaError = account.quota.error?.code.trim();
   if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
   if (account.operationalStatus !== "unavailable") return null;
-  return account.lastErrorCode?.trim() || quotaError || account.routingBlockReason || "account_unavailable";
+  // Runtime availability can be false for a route, capacity or a protected
+  // quota reserve even when the account itself is healthy. Do not invent an
+  // account failure when no account-owned error has been observed.
+  return accountError || quotaError || account.routingBlockReason || null;
 }
 
 export function accountErrorTranslationKey(code: string) {

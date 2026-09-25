@@ -1,5 +1,5 @@
 import type { Page } from "../bun-playwright";
-import type { ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask } from "../../src/features/relay/api/types";
+import type { ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask, ToolPolicy, ToolPolicyUpdate } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
   locale?: "en" | "ru";
@@ -36,6 +36,7 @@ export type MockOptions = {
   usageCandidateKind?: "account" | "source";
   usageRequestedModel?: string;
   usageResolvedModel?: string;
+  usageEndpointKind?: string;
   activeModelCounts?: Array<{ model: string; requestCount: number }>;
   usageToolDiagnostics?: "forwarded_text_only" | "dropped_text_only";
   usageTotalPages?: number;
@@ -60,8 +61,11 @@ export type MockOptions = {
   quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
   gatewayRunning?: boolean;
+  rotationVersion?: 1 | 2;
   codexBackgroundTasksEnabled?: boolean;
   codexWebsocketsEnabled?: boolean;
+  basisPointsAvailable?: boolean;
+  basisPointsEnabled?: boolean;
   chatgptRetryUntilAvailable?: boolean;
   poolMembers?: boolean;
   proxyCount?: number;
@@ -212,6 +216,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       apiEquivalent: { microUsd: 8_500, pricedTokens: 1_400, unpricedTokens: 0 },
       secretAvailable: true,
       lastErrorCode: input.sourceErrorCode ?? null,
+      refreshRevision: 1,
     };
     const sourceCount = Math.max(1, Math.min(8, Math.trunc(input.sourceCount ?? 1)));
     const sources = [source, ...Array.from({ length: sourceCount - 1 }, (_, index) => ({
@@ -252,6 +257,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       quota,
       quotaRefreshStatus: input.quotaRefreshStatus ?? "updated" as "pending" | "refreshing" | "updated" | "failed" | "requires_reauth",
       secretAvailable: true,
+      basisPointsAvailable: input.basisPointsAvailable ?? false,
+      basisPointsEnabled: input.basisPointsEnabled ?? false,
       remoteLocation: null as { serverId: string; remoteAccountId: string } | null,
       proxyMode: "common",
       proxyAvailable: true,
@@ -347,13 +354,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       updatedAtMs: Date.now() - 60_000,
       ...input.automation,
     };
+    const defaultToolPolicy: ToolPolicy = { mode: "pass_through" };
+
+
+    function saveToolPolicy(current: ToolPolicy, input: ToolPolicyUpdate): ToolPolicy {
+      if (JSON.stringify(current) !== JSON.stringify(input.expectedPolicy)) throw { code: "conflict", message: "Synthetic policy changed" };
+      return { ...input.policy };
+    }
     const localRuntime = {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { modelCatalog: modelMetadata, poolRouting: { version: 1, mode: "smart", members: [] } as import("../../src/features/relay/api/types").PoolRoutingPolicy, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: input.rotationVersion ?? 2, mode: input.rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", basisPointsEnabled: input.basisPointsEnabled ?? false, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "source_protocols_v1"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "rotation_v2", "source_protocols_v1"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
       sources: populated ? sources : [],
       accounts: populated ? accounts : [],
       automations: populated ? [automation] : [],
@@ -408,15 +422,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] };
-    if (!input.remoteFeatures) remoteRuntime.capabilities.features.push("model_order_reset");
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "rotation_v2", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] };
+    if (!input.remoteFeatures) remoteRuntime.capabilities.features.push("model_order_reset", "tool_policy_v1");
     const configurationPreset = {
       format: "zenith-relay-configuration",
       schemaVersion: 2,
       settings: {
         sources: remoteRuntime.sources.map((item) => ({ id: item.id, name: item.name, baseUrl: item.baseUrl, wireApi: item.wireApi, protocolBindings: item.protocolBindings, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight, recoveryDelaySeconds: item.recoveryDelaySeconds, modelPriceOverrides: item.modelPriceOverrides })),
         accounts: remoteRuntime.accounts.map((item) => ({ id: item.id, identityHint: item.identityHint, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight, proxyId: null })),
-        routing: { poolRouting: structuredClone(remoteRuntime.gateway.poolRouting), maxRetryCandidates: 4, routingStrategy: remoteRuntime.gateway.routingStrategy, subscriptionPlanOrder: remoteRuntime.gateway.subscriptionPlanOrder, defaultServiceTier: remoteRuntime.gateway.defaultServiceTier, imageBaseModel: null },
+        routing: { poolRouting: structuredClone(remoteRuntime.gateway.poolRouting), maxRetryCandidates: 4, defaultServiceTier: remoteRuntime.gateway.defaultServiceTier, imageBaseModel: null },
         quota: { requestTimeoutSeconds: remoteRuntime.gateway.quotaRequestTimeoutSeconds, accountProxyRequired: remoteRuntime.gateway.accountProxyRequired, commonProxyId: null },
         hiddenModels: [],
         modelPriceOverrides: {},
@@ -494,7 +508,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     const sourceUsage = input.usageCandidateKind === "source";
-    const routing = { reason: sourceUsage ? "weighted_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3 };
+    const routing = { reason: sourceUsage ? "weighted_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3, endpointKind: input.usageEndpointKind ?? null };
     const localUnpricedTokens = Math.min(28, Math.max(0, input.usageUnpricedTokens ?? 0));
     const remoteUnpricedTokens = Math.min(25, Math.max(0, input.usageUnpricedTokens ?? 0));
     const requestedUsageModel = input.usageRequestedModel ?? "gpt-5.4";
@@ -603,7 +617,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             const createdAtMs = events[0]?.createdAtMs ?? 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
             const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
-            return { events: query.includeEvents === false ? [] : structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: query.includeModels === false || !events.length ? [] : [{ key: "gpt-5.4", totals }], poolMembers: query.includePoolMembers === false || !events.length ? [] : [{ key: sourceUsage ? source.id : "a1b2c3d4e5f6", label: sourceUsage ? source.name : account.label, totals }] };
+            return { events: query.includeEvents === false ? [] : structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? input.usageTotalPages ?? 1 : 0, totals, buckets, models: query.includeModels === false || !events.length ? [] : [{ key: "gpt-5.4", totals }], poolMembers: query.includePoolMembers === false || !events.length ? [] : [{ key: sourceUsage ? source.id : "a1b2c3d4e5f6", label: sourceUsage ? source.name : account.label, totals }] };
           }
           case "create_local_source": {
             if (input.sourceCreateError) throw { code: input.sourceCreateError, message: "Synthetic upstream model discovery failed" };
@@ -780,6 +794,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.chatgptInterfaceQuotaReserveBasisPoints = request.reserveBasisPoints;
             return structuredClone(localRuntime);
           }
+          case "set_local_tool_policy": {
+            localRuntime.gateway.toolPolicy = saveToolPolicy(localRuntime.gateway.toolPolicy, args.input as ToolPolicyUpdate);
+            return structuredClone(localRuntime);
+          }
           case "set_local_codex_background_tasks": {
             const request = args.input as { enabled: boolean };
             localRuntime.gateway.codexBackgroundTasksEnabled = request.enabled;
@@ -796,18 +814,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.chatgptRetryUntilAvailable = request.enabled;
             return structuredClone(localRuntime);
           }
-          case "update_local_routing": {
-            const request = args.input as { poolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; expectedPoolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; maxRetryCandidates: number; cooldownAfterFailures: number; keepLastCandidateAvailable: boolean; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" | "ultrafast" };
+        case "update_local_routing": {
+            const request = args.input as { poolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; expectedPoolRouting?: import("../../src/features/relay/api/types").PoolRoutingSnapshot; maxRetryCandidates: number; defaultServiceTier: "standard" | "fast" | "ultrafast"; basisPointsEnabled?: boolean };
             if (request.poolRouting) {
               if (JSON.stringify(request.expectedPoolRouting) !== JSON.stringify(localRuntime.gateway.poolRouting)) throw { code: "conflict", message: "pool routing changed" };
               localRuntime.gateway.poolRouting = structuredClone(request.poolRouting);
             }
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
-            localRuntime.gateway.cooldownAfterFailures = request.cooldownAfterFailures;
-            localRuntime.gateway.keepLastCandidateAvailable = request.keepLastCandidateAvailable;
-            localRuntime.gateway.routingStrategy = request.routingStrategy;
-            localRuntime.gateway.subscriptionPlanOrder = [...request.subscriptionPlanOrder];
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
+            if (request.basisPointsEnabled !== undefined) {
+              localRuntime.gateway.basisPointsEnabled = request.basisPointsEnabled;
+              for (const account of localRuntime.accounts) account.basisPointsEnabled = account.basisPointsAvailable && request.basisPointsEnabled;
+            }
             return structuredClone(localRuntime);
           }
           case "sync_codex_default_service_tier": return null;
@@ -1319,6 +1337,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         refreshGatewayModels(remoteRuntime);
         return structuredClone(remoteRuntime);
       }
+      if (type === "set_tool_policy") {
+        remoteRuntime.gateway.toolPolicy = saveToolPolicy(remoteRuntime.gateway.toolPolicy, input.payload as unknown as ToolPolicyUpdate);
+        return structuredClone(remoteRuntime);
+      }
       if (type === "set_codex_background_tasks") {
         remoteRuntime.gateway.codexBackgroundTasksEnabled = Boolean(input.payload?.enabled);
         return structuredClone(remoteRuntime);
@@ -1412,11 +1434,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           remoteRuntime.gateway.poolRouting = structuredClone(input.payload.poolRouting) as typeof remoteRuntime.gateway.poolRouting;
         }
         remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);
-        remoteRuntime.gateway.cooldownAfterFailures = Number(input.payload?.cooldownAfterFailures);
-        remoteRuntime.gateway.keepLastCandidateAvailable = Boolean(input.payload?.keepLastCandidateAvailable);
-        if (input.payload?.routingStrategy) remoteRuntime.gateway.routingStrategy = input.payload.routingStrategy as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
-        if (input.payload?.subscriptionPlanOrder) remoteRuntime.gateway.subscriptionPlanOrder = [...input.payload.subscriptionPlanOrder as string[]];
         if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast" | "ultrafast";
+        if (typeof input.payload?.basisPointsEnabled === "boolean") {
+          remoteRuntime.gateway.basisPointsEnabled = input.payload.basisPointsEnabled;
+          for (const account of remoteRuntime.accounts) account.basisPointsEnabled = account.basisPointsAvailable && input.payload.basisPointsEnabled;
+        }
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_all_quotas") return { refreshed: remoteRuntime.accounts.length, failed: 0, snapshot: structuredClone(remoteRuntime) };

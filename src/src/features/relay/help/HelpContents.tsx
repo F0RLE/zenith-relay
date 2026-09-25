@@ -1,5 +1,5 @@
 import { ChevronDown, List } from "lucide-react";
-import { useId, useLayoutEffect, useRef, useState, type FocusEvent, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 type Section = { id: string; label: string; target: HTMLElement };
@@ -63,18 +63,35 @@ export function HelpContents({ documentRef, language }: {
     if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
   };
 
+  useEffect(() => {
+    if (!open) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || !navigationRef.current?.contains(target)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      navigationRef.current?.querySelector<HTMLButtonElement>(".help-contents-toggle")?.focus({ preventScroll: true });
+    };
+    const closeOnViewportChange = () => setOpen(false);
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape, true);
+    window.addEventListener("resize", closeOnViewportChange);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape, true);
+      window.removeEventListener("resize", closeOnViewportChange);
+    };
+  }, [open]);
+
   return <nav
     ref={navigationRef}
     className="help-contents"
     aria-label={t("helpCenter.contents")}
     data-open={open}
     onBlur={closeOnBlur}
-    onKeyDown={(event) => {
-      if (event.key === "Escape" && open) {
-        setOpen(false);
-        navigationRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-      }
-    }}
   >
     <div className="help-contents-label"><List aria-hidden /><span>{t("helpCenter.contents")}</span></div>
     <button

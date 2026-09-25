@@ -5,9 +5,9 @@
   inset: 36px 0 0;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: 20px;
   background: var(--relay-overlay);
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(3px);
 }
 
 /* Error details can be opened from a toast while another modal is active. */
@@ -16,15 +16,15 @@
 }
 
 .relay-dialog {
-  width: min(520px, 100%);
-  max-height: calc(100vh - 84px);
+  width: min(560px, 100%);
+  max-height: calc(100dvh - 76px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid var(--relay-border-strong);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--relay-surface);
-  box-shadow: 0 22px 60px rgb(0 0 0 / 32%);
+  box-shadow: var(--relay-dialog-shadow);
 }
 
 .relay-dialog.wide {
@@ -37,41 +37,80 @@
 
 .relay-dialog > header,
 .relay-dialog > footer {
-  min-height: 56px;
+  min-height: 60px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--relay-border);
 }
 
 .relay-dialog > header {
   position: relative;
-  justify-content: center;
-  padding-inline: 56px;
+  justify-content: flex-start;
+  padding-right: 60px;
+  background: var(--relay-surface);
 }
 
 .relay-dialog > header h2 {
   max-width: 100%;
   margin: 0;
-  font-size: 16px;
-  text-align: center;
+  color: var(--relay-text);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 22px;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .relay-dialog > header > .relay-icon-button {
   position: absolute;
-  right: 14px;
+  right: 16px;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
 }
 
 .relay-dialog > footer {
   justify-content: flex-end;
+  flex-wrap: wrap;
+  padding-block: 12px;
+  background: var(--relay-surface);
   border-top: 1px solid var(--relay-border);
   border-bottom: 0;
 }
 
 .relay-dialog-body {
+  min-width: 0;
   overflow: auto;
-  padding: 18px;
+  overscroll-behavior: contain;
+  padding: 20px;
+}
+
+.relay-dialog .relay-field {
+  min-width: 0;
+}
+
+.relay-dialog .relay-field > input:not([type="checkbox"]):not([type="radio"]),
+.relay-dialog textarea {
+  min-width: 0;
+  width: 100%;
+}
+
+.relay-dialog > footer .relay-button {
+  min-height: 36px;
+  white-space: normal;
+}
+
+.relay-dialog.source-add-dialog,
+.relay-dialog.account-export-dialog {
+  width: min(640px, 100%);
+}
+
+.relay-dialog.account-import-dialog:not(:has(.import-preview)) {
+  width: min(640px, 100%);
 }
 
 @media (max-height: 800px) {
@@ -80,7 +119,7 @@
   }
 
   .relay-dialog {
-    max-height: calc(100vh - 68px);
+    max-height: calc(100dvh - 68px);
   }
 }
 
@@ -90,7 +129,36 @@
   }
 
   .relay-dialog {
-    max-height: calc(100vh - 60px);
+    max-height: calc(100dvh - 60px);
+  }
+}
+
+@media (max-width: 620px) {
+  .relay-modal-backdrop {
+    padding: 12px;
+  }
+
+  .relay-dialog {
+    width: 100%;
+    max-height: calc(100dvh - 60px);
+    border-radius: 10px;
+  }
+
+  .relay-dialog > header,
+  .relay-dialog > footer {
+    padding-inline: 16px;
+  }
+
+  .relay-dialog > header {
+    padding-right: 56px;
+  }
+
+  .relay-dialog-body {
+    padding: 16px;
+  }
+
+  .relay-dialog > footer > .relay-button {
+    flex: 1 1 auto;
   }
 }
 
@@ -768,13 +836,34 @@
 }
 
 .deployment-result {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  gap: 18px;
 }
 
-.deployment-result label {
+.deployment-result > .relay-status {
+  justify-self: start;
+}
+
+.deployment-result > label,
+.deployment-result > .relay-field {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr);
-  gap: 10px;
+  gap: 7px;
+  margin: 0;
+}
+
+.deployment-result > label > span,
+.deployment-result > .relay-field > span {
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.deployment-result > label > code,
+.deployment-result > .relay-field > code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.deployment-result > .form-note {
+  margin: 0;
 }

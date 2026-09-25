@@ -53,6 +53,7 @@ describe("account status policy", () => {
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" }, lastErrorCode: "models_prepare" }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("provider_timeout");
+    expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", authState: { state: "active" }, health: "healthy" }))).toBeNull();
   });
 
   test("does not let a stale quota result hide a required sign-in", () => {

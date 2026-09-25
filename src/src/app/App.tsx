@@ -2,12 +2,12 @@ import { useEffect, useLayoutEffect, useState } from "react";
 import { TitleBar } from "../components/TitleBar";
 import { AppContextMenu } from "../features/relay/components/ContextMenu";
 import { AppTooltips } from "../features/relay/components/AppTooltips";
-import { getPlatform, type Platform } from "../platform/desktop";
+import { getPlatform, platformFromUserAgent, type Platform } from "../platform/desktop";
 import "../styles.css";
 import { RelayApp } from "./RelayApp";
 
 export function App() {
-  const [platform, setPlatform] = useState<Platform>("windows");
+  const [platform, setPlatform] = useState<Platform | "unknown">(() => platformFromUserAgent(navigator.userAgent));
 
   useLayoutEffect(() => {
     const preventChromeSelectAll = (event: KeyboardEvent) => {
@@ -22,7 +22,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    getPlatform().then(setPlatform).catch(() => setPlatform("windows"));
+    getPlatform().then(setPlatform).catch(() => undefined);
   }, []);
 
   return (

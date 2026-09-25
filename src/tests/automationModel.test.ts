@@ -47,7 +47,7 @@ const gateway: RuntimeSnapshot["gateway"] = {
   candidateCount: 1,
   visibleModelIds: ["gpt-5.4", "gpt-5.4-mini"],
   maxRetryCandidates: 3,
-  routingStrategy: "adaptive",
+
   defaultServiceTier: "standard",
 };
 

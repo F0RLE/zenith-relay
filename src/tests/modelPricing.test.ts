@@ -20,19 +20,20 @@ function metadata(
 }
 
 describe("model metadata presentation", () => {
-  test("keeps all company families in one stable group in snapshot order", () => {
+  test("keeps company groups and model order independently of catalog family", () => {
     const models = [
       metadata("new", "openai", "gpt-astra"),
       metadata("sol", "openai", "gpt-sol"),
       metadata("claude", "anthropic", "claude-opus"),
       metadata("terra", "openai", "gpt-terra"),
+      metadata("newer-sol", "openai", "gpt-sol"),
       metadata("mini", "openai", "gpt-mini"),
       metadata("unclassified", "openai", null),
     ];
     const groups = groupModels(models, { metadata: (model) => model });
     expect(groups.map((group) => [group.id, group.label, group.items.map((item) => item.id)]))
       .toEqual([
-        ["catalog-openai", "OpenAI", ["new", "sol", "terra", "mini", "unclassified"]],
+        ["catalog-openai", "OpenAI", ["new", "sol", "terra", "newer-sol", "mini", "unclassified"]],
         ["catalog-anthropic", "Anthropic", ["claude"]],
       ]);
     const changedFamily = models.map((model) => ({ ...model, catalogFamily: "renamed" }));
@@ -91,6 +92,18 @@ describe("model metadata presentation", () => {
       summaries,
     )).toEqual(["NEW", "old", "history", "removed"]);
     expect(uniqueModelIds([" First ", "first", "Second"])).toEqual([" First ", "Second"]);
+  });
+
+  test("sorts models outside the current snapshot by stable ID when requested", () => {
+    const summaries = [
+      metadata("new", "openai", "gpt"),
+      metadata("old", "openai", "gpt"),
+    ] as ModelSummary[];
+    expect(orderModelIdsBySnapshot(
+      ["unknown-z", "old", "unknown-a", "new"],
+      summaries,
+      { unknownOrder: "stable-id" },
+    )).toEqual(["new", "old", "unknown-a", "unknown-z"]);
   });
 });
 

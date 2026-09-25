@@ -1,20 +1,17 @@
 import { relayCommands } from "./api/commands";
-import type { DefaultServiceTier, PoolRoutingPolicy, RelayMode, RoutingStrategy } from "./api/types";
+import type { DefaultServiceTier, PoolRoutingPolicy, PoolRoutingSnapshot, RelayMode } from "./api/types";
 
 export type RoutingPolicy = {
+  basisPointsEnabled?: boolean;
   poolRouting?: PoolRoutingPolicy;
-  expectedPoolRouting?: PoolRoutingPolicy;
+  expectedPoolRouting?: PoolRoutingSnapshot;
   maxRetryCandidates: number;
-  cooldownAfterFailures: number;
-  keepLastCandidateAvailable: boolean;
-  routingStrategy: RoutingStrategy;
   defaultServiceTier: DefaultServiceTier;
-  subscriptionPlanOrder: string[];
 };
 
 export function persistRoutingPolicy(mode: RelayMode, policy: RoutingPolicy) {
   return mode === "local"
-    ? relayCommands.updateRouting(policy.routingStrategy, policy.maxRetryCandidates, policy.cooldownAfterFailures, policy.keepLastCandidateAvailable, policy.defaultServiceTier, policy.subscriptionPlanOrder, policy.poolRouting, policy.expectedPoolRouting)
+    ? relayCommands.updateRouting(policy.maxRetryCandidates, policy.defaultServiceTier, policy.poolRouting, policy.expectedPoolRouting, policy.basisPointsEnabled)
     : relayCommands.remoteAction({ type: "set_routing_policy" }, policy)
       .then(() => relayCommands.syncCodexDefaultServiceTier(policy.defaultServiceTier));
 }

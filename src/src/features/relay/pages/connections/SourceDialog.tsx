@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type FormEvent } from "react";
 import { Link2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { SourceSummary } from "../../api/types";
+import type { RelayMode, SourceSummary } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import { SecretField, Button, Dialog, ErrorDetailsDialog, Tabs } from "../../components/Ui";
 import { SourcePriceEditor } from "../../components/SourcePriceEditor";
@@ -12,12 +12,13 @@ import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
 
 type SourceEditTab = "main" | "prices";
-export function SourceDialog({ source: initialSource, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
+export function SourceDialog({ source: initialSource, onClose, addToPool = false, modeOverride, onCreated }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean; modeOverride?: RelayMode; onCreated?: () => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode: currentMode, runtime, perform, busy } = useRelayState();
+  const mode = modeOverride ?? currentMode;
   const [savedSource, setSavedSource] = useState(initialSource);
   const createdSourceId = useRef<string | null>(null);
-  const source = runtime?.sources.find((value) => value.id === savedSource?.id) ?? savedSource;
+  const source = mode === currentMode ? runtime?.sources.find((value) => value.id === savedSource?.id) ?? savedSource : savedSource;
   const [provider, setProvider] = useState(defaultApiProviderValue);
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
@@ -92,7 +93,10 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
       reportError: false,
       onError: (error, messageKey) => setOperationError({ error, messageKey }),
     });
-    if (ok && source) onClose();
+    if (ok && (source || onCreated)) {
+      onCreated?.();
+      onClose();
+    }
   };
   const dialogClassName = source ? `source-edit-dialog connection-dialog${activeTab === "prices" ? " source-prices-dialog" : ""}` : "source-add-dialog";
   const footer = source

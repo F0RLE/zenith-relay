@@ -119,16 +119,14 @@
 }
 
 .gateway-api-tab {
-  margin-top: 18px;
+  margin-top: 16px;
 }
 
 .gateway-api-connection-panel {
   container-type: inline-size;
   min-width: 0;
-  border: 1px solid var(--relay-border);
-  border-radius: 8px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
+  display: grid;
+  gap: 12px;
 }
 
 .gateway-api-overview {
@@ -138,8 +136,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px 28px;
-  padding: 22px 24px;
-  border-bottom: 1px solid var(--relay-border);
+  padding: 18px 20px;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
 }
 
 .gateway-api-status {
@@ -150,14 +151,18 @@
 }
 
 .gateway-api-status > svg {
-  width: 22px;
-  height: 22px;
+  width: 36px;
+  height: 36px;
   flex: 0 0 auto;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--relay-subtle);
   color: var(--relay-muted);
 }
 
 .gateway-api-status.running > svg {
-  color: var(--relay-accent-hover);
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent);
 }
 
 .gateway-api-status h2 {
@@ -176,40 +181,63 @@
 .gateway-api-metrics {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 24px;
+  gap: 8px;
   margin: 0;
 }
 
 .gateway-api-metrics > div {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  min-width: 84px;
+  display: grid;
+  gap: 2px;
+  padding: 8px 11px;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: var(--relay-subtle);
 }
 
 .gateway-api-metrics dt {
   color: var(--relay-muted);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 15px;
 }
 
 .gateway-api-metrics dd {
   margin: 0;
   color: var(--relay-text);
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 650;
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
 }
 
 .gateway-api-fields {
-  padding: 0 24px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.gateway-api-options {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
 }
 
 .gateway-api-field {
   min-width: 0;
   display: grid;
-  grid-template-columns: 120px minmax(0, 1fr) 226px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label actions"
+    "value actions"
+    "hint actions";
   align-items: center;
-  gap: 20px;
-  padding: 24px 0;
+  gap: 7px 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
 }
 
 .gateway-api-field + .gateway-api-field {
@@ -217,24 +245,39 @@
 }
 
 .gateway-api-field h3 {
+  grid-area: label;
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
-  color: var(--relay-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.gateway-api-field > header {
+  grid-area: label;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gateway-api-field > header h3 {
+  min-width: 0;
 }
 
 .gateway-api-field h3 > svg {
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
-  color: var(--relay-muted);
+  color: var(--relay-accent);
 }
 
 .gateway-api-address {
+  grid-area: value;
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--relay-text);
@@ -246,17 +289,24 @@
 }
 
 .gateway-api-field > p {
+  grid-area: hint;
   margin: 0;
   color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 19px;
+  font-size: 11px;
+  line-height: 17px;
 }
 
 .gateway-api-field-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-area: actions;
+  display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+}
+
+.gateway-api-field > header .gateway-api-field-actions {
+  grid-area: auto;
+  flex: 0 0 auto;
 }
 
 .gateway-api-field-actions > .relay-button {
@@ -271,23 +321,29 @@
   align-items: center;
   justify-content: space-between;
   gap: 14px 24px;
-  padding: 18px 24px;
-  border-top: 1px solid var(--relay-border);
-  border-radius: 0 0 8px 8px;
-  background: var(--relay-sidebar);
+  padding: 14px 20px;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
+}
+
+.gateway-api-options > .gateway-api-settings,
+.gateway-api-options > .gateway-api-toggle-setting {
+  min-width: 0;
 }
 
 .gateway-api-port-heading label {
   color: var(--relay-secondary);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .gateway-api-port-heading p {
   margin: 3px 0 0;
   color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 11px;
+  line-height: 17px;
 }
 
 .gateway-api-port-control {
@@ -306,14 +362,44 @@
 }
 
 @container (max-width: 660px) {
+  .gateway-api-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .gateway-api-field {
-    grid-template-columns: minmax(0, 1fr) 226px;
-    gap: 12px 20px;
-    padding: 20px 0;
+    gap: 7px 16px;
+  }
+
+  .gateway-api-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gateway-api-field + .gateway-api-field {
+    border-top: 1px solid var(--relay-border);
+  }
+
+  .gateway-api-overview,
+  .gateway-api-settings,
+  .gateway-api-field,
+  .gateway-api-toggle-setting {
+    padding-inline: 18px;
+  }
+
+  .gateway-api-field-actions {
+    align-self: center;
   }
 
   .gateway-api-field h3 {
-    grid-column: 1 / -1;
+    grid-column: auto;
+  }
+
+  .gateway-api-field {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 20px 18px;
+  }
+
+  .gateway-api-options {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -324,23 +410,24 @@
   }
 
   .gateway-api-metrics {
-    padding-left: 34px;
-  }
-
-  .gateway-api-fields {
-    padding: 0 18px;
+    width: 100%;
+    padding-left: 44px;
   }
 
   .gateway-api-field {
     grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
-    padding: 18px 0;
+    grid-template-areas:
+      "label"
+      "value"
+      "hint"
+      "actions";
+    gap: 8px;
+    padding: 18px;
   }
 
   .gateway-api-field-actions {
-    width: 226px;
-    max-width: 100%;
-    margin-top: 2px;
+    justify-content: flex-start;
+    margin-top: 3px;
   }
 }
 
@@ -582,28 +669,27 @@
 .proxy-route-options {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
 }
 
 .proxy-route-options > button {
   min-width: 0;
-  min-height: 58px;
+  min-height: 54px;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   color: var(--relay-text);
   text-align: left;
 }
 
 .proxy-route-options > button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--relay-accent) 58%, var(--relay-border));
-  background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
+  background: var(--relay-subtle);
 }
 
 .proxy-route-options > button.selected {
@@ -623,6 +709,18 @@
 
 .proxy-route-options > button.selected svg {
   color: var(--relay-accent-hover);
+}
+
+.proxy-route-options .proxy-route-check {
+  width: 16px;
+  height: 16px;
+}
+
+.proxy-account-context {
+  margin: 0 0 4px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .proxy-route-options span {
@@ -648,10 +746,6 @@
   display: grid;
   gap: 7px;
   padding-top: 3px;
-}
-
-@media (max-width: 620px) {
-  .proxy-route-options { grid-template-columns: 1fr; }
 }
 
 .success-text {
@@ -1047,4 +1141,15 @@
   border-radius: 6px;
   background: var(--relay-subtle);
   color: var(--relay-text);
+}
+
+.gateway-api-toggle-setting {
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
+}
+@media (max-width: 640px) {
+  .gateway-api-toggle-setting { padding: 16px 18px; }
 }

@@ -104,7 +104,11 @@ test("connection account actions use full-width zones and centered dates", async
   const summary = page.locator(".connections-account-summary > div");
   await expect(summary).toHaveCount(4);
   await expect(page.locator(".connections-account-controls")).toBeVisible();
-  expect(await summary.evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().height)))).toEqual([20, 20, 20, 20]);
+  expect(await summary.evaluateAll((items) => items.every((item) => {
+    const value = item.querySelector("strong")!.getBoundingClientRect();
+    const label = item.querySelector("span")!.getBoundingClientRect();
+    return label.left >= value.right;
+  }))).toBe(true);
   await expect(actions).toHaveCount(3);
   const [cardBox, dateBox, actionBoxes] = await Promise.all([
     card.boundingBox(),
@@ -284,7 +288,7 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await page.getByRole("tab", { name: "Правила моделей" }).click();
   const table = page.locator(".model-rules-table");
   await expect(table.getByRole("columnheader")).toHaveCount(2);
-  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center"]);
+  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "right"]);
   await expect(table.locator(".model-group-row").first()).toContainText("OpenAI");
   await expect(table.locator(".model-group-row").nth(1)).toContainText("Anthropic");
   await expect(table.locator(".model-group-row").filter({ hasText: "OpenAI" })).toHaveCount(1);
@@ -343,7 +347,7 @@ test("sparse reference tables stay compact and centered in a wide window", async
   await page.screenshot({ path: "output/playwright/api-sources-centered-ru-dark-1648x1168.png" });
 });
 
-test("source prices are grouped by metadata and Messages models expose cache TTLs", async ({ page }) => {
+test("source prices are grouped by provider and Messages models expose cache TTLs", async ({ page }) => {
   await installTauriMock(page, {
     locale: "ru",
     mode: "local",
@@ -364,6 +368,9 @@ test("source prices are grouped by metadata and Messages models expose cache TTL
   await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "Anthropic" }).click();
+  await expect(dialog.locator(".source-price-group").filter({ hasText: "OpenAI" }).locator(".source-price-model code")).toHaveText(["gpt-5.4"]);
+  await expect(dialog.locator(".source-price-group").filter({ hasText: "Anthropic" }).locator(".source-price-model code")).toHaveText(["claude-opus-4-8"]);
+  await expect(dialog.getByText("Claude Opus", { exact: true })).toHaveCount(0);
   await expect(dialog.locator(".member-price-grid-head").getByText("Кэш запись 5 мин", { exact: true })).toBeVisible();
   await expect(dialog.locator(".member-price-grid-head").getByText("Кэш запись 1 ч", { exact: true })).toBeVisible();
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -540,12 +547,9 @@ for (const viewport of viewports) {
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".pool-summary > div").evaluateAll((cells) => cells.every((cell) => {
-      const cellRect = cell.getBoundingClientRect();
-      const center = (cellRect.top + cellRect.bottom) / 2;
-      return Array.from(cell.children).every((child) => {
-        const rect = child.getBoundingClientRect();
-        return Math.abs((rect.top + rect.bottom) / 2 - center) <= 1;
-      });
+      const value = cell.querySelector("strong")!.getBoundingClientRect();
+      const label = cell.querySelector("span")!.getBoundingClientRect();
+      return value.right <= label.left && cell.scrollWidth <= cell.clientWidth;
     }))).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-members-ru-dark-${viewport.width}x${viewport.height}.png` });
 
@@ -904,7 +908,7 @@ for (const viewport of viewports) {
       await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Ротация пула" });
       await expect(dialog.getByRole("radio")).toHaveCount(3);
-      await expect(dialog.getByRole("radio", { name: "Умный выбор", exact: true })).toHaveAttribute("aria-checked", "true");
+      await expect(dialog.getByRole("radio", { name: "Автоматически", exact: true })).toHaveAttribute("aria-checked", "true");
       await dialog.getByRole("radio", { name: "По кругу", exact: true }).click();
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
@@ -969,7 +973,8 @@ for (const viewport of viewports) {
     await expect(dialog.getByText("Time remaining", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/oauth-dialog-${viewport.width}x${viewport.height}.png` });
-    await dialog.getByRole("button", { name: "Close" }).click();
+    await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
+    await expect(dialog).toHaveCount(0);
 
     await page.getByRole("tab", { name: "Sources" }).click();
     const sourceActions = page.locator(".relay-table .row-actions");
@@ -990,7 +995,8 @@ for (const viewport of viewports) {
     dialog = page.getByRole("dialog", { name: /Pool member policy/ });
     await expect(dialog).toBeVisible();
     await page.screenshot({ path: `output/playwright/pool-member-dialog-${viewport.width}x${viewport.height}.png` });
-    await dialog.getByRole("button", { name: "Close" }).first().click();
+    await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
+    await expect(dialog).toHaveCount(0);
 
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -1373,7 +1379,9 @@ for (const theme of themes) {
     await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
     const panel = page.getByRole("tabpanel", { name: "ChatGPT", exact: true });
     const switches = panel.getByRole("checkbox");
-    await expect(switches).toHaveCount(4);
+    await expect(switches).toHaveCount(3);
+    await expect(panel.locator(".codex-background-tasks-control").getByRole("checkbox")).toHaveCount(1);
+    await expect(panel.locator(".codex-websockets-control").getByRole("checkbox")).toHaveCount(1);
     const edges = await switches.evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().right));
     expect(Math.max(...edges) - Math.min(...edges)).toBeLessThanOrEqual(1);
     expect(await panel.evaluate((element) => [...element.querySelectorAll<HTMLElement>(".gateway-account-panel, .gateway-setting-row, .oauth-binding-settings")]
@@ -1584,7 +1592,7 @@ for (const scenario of [
     }
     expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
     expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
-    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "left"))).toBe(true);
     expect(await page.locator(".usage-request-table th, .usage-request-table td").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
     await expect(timing).toHaveText(scenario.locale === "ru" ? "128 мс / 428 мс" : "128 ms / 428 ms");

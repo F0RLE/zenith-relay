@@ -178,8 +178,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "feedback.saved",
   ), [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
 
-  const setChatgptRetryUntilAvailable = useCallback((enabled: boolean) => perform(
-    "chatgpt-retry-until-available",
+  const setRouteRecoveryEnabled = useCallback((enabled: boolean) => perform(
+    "route-recovery",
     mode === "local"
       ? () => relayCommands.setChatgptRetryUntilAvailable(enabled)
       : mode === "remote"
@@ -253,8 +253,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
     codexWebsocketsEnabled: displayRuntime?.gateway.codexWebsocketsEnabled ?? true,
-    chatgptRetryUntilAvailable: displayRuntime?.gateway.chatgptRetryUntilAvailable ?? false,
-    setChatgptRetryUntilAvailable,
+    routeRecoveryEnabled: displayRuntime?.gateway.chatgptRetryUntilAvailable ?? false,
+    setRouteRecoveryEnabled,
   }), [
     mode,
     setMode,
@@ -289,7 +289,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexPoolOauthSelection,
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
-    setChatgptRetryUntilAvailable,
+    setRouteRecoveryEnabled,
   ]);
 
   const usage = useMemo<RelayUsageContextValue>(() => ({

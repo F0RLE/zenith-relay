@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
-import { CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, MapPin, Network, Plus, RefreshCw, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
+import { Check, CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, MapPin, Network, Plus, RefreshCw, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolImportResult, ProxyPoolSummary, StoredProxyAssignmentResult } from "../../api/types";
@@ -103,8 +103,7 @@ function ProxyDiagnostic({ state }: { state: ProxyCheckState | undefined }) {
   const success = Boolean(result?.ip && !result.errorCode);
   const Icon = pending ? Loader2 : success ? CircleCheck : result ? CircleAlert : Globe;
   const country = result?.countryCode ? proxyLocationLabel({ countryCode: result.countryCode, region: null }, i18n.resolvedLanguage ?? i18n.language, t) : null;
-  const checkedAt = result && !pending ? t("proxies.checkedAt", { time: new Intl.DateTimeFormat(i18n.language, { hour: "2-digit", minute: "2-digit" }).format(result.checkedAtMs) }) : undefined;
-  return <div className="proxy-diagnostic" data-state={pending ? "pending" : success ? "success" : result ? "failed" : "unknown"} role="status" data-relay-tooltip={checkedAt}>
+  return <div className="proxy-diagnostic" data-state={pending ? "pending" : success ? "success" : result ? "failed" : "unknown"} role="status">
     <div><Icon className={pending ? "spin" : undefined} aria-hidden /><strong>{t(pending ? "proxies.checking" : success ? "proxies.checkSuccess" : result ? "proxies.checkFailed" : "proxies.notChecked")}</strong></div>
     {success && result ? <><code>{result.ip}</code><small>{[country, t("proxies.latency", { ms: result.elapsedMs })].filter(Boolean).join(" · ")}</small></> : result && !pending ? <small>{t(`proxies.checkErrors.${result.errorCode}`, { defaultValue: t("proxies.checkUnavailable") })}</small> : null}
   </div>;
@@ -207,6 +206,7 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
   const valid = Boolean(pool) && (choice !== "direct" || !directBlocked) && (choice !== "common" || commonConfigured) && (choice !== "stored" || proxyId) && (choice !== "custom" || proxyUrl.trim()) && (choice !== "automatic" || pool!.total > 0 || Boolean(current));
   const choose = (value: AccountProxyChoice) => { setChoice(value); setUnavailable(false); };
   return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button></>}><div className="relay-form proxy-route-form">{!pool ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : <>
+    <p className="proxy-account-context">{account.label}</p>
     <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
       <ProxyRouteOption value="direct" selected={choice === "direct"} disabled={directBlocked} icon={<WifiOff aria-hidden />} label={t("proxies.direct")} hint={t(directBlocked ? "proxies.directBlockedHint" : "proxies.directHint")} onSelect={choose} />
       <ProxyRouteOption value="automatic" selected={choice === "automatic"} disabled={!pool.total && !current} icon={<Shuffle aria-hidden />} label={t("proxies.assignAutomatically")} hint={t("proxies.storedAvailable", { count: pool.total })} onSelect={choose} />
@@ -232,6 +232,7 @@ function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummar
   };
   const valid = (choice !== "direct" || !directBlocked) && (choice !== "common" || commonConfigured) && (choice !== "custom" || Boolean(proxyUrl.trim()));
   return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button></>}><div className="relay-form proxy-route-form">
+    <p className="proxy-account-context">{account.label}</p>
     <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
       <ProxyRouteOption value="direct" selected={choice === "direct"} disabled={directBlocked} icon={<WifiOff aria-hidden />} label={t("proxies.direct")} hint={t(directBlocked ? "proxies.directBlockedHint" : "proxies.directHint")} onSelect={setChoice} />
       <ProxyRouteOption value="custom" selected={choice === "custom"} icon={<Plus aria-hidden />} label={t("proxies.addCustom")} hint={t("proxies.addCustomShortHint")} onSelect={setChoice} />
@@ -242,7 +243,7 @@ function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummar
 }
 
 function ProxyRouteOption({ value, selected, disabled = false, icon, label, hint, onSelect }: { value: AccountProxyChoice; selected: boolean; disabled?: boolean; icon: ReactNode; label: string; hint: string; onSelect: (value: AccountProxyChoice) => void }) {
-  return <button type="button" role="radio" aria-checked={selected} disabled={disabled} className={selected ? "selected" : ""} onClick={() => onSelect(value)}>{icon}<span><strong>{label}</strong><small>{hint}</small></span></button>;
+  return <button type="button" role="radio" aria-checked={selected} disabled={disabled} className={selected ? "selected" : ""} onClick={() => onSelect(value)}>{icon}<span><strong>{label}</strong><small>{hint}</small></span>{selected ? <Check className="proxy-route-check" aria-hidden /> : null}</button>;
 }
 
 export function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {

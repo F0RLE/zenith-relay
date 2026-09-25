@@ -1,6 +1,11 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
 export type DefaultServiceTier = "standard" | "fast" | "ultrafast";
+export type ToolPolicyMode = "pass_through" | "automatic";
+export type ToolPolicy = {
+  mode: ToolPolicyMode;
+};
+export type ToolPolicyUpdate = { policy: ToolPolicy; expectedPolicy: ToolPolicy };
 export type ObservedServiceTier = string;
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
@@ -99,6 +104,8 @@ export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_g
   | "messages_to_gemini" | "gemini_to_responses" | "gemini_to_chat_completions" | "gemini_to_messages";
 
 export type CapabilityStatus = "declared" | "confirmed" | "unsupported" | "unknown";
+/** Refresh evidence only; does not determine whether inference can be routed. */
+export type RefreshStatus = "unknown" | "fresh" | "stale" | "unsupported";
 export type CapabilityOrigin = "catalog" | "service_profile" | "endpoint_url" | "manual" | "generation_probe";
 export type ProtocolFeature = "text" | "streaming" | "images" | "function_tools" | "tool_choice" | "structured_output" | "reasoning";
 export type ModelEndpointCapability = {
@@ -126,6 +133,7 @@ export type SourceProbeResult = {
 
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";
+export type DocumentedCacheRetentionMinimum = "30m";
 
 export type SourceProtocolBinding = {
   wireApi: SourceWireApi;
@@ -164,6 +172,12 @@ export type SourceSummary = {
   apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;
+  /** Non-secret scope for cached provider observations; absent on older servers. */
+  refreshRevision?: number | null;
+  /** Optional on older servers; models and balance have independent freshness. */
+  refreshState?: { models: RefreshStatus; balance: RefreshStatus };
+  /** Host runtime cache only; reading snapshots does not poll a provider. */
+  providerStats?: SourceStats | null;
 };
 
 export type SourceStats = {
@@ -176,6 +190,9 @@ export type SourceStats = {
   balanceKind?: "wallet" | "key_quota" | "subscription";
   balanceUnlimited?: boolean;
   amounts?: SourceStatsAmount[];
+  asOfMs?: number | null;
+  stale?: boolean;
+  refreshError?: SourceStatsStatus | null;
 };
 
 export type SourceStatsStatus = "available" | "unsupported" | "unauthorized" | "rate_limited" | "unavailable" | "invalid_response";
@@ -189,6 +206,8 @@ export type AccountSummary = {
   id: string;
   label: string;
   identityHint: string;
+  basisPointsAvailable?: boolean;
+  basisPointsEnabled?: boolean;
   enabled: boolean;
   inPool: boolean;
   draining: boolean;
@@ -206,6 +225,8 @@ export type AccountSummary = {
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
   quotaRefreshStatus: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
+  /** Optional on older servers; saved values are not assumed fresh after restart. */
+  refreshState?: { models: RefreshStatus; quota: RefreshStatus };
   secretAvailable: boolean;
   remoteLocation?: { serverId: string; remoteAccountId: string } | null;
   proxyMode?: "direct" | "common" | "account";
@@ -314,6 +335,7 @@ export type RuntimeActivitySnapshot = {
   runtimeId?: number;
   revision: number;
   candidateId: string;
+  memberKey?: string;
   inFlight: number;
   activeRequestCount: number;
   activeModels: Array<{
@@ -373,16 +395,14 @@ export type RuntimeSnapshot = {
   configurationRevision?: string | null;
   runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
   gateway: {
-    poolRouting?: PoolRoutingPolicy;
+    toolPolicy?: ToolPolicy;
+    basisPointsEnabled?: boolean;
+    poolRouting?: PoolRoutingSnapshot;
     running: boolean;
     baseUrl: string;
     candidateCount: number;
     visibleModelIds: string[];
     maxRetryCandidates: number;
-    cooldownAfterFailures?: number;
-    keepLastCandidateAvailable?: boolean;
-    routingStrategy: RoutingStrategy;
-    subscriptionPlanOrder?: string[];
     defaultServiceTier: DefaultServiceTier;
     models?: ModelSummary[];
     /** Display metadata for the complete inventory, independent of routing rules. */
@@ -471,11 +491,8 @@ export type ConfigurationPreset = {
     sources: ConfigurationPresetSourceRule[];
     accounts: ConfigurationPresetAccountRule[];
     routing: {
+      toolPolicy?: ToolPolicy;
       maxRetryCandidates: number;
-      cooldownAfterFailures?: number;
-      keepLastCandidateAvailable?: boolean;
-      routingStrategy: RoutingStrategy;
-      subscriptionPlanOrder: string[];
       defaultServiceTier: DefaultServiceTier;
       imageBaseModel: string | null;
     };
@@ -510,9 +527,8 @@ export type ConfigurationPresetApplyResult = {
   changes: ConfigurationPresetChange[];
 };
 
-export type RoutingStrategy = "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
-
-export type PoolRoutingMode = "smart" | "in_order" | "round_robin";
+export type PoolRoutingMode = "automatic" | "in_order" | "round_robin";
+export type LegacyPoolRoutingMode = "smart" | "in_order" | "round_robin";
 export type PoolRoutingMember = {
   kind: "account" | "source";
   id: string;
@@ -520,10 +536,17 @@ export type PoolRoutingMember = {
   maxConcurrency: number;
 };
 export type PoolRoutingPolicy = {
-  version: 1;
+  version: 2;
   mode: PoolRoutingMode;
   members: PoolRoutingMember[];
 };
+/** Snapshot shape accepted from an older server during compatibility reads. */
+export type LegacyPoolRoutingPolicy = {
+  version: 1;
+  mode: LegacyPoolRoutingMode;
+  members: PoolRoutingMember[];
+};
+export type PoolRoutingSnapshot = PoolRoutingPolicy | LegacyPoolRoutingPolicy;
 
 export type ProxyAssignmentResult = {
   assigned: number;
@@ -603,6 +626,13 @@ export type RoutingDiagnostics = {
 export type ToolUseDiagnostics = {
   clientToolCount: number;
   forwardedToolCount: number;
+  clientSchemaBytes?: number;
+  forwardedSchemaBytes?: number;
+  filteredToolCount?: number;
+  policyMode?: ToolPolicyMode;
+  policyOutcome?: "pass_through" | "below_threshold" | "no_selection" | "unchanged" | "filtered" | "deferred";
+  policyFallback?: boolean;
+  deferredToolSearch?: boolean;
   toolChoice: "unspecified" | "auto" | "required" | "none" | "allowed_tools" | "specific";
   toolCallCount: number;
   textOutput: boolean;
@@ -645,7 +675,7 @@ type UsageEventRecord = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
-  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
+  cacheWriteTtl?: string | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
@@ -719,7 +749,7 @@ export type UsageExportRow = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;
-  cacheWriteTtl?: Exclude<CacheWriteTtl, "provider"> | null;
+  cacheWriteTtl?: string | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;

@@ -34,8 +34,7 @@
 .automation-details small { display: block; margin-top: 4px; color: var(--relay-muted); font-size: 11px; }
 
 .relay-dialog.connection-dialog { width: min(660px, 100%); }
-.connection-dialog .relay-dialog-body { padding: 22px 24px; }
-.connection-dialog .relay-form { gap: 18px; }
+.connection-dialog .relay-form { gap: 16px; }
 .connection-dialog-description { margin: 0; color: var(--relay-muted); font-size: 13px; line-height: 1.5; }
 .connection-dialog-context { display: flex; min-width: 0; align-items: center; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--relay-border); }
 .connection-dialog-context > svg { width: 18px; height: 18px; flex: 0 0 auto; color: var(--relay-accent-hover); }
@@ -50,10 +49,11 @@
 .relay-dialog.source-prices-dialog { width: min(1020px, 100%); }
 .source-edit-dialog .source-price-tab { border: 0; border-radius: 0; }
 .source-edit-dialog .source-price-tab-heading { padding: 0 0 16px; margin-bottom: 8px; }
-.source-edit-dialog .source-price-groups { gap: 0; }
-.source-edit-dialog .source-price-group { border: 0; border-bottom: 1px solid var(--relay-border); border-radius: 0; }
-.source-edit-dialog .source-price-group > summary { padding: 12px 0; }
-.source-edit-dialog .source-price-group > summary span { font-size: 11px; }
+.source-edit-dialog .source-price-groups { gap: 12px; }
+.source-edit-dialog .source-price-group { border: 1px solid var(--relay-border); border-radius: 8px; }
+.source-edit-dialog .source-price-group > summary { padding: 10px 14px; background: var(--relay-subtle); }
+.source-edit-dialog .source-price-group > summary:hover { color: var(--relay-accent); }
+.source-edit-dialog .source-price-group > summary span { font-size: 11px; font-variant-numeric: tabular-nums; }
 .source-edit-dialog .source-price-tab .source-price-table { --member-price-columns: 3; }
 .source-edit-dialog .source-price-tab .source-price-table[data-cache-write="true"] { --member-price-columns: 5; }
 .source-edit-dialog .source-price-row { border-radius: 0; }
@@ -143,8 +143,6 @@
 }
 
 @media (max-width: 620px) {
-  .connection-dialog .relay-dialog-body { padding: 18px; }
-  .connection-dialog .relay-form { gap: 16px; }
   .connections-toolbar .search-field { max-width: none; flex-basis: 100%; }
   .source-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; }
   .source-table td:nth-child(1) { grid-column: 1; grid-row: 2; }
@@ -173,7 +171,6 @@
 }
 
 @media (max-height: 650px) {
-  .connection-dialog .relay-dialog-body { padding-block: 14px; }
   .connection-dialog .relay-form { gap: 12px; }
   .automation-account-picker { max-height: 88px; }
 }

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { PoolRoutingPolicy } from "../../api/types";
+import type { PoolRoutingPolicy, PoolRoutingSnapshot } from "../../api/types";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { applyPoolRoutingEdits, persistPoolRoutingEdits, readRoutingRuntime, type PoolRoutingEdit } from "./poolRoutingEdits";
 
-const EMPTY_POLICY: PoolRoutingPolicy = { version: 1, mode: "smart", members: [] };
+const EMPTY_POLICY: PoolRoutingPolicy = { version: 2, mode: "automatic", members: [] };
 
 export function usePoolRoutingEditor(onClose: () => void) {
   const { mode, runtime, perform } = useRelayState();
@@ -15,19 +15,22 @@ export function usePoolRoutingEditor(onClose: () => void) {
   const [policy, setPolicy] = useState(base.current);
   const [saving, setSaving] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
+  const applyPending = (value: PoolRoutingSnapshot): PoolRoutingSnapshot => value.version === 2
+    ? applyPoolRoutingEdits(value, pending.current)
+    : value;
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
     base.current = current ?? EMPTY_POLICY;
-    setPolicy(applyPoolRoutingEdits(base.current, pending.current));
+    setPolicy(applyPending(base.current));
   }, [current]);
 
   const edit = (change: PoolRoutingEdit) => {
-    if (!current) return;
+    if (!current || current.version !== 2 || !runtime?.capabilities.features.includes("rotation_v2")) return;
     pending.current.push(change);
-    setPolicy((value) => applyPoolRoutingEdits(value, [change]));
+    setPolicy((value) => value.version === 2 ? applyPoolRoutingEdits(value, [change]) : value);
     setErrorKey(null);
     if (task.current) return;
     setSaving(true);
@@ -65,5 +68,5 @@ export function usePoolRoutingEditor(onClose: () => void) {
     const ok = await task.current;
     if (ok !== false && mounted.current) onClose();
   };
-  return { policy, edit, saving, errorKey, available: Boolean(current), close };
+  return { policy, edit, saving, errorKey, available: current?.version === 2 && Boolean(runtime?.capabilities.features.includes("rotation_v2")), close };
 }

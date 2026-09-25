@@ -56,6 +56,35 @@ input[type="checkbox"]:checked::before {
   transform: scale(1);
 }
 
+/* Menus and other transient surfaces share one visual language. Individual
+   components only add their placement and layout rules. */
+.relay-popover-panel {
+  border: 1px solid var(--relay-border-strong);
+  border-radius: var(--relay-popover-radius);
+  background: var(--relay-surface);
+  box-shadow: var(--relay-popover-shadow);
+  color: var(--relay-text);
+}
+
+.relay-popover-item {
+  min-height: var(--relay-popover-item-height);
+  border-radius: var(--relay-popover-item-radius);
+  font-size: 12px;
+  line-height: 16px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.relay-popover-item:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-focus) 28%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .relay-popover-item {
+    transition: none;
+  }
+}
+
 input[type="checkbox"]:indeterminate {
   border-color: var(--relay-accent-hover);
   background: var(--relay-accent-hover);
@@ -193,4 +222,92 @@ textarea {
 
 .search-field input {
   width: 100%;
+}
+
+.relay-toggle-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.relay-toggle-setting strong {
+  color: var(--relay-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.relay-toggle-setting > label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.relay-toggle-setting > label > span {
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.relay-status-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 24px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.relay-status-summary > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.relay-status-summary > [data-summary="provider-credits"] {
+  margin-left: auto;
+}
+
+.relay-status-summary strong {
+  color: var(--relay-text);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.relay-status-summary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.relay-status-summary svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.relay-status-summary [data-tone="ready"] > svg { color: var(--relay-accent-hover); }
+.relay-status-summary [data-tone="warning"] > svg { color: var(--relay-warning); }
+.relay-status-summary [data-tone="error"] > svg { color: var(--relay-error); }
+.relay-status-summary [data-tone="muted"] > strong { color: var(--relay-muted); }
+
+@container (max-width: 480px) {
+  .relay-status-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
+  }
+
+  .relay-status-summary > [data-summary="provider-credits"] {
+    grid-column: 1 / -1;
+    margin-left: 0;
+  }
 }

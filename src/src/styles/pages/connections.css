@@ -4,7 +4,6 @@
   grid-template-columns: minmax(140px, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  margin-bottom: 12px;
 }
 
 .account-command-context {
@@ -23,7 +22,6 @@
 .account-command-context .account-search {
   width: 100%;
   min-width: 0;
-  max-width: 260px;
 }
 
 .account-command-context .account-search input {
@@ -44,120 +42,34 @@
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.account-command-bar .relay-icon-button {
+.account-command-bar .relay-icon-button,
+.account-command-bar .relay-action-menu > summary {
   width: 34px;
   height: 34px;
   min-height: 34px;
   flex: 0 0 34px;
 }
 
-.pool-controls,
-.connections-account-controls {
-  margin: 12px 0 16px;
-  padding: 10px 12px 0;
-  border: 1px solid var(--relay-border);
-  border-radius: 8px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
+.account-command-bar .relay-icon-button:not([aria-pressed="true"]),
+.account-command-bar .relay-action-menu > summary {
+  border-color: transparent;
+  background: transparent;
+}
+
+.account-command-bar .relay-icon-button:not([aria-pressed="true"]):hover:not(:disabled),
+.account-command-bar .relay-action-menu > summary:hover,
+.account-command-bar .relay-action-menu[open] > summary {
+  background: var(--relay-subtle);
 }
 
 .connections-account-controls {
+  container-type: inline-size;
   position: relative;
+  margin: 16px 0;
 }
 
 .connections-account-controls:has(.relay-action-menu[open]) {
   z-index: 40;
-}
-
-.connection-status-summary {
-  display: grid;
-  grid-template-columns: repeat(4, auto);
-  margin: 0 -12px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--relay-border);
-  border-radius: 0 0 7px 7px;
-  background: var(--relay-subtle);
-}
-
-.connection-status-summary[data-has-provider-credits="true"] {
-  grid-template-columns: repeat(5, auto);
-}
-
-.connection-status-summary > div {
-  min-width: 0;
-  min-height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 12px;
-  color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.connection-status-summary > div + div {
-  border-left: 1px solid var(--relay-border);
-}
-
-.connection-status-summary > div:first-child {
-  padding-left: 0;
-}
-
-.connection-status-summary > div:last-child {
-  padding-right: 0;
-}
-
-.connection-status-summary span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.connection-status-summary svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-}
-
-.connection-status-summary strong {
-  flex: 0 0 auto;
-  color: var(--relay-text);
-  font-size: 13px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.connection-status-summary [data-tone="ready"] > svg { color: var(--relay-accent-hover); }
-.connection-status-summary [data-tone="warning"] > svg { color: var(--relay-warning); }
-.connection-status-summary [data-tone="error"] > svg { color: var(--relay-error); }
-.connection-status-summary [data-tone="muted"] > strong { color: var(--relay-muted); }
-
-@media (max-width: 640px) {
-  .connection-status-summary,
-  .connection-status-summary[data-has-provider-credits="true"] {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: 10px;
-  }
-
-  .connection-status-summary > div {
-    justify-content: flex-start;
-  }
-
-  .connection-status-summary > div:nth-child(odd) {
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .connection-status-summary > div:nth-child(even) {
-    padding-right: 0;
-  }
-
-  .connection-status-summary > [data-summary="provider-credits"] {
-    grid-column: 1 / -1;
-    padding-top: 10px;
-    border-top: 1px solid var(--relay-border);
-  }
 }
 
 .account-transfer-progress {
@@ -292,7 +204,7 @@
   color: var(--relay-accent-hover);
 }
 
-@media (max-width: 1100px) {
+@container (max-width: 780px) {
   .account-command-bar:not([data-selection="true"]) {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
@@ -314,7 +226,12 @@
   }
 }
 
-@media (max-width: 640px) {
+@container (max-width: 480px) {
+  .account-command-bar:not([data-selection="true"]) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "context" "filters" "actions";
+  }
+
   .account-filter-menu {
     flex: 1 1 0;
   }
@@ -1209,11 +1126,9 @@
   top: 38px;
   right: 0;
   width: min(240px, calc(100vw - 16px));
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  max-height: min(360px, calc(100dvh - 52px));
+  padding: var(--relay-popover-padding);
+  overscroll-behavior: contain;
 }
 
 .account-row-menu.account-bulk-menu > div {
@@ -1248,10 +1163,7 @@
 }
 
 .oauth-waiting .oauth-waiting-status {
-  padding: 14px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-subtle);
+  padding: 4px 0 12px;
 }
 
 .oauth-expiry {
@@ -1260,9 +1172,8 @@
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  padding: 0 11px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
+  padding: 10px 0;
+  border-block: 1px solid var(--relay-border);
   color: var(--relay-secondary);
 }
 
@@ -1295,16 +1206,16 @@
 
 .relay-action-menu button {
   width: 100%;
-  min-height: 34px;
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 5px;
   background: transparent;
   color: var(--relay-secondary);
+  font-size: 12px;
+  line-height: 16px;
   text-align: left;
   cursor: pointer;
 }
@@ -1413,11 +1324,8 @@
   z-index: 1000;
   max-height: min(280px, calc(100vh - 52px));
   overflow-y: auto;
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  padding: var(--relay-popover-padding);
+  overscroll-behavior: contain;
   visibility: hidden;
   scrollbar-color: var(--relay-border-strong) transparent;
 }
@@ -1428,14 +1336,12 @@
 
 .relay-option-list button {
   width: 100%;
-  min-height: 34px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16px;
   align-items: center;
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 5px;
   background: transparent;
   color: var(--relay-secondary);
   font-size: 12px;
@@ -1486,11 +1392,10 @@
   position: fixed;
   z-index: 1100;
   width: 190px;
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  max-height: min(280px, calc(100dvh - 52px));
+  overflow-y: auto;
+  padding: var(--relay-popover-padding);
+  overscroll-behavior: contain;
   visibility: hidden;
 }
 
@@ -1500,14 +1405,12 @@
 
 .app-context-menu button {
   width: 100%;
-  min-height: 34px;
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 5px;
   background: transparent;
   color: var(--relay-secondary);
   font-size: 12px;
@@ -1548,7 +1451,7 @@
 }
 
 .account-export-form {
-  gap: 10px;
+  gap: 16px;
 }
 
 .account-export-heading {
@@ -1569,16 +1472,8 @@
 
 .account-export-formats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.account-export-formats[data-count="4"] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.account-export-formats[data-count="7"] button:last-child {
-  grid-column: 2;
+  gap: 6px;
 }
 
 .account-export-formats button {
@@ -1587,9 +1482,9 @@
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   overflow: hidden;
-  padding: 0 28px;
+  padding: 10px 32px 10px 12px;
   border: 1px solid var(--relay-border);
   border-radius: 6px;
   background: var(--relay-surface);
@@ -1597,7 +1492,7 @@
   font: inherit;
   font-size: 12px;
   font-weight: 600;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -1613,10 +1508,7 @@
 }
 
 .account-export-formats button span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: center;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .account-export-formats button svg {
@@ -1627,14 +1519,10 @@
 }
 
 .account-export-description {
-  min-height: 34px;
   margin: 0;
-  padding: 8px 10px;
-  border-left: 2px solid var(--relay-accent);
-  background: var(--relay-subtle);
   color: var(--relay-muted);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .account-export-description-toolbar,
@@ -1647,10 +1535,16 @@
 .account-export-description-toolbar {
   min-height: 32px;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .account-export-description-toolbar > label {
   font-weight: 650;
+}
+
+.account-export-description-controls {
+  margin-left: auto;
 }
 
 .account-export-description-controls > input[type="file"] {

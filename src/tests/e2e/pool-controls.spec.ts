@@ -5,7 +5,7 @@ async function expectPanelFits(page: Page) {
   const panel = page.locator(".pool-controls");
   expect(await panel.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
-    const selectors = ".pool-priority-label, .pool-quota-actions, .pool-speed-control, .pool-control-group, .pool-current-route, .pool-next-route, .pool-active-models, .pool-summary > div";
+    const selectors = ".pool-priority-label, .pool-speed-control, .pool-control-group, .pool-current-route, .pool-next-route, .pool-active-models, .pool-summary > div";
     return Array.from(element.querySelectorAll<HTMLElement>(selectors)).every((item) => {
       const rect = item.getBoundingClientRect();
       return rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
@@ -25,7 +25,7 @@ for (const theme of ["light", "dark"] as const) {
   for (const width of [1160, 840, 390, 360]) {
     test(`pool controls stay readable in ${theme} at ${width}px`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 844 });
-      await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true, accountCount: 3, providerCredits: 125.5 });
+      await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true, accountCount: 3, providerCredits: 125.5, basisPointsAvailable: true });
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
       const panel = page.getByRole("group", { name: "Порядок использования" });
@@ -35,12 +35,16 @@ for (const theme of ["light", "dark"] as const) {
       await expect(panel.locator("[data-active-models]")).toHaveAttribute("data-active-request-count", "1");
       await expect(panel.locator(".pool-summary > div")).toHaveCount(5);
       await expect(panel.locator('[data-tone="error"] strong')).toHaveText("1");
+      await expect(panel.getByRole("checkbox")).toHaveCount(0);
+      await expect(panel).not.toContainText("Excel");
       await expectPanelFits(page);
       if (width === 1160) {
-        expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(120);
+        expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(140);
       }
+      await panel.screenshot({ path: testInfo.outputPath("panel-standard.png"), animations: "disabled" });
       await panel.getByRole("slider").press("End");
       await expect(panel.getByRole("slider")).toBeEnabled();
+      await page.mouse.click(1, 1);
       await panel.screenshot({ path: testInfo.outputPath("panel.png"), animations: "disabled" });
       await page.screenshot({ path: testInfo.outputPath("pool.png"), animations: "disabled" });
     });

@@ -749,6 +749,18 @@
   font-size: 11px;
 }
 
+.source-price-group > summary > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--relay-muted);
+  transition: transform 120ms ease;
+}
+
+.source-price-group[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
 .source-price-group[open] > summary {
   border-bottom: 1px solid var(--relay-border);
 }
@@ -767,8 +779,8 @@
   padding: 8px 10px;
 }
 
-.source-price-table[data-cache-write="true"] > .source-price-grid-head,
-.source-price-table[data-cache-write="true"] > .source-price-row {
+.source-price-table:not(.source-price-table-compact)[data-cache-write="true"] > .source-price-grid-head,
+.source-price-table:not(.source-price-table-compact)[data-cache-write="true"] > .source-price-row {
   min-width: 820px;
   grid-template-columns: minmax(178px, 1.45fr) repeat(5, minmax(104px, 1fr)) 34px;
 }
@@ -785,6 +797,16 @@
 
 .source-price-table > .source-price-row + .source-price-row {
   border-top: 1px solid var(--relay-border);
+}
+
+.source-price-row {
+  min-height: 54px;
+  transition: background 120ms ease;
+}
+
+.source-price-row:hover,
+.source-price-row:focus-within {
+  background: var(--relay-subtle);
 }
 
 .source-price-row[data-custom-price="true"] {
@@ -916,6 +938,52 @@
 
 .setup-connect-options button {
   grid-template-columns: 42px minmax(0, 1fr);
+  min-height: 70px;
+  padding: 12px;
+}
+
+.setup-connect-options {
+  gap: 18px;
+}
+
+.setup-connect-group {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.setup-connect-group > strong {
+  color: var(--relay-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.setup-connect-cards {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.setup-connect-cards > button:only-child,
+.setup-connect-cards > button:first-child:nth-last-child(3) {
+  grid-column: 1 / -1;
+}
+
+.setup-pool-ready {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+  color: var(--relay-accent-hover);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.setup-pool-ready svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
 }
 
 .setup-connect-options button:hover:not(:disabled),
@@ -1092,6 +1160,26 @@
   color: var(--relay-error);
 }
 
+.setup-current-profile-status.complete {
+  width: 100%;
+  flex-direction: row;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 0;
+  text-align: left;
+}
+
+.setup-current-profile-status.complete .setup-current-profile-mark {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+}
+
+.setup-current-profile-status.complete .setup-current-profile-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
 .setup-current-profile-copy {
   min-width: 0;
 }
@@ -1237,6 +1325,10 @@ input[type="password"] {
     padding: 12px;
   }
 
+  .setup-connect-options {
+    gap: 12px;
+  }
+
   .setup-footer {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1273,5 +1365,19 @@ input[type="password"] {
   .intro-actions {
     flex-direction: column;
     width: min(280px, 100%);
+  }
+}
+
+@media (max-width: 480px) {
+  .setup-connect-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setup-connect-options button {
+    min-height: 54px;
+  }
+
+  .setup-connect-options button small {
+    display: none;
   }
 }

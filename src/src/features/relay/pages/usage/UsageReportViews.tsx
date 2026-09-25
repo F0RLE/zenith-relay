@@ -59,7 +59,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
   }, [layout]);
 
   const columns: Record<RequestColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
-    time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
+    time: { label: t("usage.time"), cell: (row) => <time dateTime={row.time}>{formatTime(row.time)}</time> },
     status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"} label={requestStatusLabel(row, t)} /> },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },
@@ -115,7 +115,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
       <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bindColumnDrag(id)}><span>{columns[id].label}</span></button>
       <span className="usage-column-resizer" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={t("usage.resizeColumn", { column: columns[id].label })} aria-valuemin={REQUEST_COLUMN_MIN_WIDTH[id]} aria-valuemax={REQUEST_COLUMN_MAX_WIDTH} aria-valuenow={Math.round(layout.widths[id] ?? REQUEST_COLUMN_MIN_WIDTH[id])} onPointerDown={(event) => startResize(event, id)} onPointerMove={(event) => resizeColumn(event, id)} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); setResize(null); }} onLostPointerCapture={() => setResize(null)} onDoubleClick={() => setLayout((current) => ({ ...current, widths: {} }))} onKeyDown={(event) => resizeColumnByKeyboard(event, id)} />
     </th>)}</tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((id) => <td key={id} data-column={id} data-relay-tooltip={id === "model" ? row.model ?? undefined : id === "connection" ? row.connection : undefined}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+    <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((id) => <td key={id} data-column={id} data-label={columns[id].label} data-relay-tooltip={id === "model" ? row.model ?? undefined : id === "connection" ? row.connection : undefined}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
@@ -167,7 +167,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   return <div className="relay-table-wrap"><table className={`relay-table usage-aggregate-table usage-sortable-table ${field === "connection" ? "usage-connections-table" : "usage-models-table"}`}>
     <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
     <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
-    <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>
+    <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id} data-label={columns[id].label}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
@@ -178,7 +178,7 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
   const moveColumnBy = (column: ErrorColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<ErrorColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
-    time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
+    time: { label: t("usage.time"), cell: (row) => <time dateTime={row.time}>{formatTime(row.time)}</time> },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     origin: { label: t("usage.errorOrigin"), cell: (row) => formatErrorOrigin(row.errorOrigin, t) },
@@ -189,7 +189,7 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
   return <div className="relay-table-wrap"><table className="relay-table usage-error-table usage-sortable-table">
     <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
     <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.id}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+    <tbody>{rows.map((row) => <tr key={row.id}>{order.map((id) => <td key={id} data-column={id} data-label={columns[id].label}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
@@ -210,6 +210,26 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   });
   const formatTokens = (value: number | null) => value == null ? "—" : formatFullNumber(value, i18n.language);
   const hasTokenValue = (value: number | null): value is number => value != null && value > 0;
+  const hasCacheRead = hasTokenValue(breakdown.cacheRead);
+  const hasCacheWrite = hasTokenValue(breakdown.cacheWrite);
+  const reportedCacheWindows = (row.cacheWriteTtl ?? "")
+    .split(",")
+    .map((window) => window.trim().toLowerCase())
+    .filter((window) => /^\d{1,5}(?:ms|s|m|h|d)$/.test(window))
+    .map((window) => window === "5m" ? t("usage.cacheWriteTtls.5m") : window === "1h" ? t("usage.cacheWriteTtls.1h") : window)
+    .join(", ");
+  const cacheWindowLabel = reportedCacheWindows
+    ? t("usage.cacheWriteWindowReported", { ttl: reportedCacheWindows })
+    : hasCacheWrite
+      ? [
+          t("usage.cacheRetentionWindowNotReported"),
+          row.documentedCacheRetentionMinimum === "30m"
+            ? t("usage.cacheRetentionWindowOpenAiMinimum")
+            : null,
+        ].filter(Boolean).join(" · ")
+    : row.documentedCacheRetentionMinimum === "30m"
+      ? t("usage.cacheRetentionWindowOpenAiMinimum")
+      : null;
   const toolWarning = Boolean(
     toolUse
       && toolUse.forwardedToolCount > 0
@@ -222,7 +242,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     ...(toolUse ? [{ id: "tools", label: t("usage.requestSections.tools") }] : []),
     ...(routing ? [{ id: "route", label: t("usage.requestSections.route") }] : []),
   ];
-  return <Dialog title={t("usage.requestDetails")} onClose={onClose} wide className="request-details-dialog" closeOnBackdrop>
+  return <Dialog title={t("usage.requestDetails")} onClose={onClose} wide className="request-details-dialog">
     <div className="request-details-header">
       <div className="request-details-identity">
         <StatusBadge status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"} label={requestStatusLabel(row, t)} />
@@ -239,8 +259,13 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     <Tabs value={section} items={tabs} onChange={(value) => setSection(value as typeof section)} label={t("usage.requestSectionsLabel")} />
     {section === "overview" ? <>
       <dl className="request-details-list">
+        {row.requestedModel && row.routedModel && row.requestedModel !== row.routedModel ? <>
+          <div><dt>{t("usage.requestedModel")}</dt><dd><code>{row.requestedModel}</code></dd></div>
+          <div><dt>{t("usage.routedModel")}</dt><dd><code>{row.routedModel}</code></dd></div>
+        </> : null}
         <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
         <div><dt>{t("usage.protocol")}</dt><dd><code>{formatWireApi(row.wireApi, t)}</code></dd></div>
+        {row.success && routing?.endpointKind && routing.endpointKind !== row.wireApi ? <div><dt>{t("usage.endpoint")}</dt><dd><code>{formatEndpointKind(routing.endpointKind, row.wireApi, t)}</code></dd></div> : null}
         <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
         {formatObservedServiceTier(row) ? <div><dt>{t("usage.upstreamTier")}</dt><dd><code>{formatObservedServiceTier(row)}</code></dd></div> : null}
         <div><dt>{t("usage.reasoning")}</dt><dd>{formatReasoningSummary(row, t)}</dd></div>
@@ -253,7 +278,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
           <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
           <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div>
           <div><dt>{t("usage.errorCategory")}</dt><dd data-relay-tooltip={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
-          <div><dt>{t("usage.endpoint")}</dt><dd><code>{routing?.endpointKind ?? formatWireApi(row.wireApi, t)}</code></dd></div>
+          <div><dt>{t("usage.endpoint")}</dt><dd><code>{formatEndpointKind(routing?.endpointKind, row.wireApi, t)}</code></dd></div>
         </dl>
         <h3>{t("usage.upstreamError")}</h3>
         {row.upstreamError ? <>
@@ -275,8 +300,9 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       {breakdown.inputTotal == null || hasTokenValue(breakdown.inputTotal) ? <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><dd>{formatTokens(breakdown.inputTotal)}</dd></div>
         {hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><dd>{formatTokens(breakdown.uncachedInput)}</dd></div> : null}
-        {hasTokenValue(breakdown.cacheRead) ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}</dd></div> : null}
-        {hasTokenValue(breakdown.cacheWrite) ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)} ({row.cacheWriteTtl ? t(`usage.cacheWriteTtls.${row.cacheWriteTtl}`) : t("usage.cacheWriteTtlUnconfirmed")})</dd></div> : null}
+        {hasCacheRead ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}</dd></div> : null}
+        {hasCacheWrite ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)}</dd></div> : null}
+        {cacheWindowLabel ? <div className="request-details-token-child"><dt data-relay-tooltip={t("usage.cacheRetentionWindowHint")}>{t("usage.cacheRetentionWindow")}</dt><dd>{cacheWindowLabel}</dd></div> : null}
       </div> : null}
       {breakdown.outputTotal == null || hasTokenValue(breakdown.outputTotal) ? <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.outputTokens")}</dt><dd>{formatTokens(breakdown.outputTotal)}</dd></div>
@@ -288,6 +314,12 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     {section === "tools" && toolUse ? <section className="request-details-section">
       <dl className="request-details-list">
         <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount} → {toolUse.forwardedToolCount}</dd></div>
+        {toolUse.policyMode ? <div><dt>{t("toolPolicy.title")}</dt><dd>{t(`toolPolicy.modes.${toolUse.policyMode}`)}</dd></div> : null}
+        {toolUse.policyOutcome ? <div><dt>{t("toolPolicy.result")}</dt><dd>{t(`toolPolicy.outcomes.${toolUse.policyOutcome}`)}</dd></div> : null}
+        {toolUse.deferredToolSearch ? <div><dt>{t("toolPolicy.deferred")}</dt><dd>{t("toolPolicy.deferredValue")}</dd></div> : null}
+        {toolUse.policyFallback ? <div><dt>{t("toolPolicy.fallback")}</dt><dd>{t("toolPolicy.fallbackValue")}</dd></div> : null}
+        {toolUse.filteredToolCount != null && toolUse.filteredToolCount > 0 ? <div><dt>{t("toolPolicy.filtered")}</dt><dd>{toolUse.filteredToolCount}</dd></div> : null}
+        {toolUse.clientSchemaBytes != null && toolUse.forwardedSchemaBytes != null ? <div><dt>{t("toolPolicy.schemaBytes")}</dt><dd>{formatFullNumber(toolUse.clientSchemaBytes, i18n.language)} → {formatFullNumber(toolUse.forwardedSchemaBytes, i18n.language)}</dd></div> : null}
         <div><dt>{t("usage.toolChoice")}</dt><dd>{formatToolChoice(toolUse.toolChoice, t)}</dd></div>
         <div><dt>{t("usage.toolCallsReturned")}</dt><dd>{toolUse.toolCallCount}</dd></div>
         <div><dt>{t("usage.terminalOutput")}</dt><dd>{formatTerminalOutput(toolUse.terminalOutput, t)}</dd></div>
@@ -370,6 +402,15 @@ function formatWireApi(value: string | null, t: TFunction): string {
   if (value === "chat_completions") return t("usage.protocols.chatCompletions");
   if (value === "gemini") return t("usage.protocols.gemini");
   return value ?? "—";
+}
+
+function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
+  if (value === "excel_basis_points") return t("usage.endpoints.excelBasisPoints");
+  if (value === "responses") return t("usage.protocols.responses");
+  if (value === "chat_completions") return t("usage.protocols.chatCompletions");
+  if (value === "messages") return t("usage.protocols.messages");
+  if (value === "gemini") return t("usage.protocols.gemini");
+  return value ?? formatWireApi(wireApi, t);
 }
 
 function formatErrorCategory(category: string | null, t: TFunction): string {

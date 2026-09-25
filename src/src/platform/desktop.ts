@@ -23,6 +23,13 @@ type PortableDownloadEvent =
 
 export type Platform = "windows" | "macos" | "linux";
 
+export function platformFromUserAgent(userAgent: string): Platform | "unknown" {
+  if (/Macintosh|Mac OS X/i.test(userAgent)) return "macos";
+  if (/Linux|X11/i.test(userAgent)) return "linux";
+  if (/Windows/i.test(userAgent)) return "windows";
+  return "unknown";
+}
+
 export function getPlatform() {
   return invoke<Platform>("get_platform");
 }

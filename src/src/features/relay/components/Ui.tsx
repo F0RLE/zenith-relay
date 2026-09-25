@@ -274,6 +274,25 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
   const menuRef = useRef<HTMLDetailsElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => { if (menuRef.current) menuRef.current.open = false; };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      close();
+      menuRef.current?.querySelector("summary")?.focus({ preventScroll: true });
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [open]);
   useLayoutEffect(() => {
     if (!open) return;
     const place = () => {
@@ -296,13 +315,13 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
       window.removeEventListener("scroll", place, true);
     };
   }, [open, children]);
-  return <details ref={menuRef} className={`relay-action-menu ${className}`.trim()} onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div ref={panelRef} role="menu">{children}</div></details>;
+  return <details ref={menuRef} className={`relay-action-menu ${className}`.trim()} onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div ref={panelRef} className="relay-popover-panel" role="menu">{children}</div></details>;
 }
 
 export function ActionMenuItem({ children, icon, danger = false, className = "", title, onClick, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
   const tooltip = useTooltip<HTMLButtonElement>(title ?? "");
   const hasTooltip = Boolean(title);
-  const classes = [danger ? "danger" : "", className].filter(Boolean).join(" ");
+  const classes = ["relay-popover-item", danger ? "danger" : "", className].filter(Boolean).join(" ");
   return <>
     <button
       ref={hasTooltip ? tooltip.anchorRef : undefined}
@@ -441,7 +460,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     {open && typeof document !== "undefined" ? createPortal(
       <div
         ref={listRef}
-        className="relay-option-list"
+        className="relay-option-list relay-popover-panel"
         role="listbox"
         aria-label={label}
         data-positioned={Boolean(position)}
@@ -450,6 +469,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         {options.map((option, index) => <button
           key={option.value}
           type="button"
+          className="relay-popover-item"
           role="option"
           data-value={option.value}
           aria-selected={option.value === value}
@@ -487,7 +507,7 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
 }
 
-export function Dialog({ title, children, onClose, footer, wide = false, className = "", closeOnBackdrop = false, layer = "default" }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; closeOnBackdrop?: boolean; layer?: "default" | "top" }) {
+export function Dialog({ title, children, onClose, footer, wide = false, className = "", layer = "default" }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; layer?: "default" | "top" }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
@@ -572,7 +592,7 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
       }
     };
   }, []);
-  return <div className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}`} role="presentation" onPointerDown={closeOnBackdrop ? (event) => { if (event.target === event.currentTarget) onClose(); } : undefined}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
+  return <div className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}`} role="presentation" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
 }
 
 export function ErrorDetailsDialog({ error, message, onClose }: { error: FeedbackError; message: string; onClose: () => void }) {

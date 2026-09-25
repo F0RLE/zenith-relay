@@ -2,7 +2,7 @@ import type { ModelSummary, RuntimeSnapshot } from "./api/types";
 
 export type ModelCatalogIdentity = Pick<
   ModelSummary,
-  "catalogProvider" | "catalogFamily"
+  "catalogProvider"
 >;
 
 export type ModelGroup<T> = {
@@ -28,9 +28,8 @@ export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefin
 }
 
 /**
- * Group models by company, never by the catalog's finer-grained families.
- * Item order is never changed here: the snapshot is the presentation-order
- * authority and old snapshots without metadata retain discovery order.
+ * Group models by provider. Within each provider, preserve the snapshot order;
+ * catalog families do not create a second presentation order.
  */
 export function groupModels<T>(
   items: readonly T[],
@@ -43,17 +42,17 @@ export function groupModels<T>(
       options.isNativeChatGpt?.(item) ? "openai" : metadata?.catalogProvider,
     ) ?? OTHER_PROVIDER;
     const key = provider;
-    const existing = groups.get(key);
-    if (existing) {
-      existing.items.push(item);
-      continue;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        id: `catalog-${encodeURIComponent(provider)}`,
+        provider,
+        label: provider === OTHER_PROVIDER ? "Other" : displayCatalogValue(provider),
+        items: [],
+      };
+      groups.set(key, group);
     }
-    groups.set(key, {
-      id: `catalog-${encodeURIComponent(provider)}`,
-      provider,
-      label: provider === OTHER_PROVIDER ? "Other" : displayCatalogValue(provider),
-      items: [item],
-    });
+    group.items.push(item);
   }
   return [...groups.values()];
 }
@@ -74,6 +73,7 @@ export function uniqueModelIds(models: readonly string[]) {
 export function orderModelIdsBySnapshot(
   models: readonly string[],
   summaries: readonly ModelSummary[],
+  options: { unknownOrder?: "first-seen" | "stable-id" } = {},
 ) {
   const unique = uniqueModelIds(models);
   const byId = new Map(unique.map((model) => [model.toLowerCase(), model]));
@@ -81,7 +81,17 @@ export function orderModelIdsBySnapshot(
     .map((model) => byId.get(model.id.toLowerCase()))
     .filter((model): model is string => Boolean(model));
   const known = new Set(ordered.map((model) => model.toLowerCase()));
-  return [...ordered, ...unique.filter((model) => !known.has(model.toLowerCase()))];
+  const unknown = unique.filter((model) => !known.has(model.toLowerCase()));
+  if (options.unknownOrder === "stable-id") {
+    unknown.sort(compareModelIds);
+  }
+  return [...ordered, ...unknown];
+}
+
+function compareModelIds(left: string, right: string) {
+  const leftKey = left.trim().toLowerCase();
+  const rightKey = right.trim().toLowerCase();
+  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : left < right ? -1 : left > right ? 1 : 0;
 }
 
 function normalizeCatalogValue(value: string | null | undefined) {
@@ -101,6 +111,5 @@ function displayCatalogPart(part: string) {
   if (part === "openai") return "OpenAI";
   if (part === "xai") return "xAI";
   if (part === "zai") return "Z.ai";
-  if (part === "gpt") return "GPT";
   return `${part[0]!.toUpperCase()}${part.slice(1)}`;
 }

@@ -14,19 +14,29 @@ async function expectSetupFrame(page: Page) {
   }
 }
 
-test("quick setup covers all three runtime choices", async ({ page }) => {
+test("quick setup chooses where the shared pool runs", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Zenith Relay" })).toBeVisible();
   await page.getByRole("button", { name: "Get started" }).click();
   await expect(page.getByRole("heading", { name: "Where should Zenith Relay run?" })).toBeVisible();
+  await expect(page.locator(".mode-options button")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: /Choose API/ })).toHaveCount(0);
   await page.getByRole("button", { name: /On your server/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Server address").fill("https://relay.example.invalid");
   await page.getByLabel("Management token").fill("synthetic-management-token-000000");
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
   await page.screenshot({ path: "output/playwright/onboarding-server-1160x760.png" });
+});
+
+test("skipping repeated setup preserves a previously selected direct API mode", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", mode: "zenith", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Skip setup" }).click();
+  await expect(page.getByRole("button", { name: "Mode: Choose API" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("zenith");
 });
 
 test("local quick setup verifies runtime and applies ChatGPT only after explicit choices", async ({ page }) => {
@@ -53,7 +63,7 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "complete_codex_oauth"))).toBe(true);
   await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
   await page.getByRole("button", { name: "ChatGPT" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
@@ -71,7 +81,7 @@ test("local quick setup connects OpenCode to the pool without launching a client
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
   await page.getByRole("button", { name: "OpenCode", exact: true }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
@@ -96,7 +106,7 @@ test("local quick setup imports through the unified dialog and selects pool memb
   expect(call?.args.input).toMatchObject({ addToPool: true });
 });
 
-test("local quick setup imports the current ChatGPT profile directly and advances to the client choice", async ({ page }) => {
+test("local quick setup imports the current ChatGPT profile and allows adding an API before continuing", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true, gatewayRunning: false, importConfirmDelayMs: 250 });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
@@ -107,8 +117,8 @@ test("local quick setup imports the current ChatGPT profile directly and advance
   await expect(status).toContainText("Importing current profile");
   await expect(page.getByRole("dialog", { name: "Import accounts" })).toHaveCount(0);
   await expect(status).toContainText("Profile imported");
-  await expect(status).toContainText(/Continuing setup in [1-3]/);
-  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Add API source" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
   expect(await status.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
@@ -127,7 +137,8 @@ test("local quick setup imports the current ChatGPT profile directly and advance
     sessionId: "current_codex_profile",
     addToPool: true,
   });
-  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible({ timeout: 4_000 });
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
 });
 
 test("current profile import keeps setup on the connection step when an item fails", async ({ page }) => {
@@ -140,7 +151,7 @@ test("current profile import keeps setup on the connection step when an item fai
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-import-error-1160x760.png" });
-  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
   expect(calls.map((call) => call.command)).toContain("cancel_local_account_import");
 });
@@ -166,7 +177,7 @@ test("current profile action stays hidden when no usable ChatGPT profile exists"
   await page.getByRole("button", { name: "Приступить" }).click();
   await page.getByRole("button", { name: "Продолжить" }).click();
   await expect(page.getByRole("button", { name: /Импортировать текущий профиль/ })).toHaveCount(0);
-  await expect(page.locator(".setup-connect-options button")).toHaveCount(2);
+  await expect(page.locator(".setup-connect-options button")).toHaveCount(3);
   await expect(page.locator(".setup-connected")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/onboarding-step-2-no-profile-ru-dark-1160x760.png" });
 });
@@ -185,7 +196,9 @@ test("all onboarding steps keep progress and actions in one bounded workspace", 
   await page.screenshot({ path: "output/playwright/onboarding-step-2-connection-ru-dark-1160x760.png" });
 
   await page.getByRole("button", { name: /Импортировать текущий профиль/ }).click();
-  await expect(page.locator(".client-options")).toBeVisible({ timeout: 4_000 });
+  await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
+  await page.getByRole("button", { name: "Продолжить" }).click();
+  await expect(page.locator(".client-options")).toBeVisible();
   await expectSetupFrame(page);
   await page.screenshot({ path: "output/playwright/onboarding-step-3-client-ru-dark-1160x760.png" });
   await page.getByRole("button", { name: "Продолжить" }).click();
@@ -193,57 +206,59 @@ test("all onboarding steps keep progress and actions in one bounded workspace", 
   await page.screenshot({ path: "output/playwright/onboarding-step-4-ready-ru-dark-1160x760.png" });
 });
 
-test("Choose API setup saves and launches an OpenRouter source directly", async ({ page }) => {
+test("local quick setup combines an account and an OpenRouter source in the pool", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", mode: "local", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
-  await page.getByRole("button", { name: /Choose API/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("radio", { name: /OpenRouter/ }).click();
-  await page.getByLabel("API key").fill("sk-or-synthetic");
+  await page.getByRole("button", { name: /Import current profile/ }).click();
+  await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
+  await page.getByRole("button", { name: "Add API source" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add API source" });
+  await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
+  await dialog.getByLabel("Upstream API key").fill("sk-or-synthetic");
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What should use your pool?" })).toBeVisible();
   await page.getByRole("button", { name: "ChatGPT", exact: true }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "chat_completions" });
-  expect(calls.find((call) => call.command === "launch_codex_source")?.args).toEqual({ sourceId: "source_created_2" });
-  expect(calls.map((call) => call.command)).not.toContain("set_local_pool_membership");
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.directSourceId"))).toBe("source_created_2");
+  expect(calls.find((call) => call.command === "confirm_local_account_import")?.args.input).toMatchObject({ addToPool: true });
+  expect(calls.find((call) => call.command === "set_local_pool_membership")?.args.input).toEqual({ accountIds: [], sourceIds: ["source_created_2"], inPool: true });
+  expect(calls.map((call) => call.command)).toContain("attach_codex_to_local_gateway");
+  expect(calls.map((call) => call.command)).not.toContain("launch_codex_source");
   await page.getByRole("button", { name: "Open application" }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("zenith");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
 });
 
-test("Choose API quick setup can configure and save a custom provider", async ({ page }) => {
-  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+test("repeated quick setup adds a custom API to the local pool from a previous direct mode", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", mode: "zenith", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
-  await page.getByRole("button", { name: /Choose API/ }).click();
+  await expect(page.getByRole("button", { name: /Computer/ })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Continue" }).click();
-
-  await expect(page.getByRole("heading", { name: "Choose an API" })).toHaveCount(1);
-  await expect(page.locator(".api-provider-intro")).toHaveCount(0);
-  await expect(page.getByRole("radiogroup", { name: "API provider" })).toBeVisible();
-
-  await page.getByRole("radio", { name: /Zenith API/ }).click();
-  await expect(page.getByRole("heading", { name: "Connect Zenith API" })).toBeVisible();
-  await expect(page.locator(".source-routing-disclosure")).toHaveCount(0);
-  await expect(page.getByLabel("API key")).toBeVisible();
-
-  await page.getByRole("radio", { name: /Custom API/ }).click();
-  await expect(page.getByText("Enter a name, endpoint, and API key.")).toBeVisible();
-  await page.getByLabel("API key", { exact: true }).fill("synthetic-custom-api-key");
-  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
-  await page.getByLabel("API address", { exact: true }).fill("https://api.example.invalid/v1");
-  await page.getByLabel("Name", { exact: true }).fill("My API");
-  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
+  await page.getByRole("button", { name: "Add API source" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add API source" });
+  await dialog.getByRole("radio", { name: /Custom API/ }).click();
+  await dialog.getByLabel("Upstream API key").fill("synthetic-custom-api-key");
+  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+  await dialog.getByLabel("API address").fill("https://api.example.invalid/v1");
+  await dialog.getByLabel("Name").fill("My API");
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "My API", baseUrl: "https://api.example.invalid/v1", apiKey: "synthetic-custom-api-key", protocolBindings: [] });
+  expect(calls.find((call) => call.command === "set_local_pool_membership")?.args.input).toMatchObject({ sourceIds: ["source_created_2"], inPool: true });
+  expect(calls.map((call) => call.command)).not.toContain("execute_remote_server_action");
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.locator(".client-options")).toBeVisible();
-  const input = await page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: unknown } }>;
-  }).__TAURI_TEST_INVOKES__.find((call) => call.command === "create_local_source")?.args.input);
-  expect(input).toMatchObject({ name: "My API", baseUrl: "https://api.example.invalid/v1", apiKey: "synthetic-custom-api-key", protocolBindings: [] });
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Open application" }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
 });
 
 test("remote quick setup requires explicit consent for plain HTTP", async ({ page }) => {
@@ -299,19 +314,20 @@ for (const theme of ["light", "dark"] as const) {
       await expectSetupFrame(page);
       expect(await page.locator(".setup-connect-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-local-ru-${theme}-${viewport.width}x${viewport.height}.png` });
-      await page.getByRole("button", { name: "Назад" }).click();
-      await page.getByRole("button", { name: /Выбор API/ }).click();
-      await page.getByRole("button", { name: "Продолжить" }).click();
+      await page.getByRole("button", { name: "Добавить API-источник" }).click();
+      const dialog = page.getByRole("dialog", { name: "Добавить API-источник" });
       await expectSetupFrame(page);
-      expect(await page.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
-      await page.screenshot({ path: `output/playwright/onboarding-api-ru-${theme}-${viewport.width}x${viewport.height}.png` });
-      await page.getByRole("radio", { name: "Свой API", exact: true }).click();
-      await page.getByLabel("API key", { exact: true }).fill("synthetic-preview-key");
-      await page.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
-      await page.getByLabel("Название", { exact: true }).fill("Рабочий API");
-      await expect(page.getByRole("button", { name: "Продолжить" })).toBeEnabled();
+      expect(await dialog.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
+      await page.screenshot({ path: `output/playwright/onboarding-pool-api-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await dialog.getByRole("radio", { name: "Свой API", exact: true }).click();
+      await dialog.getByLabel("Ключ внешнего API", { exact: true }).fill("synthetic-preview-key");
+      await dialog.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
+      await dialog.getByLabel("Название", { exact: true }).fill("Рабочий API");
+      await expect(dialog.getByRole("button", { name: "Сохранить" })).toBeEnabled();
       await expectSetupFrame(page);
-      await page.screenshot({ path: `output/playwright/onboarding-api-custom-ru-${theme}-${viewport.width}x${viewport.height}.png`, animations: "disabled" });
+      await page.screenshot({ path: `output/playwright/onboarding-pool-api-custom-ru-${theme}-${viewport.width}x${viewport.height}.png`, animations: "disabled" });
+      await dialog.getByRole("button", { name: "Сохранить" }).click();
+      await expect(dialog).toHaveCount(0);
       await page.getByRole("button", { name: "Продолжить" }).click();
       await expect(page.locator(".client-options")).toBeVisible();
       await expectSetupFrame(page);

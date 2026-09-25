@@ -257,8 +257,9 @@
 }
 
 .mode-menu button {
+  min-height: var(--relay-popover-item-height);
   gap: 7px;
-  padding-inline: 7px;
+  padding-inline: 9px;
 }
 
 .mode-menu {
@@ -267,18 +268,17 @@
   top: 56px;
   left: 10px;
   right: 10px;
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 8px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  padding: var(--relay-popover-padding);
+  max-height: min(360px, calc(100dvh - 52px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .mode-menu button span {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -727,21 +727,21 @@
 }
 
 .relay-button.primary {
-  border-color: var(--relay-accent-hover);
-  background: var(--relay-accent-hover);
-  color: #fff;
+  border-color: var(--relay-accent);
+  background: var(--relay-accent);
+  color: var(--relay-on-accent);
   box-shadow: 0 1px 2px rgb(5 78 58 / 22%);
 }
 
 .relay-button.primary:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--relay-accent-hover) 86%, #000);
-  background: color-mix(in srgb, var(--relay-accent-hover) 86%, #000);
+  border-color: var(--relay-accent-hover);
+  background: var(--relay-accent-hover);
 }
 
 :root[data-theme="dark"] .relay-button.primary {
   border-color: var(--relay-accent);
   background: var(--relay-accent);
-  color: var(--relay-bg);
+  color: var(--relay-on-accent);
 }
 
 :root[data-theme="dark"] .relay-button.primary:hover:not(:disabled) {
@@ -753,7 +753,7 @@
   :root[data-theme="system"] .relay-button.primary {
     border-color: var(--relay-accent);
     background: var(--relay-accent);
-    color: var(--relay-bg);
+    color: var(--relay-on-accent);
   }
 
   :root[data-theme="system"] .relay-button.primary:hover:not(:disabled) {
@@ -1362,13 +1362,13 @@ textarea:focus-visible {
     right: 0;
     left: 0;
     max-height: min(440px, calc(100dvh - 170px));
-    padding: 8px;
-    border: 1px solid var(--relay-border);
-    border-radius: 0 0 6px 6px;
+    padding: var(--relay-popover-padding);
+    border: 1px solid var(--relay-border-strong);
+    border-radius: 0 0 var(--relay-popover-radius) var(--relay-popover-radius);
     background: var(--relay-surface);
-    box-shadow: var(--relay-shadow);
-    overflow-y: auto;
+    box-shadow: var(--relay-popover-shadow);
     overscroll-behavior: contain;
+    overflow-y: auto;
   }
 
   .help-contents[data-open="true"] .help-contents-list {

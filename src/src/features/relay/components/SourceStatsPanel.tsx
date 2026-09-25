@@ -10,10 +10,10 @@ export function SourceStatsPanel({ source, state, overview = false }: { source: 
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const stats = state?.value;
   const amounts = sourceStatsAmounts(stats);
-  const status = stats ? sourceStatsStatus(stats) : state?.failed ? "unavailable" : "available";
+  const status = stats ? sourceStatsStatus(stats) : state?.failed ? "unavailable" : source.refreshState?.balance === "unsupported" ? "unsupported" : "available";
   const available = stats != null && status === "available";
-  const stale = available && state?.failed;
-  const error = state?.error ?? (state?.failed ? "unavailable" : status);
+  const stale = available && (stats?.stale || state?.failed);
+  const error = stats?.refreshError ?? state?.error ?? (stale || state?.failed ? "unavailable" : status);
   const formatAmounts = (field: "balanceMicros" | "spentMicros") => amounts
     .filter((amount) => amount[field] != null)
     .map((amount: SourceStatsAmount) => `${formatSourceAmount(amount[field]!, amount.currency, locale)}${amount.currency === "CREDITS" ? ` ${t("providerStats.units")}` : ""}`);
@@ -39,7 +39,7 @@ export function SourceStatsPanel({ source, state, overview = false }: { source: 
       </div>)}
     </dl>
     {stale ? <div className="source-stats-caption" data-warning="true" data-relay-tooltip={t(`providerStats.status.${error}`)} role="status">
-      <span><CircleAlert aria-hidden />{t("providerStats.stale")}</span>
+      {stale ? <span><CircleAlert aria-hidden />{t("providerStats.stale")}</span> : null}
     </div> : null}
   </div>;
 }

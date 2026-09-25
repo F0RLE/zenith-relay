@@ -16,12 +16,20 @@ export function sourceStatsStatus(stats: SourceStats): SourceStatsStatus {
 export function settledSourceStats(previous: SourceStats | null, result: SourceStats): SourceStatsState {
   const status = sourceStatsStatus(result);
   const failed = status !== "available" && status !== "unsupported";
+  const retained = failed && previous && sourceStatsStatus(previous) === "available";
   return {
-    value: failed && previous && sourceStatsStatus(previous) === "available" ? previous : result,
+    value: retained ? { ...previous, stale: true, refreshError: status } : result,
     loading: false,
-    failed,
-    ...(failed ? { error: status } : {}),
+    failed: failed || Boolean(result.refreshError),
+    ...(result.refreshError || failed ? { error: result.refreshError ?? status } : {}),
   };
+}
+
+/** A delayed host snapshot must not replace a newer explicit read. Snapshot
+ * projection also cannot complete an independent in-flight UI operation. */
+export function projectedSourceStats(previous: SourceStatsState | undefined, result: SourceStats): SourceStatsState {
+  if (previous?.value?.asOfMs != null && result.asOfMs != null && previous.value.asOfMs > result.asOfMs) return previous;
+  return { ...settledSourceStats(previous?.value ?? null, result), loading: previous?.loading ?? false };
 }
 
 export function sourceStatsAmounts(stats: SourceStats | null | undefined): SourceStatsAmount[] {

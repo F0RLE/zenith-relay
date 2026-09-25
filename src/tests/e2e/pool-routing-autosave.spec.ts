@@ -104,7 +104,7 @@ test("rotation rolls back a failed save and accepts the next edit", async ({ pag
   });
   await dialog.getByRole("radio", { name: "In order", exact: true }).click();
   await expect(dialog.getByRole("alert")).toBeVisible();
-  await expect(dialog.getByRole("radio", { name: "Smart", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
   await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await expect(dialog.getByRole("alert")).toHaveCount(0);
@@ -156,6 +156,6 @@ test("repeated routing conflicts stop after three attempts and restore stored va
   await dialog.getByRole("radio", { name: "In order", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("Current values are shown");
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
-  await expect(dialog.getByRole("radio", { name: "Smart", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
   expect(await page.evaluate(() => (window as unknown as { __routingAttempts: number }).__routingAttempts)).toBe(3);
 });
