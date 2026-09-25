@@ -54,7 +54,7 @@ use std::{path::PathBuf, sync::Arc};
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, ReauthReason},
     protocol::OperationalStatus,
-    GatewayRuntime,
+    CandidateHealth, GatewayRuntime,
 };
 
 struct ReviewPool {
@@ -119,6 +119,101 @@ async fn membership_scope_preserves_disable_drain_and_removal() {
         }
         assert_eq!(pool.models().await, ["gpt-review"]);
     }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn desktop_membership_batch_keeps_the_live_runtime_and_rejects_missing_members() {
+    let pool = ReviewPool::new().await;
+    let membership = |account_ids: Vec<String>, in_pool| super::pool::PoolMembershipInput {
+        account_ids,
+        source_ids: Vec::new(),
+        in_pool,
+    };
+    let missing = super::pool::apply_local_pool_membership(
+        membership(vec![pool.ids[0].clone(), "missing-member".into()], false),
+        &pool.state,
+    )
+    .await;
+    assert!(missing.is_err());
+    assert_eq!(pool.models().await, ["gpt-review"]);
+    assert!(
+        pool.state
+            .store()
+            .unwrap()
+            .account(&pool.ids[0])
+            .unwrap()
+            .account
+            .in_pool
+    );
+
+    let (removed, hot, _) =
+        super::pool::apply_local_pool_membership(membership(pool.ids.to_vec(), false), &pool.state)
+            .await
+            .unwrap();
+    assert!(hot);
+    assert!(removed
+        .accounts
+        .iter()
+        .all(|account| !account.account.in_pool));
+    assert!(pool.models().await.is_empty());
+    assert!(Arc::ptr_eq(
+        &pool.runtime,
+        &pool.state.gateway.runtime().await.unwrap()
+    ));
+
+    let (joined, hot, refresh_ids) = super::pool::apply_local_pool_membership(
+        membership(vec![pool.ids[0].clone()], true),
+        &pool.state,
+    )
+    .await
+    .unwrap();
+    assert!(hot);
+    assert_eq!(refresh_ids, vec![pool.ids[0].clone()]);
+    assert!(joined
+        .accounts
+        .iter()
+        .any(|account| account.account.id == pool.ids[0] && account.account.in_pool));
+    assert_eq!(pool.models().await, ["gpt-review"]);
+    assert!(Arc::ptr_eq(
+        &pool.runtime,
+        &pool.state.gateway.runtime().await.unwrap()
+    ));
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
+    let pool = ReviewPool::new().await;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let affected = super::gateway::accounts_without_explicit_proxy(&pool.state, false).unwrap();
+    assert_eq!(affected, pool.ids);
+
+    let second = credentials.require(&pool.ids[1]).unwrap();
+    let explicit = second
+        .clone()
+        .with_proxy_route(Some("http://127.0.0.1:8080".into()), false)
+        .unwrap();
+    credentials.save(&explicit).unwrap();
+    assert_eq!(
+        super::gateway::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        [pool.ids[0].clone()]
+    );
+    assert_eq!(
+        super::gateway::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
+        [pool.ids[0].clone()]
+    );
+
+    let bypassed = second.with_proxy_route(None, true).unwrap();
+    credentials.save(&bypassed).unwrap();
+    assert_eq!(
+        super::gateway::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        [pool.ids[0].clone()]
+    );
+    assert_eq!(
+        super::gateway::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
+        pool.ids
+    );
     pool.close().await;
 }
 
@@ -317,6 +412,76 @@ async fn recovered_account_remains_authorized_after_scope_refresh() {
         ["gpt-review"],
         "recovery must not require removing another member"
     );
+}
+
+#[tokio::test]
+async fn refreshed_models_keep_desktop_runtime_and_live_candidate_block() {
+    let pool = ReviewPool::new().await;
+    pool.state
+        .account_metadata_sink()
+        .persist_auth_state(
+            &pool.ids[1],
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidatedRefreshToken),
+        )
+        .await
+        .unwrap();
+    let previous = pool
+        .state
+        .store()
+        .unwrap()
+        .account(&pool.ids[0])
+        .unwrap()
+        .clone();
+    let mut updated = previous.clone();
+    updated.discovered_models = Some(vec!["gpt-new".into()]);
+    pool.state
+        .store()
+        .unwrap()
+        .upsert_account(updated.clone())
+        .unwrap();
+    assert!(pool
+        .runtime
+        .set_candidate_cooldown(&pool.ids[0], "*", current_time_ms() + 60_000));
+    assert!(pool
+        .runtime
+        .set_candidate_health(&pool.ids[0], CandidateHealth::Blocked));
+    sync_refreshed_account_or_rollback(&pool.state, previous, updated, true)
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &pool.runtime,
+        &pool.state.gateway.runtime().await.unwrap()
+    ));
+    assert!(pool.models().await.is_empty());
+    assert!(pool.runtime.clear_candidate_cooldown(&pool.ids[0], "*"));
+    assert!(
+        !pool
+            .runtime
+            .candidate_runtime_order()
+            .into_iter()
+            .find(|candidate| candidate.candidate_id == pool.ids[0])
+            .unwrap()
+            .available
+    );
+    assert!(pool
+        .runtime
+        .set_candidate_health(&pool.ids[0], CandidateHealth::Healthy));
+    assert_eq!(pool.models().await, ["gpt-new"]);
+    assert!(pool
+        .runtime
+        .set_candidate_health(&pool.ids[0], CandidateHealth::Blocked));
+    let unchanged = pool
+        .state
+        .store()
+        .unwrap()
+        .account(&pool.ids[0])
+        .unwrap()
+        .clone();
+    sync_refreshed_account_or_rollback(&pool.state, unchanged.clone(), unchanged, false)
+        .await
+        .unwrap();
+    assert!(pool.models().await.is_empty());
+    pool.close().await;
 }
 
 #[tokio::test]

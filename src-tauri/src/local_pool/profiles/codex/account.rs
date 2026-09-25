@@ -169,40 +169,40 @@ pub(super) fn restore_account_locked(
     let original_auth_bytes = read_optional_bytes(&auth_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
-    if !account_managed_config_matches(&document)
-        || !account_auth_matches_snapshot(
-            &original_auth_bytes,
-            &auth_path,
-            &backup.managed_access_hash,
-        )?
-    {
+    if backup.projection_secret_ref.is_none() && !account_managed_config_matches(&document) {
         return Err(profile_restore_blocked());
     }
-    let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
-        Some(secret_ref) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
+    let auth_matches_managed = account_auth_matches_snapshot(
+        &original_auth_bytes,
+        &auth_path,
+        &backup.managed_access_hash,
+    )?;
+    let previous_auth = match (
+        auth_matches_managed,
+        backup.projection_secret_ref.as_deref(),
+        backup.previous_auth_secret_ref.as_deref(),
+    ) {
+        (true, None, Some(secret_ref)) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 "ChatGPT account profile backup secret is missing",
             )
         })?),
-        None => None,
+        _ => None,
     };
     restore_account_config(&mut document, &backup);
-    let restored = match backup.projection_secret_ref.as_deref() {
-        Some(secret_ref) => projection::restore(
-            secret_ref,
-            snapshot_text(&original_config_bytes, &config_path)?,
-            snapshot_text(&original_auth_bytes, &auth_path)?,
-            secrets,
-        )?,
-        None => UserProfileSnapshot {
-            config: Some(document.to_string()),
-            auth: projection::merge_auth(
-                snapshot_text(&original_auth_bytes, &auth_path)?,
-                previous_auth.as_deref(),
-            )?,
-        },
-    };
+    let restored = projection::restore_from_backup(
+        backup.projection_secret_ref.as_deref(),
+        &document,
+        (&config_path, &original_config_bytes),
+        (&auth_path, &original_auth_bytes),
+        auth_matches_managed,
+        previous_auth.as_deref(),
+        secrets,
+    )?;
+    if read_optional_bytes(&backup_path)? != backup_bytes {
+        return Err(profile_changed_at(&backup_path));
+    }
     let restored_config_bytes = restored
         .config
         .as_ref()
@@ -213,15 +213,20 @@ pub(super) fn restore_account_locked(
         restored.config.as_deref(),
     )?;
 
-    let restored_auth_bytes = restored
-        .auth
-        .as_ref()
-        .map(|content| content.as_bytes().to_vec());
-    let auth_result = match restored.auth.as_deref() {
-        Some(previous_auth) => {
+    let restored_auth_bytes = if auth_matches_managed {
+        restored
+            .auth
+            .as_ref()
+            .map(|content| content.as_bytes().to_vec())
+    } else {
+        original_auth_bytes.clone()
+    };
+    let auth_result = match (auth_matches_managed, restored.auth.as_deref()) {
+        (true, Some(previous_auth)) => {
             replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
         }
-        None => remove_if_unchanged(&auth_path, &original_auth_bytes),
+        (true, None) => remove_if_unchanged(&auth_path, &original_auth_bytes),
+        (false, _) => Ok(()),
     };
     if let Err(error) = auth_result {
         return Err(with_rollback(
@@ -267,7 +272,7 @@ pub(super) fn restore_account_locked(
             ),
         ));
     }
-    Ok(Some(binding_from_backup(&backup, true)))
+    Ok(Some(binding_from_backup(&backup, auth_matches_managed)))
 }
 
 pub(super) fn sync_account_profile_with(

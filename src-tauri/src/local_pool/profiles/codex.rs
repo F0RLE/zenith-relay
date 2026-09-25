@@ -34,10 +34,10 @@ mod switch_transaction;
 mod transaction;
 
 use catalog_state::{
-    apply_model_catalog_change, backup_path, invalidate_models_cache, local_backup,
-    managed_model_catalog_path, reconcile_pending_catalog_state,
-    remove_managed_model_catalog_if_unchanged, rollback_model_catalog_change,
-    valid_managed_model_catalog,
+    apply_model_catalog_change, backup_path, externally_changed_managed_model_catalog,
+    invalidate_models_cache, local_backup, managed_model_catalog_path,
+    reconcile_pending_catalog_state, remove_managed_model_catalog_if_unchanged,
+    rollback_model_catalog_change, valid_managed_model_catalog,
 };
 use config::*;
 use transaction::{
@@ -71,6 +71,8 @@ const MODELS_CACHE_FILE: &str = "models_cache.json";
 const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const DESKTOP_DEFAULT_SERVICE_TIER_KEY: &str = "default-service-tier";
 const TOP_LEVEL_SERVICE_TIER_KEY: &str = "service_tier";
+// This is a legacy Codex storage key. Keep its exact name for compatibility;
+// it does not indicate that Relay embeds or runs Electron.
 const PERSISTED_ATOM_STATE_KEY: &str = "electron-persisted-atom-state";
 const SERVICE_TIER_CHANGED_KEY: &str = "has-user-changed-service-tier";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
@@ -189,6 +191,7 @@ struct LocalAttachOptions<'a> {
     bound_oauth: Option<BoundOAuthProfile<'a>>,
     catalog_json: Option<&'a str>,
     supports_websockets: bool,
+    rebase_newer_login: bool,
 }
 
 impl<'a> Default for LocalAttachOptions<'a> {
@@ -198,11 +201,29 @@ impl<'a> Default for LocalAttachOptions<'a> {
             bound_oauth: None,
             catalog_json: None,
             supports_websockets: true,
+            rebase_newer_login: false,
         }
     }
 }
 
 pub(crate) fn attach_ready_api(codex_home: &Path, backup_root: &Path, api_key: &str) -> Result<()> {
+    attach_ready_api_with_intent(codex_home, backup_root, api_key, false)
+}
+
+pub(crate) fn attach_ready_api_explicit(
+    codex_home: &Path,
+    backup_root: &Path,
+    api_key: &str,
+) -> Result<()> {
+    attach_ready_api_with_intent(codex_home, backup_root, api_key, true)
+}
+
+fn attach_ready_api_with_intent(
+    codex_home: &Path,
+    backup_root: &Path,
+    api_key: &str,
+    rebase_newer_login: bool,
+) -> Result<()> {
     switch_to_local_with(
         codex_home,
         backup_root,
@@ -211,6 +232,7 @@ pub(crate) fn attach_ready_api(codex_home: &Path, backup_root: &Path, api_key: &
         api_key,
         LocalAttachOptions {
             provider_id: READY_API_PROVIDER_ID,
+            rebase_newer_login,
             ..LocalAttachOptions::default()
         },
         &OsSecretBackend,
@@ -281,6 +303,7 @@ pub fn attach_with_catalog(
         local_key,
         LocalAttachOptions {
             catalog_json: Some(catalog_json),
+            rebase_newer_login: true,
             ..LocalAttachOptions::default()
         },
         &OsSecretBackend,
@@ -305,6 +328,7 @@ pub fn attach_with_catalog_and_websockets(
         LocalAttachOptions {
             catalog_json: Some(catalog_json),
             supports_websockets,
+            rebase_newer_login: true,
             ..LocalAttachOptions::default()
         },
         &OsSecretBackend,
@@ -360,6 +384,7 @@ pub(crate) fn attach_with_oauth_and_options(
             bound_oauth: Some(options.bound_oauth),
             catalog_json: Some(options.catalog_json),
             supports_websockets: options.supports_websockets,
+            rebase_newer_login: true,
             ..LocalAttachOptions::default()
         },
         &OsSecretBackend,
@@ -607,6 +632,27 @@ pub fn attach_account(
         account_id,
         tokens,
         provider_account_id,
+        &OsSecretBackend,
+    )
+}
+
+/// A user-requested activation may first detach an old binding without
+/// replacing a login made independently in Codex, then back up that login as
+/// the baseline for the new binding. Do not use this for automatic rollback.
+pub fn attach_account_explicit(
+    codex_home: &Path,
+    backup_root: &Path,
+    account_id: &str,
+    tokens: &TokenSet,
+    provider_account_id: &str,
+) -> Result<ProfileBinding> {
+    switch_to_account_with_intent(
+        codex_home,
+        backup_root,
+        account_id,
+        tokens,
+        provider_account_id,
+        true,
         &OsSecretBackend,
     )
 }
@@ -1205,7 +1251,12 @@ fn switch_to_local_with(
             }
             None => None,
         };
-        local::prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
+        local::prepare_existing_local_binding_locked(
+            codex_home,
+            backup_root,
+            options.rebase_newer_login,
+            secrets,
+        )?;
         local::attach_local_locked(
             codex_home,
             backup_root,
@@ -1252,10 +1303,62 @@ fn switch_to_account_with(
     provider_account_id: &str,
     secrets: &impl SecretBackend,
 ) -> Result<ProfileBinding> {
+    switch_to_account_with_intent(
+        codex_home,
+        backup_root,
+        account_id,
+        tokens,
+        provider_account_id,
+        false,
+        secrets,
+    )
+}
+
+fn switch_to_account_with_intent(
+    codex_home: &Path,
+    backup_root: &Path,
+    account_id: &str,
+    tokens: &TokenSet,
+    provider_account_id: &str,
+    rebase_newer_login: bool,
+    secrets: &impl SecretBackend,
+) -> Result<ProfileBinding> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
     switch_transaction::run(codex_home, secrets, |secrets| {
+        if rebase_newer_login {
+            if let Some(path) = account_backup_for_profile(codex_home, backup_root)? {
+                let bytes = read_optional_bytes(&path)?;
+                let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
+                    LocalPoolError::new(
+                        ErrorCode::RecoveryRequired,
+                        "ChatGPT account profile backup disappeared during activation",
+                    )
+                })?;
+                let profile_dir = canonical_profile_dir(codex_home)?;
+                let auth_path = profile_dir.join(AUTH_FILE);
+                let auth = read_optional_bytes(&auth_path)?;
+                let config_path = profile_dir.join(CONFIG_FILE);
+                let config = read_optional_bytes(&config_path)?;
+                let document =
+                    parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+                if !account_managed_config_matches(&document)
+                    || !account_auth_matches_snapshot(
+                        &auth,
+                        &auth_path,
+                        &backup.managed_access_hash,
+                    )?
+                {
+                    account::restore_account_locked(codex_home, backup_root, secrets)?;
+                }
+            }
+        }
         if backup_path(backup_root).exists() {
+            if let Some(backup) = local_backup(codex_home, backup_root)? {
+                if !rebase_newer_login {
+                    local::ensure_no_newer_login(codex_home, &backup)?;
+                }
+            }
             local::restore_local_locked(codex_home, backup_root, secrets)?;
         }
         account::attach_account_locked(
@@ -1311,7 +1414,7 @@ fn attach_with(
 ) -> Result<()> {
     let _profile_guard = lock_codex_profile();
     ensure_test_native_catalog(codex_home);
-    local::prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
+    local::prepare_existing_local_binding_locked(codex_home, backup_root, false, secrets)?;
     local::attach_local_locked(
         codex_home,
         backup_root,
@@ -1334,7 +1437,7 @@ fn attach_with_catalog_for_test(
 ) -> Result<()> {
     let _profile_guard = lock_codex_profile();
     ensure_test_native_catalog(codex_home);
-    local::prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
+    local::prepare_existing_local_binding_locked(codex_home, backup_root, false, secrets)?;
     local::attach_local_locked(
         codex_home,
         backup_root,
@@ -1449,15 +1552,19 @@ fn account_auth_content(tokens: &TokenSet, provider_account_id: &str) -> Result<
     Ok(format!("{content}\n"))
 }
 
+fn auth_snapshot_json(snapshot: &Option<Vec<u8>>) -> Option<Value> {
+    snapshot
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|content| serde_json::from_str(content).ok())
+}
+
 fn account_auth_matches_snapshot(
     snapshot: &Option<Vec<u8>>,
-    path: &Path,
+    _path: &Path,
     expected_hash: &str,
 ) -> Result<bool> {
-    let Some(content) = snapshot_text(snapshot, path)? else {
-        return Ok(false);
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Some(value) = auth_snapshot_json(snapshot) else {
         return Ok(false);
     };
     Ok(

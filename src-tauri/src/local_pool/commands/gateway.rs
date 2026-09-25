@@ -1,8 +1,13 @@
 use super::{
-    restart_after_secret_change, restart_or_rollback, runtime_from_store, sync_gateway_or_rollback,
+    fence_runtime_candidates, restart_after_secret_change, restart_or_rollback, runtime_from_store,
+    sync_gateway_or_rollback,
 };
 use crate::local_pool::{
-    accounts::proxy::COMMON_PROXY_SECRET_REF,
+    accounts::{
+        credentials::{credential_invalid_state_error, CredentialStore},
+        proxy::COMMON_PROXY_SECRET_REF,
+        NativeSecretBackend,
+    },
     error::{CommandError, ErrorCode, ErrorDiagnostics, LocalPoolError},
     models::LocalPoolSnapshot,
     state::DesktopState,
@@ -15,6 +20,35 @@ use tauri::{AppHandle, State};
 use zenith_relay_core::is_valid_model_token;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
+
+#[tauri::command]
+pub async fn set_local_tool_policy(
+    input: zenith_relay_core::ToolPolicyUpdate,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let invalid = |message| LocalPoolError::new(ErrorCode::InvalidState, message);
+    let policy = input.policy.normalized().map_err(invalid)?;
+    let expected = input.expected_policy.normalized().map_err(invalid)?;
+    let mut gateway = state.store()?.gateway().clone();
+    if gateway.tool_policy != expected {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "tool policy changed; reload before saving",
+        )
+        .into());
+    }
+    let previous = gateway.clone();
+    gateway.tool_policy = policy.clone();
+    state.store()?.replace_gateway(gateway)?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        if let Err(error) = runtime.set_tool_policy(policy) {
+            state.store()?.replace_gateway(previous)?;
+            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
+        }
+    }
+    state.snapshot().await.map_err(Into::into)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +194,25 @@ async fn rotate_system_gateway_api_key(
     let key = super::pool::ensure_system_gateway_key(state)?;
     let old_secret = super::pool::ensure_local_gateway_key_secret(&key)?;
     let new_secret = super::pool::new_local_gateway_api_key();
+    // The principal changes before the replacement listener starts. Do not
+    // let requests authenticated with the old secret dispatch in that gap.
+    let (account_ids, source_ids) = {
+        let store = state.store()?;
+        (
+            store
+                .accounts()
+                .iter()
+                .map(|account| account.account.id.clone())
+                .collect::<Vec<_>>(),
+            store
+                .sources()
+                .iter()
+                .map(|source| source.id.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &account_ids, &source_ids);
     secret_store::save(&key.secret_ref, &new_secret)?;
     restart_after_secret_change(state, &key.secret_ref, &old_secret).await?;
     Ok(new_secret)
@@ -183,6 +236,10 @@ pub async fn set_local_common_proxy(
     {
         return state.snapshot().await.map_err(Into::into);
     }
+    let affected_accounts = accounts_without_explicit_proxy(&state, false)?;
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
+    state.store()?.invalidate_refresh_configuration()?;
     save_optional_proxy(next_secret.as_deref())?;
     let mut next_gateway = old_gateway.clone();
     next_gateway.common_proxy_configured = next_secret.is_some();
@@ -208,6 +265,9 @@ pub async fn set_local_account_proxy_required(
     if old_gateway.account_proxy_required == input.required {
         return state.snapshot().await.map_err(Into::into);
     }
+    let affected_accounts = accounts_without_explicit_proxy(&state, true)?;
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
     let mut next_gateway = old_gateway.clone();
     next_gateway.account_proxy_required = input.required;
     state.store()?.replace_gateway(next_gateway)?;
@@ -233,7 +293,7 @@ pub async fn set_local_codex_background_tasks(
     state.snapshot().await.map_err(Into::into)
 }
 
-/// Updates the ChatGPT-only retry policy without rebuilding the gateway.
+/// Updates route recovery for text API requests without rebuilding the gateway.
 /// Existing candidate rotation, cooldowns, health state, and affinity remain
 /// owned by the running runtime and are observed by new and waiting requests.
 #[tauri::command]
@@ -249,7 +309,7 @@ pub async fn set_local_chatgpt_retry_until_available(
     gateway.chatgpt_retry_until_available = input.enabled;
     state.store()?.replace_gateway(gateway)?;
     if let Some(runtime) = state.gateway.runtime().await {
-        runtime.set_chatgpt_retry_until_available(input.enabled);
+        runtime.set_route_recovery_enabled(input.enabled);
     }
     state.snapshot().await.map_err(Into::into)
 }
@@ -396,6 +456,36 @@ fn save_optional_proxy(value: Option<&str>) -> crate::local_pool::error::Result<
 
 fn restore_common_proxy(value: Option<&str>) -> crate::local_pool::error::Result<()> {
     save_optional_proxy(value)
+}
+
+/// A common proxy affects only inherited routes. Requiring an account proxy
+/// additionally affects direct/bypassed routes, but never explicit proxies.
+pub(super) fn accounts_without_explicit_proxy(
+    state: &DesktopState,
+    include_bypassed: bool,
+) -> crate::local_pool::error::Result<Vec<String>> {
+    let account_ids = state
+        .store()?
+        .accounts()
+        .iter()
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let mut affected = Vec::new();
+    for id in account_ids {
+        let Some(credential) = credentials
+            .load(&id)
+            .map_err(credential_invalid_state_error)?
+        else {
+            continue;
+        };
+        if credential.proxy_url().is_none()
+            && (include_bypassed || !credential.bypass_common_proxy())
+        {
+            affected.push(id);
+        }
+    }
+    Ok(affected)
 }
 
 #[tauri::command]

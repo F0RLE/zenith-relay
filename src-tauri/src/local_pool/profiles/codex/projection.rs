@@ -102,6 +102,39 @@ pub(super) fn restore(
     })
 }
 
+/// Both account and local profile restore use the same encrypted projection
+/// when present; older backups merge only the managed auth and config leaves.
+pub(super) fn restore_from_backup(
+    secret_ref: Option<&str>,
+    document: &DocumentMut,
+    config: (&Path, &Option<Vec<u8>>),
+    auth: (&Path, &Option<Vec<u8>>),
+    auth_matches_managed: bool,
+    previous_auth: Option<&str>,
+    secrets: &impl SecretBackend,
+) -> Result<UserProfileSnapshot> {
+    match secret_ref {
+        Some(secret_ref) => restore(
+            secret_ref,
+            snapshot_text(config.1, config.0)?,
+            if auth_matches_managed {
+                snapshot_text(auth.1, auth.0)?
+            } else {
+                None
+            },
+            secrets,
+        ),
+        None => Ok(UserProfileSnapshot {
+            config: Some(document.to_string()),
+            auth: if auth_matches_managed {
+                merge_auth(snapshot_text(auth.1, auth.0)?, previous_auth)?
+            } else {
+                None
+            },
+        }),
+    }
+}
+
 fn restore_config_text(
     before: Option<&str>,
     after: &str,
@@ -117,8 +150,7 @@ fn restore_config_text(
         before_doc.as_table(),
         after_doc.as_table(),
         current_doc.as_table_mut(),
-        true,
-    )?;
+    );
     let restored = current_doc.to_string();
     if restored.trim().is_empty() && before.is_none() {
         Ok(None)
@@ -160,8 +192,7 @@ fn restore_table(
     before: &dyn toml_edit::TableLike,
     after: &dyn toml_edit::TableLike,
     current: &mut dyn toml_edit::TableLike,
-    root: bool,
-) -> Result<()> {
+) {
     let keys: std::collections::BTreeSet<_> = before
         .iter()
         .chain(after.iter())
@@ -182,20 +213,16 @@ fn restore_table(
                 previous.and_then(Item::as_table_like).unwrap_or(&empty),
                 managed,
                 existing,
-                false,
-            )?;
+            );
             if previous.is_none() && existing.is_empty() {
                 current.remove(&key);
             }
             continue;
         }
         if !same(current.get(&key), managed) {
-            // Reasoning is a user preference. A later choice (including
-            // deleting it) wins over the temporary attach-time adjustment.
-            if root && key == "model_reasoning_effort" {
-                continue;
-            }
-            return Err(profile_restore_blocked());
+            // An external edit owns this leaf. Undo the other Relay-owned
+            // leaves without replacing the user's newer value.
+            continue;
         }
         match previous {
             Some(item) => {
@@ -206,7 +233,6 @@ fn restore_table(
             }
         }
     }
-    Ok(())
 }
 
 /// Credentials are mutually exclusive; extension fields are not credentials.
@@ -307,13 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn changed_managed_endpoint_is_a_conflict() {
-        assert!(restore_config_text(
+    fn changed_managed_endpoint_is_preserved() {
+        let restored = restore_config_text(
             None,
             "[model_providers.relay]\nbase_url='local'",
-            Some("[model_providers.relay]\nbase_url='external'")
+            Some("[model_providers.relay]\nbase_url='external'"),
         )
-        .is_err());
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            parse_config(&restored).unwrap()["model_providers"]["relay"]["base_url"].as_str(),
+            Some("external")
+        );
     }
 
     #[test]

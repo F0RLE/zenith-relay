@@ -3,6 +3,7 @@ use std::{
     net::IpAddr,
     time::{Duration, Instant},
 };
+use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
 use zenith_relay_core::{error_codes, ProxyConfig};
 
 const CHECK_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
@@ -55,7 +56,16 @@ async fn request(
         .timeout(timeout)
         .build()
         .map_err(|_| error_codes::PROXY_CHECK_CONNECTION_FAILED)?;
-    let mut response = client.get(url).send().await.map_err(classify_error)?;
+    let (mut response, permit) = management_http_gate()
+        .send(&client, client.get(url), HttpClass::Ordinary)
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                error_codes::PROXY_CHECK_TIMEOUT
+            } else {
+                error_codes::PROXY_CHECK_CONNECTION_FAILED
+            }
+        })?;
     if response.status() == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         return Err(error_codes::PROXY_CHECK_AUTH_FAILED);
     }
@@ -75,6 +85,7 @@ async fn request(
         }
         bytes.extend_from_slice(&chunk);
     }
+    drop(permit);
     parse_trace(&bytes)
 }
 

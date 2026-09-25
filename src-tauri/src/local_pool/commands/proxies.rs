@@ -1,4 +1,4 @@
-use super::{current_time_ms, restart_or_rollback};
+use super::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
         credentials::{
@@ -299,6 +299,18 @@ async fn apply_choices(
             pool: pool.summary(),
         });
     }
+    let affected_accounts = updates
+        .iter()
+        .map(|(_, next)| next.local_account_id().to_string())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
+    state.store()?.invalidate_account_refresh(
+        &affected_accounts
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )?;
     save_credential_updates(&credentials, &updates)?;
     if let Err(error) = pool.save() {
         restore_credentials(&credentials, &updates)?;

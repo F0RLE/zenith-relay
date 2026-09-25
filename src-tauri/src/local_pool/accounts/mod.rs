@@ -11,6 +11,7 @@ pub(crate) mod proxy;
 pub(crate) mod quota_refresh;
 pub(crate) mod quota_service;
 pub(crate) mod records;
+pub(crate) mod refresh_observations;
 pub(crate) mod reset_credits;
 pub(crate) mod wake;
 

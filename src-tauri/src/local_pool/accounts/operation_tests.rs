@@ -32,7 +32,7 @@ use zenith_relay_core::providers::chatgpt::{
     CodexSubscriptionMetadata, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
     QuotaRefreshOutcome,
 };
-use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaWindow, QuotaWindowKind, Subscription};
+use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaWindowKind, Subscription};
 use zenith_relay_core::{
     MessagesReasoningMode, ProviderSource, SourceAdapter, SourceProtocolBinding, WireApi,
 };
@@ -417,6 +417,7 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Err(ModelDiscoveryFailure {
             code: ModelDiscoveryFailureCode::Transport,
             retryable: true,
+            retry_after_ms: None,
             http_status: None,
         }),
     ));
@@ -434,6 +435,7 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Err(ModelDiscoveryFailure {
             code: ModelDiscoveryFailureCode::Transport,
             retryable: true,
+            retry_after_ms: None,
             http_status: None,
         }),
     ));
@@ -508,6 +510,7 @@ fn model_unauthorized_removes_an_account_with_cached_models_from_routing() {
     let failure = ModelDiscoveryFailure {
         code: ModelDiscoveryFailureCode::Unauthorized,
         retryable: false,
+        retry_after_ms: None,
         http_status: Some(401),
     };
     assert!(model_discovery_was_unauthorized(&Some(
@@ -535,6 +538,7 @@ fn model_unauthorized_does_not_downgrade_reauthentication() {
     let failure = ModelDiscoveryFailure {
         code: ModelDiscoveryFailureCode::Unauthorized,
         retryable: false,
+        retry_after_ms: None,
         http_status: Some(401),
     };
 
@@ -779,7 +783,12 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
         .iter()
         .all(|account| account.account.subscription.active_until_ms.is_some()));
     assert!(accounts.iter().all(|account| account.account.in_pool));
-    assert!(state.next_quota_refresh_due().unwrap().is_some());
+    assert!(state
+        .store()
+        .unwrap()
+        .accounts()
+        .iter()
+        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
 
     account_check_server.abort();
     drop(state);
@@ -908,7 +917,12 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
     let account = response.results[0].account.as_ref().unwrap();
     assert!(account.models.is_empty());
-    assert!(state.next_quota_refresh_due().unwrap().is_some());
+    assert!(state
+        .store()
+        .unwrap()
+        .accounts()
+        .iter()
+        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
     assert!(sessions.resume(&session_id, &[]).is_err());
     account_check_server.abort();
     CredentialStore::from_backend(NativeSecretBackend)
@@ -1408,7 +1422,12 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
         .unwrap()
         .upsert_account(account_record(&account_id))
         .unwrap();
-    state.mark_quota_refresh(&account_id, 123_456).unwrap();
+    let before_refresh = state
+        .store()
+        .unwrap()
+        .account_refresh_scope(&account_id)
+        .unwrap()
+        .1;
     codex::attach_account(
         &profile,
         &state.profile_backup_root(),
@@ -1418,20 +1437,23 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     )
     .unwrap();
 
-    let previous_quota = state.quota_refresh_snapshot().unwrap();
     let previous_wake = state.wake_snapshot().unwrap();
     let old_automations = state.store().unwrap().automations().clone();
     let bindings = codex::account_bindings(&state.profile_backup_root()).unwrap();
     let restored = restore_bound_account_profiles(&state, &bindings, Some(&stored)).unwrap();
     credentials.delete(&account_id).unwrap();
-    state.remove_quota_refresh(&account_id).unwrap();
+    state
+        .store()
+        .unwrap()
+        .invalidate_account_refresh(&[&account_id])
+        .unwrap();
+    state.remove_account_refresh(&account_id);
 
     rollback_deleted_account_side_effects(
         &state,
         &credentials,
         &account_id,
         Some(&stored),
-        previous_quota,
         previous_wake,
         old_automations,
         &restored,
@@ -1441,7 +1463,14 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     .unwrap();
 
     assert!(credentials.require(&account_id).is_ok());
-    assert_eq!(state.next_quota_refresh_due().unwrap(), Some(123_456));
+    assert!(state
+        .store()
+        .unwrap()
+        .ensure_account_refresh_current(&before_refresh)
+        .is_err());
+    assert!(state
+        .sync_account_quota_refresh(&account_id, current_time_ms())
+        .unwrap());
     assert_eq!(
         codex::account_bindings(&state.profile_backup_root())
             .unwrap()
@@ -1653,98 +1682,6 @@ fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
-    let now_ms = 100_000;
-    let mut account = account_record("account_local");
-    account.account.quota.primary = Some(QuotaWindow {
-        kind: QuotaWindowKind::Primary,
-        provider_cycle_id: None,
-        window_start_ms: None,
-        available_basis_points: Some(10_000),
-        explicitly_full: Some(true),
-        reset_at_ms: Some(now_ms + 300_000),
-        window_minutes: Some(300),
-        observed_at_ms: now_ms,
-        full_transition_fingerprint: None,
-        exhaustion_transition_fingerprint: None,
-    });
-    let updated = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Updated {
-            transitions: Vec::new(),
-            exhaustion_transitions: Vec::new(),
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(
-        next_quota_refresh_at(&updated, now_ms),
-        Some(now_ms + 300_000 + quota_reset_refresh_delay(&account.account.id))
-    );
-    account.account.quota.primary.as_mut().unwrap().reset_at_ms = Some(now_ms + 10_000);
-    let short_reset = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Updated {
-            transitions: Vec::new(),
-            exhaustion_transitions: Vec::new(),
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(
-        next_quota_refresh_at(&short_reset, now_ms),
-        Some(now_ms + 10_000 + quota_reset_refresh_delay(&account.account.id))
-    );
-    account.account.quota.primary.as_mut().unwrap().reset_at_ms = Some(now_ms + 5 * 60 * 60_000);
-    let long_window = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Updated {
-            transitions: Vec::new(),
-            exhaustion_transitions: Vec::new(),
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(
-        next_quota_refresh_at(&long_window, now_ms),
-        Some(now_ms + QUOTA_IDLE_REFRESH_MS)
-    );
-
-    let retryable = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Failed {
-            code: "quota_transport".into(),
-            retryable: true,
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(
-        next_quota_refresh_at(&retryable, now_ms),
-        Some(now_ms + QUOTA_REFRESH_RETRY_MS)
-    );
-    let parser_failure = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Failed {
-            code: "quota_invalid_response".into(),
-            retryable: false,
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(
-        next_quota_refresh_at(&parser_failure, now_ms),
-        Some(now_ms + QUOTA_IDLE_REFRESH_MS)
-    );
-    account.account.auth_state =
-        AccountAuthState::RequiresReauth(zenith_relay_core::accounts::ReauthReason::InvalidGrant);
-    let terminal = AccountQuotaRefreshResponse {
-        account,
-        quota: AccountQuotaOutcome::Failed {
-            code: "invalid_grant".into(),
-            retryable: false,
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(next_quota_refresh_at(&terminal, now_ms), None);
-    assert_eq!(QUOTA_REFRESH_BATCH_SIZE, 5);
-}
 #[test]
 fn prepared_credentials_debug_output_is_redacted() {
     let prepared = PreparedAccountCredentials {

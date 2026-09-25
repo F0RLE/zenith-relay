@@ -364,11 +364,14 @@ async fn lookup_import_account_id_with_hints(
             "ChatGPT account lookup client could not be created",
         )
     })?;
-    let response = http
-        .get(endpoint)
-        .header(AUTHORIZATION, authorization)
-        .header(ACCEPT, "application/json")
-        .send()
+    let (response, permit) = zenith_relay_core::scheduler::refresh::http::management_http_gate()
+        .send(
+            &http,
+            http.get(endpoint)
+                .header(AUTHORIZATION, authorization)
+                .header(ACCEPT, "application/json"),
+            zenith_relay_core::scheduler::refresh::http::HttpClass::Auth,
+        )
         .await
         .map_err(|_| {
             ImportItemError::new(
@@ -376,6 +379,7 @@ async fn lookup_import_account_id_with_hints(
                 "ChatGPT account lookup request failed",
             )
         })?;
+    drop(permit);
     let status = response.status();
     let body = collect_limited(response, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES)
         .await

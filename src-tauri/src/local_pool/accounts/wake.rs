@@ -132,26 +132,31 @@ impl CodexWakeClient {
             .identity
             .with_configured_client_version()
             .map_err(|_| WakeExecutionFailure::configuration())?;
-        let response = identity
-            .apply(
-                self.http
-                    .post(self.responses_endpoint.clone())
-                    .header(AUTHORIZATION, self.authorization.clone())
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(body),
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                let code = if error.is_timeout() {
-                    WakeExecutionErrorCode::Timeout
-                } else {
-                    WakeExecutionErrorCode::Transport
-                };
-                WakeExecutionFailure::runtime(code, true, None, elapsed_ms(started))
-            })?;
+        let (response, permit) =
+            zenith_relay_core::scheduler::refresh::http::management_http_gate()
+                .send(
+                    &self.http,
+                    identity.apply(
+                        self.http
+                            .post(self.responses_endpoint.clone())
+                            .header(AUTHORIZATION, self.authorization.clone())
+                            .header(CONTENT_TYPE, "application/json")
+                            .body(body),
+                    ),
+                    zenith_relay_core::scheduler::refresh::http::HttpClass::Ordinary,
+                )
+                .await
+                .map_err(|error| {
+                    let code = if error.is_timeout() {
+                        WakeExecutionErrorCode::Timeout
+                    } else {
+                        WakeExecutionErrorCode::Transport
+                    };
+                    WakeExecutionFailure::runtime(code, true, None, elapsed_ms(started))
+                })?;
         let status = response.status();
         let response_body = collect_limited(response, MAX_RESPONSE_BYTES).await;
+        drop(permit);
         if !status.is_success() {
             return Err(status_failure(status.as_u16(), elapsed_ms(started)));
         }

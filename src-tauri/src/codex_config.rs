@@ -62,15 +62,28 @@ pub(crate) fn lock_codex_profile() -> MutexGuard<'static, ()> {
 }
 
 pub fn enable_provider(api_key: &str, backup_dir: &Path) -> Result<(), String> {
+    enable_provider_with_intent(api_key, backup_dir, false)
+}
+
+pub fn enable_provider_explicit(api_key: &str, backup_dir: &Path) -> Result<(), String> {
+    enable_provider_with_intent(api_key, backup_dir, true)
+}
+
+fn enable_provider_with_intent(
+    api_key: &str,
+    backup_dir: &Path,
+    rebase_newer_login: bool,
+) -> Result<(), String> {
     if api_key.is_empty() {
         return Err("Введите API key.".to_string());
     }
-    crate::local_pool::profiles::codex::attach_ready_api(
-        &default_codex_home(),
-        profile_root(backup_dir)?,
-        api_key,
-    )
-    .map_err(|error| error.message)
+    let profile_root = profile_root(backup_dir)?;
+    let attach = if rebase_newer_login {
+        crate::local_pool::profiles::codex::attach_ready_api_explicit
+    } else {
+        crate::local_pool::profiles::codex::attach_ready_api
+    };
+    attach(&default_codex_home(), profile_root, api_key).map_err(|error| error.message)
 }
 
 fn profile_root(backup_dir: &Path) -> Result<&Path, String> {

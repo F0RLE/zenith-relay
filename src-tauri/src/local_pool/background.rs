@@ -1,31 +1,25 @@
 use super::{
     accounts::{
         quota_refresh::{
-            next_quota_refresh_at, prepare_account_credentials, record_model_refresh_error,
-            record_quota_refresh_error, refresh_account_models_once, refresh_account_quota_once,
+            prepare_account_credentials, refresh_account_models_once, refresh_account_quota_once,
             AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
-        reset_credits::consume_local_reset_credit_for_account,
         wake::{completion_from_execution, execute_with_runtime, CodexWakeClient},
     },
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,
 };
-use std::{
-    collections::{BTreeSet, HashMap},
-    time::Duration,
-};
+use std::{collections::BTreeSet, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     automations::{
-        verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit, WakeTrigger,
+        verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit,
         WakeVerificationOutcome,
     },
     pricing::pricing_refresh_delay,
     providers::chatgpt::{
-        configure_codex_client_version, refresh_codex_client_release, CodexQuotaClient,
+        configure_codex_client_version, refresh_codex_client_release,
         CODEX_RELEASE_REFRESH_INTERVAL,
     },
     unix_time_ms as current_time_ms,
@@ -35,17 +29,12 @@ mod timing;
 mod wake_policy;
 
 use timing::{due_wait, DueWait};
-use wake_policy::codex_wake_policy;
+pub(super) use wake_policy::codex_wake_policy;
 
-const QUOTA_BATCH_SIZE: usize = 5;
 const WAKE_BATCH_SIZE: usize = 2;
 const WORKER_ERROR_RETRY_MS: u64 = 60_000;
 const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
-const SOURCE_MODEL_REFRESH_START_DELAY_SECONDS: u64 = 5;
-const ACCOUNT_MODEL_REFRESH_START_DELAY_SECONDS: u64 = 5;
-const SOURCE_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
-const ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 8 * 60 * 60;
 
 pub(crate) fn start(app: AppHandle) {
     crate::diagnostics::record_operation("background", "workers_started", &[]);
@@ -73,18 +62,14 @@ pub(crate) fn start(app: AppHandle) {
             );
         }
     });
-    let quota_app = app.clone();
-    let _quota_worker = tauri::async_runtime::spawn(async move {
-        quota_loop(quota_app).await;
-    });
-    let source_app = app.clone();
-    let _source_model_worker = tauri::async_runtime::spawn(async move {
-        source_model_loop(source_app).await;
-    });
-    let account_model_app = app.clone();
-    let _account_model_worker = tauri::async_runtime::spawn(async move {
-        account_model_loop(account_model_app).await;
-    });
+    if let Err(error) = app.state::<DesktopState>().start_refresh() {
+        crate::diagnostics::record_error(
+            "account-refresh",
+            Some("start_failed"),
+            &error.message,
+            &[],
+        );
+    }
     let pricing_app = app.clone();
     let _pricing_worker = tauri::async_runtime::spawn(async move {
         pricing_loop(pricing_app).await;
@@ -201,7 +186,7 @@ async fn pricing_loop(app: AppHandle) {
 /// A membership change needs immediate model discovery, otherwise the UI can
 /// show a fresh quota together with an empty model list until the user
 /// manually refreshes it. Keep this one-shot work off the command path and
-/// reuse the per-account lock shared by the regular quota/model workers.
+/// join the independent model-kind job in the common refresh service.
 pub(crate) fn refresh_account_models_in_background(app: AppHandle, account_ids: Vec<String>) {
     let account_ids = account_ids
         .into_iter()
@@ -227,14 +212,6 @@ async fn refresh_account_models_and_notify(
     account_id: &str,
 ) {
     if let Err(error) = refresh_account_models_once(state, account_id).await {
-        if let Err(record_error) = record_model_refresh_error(state, account_id, &error) {
-            crate::diagnostics::record_error(
-                "background-account-models",
-                Some("persist_refresh_error_failed"),
-                &record_error.message,
-                &[("account", crate::diagnostics::hash_identifier(account_id))],
-            );
-        }
         crate::diagnostics::record_error(
             "background-account-models",
             Some("refresh_failed"),
@@ -267,163 +244,6 @@ pub(crate) async fn run_due_confirmation_wakes(
         }
     };
     run_wake_permits(state, permits).await
-}
-
-async fn quota_loop(app: AppHandle) {
-    loop {
-        let state = app.state::<DesktopState>();
-        state.wait_for_background_session_active().await;
-        let wait_result = tokio::select! {
-            _ = state.wait_for_background_session_inactive() => continue,
-            result = wait_for_quota_due(&state) => result,
-        };
-        if let Err(error) = wait_result {
-            crate::diagnostics::record_error(
-                "background-quota",
-                Some("schedule_failed"),
-                &error.message,
-                &[],
-            );
-            tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
-            continue;
-        }
-        if !state.background_session_active() {
-            continue;
-        }
-        if let Err(error) = run_due_quota_refreshes(&app, true).await {
-            crate::diagnostics::record_error(
-                "background-quota",
-                Some("refresh_batch_failed"),
-                &error.message,
-                &[],
-            );
-            tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
-        }
-    }
-}
-
-async fn account_model_loop(app: AppHandle) {
-    tokio::time::sleep(Duration::from_secs(
-        ACCOUNT_MODEL_REFRESH_START_DELAY_SECONDS,
-    ))
-    .await;
-    loop {
-        let state = app.state::<DesktopState>();
-        state.wait_for_background_session_active().await;
-        let account_ids = state.store().map(|store| {
-            store
-                .accounts()
-                .iter()
-                .filter(|account| {
-                    account.remote_location.is_none()
-                        && account.account.is_automatic_quota_monitoring_eligible()
-                })
-                .map(|account| account.account.id.clone())
-                .collect::<Vec<_>>()
-        });
-        match account_ids {
-            Ok(account_ids) => {
-                for account_id in account_ids {
-                    if !state.background_session_active() {
-                        break;
-                    }
-                    refresh_account_models_and_notify(&state, &app, &account_id).await;
-                }
-            }
-            Err(error) => crate::diagnostics::record_error(
-                "background-account-models",
-                Some("load_accounts_failed"),
-                &error.message,
-                &[],
-            ),
-        }
-        tokio::select! {
-            _ = state.wait_for_background_session_inactive() => {},
-            _ = tokio::time::sleep(Duration::from_secs(ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS)) => {},
-        }
-    }
-}
-
-async fn source_model_loop(app: AppHandle) {
-    tokio::time::sleep(Duration::from_secs(
-        SOURCE_MODEL_REFRESH_START_DELAY_SECONDS,
-    ))
-    .await;
-    loop {
-        let state = app.state::<DesktopState>();
-        state.wait_for_background_session_active().await;
-        let source_ids = {
-            state.store().map(|store| {
-                store
-                    .sources()
-                    .iter()
-                    .filter(|source| source.enabled)
-                    .map(|source| source.id.clone())
-                    .collect::<Vec<_>>()
-            })
-        };
-        match source_ids {
-            Ok(source_ids) => {
-                for source_id in source_ids {
-                    if !state.background_session_active() {
-                        break;
-                    }
-                    let refresh_result = super::commands::connections::refresh_local_source_models(
-                        &state,
-                        &source_id,
-                        super::commands::connections::SourceRefreshMode::Background,
-                    )
-                    .await;
-                    match refresh_result {
-                        Ok(source) if source.last_test_status.as_deref() == Some("error") => {
-                            crate::diagnostics::record_error(
-                                "background-source-models",
-                                Some("discovery_failed"),
-                                source
-                                    .last_error
-                                    .as_deref()
-                                    .unwrap_or("source model discovery failed"),
-                                &[("source", crate::diagnostics::hash_identifier(&source_id))],
-                            );
-                        }
-                        Err(error) => crate::diagnostics::record_error(
-                            "background-source-models",
-                            Some("refresh_failed"),
-                            &error.message,
-                            &[("source", crate::diagnostics::hash_identifier(&source_id))],
-                        ),
-                        Ok(_) => {}
-                    }
-                    let _ = app.emit("zenith-state-changed", ());
-                }
-                if !state.background_session_active() {
-                    continue;
-                }
-                let _mutation = state.setup_guard().await;
-                let result =
-                    super::commands::profiles::refresh_active_client_catalogs(&state).await;
-                if let Err(error) = &result {
-                    crate::diagnostics::record_error(
-                        "background-catalog",
-                        Some("refresh_failed"),
-                        &error.message,
-                        &[],
-                    );
-                }
-                super::commands::record_catalog_refresh_result(&state, &result);
-            }
-            Err(error) => crate::diagnostics::record_error(
-                "background-source-models",
-                Some("load_sources_failed"),
-                &error.message,
-                &[],
-            ),
-        }
-        tokio::select! {
-            _ = state.wait_for_background_session_inactive() => {},
-            _ = tokio::time::sleep(Duration::from_secs(SOURCE_MODEL_REFRESH_INTERVAL_SECONDS)) => {},
-        }
-    }
 }
 
 async fn wake_loop(app: AppHandle) {
@@ -477,20 +297,6 @@ async fn wake_loop(app: AppHandle) {
     }
 }
 
-async fn wait_for_quota_due(state: &DesktopState) -> Result<()> {
-    match due_wait(state.next_quota_refresh_due()?, current_time_ms()) {
-        DueWait::Ready => {}
-        DueWait::Notify => state.wait_for_quota_refresh().await,
-        DueWait::Sleep(delay) => {
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => {},
-                _ = state.wait_for_quota_refresh() => {},
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn wait_for_automatic_wake(state: &DesktopState) -> Result<()> {
     match due_wait(state.next_automatic_wake_due()?, current_time_ms()) {
         DueWait::Ready => {}
@@ -503,302 +309,6 @@ async fn wait_for_automatic_wake(state: &DesktopState) -> Result<()> {
         }
     }
     Ok(())
-}
-
-async fn run_due_quota_refreshes(app: &AppHandle, refresh_models: bool) -> Result<usize> {
-    let mut workers = JoinSet::new();
-    let mut active_permits = HashMap::with_capacity(QUOTA_BATCH_SIZE);
-    let mut claimed = claim_and_spawn_quota_workers(
-        app,
-        &mut workers,
-        &mut active_permits,
-        QUOTA_BATCH_SIZE,
-        refresh_models,
-    )?;
-    if claimed > 0 {
-        let _ = app.emit("zenith-state-changed", ());
-    }
-
-    let mut first_error = None;
-    while let Some(joined) = workers.join_next_with_id().await {
-        let worker_id = quota_worker_id(&joined);
-        let Some(permit) = active_permits.remove(&worker_id) else {
-            crate::diagnostics::record_error(
-                "background-quota",
-                Some("worker_permit_lost"),
-                "quota refresh worker permit was lost",
-                &[],
-            );
-            first_error.get_or_insert_with(|| {
-                LocalPoolError::new(
-                    ErrorCode::InvalidState,
-                    "quota refresh worker permit was lost",
-                )
-            });
-            continue;
-        };
-        match joined {
-            Ok((_, response)) => {
-                let state = app.state::<DesktopState>();
-                let account_hash = crate::diagnostics::hash_identifier(&permit.account_id);
-                if let Err(error) = settle_quota_refresh(&state, permit, response).await {
-                    crate::diagnostics::record_error(
-                        "background-quota",
-                        Some("settle_failed"),
-                        &error.message,
-                        &[("account", account_hash)],
-                    );
-                    first_error.get_or_insert(error);
-                }
-            }
-            Err(_) => {
-                let state = app.state::<DesktopState>();
-                let account_hash = crate::diagnostics::hash_identifier(&permit.account_id);
-                if let Err(error) = reschedule_failed_quota_worker(
-                    &state,
-                    permit,
-                    current_time_ms().saturating_add(WORKER_ERROR_RETRY_MS),
-                ) {
-                    crate::diagnostics::record_error(
-                        "background-quota",
-                        Some("reschedule_failed"),
-                        &error.message,
-                        &[("account", account_hash.clone())],
-                    );
-                    first_error.get_or_insert(error);
-                    continue;
-                }
-                crate::diagnostics::record_error(
-                    "background-quota",
-                    Some("worker_panicked"),
-                    "quota refresh worker terminated unexpectedly",
-                    &[("account", account_hash)],
-                );
-                first_error.get_or_insert_with(|| {
-                    LocalPoolError::new(ErrorCode::InvalidState, "quota refresh worker failed")
-                });
-            }
-        }
-        let _ = app.emit("zenith-state-changed", ());
-        let open_slots = QUOTA_BATCH_SIZE.saturating_sub(workers.len());
-        if open_slots == 0 {
-            continue;
-        }
-        match claim_and_spawn_quota_workers(
-            app,
-            &mut workers,
-            &mut active_permits,
-            open_slots,
-            refresh_models,
-        ) {
-            Ok(new_claims) => claimed = claimed.saturating_add(new_claims),
-            Err(error) => {
-                crate::diagnostics::record_error(
-                    "background-quota",
-                    Some("claim_failed"),
-                    &error.message,
-                    &[],
-                );
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    first_error.map_or(Ok(claimed), Err)
-}
-
-fn claim_and_spawn_quota_workers(
-    app: &AppHandle,
-    workers: &mut JoinSet<Result<AccountQuotaRefreshResponse>>,
-    active_permits: &mut HashMap<TaskId, zenith_relay_core::quota::QuotaRefreshPermit>,
-    max_claims: usize,
-    refresh_models: bool,
-) -> Result<usize> {
-    let state = app.state::<DesktopState>();
-    if !state.background_session_active() {
-        return Ok(0);
-    }
-    let permits = state.claim_due_quota_refreshes(current_time_ms(), max_claims)?;
-    let claimed = permits.len();
-    for permit in permits {
-        let worker_app = app.clone();
-        let account_id = permit.account_id.clone();
-        let task = workers.spawn(async move {
-            let state = worker_app.state::<DesktopState>();
-            refresh_account_quota_once(&state, &account_id, false, refresh_models).await
-        });
-        active_permits.insert(task.id(), permit);
-    }
-    Ok(claimed)
-}
-
-fn quota_worker_id<T>(result: &std::result::Result<(TaskId, T), JoinError>) -> TaskId {
-    match result {
-        Ok((id, _)) => *id,
-        Err(error) => error.id(),
-    }
-}
-
-fn reschedule_failed_quota_worker(
-    state: &DesktopState,
-    permit: zenith_relay_core::quota::QuotaRefreshPermit,
-    due_at_ms: u64,
-) -> Result<()> {
-    state.reschedule_quota_refresh(permit, due_at_ms)?;
-    Ok(())
-}
-
-async fn settle_quota_refresh(
-    state: &DesktopState,
-    permit: zenith_relay_core::quota::QuotaRefreshPermit,
-    response: Result<AccountQuotaRefreshResponse>,
-) -> Result<()> {
-    match response {
-        Ok(response) => {
-            if let Some(due_at_ms) = next_quota_refresh_at(&response, current_time_ms()) {
-                state.reschedule_quota_refresh(permit, due_at_ms)?;
-            } else {
-                state.complete_quota_refresh(permit)?;
-            }
-            let _ = evaluate_updated_transitions(state, &response);
-            evaluate_weekly_exhaustions(state, &response).await?;
-        }
-        Err(error) => {
-            let account_id = permit.account_id.clone();
-            crate::diagnostics::record_error(
-                "background-quota",
-                Some(error_codes::ACCOUNT_REFRESH_FAILED),
-                &error.message,
-                &[("account", crate::diagnostics::hash_identifier(&account_id))],
-            );
-            if let Err(record_error) =
-                record_quota_refresh_error(state, &account_id, &error, current_time_ms())
-            {
-                crate::diagnostics::record_error(
-                    "background-quota",
-                    Some("persist_refresh_error_failed"),
-                    &record_error.message,
-                    &[("account", crate::diagnostics::hash_identifier(&account_id))],
-                );
-            }
-            if terminal_quota_refresh_error(state, &account_id, &error)? {
-                state.complete_quota_refresh(permit)?;
-            } else {
-                state.reschedule_quota_refresh(
-                    permit,
-                    current_time_ms().saturating_add(WORKER_ERROR_RETRY_MS),
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn terminal_quota_refresh_error(
-    state: &DesktopState,
-    account_id: &str,
-    error: &LocalPoolError,
-) -> Result<bool> {
-    if matches!(error.code, ErrorCode::NotFound) {
-        return Ok(true);
-    }
-    Ok(state
-        .store()?
-        .account(account_id)
-        .is_none_or(|account| account.account.auth_state.requires_fresh_login()))
-}
-
-fn evaluate_updated_transitions(
-    state: &DesktopState,
-    response: &AccountQuotaRefreshResponse,
-) -> Result<()> {
-    let AccountQuotaOutcome::Updated { transitions, .. } = &response.quota else {
-        return Ok(());
-    };
-    if transitions.is_empty() {
-        return Ok(());
-    }
-    let capabilities = CodexQuotaClient::new()
-        .map_err(|failure| LocalPoolError::new(ErrorCode::InvalidState, failure.code))?
-        .capabilities();
-    let policy = codex_wake_policy(&response.account, &capabilities);
-    let tasks = state.store()?.automations().tasks.clone();
-    let now_ms = current_time_ms();
-    for transition in transitions {
-        for task in &tasks {
-            state.evaluate_wake_transition(
-                task,
-                &response.account.account,
-                transition,
-                &policy,
-                now_ms,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-async fn evaluate_weekly_exhaustions(
-    state: &DesktopState,
-    response: &AccountQuotaRefreshResponse,
-) -> Result<()> {
-    if response.account.remote_location.is_some()
-        || response
-            .account
-            .account
-            .quota
-            .reset_credits_available
-            .is_some_and(|available| available == 0)
-    {
-        return Ok(());
-    }
-    let tasks = state.store()?.automations().tasks.clone();
-    let has_weekly_task = tasks.iter().any(|task| {
-        task.enabled
-            && task.trigger == WakeTrigger::Weekly
-            && task.account_selector.matches(&response.account.account)
-    });
-    if !has_weekly_task {
-        return Ok(());
-    }
-    let transitions = weekly_exhaustion_candidates(response);
-    for transition in &transitions {
-        if transition.window_kind != zenith_relay_core::quota::QuotaWindowKind::Secondary
-            || state
-                .weekly_reset_was_applied(&response.account.account.id, &transition.fingerprint)?
-        {
-            continue;
-        }
-        if consume_local_reset_credit_for_account(state, &response.account.account.id)
-            .await
-            .is_ok()
-        {
-            state
-                .mark_weekly_reset_applied(&response.account.account.id, &transition.fingerprint)?;
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn weekly_exhaustion_candidates(
-    response: &AccountQuotaRefreshResponse,
-) -> Vec<zenith_relay_core::quota::QuotaTransition> {
-    let mut transitions = response.exhaustion_transitions.clone();
-    if !transitions.iter().any(|transition| {
-        transition.window_kind == zenith_relay_core::quota::QuotaWindowKind::Secondary
-    }) {
-        if let Some(transition) = response
-            .account
-            .account
-            .quota
-            .secondary
-            .as_ref()
-            .and_then(zenith_relay_core::quota::QuotaWindow::exhaustion_transition)
-        {
-            transitions.push(transition);
-        }
-    }
-    transitions
 }
 
 async fn run_wake_permits(state: &DesktopState, permits: Vec<WakePermit>) -> Result<usize> {
@@ -919,38 +429,8 @@ async fn execute_wake_permit(
         if !state.is_wake_permit_active(permit)? {
             return Ok(None);
         }
-        match refresh_account_quota_once(state, &permit.account_id, false, false).await {
-            Ok(response) => {
-                if let Err(error) = settle_verification_quota(state, &permit.account_id, &response)
-                {
-                    crate::diagnostics::record_error(
-                        "background-wake",
-                        Some("settle_verification_failed"),
-                        &error.message,
-                        &[(
-                            "account",
-                            crate::diagnostics::hash_identifier(&permit.account_id),
-                        )],
-                    );
-                }
-                if let Err(error) = evaluate_updated_transitions(state, &response) {
-                    crate::diagnostics::record_error(
-                        "background-wake",
-                        Some("evaluate_transition_failed"),
-                        &error.message,
-                        &[],
-                    );
-                }
-                if let Err(error) = evaluate_weekly_exhaustions(state, &response).await {
-                    crate::diagnostics::record_error(
-                        "background-wake",
-                        Some("evaluate_weekly_failed"),
-                        &error.message,
-                        &[],
-                    );
-                }
-                verification_from_refresh(permit, &response)
-            }
+        match refresh_account_quota_once(state, &permit.account_id).await {
+            Ok(response) => verification_from_refresh(permit, &response),
             Err(error) => {
                 crate::diagnostics::record_error(
                     "background-wake",
@@ -972,19 +452,6 @@ async fn execute_wake_permit(
         verification,
         current_time_ms(),
     )))
-}
-
-fn settle_verification_quota(
-    state: &DesktopState,
-    account_id: &str,
-    response: &AccountQuotaRefreshResponse,
-) -> Result<()> {
-    if let Some(due_at_ms) = next_quota_refresh_at(response, current_time_ms()) {
-        state.sync_account_quota_refresh(account_id, due_at_ms)?;
-    } else {
-        state.remove_quota_refresh(account_id)?;
-    }
-    Ok(())
 }
 
 fn verification_from_refresh(
@@ -1030,7 +497,6 @@ mod tests {
     use zenith_relay_core::{
         accounts::{
             AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
-            ReauthReason,
         },
         automations::{WakeExecutionRequest, WakeTrigger, WakeVerificationMetadata},
         quota::{
@@ -1038,49 +504,6 @@ mod tests {
         },
         WireApi,
     };
-
-    #[test]
-    fn source_models_refresh_at_startup_then_every_eight_hours() {
-        assert_eq!(SOURCE_MODEL_REFRESH_START_DELAY_SECONDS, 5);
-        assert_eq!(SOURCE_MODEL_REFRESH_INTERVAL_SECONDS, 8 * 60 * 60);
-    }
-
-    #[test]
-    fn account_models_refresh_is_independent_from_quota_schedule() {
-        assert_eq!(ACCOUNT_MODEL_REFRESH_START_DELAY_SECONDS, 5);
-        assert_eq!(ACCOUNT_MODEL_REFRESH_INTERVAL_SECONDS, 8 * 60 * 60);
-    }
-
-    #[test]
-    fn only_reauthentication_stops_automatic_quota_retries() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-background-auth-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let state = DesktopState::open(root.clone()).unwrap();
-        let mut account = account_record();
-        state
-            .store()
-            .unwrap()
-            .upsert_account(account.clone())
-            .unwrap();
-        let error = LocalPoolError::new(ErrorCode::InvalidState, "safe failure");
-        assert!(!terminal_quota_refresh_error(&state, "account-1", &error).unwrap());
-
-        account.account.auth_state = AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant);
-        state
-            .store()
-            .unwrap()
-            .upsert_account(account.clone())
-            .unwrap();
-        assert!(terminal_quota_refresh_error(&state, "account-1", &error).unwrap());
-
-        account.account.auth_state = AccountAuthState::DegradedAccessOnly;
-        state.store().unwrap().upsert_account(account).unwrap();
-        assert!(!terminal_quota_refresh_error(&state, "account-1", &error).unwrap());
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn codex_policy_uses_capability_windows_and_lightest_allowed_model() {
@@ -1145,47 +568,6 @@ mod tests {
             verification_from_refresh(&permit, &response),
             WakeVerificationOutcome::Unconfirmed
         );
-    }
-
-    #[tokio::test]
-    async fn panicked_and_canceled_quota_workers_reschedule_their_permits() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-quota-worker-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let state = DesktopState::open(root.clone()).unwrap();
-        state.mark_quota_refresh("account-panic", 100).unwrap();
-        state.mark_quota_refresh("account-cancel", 100).unwrap();
-        let mut permits = state.claim_due_quota_refreshes(100, 2).unwrap();
-        assert_eq!(permits.len(), 2);
-
-        let mut workers = JoinSet::new();
-        let mut active_permits = HashMap::new();
-        let panic_task = workers.spawn(async { panic!("synthetic quota worker panic") });
-        active_permits.insert(panic_task.id(), permits.pop().unwrap());
-        let canceled_task = workers.spawn(async { std::future::pending::<()>().await });
-        active_permits.insert(canceled_task.id(), permits.pop().unwrap());
-        canceled_task.abort();
-
-        while let Some(joined) = workers.join_next_with_id().await {
-            assert!(joined.is_err());
-            let permit = active_permits
-                .remove(&quota_worker_id(&joined))
-                .expect("worker permit must remain recoverable");
-            reschedule_failed_quota_worker(&state, permit, 200).unwrap();
-        }
-
-        assert!(active_permits.is_empty());
-        let mut recovered = state
-            .claim_due_quota_refreshes(200, 2)
-            .unwrap()
-            .into_iter()
-            .map(|permit| permit.account_id)
-            .collect::<Vec<_>>();
-        recovered.sort();
-        assert_eq!(recovered, vec!["account-cancel", "account-panic"]);
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1308,64 +690,5 @@ mod tests {
             },
             exhaustion_transitions: Vec::new(),
         }
-    }
-
-    #[test]
-    fn weekly_exhaustion_candidates_recover_a_missed_secondary_transition() {
-        let mut account = account_record();
-        account.account.quota.reset_credits_available = None;
-        account.account.quota.secondary = Some(QuotaWindow {
-            kind: QuotaWindowKind::Secondary,
-            provider_cycle_id: Some("weekly-cycle".into()),
-            window_start_ms: Some(1_000),
-            available_basis_points: Some(0),
-            explicitly_full: Some(false),
-            reset_at_ms: Some(3_601_000),
-            window_minutes: Some(60),
-            observed_at_ms: 1_000,
-            full_transition_fingerprint: None,
-            exhaustion_transition_fingerprint: Some("weekly-fingerprint".into()),
-        });
-        let response = AccountQuotaRefreshResponse {
-            account,
-            quota: AccountQuotaOutcome::Updated {
-                transitions: Vec::new(),
-                exhaustion_transitions: Vec::new(),
-            },
-            exhaustion_transitions: Vec::new(),
-        };
-
-        let candidates = weekly_exhaustion_candidates(&response);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].window_kind, QuotaWindowKind::Secondary);
-        assert_eq!(candidates[0].fingerprint, "weekly-fingerprint");
-    }
-
-    #[test]
-    fn weekly_exhaustion_candidates_keep_provider_transition_identity() {
-        let mut response = quota_response(full_window(Some(10_000), 100));
-        response
-            .exhaustion_transitions
-            .push(zenith_relay_core::quota::QuotaTransition {
-                window_kind: QuotaWindowKind::Secondary,
-                fingerprint: "provider-fingerprint".into(),
-                transitioned_at_ms: 200,
-            });
-        response.account.account.quota.secondary = Some(QuotaWindow {
-            kind: QuotaWindowKind::Secondary,
-            provider_cycle_id: None,
-            window_start_ms: None,
-            available_basis_points: Some(0),
-            explicitly_full: Some(false),
-            reset_at_ms: None,
-            window_minutes: Some(60),
-            observed_at_ms: 300,
-            full_transition_fingerprint: None,
-            exhaustion_transition_fingerprint: Some("derived-fingerprint".into()),
-        });
-
-        let candidates = weekly_exhaustion_candidates(&response);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].fingerprint, "provider-fingerprint");
     }
 }

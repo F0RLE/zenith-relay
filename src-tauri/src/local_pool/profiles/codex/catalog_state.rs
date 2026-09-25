@@ -30,6 +30,33 @@ pub(super) fn valid_managed_model_catalog(
     expected_path: &Path,
     content: &Option<Vec<u8>>,
 ) -> bool {
+    if !valid_managed_model_catalog_metadata(backup, expected_path, content) {
+        return false;
+    }
+    if backup.managed_model_catalog_path.is_none() {
+        return true;
+    }
+    if backup.restore_pending && content.is_none() {
+        return true;
+    }
+    let current_hash = content.as_deref().map(bytes_hash);
+    let stable_valid = match backup.managed_model_catalog_hash.as_deref() {
+        Some(hash) => current_hash.as_deref() == Some(hash),
+        None => content.is_none(),
+    };
+    let pending_valid = backup
+        .managed_model_catalog_pending_hash
+        .as_deref()
+        .is_some_and(|hash| current_hash.as_deref() == Some(hash));
+    let pending_remove_valid = backup.managed_model_catalog_pending_remove && content.is_none();
+    stable_valid || pending_valid || pending_remove_valid
+}
+
+fn valid_managed_model_catalog_metadata(
+    backup: &ProfileBackup,
+    expected_path: &Path,
+    content: &Option<Vec<u8>>,
+) -> bool {
     if backup
         .managed_model_catalog_hash
         .as_deref()
@@ -52,21 +79,30 @@ pub(super) fn valid_managed_model_catalog(
     if portable_path_value(path) != portable_path_string(expected_path) {
         return false;
     }
-    if backup.restore_pending && content.is_none() {
-        return true;
+    true
+}
+
+/// A known Relay catalog path contains bytes not written by the current or
+/// interrupted attach. It is not a corrupt backup: restore may leave the file
+/// alone, while attach/refresh must still refuse to replace it.
+pub(super) fn externally_changed_managed_model_catalog(
+    backup: &ProfileBackup,
+    expected_path: &Path,
+    content: &Option<Vec<u8>>,
+) -> bool {
+    if !valid_managed_model_catalog_metadata(backup, expected_path, content)
+        || backup.managed_model_catalog_path.is_none()
+        || (backup.managed_model_catalog_hash.is_none()
+            && backup.managed_model_catalog_pending_hash.is_none())
+    {
+        return false;
     }
-    let current_hash = content.as_deref().map(bytes_hash);
-    let stable_valid = match backup.managed_model_catalog_hash.as_deref() {
-        Some(hash) if hash.len() == 64 => current_hash.as_deref() == Some(hash),
-        None => content.is_none(),
-        _ => false,
+    let Some(content) = content.as_deref() else {
+        return false;
     };
-    let pending_valid = backup
-        .managed_model_catalog_pending_hash
-        .as_deref()
-        .is_some_and(|hash| hash.len() == 64 && current_hash.as_deref() == Some(hash));
-    let pending_remove_valid = backup.managed_model_catalog_pending_remove && content.is_none();
-    stable_valid || pending_valid || pending_remove_valid
+    let current_hash = bytes_hash(content);
+    backup.managed_model_catalog_hash.as_deref() != Some(current_hash.as_str())
+        && backup.managed_model_catalog_pending_hash.as_deref() != Some(current_hash.as_str())
 }
 
 pub(super) fn managed_model_catalog_path(backup_root: &Path) -> Result<PathBuf> {
@@ -165,15 +201,31 @@ pub(super) fn local_backup(codex_home: &Path, root: &Path) -> Result<Option<Prof
         (None, None) => true,
         _ => false,
     };
-    if backup.version != 1
-        || backup.managed_key_hash.len() != 64
-        || backup.managed_base_url.trim().is_empty()
-        || !oauth_metadata_valid
-        || !valid_managed_model_catalog(&backup, &catalog_path, &catalog)
+    let invalid_reason = if backup.version != 1 {
+        Some("unsupported backup version")
+    } else if backup.managed_key_hash.len() != 64 {
+        Some("invalid managed key fingerprint")
+    } else if backup.managed_base_url.trim().is_empty() {
+        Some("missing managed gateway address")
+    } else if !oauth_metadata_valid {
+        Some("invalid OAuth ownership metadata")
+    } else if !valid_managed_model_catalog(&backup, &catalog_path, &catalog)
+        && !externally_changed_managed_model_catalog(&backup, &catalog_path, &catalog)
     {
+        Some(
+            if valid_managed_model_catalog_metadata(&backup, &catalog_path, &catalog) {
+                "managed model catalog is missing or cannot be verified"
+            } else {
+                "invalid managed model catalog reference or fingerprint"
+            },
+        )
+    } else {
+        None
+    };
+    if let Some(reason) = invalid_reason {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "ChatGPT local gateway profile backup has invalid metadata",
+            format!("ChatGPT local gateway profile backup cannot be restored: {reason}"),
         ));
     }
     Ok(Some(backup))

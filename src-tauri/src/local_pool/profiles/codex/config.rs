@@ -473,13 +473,10 @@ pub(super) fn auth_content(local_key: &str) -> String {
 
 pub(super) fn auth_matches_snapshot(
     snapshot: &Option<Vec<u8>>,
-    path: &Path,
+    _path: &Path,
     expected_hash: &str,
 ) -> Result<bool> {
-    let Some(content) = snapshot_text(snapshot, path)? else {
-        return Ok(false);
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Some(value) = auth_snapshot_json(snapshot) else {
         return Ok(false);
     };
     Ok(value

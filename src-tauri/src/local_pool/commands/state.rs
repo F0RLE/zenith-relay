@@ -136,8 +136,10 @@ pub(crate) async fn build_local_runtime_state(
         .sources
         .iter()
         .map(|record| {
-            local_source_summary(
+            let observation = inputs.source_refresh.get(&record.id);
+            let mut summary = local_source_summary(
                 record,
+                observation.map(|value| value.revision),
                 inputs
                     .source_api_keys
                     .get(&record.id)
@@ -155,14 +157,20 @@ pub(crate) async fn build_local_runtime_state(
                     .get(&record.id)
                     .copied()
                     .unwrap_or_default(),
-            )
+            )?;
+            summary.provider_stats = summary
+                .secret_available
+                .then(|| observation.and_then(|value| value.stats.clone()))
+                .flatten();
+            summary.refresh_state = observation.map(|value| value.state).unwrap_or_default();
+            Ok::<_, LocalPoolError>(summary)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut account_summaries = inputs
         .accounts
         .iter()
         .map(|record| {
-            local_account_summary(
+            let mut summary = local_account_summary(
                 record,
                 LocalAccountSummaryContext {
                     settings: &inputs.gateway,
@@ -184,7 +192,13 @@ pub(crate) async fn build_local_runtime_state(
                             .unwrap_or(false)
                     }),
                 },
-            )
+            )?;
+            summary.refresh_state = inputs
+                .account_refresh
+                .get(&record.account.id)
+                .copied()
+                .unwrap_or_default();
+            Ok::<_, LocalPoolError>(summary)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut warnings = inputs.warnings;
@@ -270,6 +284,8 @@ pub(crate) async fn build_local_runtime_state(
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         gateway: GatewaySummary {
+            tool_policy: inputs.gateway.tool_policy.clone(),
+            basis_points_enabled: inputs.gateway.basis_points_enabled,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 inputs.gateway.pool_routing.as_ref(),
                 &source_summaries,
@@ -280,10 +296,6 @@ pub(crate) async fn build_local_runtime_state(
             candidate_count,
             visible_model_ids,
             max_retry_candidates: inputs.gateway.max_retry_candidates,
-            cooldown_after_failures: inputs.gateway.cooldown_after_failures,
-            keep_last_candidate_available: inputs.gateway.keep_last_candidate_available,
-            routing_strategy: inputs.gateway.routing_strategy,
-            subscription_plan_order: inputs.gateway.subscription_plan_order.clone(),
             default_service_tier: inputs.gateway.default_service_tier,
             image_base_model: inputs.gateway.image_base_model.clone(),
             models,
@@ -348,6 +360,7 @@ pub async fn get_local_runtime_order(
 
 fn local_source_summary(
     record: &ProviderSourceRecord,
+    refresh_revision: Option<u64>,
     secret_available: bool,
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
@@ -384,6 +397,9 @@ fn local_source_summary(
         api_equivalent,
         secret_available,
         last_error_code: record.last_error.clone(),
+        refresh_revision,
+        refresh_state: Default::default(),
+        provider_stats: None,
     })
 }
 
@@ -442,6 +458,10 @@ fn local_account_summary(
             .take(12)
             .collect(),
         provider_family: record.provider_family.clone(),
+        basis_points_available: credentials
+            .is_some_and(|value| value.has_oauth() && !value.is_agent_identity()),
+        basis_points_enabled: settings.basis_points_enabled
+            && credentials.is_some_and(|value| value.has_oauth() && !value.is_agent_identity()),
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
@@ -468,6 +488,7 @@ fn local_account_summary(
             &record.account.quota,
             refreshing,
         ),
+        refresh_state: Default::default(),
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
         client_auth_status: record.client_auth_status.clone(),
@@ -531,17 +552,14 @@ mod parity_tests {
                 version: None,
             },
             gateway: GatewaySummary {
+                tool_policy: Default::default(),
+                basis_points_enabled: false,
                 pool_routing: None,
                 running: false,
                 base_url: "http://127.0.0.1:14998/v1".into(),
                 candidate_count: 0,
                 visible_model_ids: Vec::new(),
                 max_retry_candidates: 3,
-                cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
-                keep_last_candidate_available:
-                    zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-                routing_strategy: Default::default(),
-                subscription_plan_order: Vec::new(),
                 default_service_tier: Default::default(),
                 image_base_model: None,
                 models: Vec::new(),

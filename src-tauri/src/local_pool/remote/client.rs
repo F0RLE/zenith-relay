@@ -232,10 +232,15 @@ impl RemoteClient {
     pub async fn source_stats(
         &self,
         source_id: &str,
+        force: bool,
     ) -> Result<SourceProviderStats, RemoteClientError> {
         self.request(
             Method::GET,
-            &format!("{}/stats", remote_object_path("sources", source_id)?),
+            &format!(
+                "{}/stats{}",
+                remote_object_path("sources", source_id)?,
+                if force { "?force=true" } else { "" }
+            ),
             Option::<&()>::None,
             true,
         )

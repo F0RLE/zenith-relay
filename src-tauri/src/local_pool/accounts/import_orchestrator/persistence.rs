@@ -4,7 +4,7 @@ use crate::local_pool::accounts::{
     credentials::{CredentialStore, StoredCodexCredentials},
     NativeSecretBackend,
 };
-use crate::local_pool::commands::{current_time_ms, restart_or_rollback};
+use crate::local_pool::commands::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
@@ -77,6 +77,21 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
         attempted_account.last_client_login_redirect_at_ms =
             current.last_client_login_redirect_at_ms;
     }
+    // Re-import may replace an existing login and executor. Close pending
+    // final dispatches before the first credential write, not only when the
+    // listener is eventually restarted. A new account has no old candidate.
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), std::slice::from_ref(&account_id), &[]);
+    state
+        .store()
+        .and_then(|mut store| store.invalidate_account_refresh(&[&account_id]))
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::ACCOUNT_STORE_FAILED,
+                "failed to retire previous account observations",
+            )
+        })?;
     credential_store
         .save(credentials)
         .map_err(credential_item_error)?;
@@ -650,6 +665,48 @@ mod tests {
         }
         drop(state);
         std::fs::remove_dir_all(root).expect("cleanup state");
+    }
+
+    #[tokio::test]
+    async fn reimporting_identical_credentials_retires_preexisting_refresh_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-refresh-fence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let account_id = format!("account_{}", uuid::Uuid::new_v4().simple());
+        let imported = credentials(&account_id, "same", 10, 1);
+        let record = account(&imported);
+        credential_store.save(&imported).unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_account(record.clone())
+            .unwrap();
+        let (_, old_scope) = state
+            .store()
+            .unwrap()
+            .account_refresh_scope(&account_id)
+            .unwrap();
+        {
+            let _mutation = state.setup_guard().await;
+            persist_imported_account(
+                &state,
+                &credential_store,
+                &imported,
+                Some(&imported),
+                record,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(state
+            .store()
+            .unwrap()
+            .ensure_account_refresh_current(&old_scope)
+            .is_err());
+        cleanup_import_test_state(state, credential_store, &account_id, root).await;
     }
 
     #[tokio::test]

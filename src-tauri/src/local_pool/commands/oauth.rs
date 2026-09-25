@@ -14,7 +14,7 @@ use crate::local_pool::{
             OAuthFlowStart, OAuthFlowStatus,
         },
         proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
-        quota_refresh::{next_quota_refresh_at, AccountQuotaOutcome, AccountQuotaRefreshResponse},
+        quota_refresh::{AccountQuotaOutcome, AccountQuotaRefreshResponse},
         quota_service::{apply_quota_failure, apply_quota_success},
         records::{self, new_account_record, CODEX_SOURCE_ID},
         NativeSecretBackend,
@@ -386,7 +386,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     if let Some(issue) = model_issue {
         apply_initial_model_issue(&mut record, issue);
     }
-    let quota_refresh_at = next_quota_refresh_at(
+    let quota_reset_delay = crate::local_pool::refresh::reset_due_delay(
         &AccountQuotaRefreshResponse {
             account: record.clone(),
             quota: quota_outcome,
@@ -459,6 +459,18 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     let authority_tokens = committed_credentials
         .to_token_set()
         .map_err(credential_error)?;
+    // A replaced login may change the provider principal while an old
+    // request is waiting to send. Fence that account before committing the
+    // credential and keep it closed through runtime replacement or restore.
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = super::fence_runtime_candidates(
+        runtime.as_deref(),
+        std::slice::from_ref(&local_account_id),
+        &[],
+    );
+    state
+        .store()?
+        .invalidate_account_refresh(&[&local_account_id])?;
     credential_store
         .save(&committed_credentials)
         .map_err(credential_error)?;
@@ -484,14 +496,20 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         drop(commit_guard);
         return Err(match rollback {
             Ok(true) => error,
-            Ok(false) => LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "OAuth completion was superseded by newer account state",
-            ),
-            Err(_) => LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "OAuth completion could not restore the previous account state",
-            ),
+            Ok(false) => {
+                super::fail_closed(
+                    state,
+                    "OAuth completion was superseded before runtime synchronization".into(),
+                )
+                .await
+            }
+            Err(_) => {
+                super::fail_closed(
+                    state,
+                    "OAuth completion could not restore the previous account state".into(),
+                )
+                .await
+            }
         });
     }
     drop(commit_guard);
@@ -545,22 +563,17 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     // not restore a stale account snapshot over a later refresh/login; retry
     // the current state without a data rollback instead.
     super::restart_or_rollback(state, || Ok(())).await?;
-    let previous_quota_refresh = match state.quota_refresh_snapshot() {
-        Ok(previous) => previous,
-        Err(error) => return Err(error),
-    };
-    let schedule_result = match quota_refresh_at {
-        Some(due_at_ms) => state
-            .sync_account_quota_refresh(&local_account_id, due_at_ms)
-            .map(|_| ()),
-        None => state.remove_quota_refresh(&local_account_id).map(|_| ()),
-    };
-    schedule_result?;
+    drop(_dispatch_fences);
+    state.sync_account_quota_refresh(
+        &local_account_id,
+        now_ms.saturating_add(quota_reset_delay.unwrap_or(15 * 60_000)),
+    )?;
     if let Err(error) = flow.complete(login_id).await.map_err(flow_error) {
-        let queue_restored = state.restore_quota_refresh(previous_quota_refresh).is_ok();
+        // Keep registrations derived from committed credentials/current state.
+        state.store()?.notify_refresh_changed();
         let checkpoint_restored =
             restore_completion_checkpoint(&checkpoint.login_id, &encoded_checkpoint).is_ok();
-        let error = if queue_restored && checkpoint_restored {
+        let error = if checkpoint_restored {
             error
         } else {
             LocalPoolError::new(
@@ -1338,6 +1351,7 @@ mod tests {
             initial_model_issue(&ModelDiscoveryFailure {
                 code: ModelDiscoveryFailureCode::Unauthorized,
                 retryable: false,
+                retry_after_ms: None,
                 http_status: Some(401),
             }),
         );

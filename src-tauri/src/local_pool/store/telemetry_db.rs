@@ -14,8 +14,8 @@ use zenith_relay_core::pricing::PriceEvidence;
 use zenith_relay_core::{
     pricing::{PriceSource, PricingCatalog, PricingContext, PricingMetadata, PricingSourceSummary},
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
-    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, RoutingDiagnostics,
+    ToolUseDiagnostics, UsageEvent,
 };
 #[cfg(test)]
 use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
@@ -92,7 +92,7 @@ pub struct UsageLog {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
-    pub cache_write_ttl: Option<CacheWriteTtl>,
+    pub cache_write_ttl: Option<String>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -491,7 +491,7 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 mod tests {
     use super::*;
     use zenith_relay_core::{
-        CacheWriteTtl, ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
+        ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
     };
 
     fn aggregate_test_event(
@@ -499,7 +499,7 @@ mod tests {
         attempt: u16,
         input_tokens: u64,
         cache_write_input_tokens: u64,
-        cache_write_ttl: Option<CacheWriteTtl>,
+        cache_write_ttl: Option<String>,
         output_tokens: u64,
     ) -> UsageEvent {
         UsageEvent {
@@ -590,12 +590,19 @@ mod tests {
             http_status: 200,
             error_category: None,
             tool_use: ToolUseDiagnostics {
-                client_tool_count: 3,
-                forwarded_tool_count: 3,
+                client_tool_count: 73,
+                forwarded_tool_count: 73,
                 tool_choice: ToolChoiceMode::Auto,
                 tool_call_count: 1,
                 text_output: false,
                 terminal_output: TerminalOutputKind::ToolCall,
+                client_schema_bytes: Some(12345),
+                forwarded_schema_bytes: Some(12345),
+                filtered_tool_count: 0,
+                policy_mode: Some(zenith_relay_core::ToolPolicyMode::Automatic),
+                policy_outcome: Some(zenith_relay_core::ToolPolicyOutcome::Deferred),
+                policy_fallback: false,
+                deferred_tool_search: true,
             },
             cooldown_scope: None,
             retry_at_ms: None,
@@ -617,6 +624,7 @@ mod tests {
         let database = TelemetryDb::open(&path).unwrap();
         let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_use.as_ref(), Some(&event.tool_use));
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
         assert_eq!(
@@ -706,7 +714,7 @@ mod tests {
                 1,
                 10,
                 5,
-                Some(CacheWriteTtl::FiveMinutes),
+                Some("5m".to_string()),
                 4,
             ))
             .unwrap();
@@ -716,7 +724,7 @@ mod tests {
                 2,
                 20,
                 7,
-                Some(CacheWriteTtl::OneHour),
+                Some("1h".to_string()),
                 8,
             ))
             .unwrap();
@@ -1372,7 +1380,7 @@ mod tests {
         event.resolved_model = Some("gpt-5.4".into());
         event.input_tokens = Some(20);
         event.cache_write_input_tokens = Some(5);
-        event.cache_write_ttl = Some(CacheWriteTtl::FiveMinutes);
+        event.cache_write_ttl = Some("5m".to_string());
         event.output_tokens = Some(4);
         event.total_tokens = Some(24);
         database.record(&event).unwrap();

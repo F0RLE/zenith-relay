@@ -9,8 +9,6 @@ use std::{
 #[cfg(target_os = "windows")]
 use std::ffi::OsStr;
 
-#[cfg(any(not(target_os = "windows"), test))]
-use crate::codex_config::load_api_key_for_launch;
 #[cfg(target_os = "windows")]
 use sysinfo::Pid;
 use sysinfo::{ProcessesToUpdate, System};
@@ -18,25 +16,6 @@ use sysinfo::{ProcessesToUpdate, System};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-#[cfg(not(target_os = "windows"))]
-const CODEX_PROCESS_NAMES: &[&str] = &[
-    "ChatGPT",
-    "ChatGPT.exe",
-    "codex",
-    "codex.exe",
-    "Codex",
-    "Codex.exe",
-    "OpenAI.Codex.exe",
-];
-#[cfg(not(target_os = "windows"))]
-const OPENCODE_PROCESS_NAMES: &[&str] = &[
-    "opencode",
-    "opencode.exe",
-    "OpenCode",
-    "OpenCode.exe",
-    "opencode-desktop",
-    "opencode-desktop.exe",
-];
 const CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENCODE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "windows")]
@@ -45,21 +24,21 @@ const CODEX_STOP_STABLE_WINDOW: Duration = Duration::from_millis(750);
 const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn launch_codex() -> String {
-    launch_codex_checked(true)
+    launch_codex_checked()
         .map(|_| "ChatGPT запущен.".to_string())
         .unwrap_or_else(|error| format!("Ключ сохранен, но ChatGPT не запустился: {error}"))
 }
 
 pub fn launch_codex_with_profile() -> Result<(), String> {
-    launch_codex_checked(false)
+    launch_codex_checked()
 }
 
 /// Restart OpenCode after changing its global configuration. OpenCode's
 /// desktop sidecar snapshots the provider catalog at startup, and launching
 /// a second instance only focuses the existing single-instance process.
 pub fn restart_opencode() -> Result<(), String> {
-    let executable = resolve_opencode_command().ok_or_else(|| {
-        "OpenCode executable was not found. Relay checks Desktop, the official installer, package managers, and PATH; restart Relay after installing it".to_string()
+    let executable = resolve_opencode_desktop_command().ok_or_else(|| {
+        "OpenCode desktop was not found. Install the desktop app or open it manually; Relay does not launch the terminal CLI without a terminal".to_string()
     })?;
 
     // Resolve the executable before stopping the current instance. A broken
@@ -75,10 +54,32 @@ pub fn restart_opencode() -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new(executable)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("failed to start OpenCode: {error}"))
+        #[cfg(target_os = "macos")]
+        {
+            let app = executable
+                .ancestors()
+                .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+                .ok_or_else(|| "OpenCode desktop bundle was not found".to_string())?;
+            Command::new("open")
+                .arg("-a")
+                .arg(app)
+                .status()
+                .map_err(|error| format!("failed to open OpenCode: {error}"))
+                .and_then(|status| {
+                    status
+                        .success()
+                        .then_some(())
+                        .ok_or_else(|| "OpenCode desktop did not open".to_string())
+                })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Command::new(executable)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| format!("failed to start OpenCode: {error}"))
+        }
     }
 }
 
@@ -98,17 +99,13 @@ fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
         windows_hidden_command(executable)
     };
 
-    // GUI builds ignore CREATE_NEW_CONSOLE; CLI/TUI builds receive their own
-    // console instead of inheriting Relay's hidden process window.
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    command.creation_flags(CREATE_NEW_CONSOLE);
     command
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
-fn resolve_opencode_command() -> Option<PathBuf> {
+fn resolve_opencode_desktop_command() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(configured) = env::var_os("OPENCODE_BIN").filter(|value| !value.is_empty()) {
         candidates.push(PathBuf::from(configured));
@@ -247,37 +244,11 @@ fn resolve_opencode_command() -> Option<PathBuf> {
         }
     }
 
-    // Discover package-manager global bin directories. This covers npm,
-    // pnpm, Bun and Yarn installations even when their shims are not in the
-    // environment inherited by the desktop app.
-    for (manager, args) in [
-        ("npm", ["prefix", "-g"].as_slice()),
-        ("pnpm", ["bin", "-g"].as_slice()),
-        ("bun", ["pm", "bin", "-g"].as_slice()),
-        ("yarn", ["global", "bin"].as_slice()),
-    ] {
-        let Some(manager_path) = find_command_on_path(manager) else {
-            continue;
-        };
-        let Ok(output) = run_command_output(&manager_path, args) else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let Ok(directory) = String::from_utf8(output.stdout) else {
-            continue;
-        };
-        let directory = PathBuf::from(directory.trim());
-        if !directory.as_os_str().is_empty() {
-            push_opencode_commands(&mut candidates, &directory);
-            // npm's global prefix is the parent of its bin directory on
-            // Unix, but the prefix itself is the bin directory on Windows.
-            push_opencode_commands(&mut candidates, &directory.join("bin"));
-        }
-    }
-
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.is_file())
+        .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
+        .find(|candidate| is_opencode_desktop_path(candidate))
 }
 
 fn push_opencode_commands(candidates: &mut Vec<PathBuf>, directory: &Path) {
@@ -332,22 +303,6 @@ fn push_macos_app_bundles(candidates: &mut Vec<PathBuf>, directory: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 fn push_macos_app_bundles(_candidates: &mut Vec<PathBuf>, _directory: &Path) {}
-
-fn run_command_output(path: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
-    #[cfg(target_os = "windows")]
-    if path.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-    }) {
-        return windows_hidden_command("cmd.exe")
-            .arg("/D")
-            .arg("/S")
-            .arg("/C")
-            .arg(path)
-            .args(args)
-            .output();
-    }
-    Command::new(path).args(args).output()
-}
 
 pub fn is_codex_running() -> bool {
     let system = codex_process_system();
@@ -501,7 +456,7 @@ fn windows_taskkill_arguments(pid: u32, force: bool) -> Vec<String> {
     arguments
 }
 
-fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
+fn launch_codex_checked() -> Result<(), String> {
     // Opening an already running desktop app is a no-op. Besides avoiding a
     // duplicate process, this prevents Chromium from reinitializing its
     // profile and touching the large on-disk cache on every click.
@@ -511,7 +466,6 @@ fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let _ = inject_saved_key;
         launch_codex_desktop()
     }
 
@@ -526,46 +480,13 @@ fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
                 return Ok(());
             }
         }
-        start_detached(resolve_codex_cli_path(), inject_saved_key)
+        Err("ChatGPT/Codex desktop was not found. Install the desktop app; the terminal CLI cannot be opened from Relay without a terminal".to_string())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        start_detached(resolve_codex_cli_path(), inject_saved_key)
+        Err("Codex desktop launch is unavailable on this platform. Open a supported desktop app manually; Relay will not start the terminal CLI in the background".to_string())
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn resolve_codex_cli_path() -> PathBuf {
-    if let Some(path) = find_command_on_path("codex") {
-        return path;
-    }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return PathBuf::from("codex");
-    };
-    for candidate in [
-        home.join(".local/bin/codex"),
-        home.join(".volta/bin/codex"),
-        home.join(".asdf/shims/codex"),
-    ] {
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    for (root, suffix) in [
-        (home.join(".nvm/versions/node"), "bin/codex"),
-        (
-            home.join(".local/share/fnm/node-versions"),
-            "installation/bin/codex",
-        ),
-        (home.join(".fnm/node-versions"), "installation/bin/codex"),
-        (home.join(".asdf/installs/nodejs"), "bin/codex"),
-    ] {
-        if let Some(path) = newest_versioned_command(&root, suffix) {
-            return path;
-        }
-    }
-    PathBuf::from("codex")
 }
 
 fn find_command_on_path(name: &str) -> Option<PathBuf> {
@@ -583,47 +504,6 @@ fn find_command_on_path(name: &str) -> Option<PathBuf> {
     env::split_paths(&paths)
         .flat_map(|directory| names.iter().map(move |entry| directory.join(entry)))
         .find(|candidate| candidate.is_file())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn newest_versioned_command(root: &Path, suffix: &str) -> Option<PathBuf> {
-    let mut candidates = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join(suffix))
-        .filter(|candidate| candidate.is_file())
-        .collect::<Vec<_>>();
-    candidates.sort();
-    candidates.pop()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn start_detached(path: PathBuf, inject_saved_key: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = windows_hidden_command(path);
-        configure_launch_environment(&mut command, inject_saved_key);
-        command.spawn().map(|_| ()).map_err(|err| err.to_string())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut command = Command::new(path);
-        configure_launch_environment(&mut command, inject_saved_key);
-        command.spawn().map(|_| ()).map_err(|err| err.to_string())
-    }
-}
-
-#[cfg(any(not(target_os = "windows"), test))]
-fn configure_launch_environment(command: &mut Command, inject_saved_key: bool) {
-    if inject_saved_key {
-        if let Some(api_key) = load_api_key_for_launch() {
-            command.env("OPENAI_API_KEY", api_key);
-        }
-        return;
-    }
-    command.env_remove("OPENAI_API_KEY");
-    command.env_remove("OPENAI_BASE_URL");
 }
 
 #[cfg(target_os = "windows")]
@@ -791,30 +671,40 @@ fn is_opencode_process_identity(
 ) -> bool {
     #[cfg(target_os = "windows")]
     {
-        // Electron creates crashpad/GPU/renderer children with the same
-        // executable. Only the main OpenCode process may be terminated; the
-        // normal task-kill tree then cleans up its children.
+        // Chromium desktop wrappers create crashpad/GPU/renderer children with
+        // the same executable; those helpers are not the app itself.
         if command
             .iter()
             .any(|value| value.as_ref().starts_with("--type="))
         {
             return false;
         }
-        let path = executable
-            .map(|value| value.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        let name_matches = ["opencode.exe", "opencode-desktop.exe"]
-            .iter()
-            .any(|candidate| name.eq_ignore_ascii_case(candidate));
-        name_matches && path.contains("opencode")
+        [
+            "opencode.exe",
+            "opencode-desktop.exe",
+            "OpenCode Dev.exe",
+            "OpenCode Beta.exe",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            && executable.is_some_and(is_windows_opencode_desktop_path)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (executable, command);
-        OPENCODE_PROCESS_NAMES
+        !command
             .iter()
-            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            .any(|value| value.as_ref().starts_with("--type="))
+            && executable.is_some_and(|path| {
+                if cfg!(target_os = "macos") {
+                    name.eq_ignore_ascii_case("OpenCode") && is_macos_opencode_desktop_path(path)
+                } else {
+                    is_linux_opencode_desktop_path(path)
+                        && ["opencode", "opencode-desktop", "ai.opencode.desktop"]
+                            .iter()
+                            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+                }
+            })
     }
 }
 
@@ -858,11 +748,89 @@ fn is_codex_process_identity(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (executable, command);
-        CODEX_PROCESS_NAMES
-            .iter()
-            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        cfg!(target_os = "macos")
+            && !command
+                .iter()
+                .any(|value| value.as_ref().starts_with("--type="))
+            && executable.is_some_and(|path| {
+                (name.eq_ignore_ascii_case("ChatGPT")
+                    && is_macos_app_executable(path, "chatgpt", "chatgpt"))
+                    || (name.eq_ignore_ascii_case("Codex")
+                        && is_macos_app_executable(path, "codex", "codex"))
+            })
     }
+}
+
+fn is_opencode_desktop_path(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        is_windows_opencode_desktop_path(path)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        is_macos_opencode_desktop_path(path)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        is_linux_opencode_desktop_path(path)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_opencode_desktop_path(path: &Path) -> bool {
+    let path = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let desktop_name = [
+        "opencode.exe",
+        "opencode-desktop.exe",
+        "opencode dev.exe",
+        "opencode beta.exe",
+    ]
+    .iter()
+    .any(|name| path.ends_with(&format!("\\{name}")));
+    desktop_name
+        && !path.contains("\\bin\\")
+        && !path.contains("\\resources\\")
+        && [
+            "\\programs\\@opencode-aidesktop\\",
+            "\\programs\\opencode\\",
+            "\\programs\\opencode desktop\\",
+            "\\programs\\opencode dev\\",
+            "\\programs\\opencode beta\\",
+            "\\program files\\opencode\\",
+            "\\program files\\opencode desktop\\",
+            "\\program files\\opencode dev\\",
+            "\\program files\\opencode beta\\",
+            "\\scoop\\apps\\opencode-desktop\\",
+        ]
+        .iter()
+        .any(|root| path.contains(root))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_macos_opencode_desktop_path(path: &Path) -> bool {
+    ["opencode", "opencode beta", "opencode dev"]
+        .iter()
+        .any(|bundle| is_macos_app_executable(path, bundle, "opencode"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_macos_app_executable(path: &Path, bundle: &str, executable: &str) -> bool {
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    path.ends_with(&format!("/{bundle}.app/contents/macos/{executable}"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_linux_opencode_desktop_path(path: &Path) -> bool {
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    path.ends_with(".appimage") && path.contains("opencode")
+        || path.ends_with("/opencode-desktop")
+        || path.ends_with("/ai.opencode.desktop")
+        || (path.ends_with("/opencode")
+            && (path.contains("/opt/opencode/")
+                || (path.contains("/.mount_") && path.contains("opencode"))))
 }
 
 #[cfg(target_os = "windows")]
@@ -911,21 +879,60 @@ fn process_stop_is_stable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
     #[test]
-    fn account_profile_launch_clears_api_environment_overrides() {
-        let mut command = Command::new("codex");
-        command.env("OPENAI_API_KEY", "old-key");
-        command.env("OPENAI_BASE_URL", "https://old.example/v1");
-        configure_launch_environment(&mut command, false);
-        let environment = command.get_envs().collect::<Vec<_>>();
-        assert!(environment
-            .iter()
-            .any(|(key, value)| { *key == OsStr::new("OPENAI_API_KEY") && value.is_none() }));
-        assert!(environment
-            .iter()
-            .any(|(key, value)| { *key == OsStr::new("OPENAI_BASE_URL") && value.is_none() }));
+    fn unix_desktop_paths_do_not_include_terminal_clients_or_helpers() {
+        assert!(is_macos_app_executable(
+            Path::new("/Applications/Codex.app/Contents/MacOS/Codex"),
+            "codex",
+            "codex"
+        ));
+        assert!(is_macos_app_executable(
+            Path::new("/Users/test/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
+            "chatgpt",
+            "chatgpt"
+        ));
+        assert!(!is_macos_app_executable(
+            Path::new("/Applications/Codex.app/Contents/Resources/codex"),
+            "codex",
+            "codex"
+        ));
+        assert!(!is_macos_app_executable(
+            Path::new("/usr/local/bin/codex"),
+            "codex",
+            "codex"
+        ));
+        assert!(is_macos_opencode_desktop_path(Path::new(
+            "/Applications/OpenCode.app/Contents/MacOS/OpenCode"
+        )));
+        assert!(!is_macos_opencode_desktop_path(Path::new(
+            "/Users/test/.opencode/bin/opencode"
+        )));
+        assert!(is_linux_opencode_desktop_path(Path::new(
+            "/usr/bin/ai.opencode.desktop"
+        )));
+        assert!(is_linux_opencode_desktop_path(Path::new(
+            "/opt/OpenCode/opencode"
+        )));
+        assert!(!is_linux_opencode_desktop_path(Path::new(
+            "/usr/local/bin/opencode"
+        )));
+        assert!(!is_linux_opencode_desktop_path(Path::new(
+            "/home/test/.opencode/bin/opencode"
+        )));
+    }
+
+    #[test]
+    fn windows_opencode_desktop_path_excludes_cli_installation() {
+        assert!(is_windows_opencode_desktop_path(Path::new(
+            r"C:\Users\test\AppData\Local\Programs\@opencode-aidesktop\opencode.exe"
+        )));
+        assert!(!is_windows_opencode_desktop_path(Path::new(
+            r"C:\Users\test\AppData\Local\Programs\OpenCode\bin\opencode.exe"
+        )));
+        assert!(!is_windows_opencode_desktop_path(Path::new(
+            r"C:\Users\test\.opencode\bin\opencode.exe"
+        )));
     }
 
     #[test]
@@ -1029,7 +1036,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_opencode_matches_desktop_but_ignores_electron_helpers() {
+    fn windows_opencode_matches_desktop_but_ignores_chromium_helpers() {
         let executable =
             Path::new(r"C:\Users\test\AppData\Local\Programs\@opencode-aidesktop\opencode.exe");
         assert!(is_opencode_process_identity(

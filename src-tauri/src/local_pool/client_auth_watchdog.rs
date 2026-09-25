@@ -398,8 +398,8 @@ mod tests {
     fn watchdog_requires_an_unambiguous_desktop_cdp_port() {
         assert_eq!(unique_remote_debugging_port([]), None);
         assert_eq!(unique_remote_debugging_port([56140]), Some(56140));
-        // Electron can expose the same parent port through duplicate process
-        // entries, which remains unambiguous.
+        // A Chromium desktop wrapper can expose the same parent port through
+        // duplicate process entries, which remains unambiguous.
         assert_eq!(unique_remote_debugging_port([56140, 56140]), Some(56140));
         assert_eq!(unique_remote_debugging_port([56140, 56141]), None);
     }

@@ -788,7 +788,7 @@ async fn activate_account_profile(
         } else {
             None
         };
-        let attached = codex::attach_account(
+        let attached = codex::attach_account_explicit(
             &profile_dir,
             &state.profile_backup_root(),
             account_id,

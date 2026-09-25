@@ -373,6 +373,7 @@ pub fn run() {
             local_pool::commands::gateway::set_local_common_proxy,
             local_pool::commands::gateway::set_local_account_proxy_required,
             local_pool::commands::gateway::set_local_codex_background_tasks,
+            local_pool::commands::gateway::set_local_tool_policy,
             local_pool::commands::gateway::set_local_chatgpt_retry_until_available,
             local_pool::commands::gateway::set_local_codex_websockets,
             local_pool::commands::gateway::set_codex_profile_websockets,

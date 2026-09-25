@@ -6,12 +6,10 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeHistory, WakeTask},
     deserialize_model_reasoning_allowed_levels, normalize_model_ids,
     normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, normalize_subscription_plan_order,
+    normalize_model_service_tier_overrides,
     protocol::RemoteAccountLocation,
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, RuntimeCandidatePolicy,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding,
-    SourceProtocolConfig, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    ApiModelPriceOverride, DefaultServiceTier, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord,
+    RuntimeSourcePolicyUpdate, SourceProtocolBinding, SourceProtocolConfig, WireApi,
 };
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
@@ -36,6 +34,13 @@ pub enum BindScope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySettings {
+    #[serde(default)]
+    pub tool_policy: zenith_relay_core::ToolPolicy,
+    /// Use the explicitly labelled Excel/Basis Points route for compatible
+    /// OAuth accounts. The physical account candidate and its quota remain
+    /// shared with native Responses traffic.
+    #[serde(default)]
+    pub basis_points_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     pub enabled: bool,
@@ -44,14 +49,6 @@ pub struct GatewaySettings {
     pub client_host: String,
     #[serde(default = "default_max_retry_candidates")]
     pub max_retry_candidates: u8,
-    #[serde(default = "default_cooldown_after_failures")]
-    pub cooldown_after_failures: u8,
-    #[serde(default = "default_keep_last_candidate_available")]
-    pub keep_last_candidate_available: bool,
-    #[serde(default)]
-    pub routing_strategy: RoutingStrategy,
-    #[serde(default)]
-    pub subscription_plan_order: Vec<String>,
     #[serde(default)]
     pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
@@ -68,8 +65,8 @@ pub struct GatewaySettings {
     pub codex_background_tasks_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
-    /// When enabled, managed ChatGPT requests wait for a temporary provider
-    /// outage to recover instead of returning the last retryable failure.
+    /// Legacy persisted key for API text-route recovery, including non-ChatGPT
+    /// clients. Retained so existing local settings survive upgrades.
     #[serde(default)]
     pub chatgpt_retry_until_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,16 +368,14 @@ impl Default for AutomationRecords {
 impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
+            tool_policy: Default::default(),
+            basis_points_enabled: false,
             enabled: false,
             bind_scope: BindScope::Localhost,
             port: DEFAULT_GATEWAY_PORT,
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
-            cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
-            keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-            routing_strategy: RoutingStrategy::Adaptive,
-            pool_routing: None,
-            subscription_plan_order: Vec::new(),
+            pool_routing: Some(zenith_relay_core::PoolRoutingPolicy::default()),
             default_service_tier: DefaultServiceTier::Standard,
             image_base_model: None,
             common_proxy_configured: false,
@@ -437,16 +432,13 @@ impl GatewaySettings {
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
         }
+        self.tool_policy.clone().normalized()?;
         if self.client_host != "127.0.0.1" && self.client_host != "localhost" {
             return Err("local gateway host must be localhost or 127.0.0.1");
         }
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
         }
-        if !(1..=8).contains(&self.cooldown_after_failures) {
-            return Err("cooldown after failures must be between 1 and 8");
-        }
-        normalize_subscription_plan_order(self.subscription_plan_order.clone())?;
         if let Some(policy) = &self.pool_routing {
             policy.validate()?;
         }
@@ -481,14 +473,6 @@ impl GatewaySettings {
 
 fn default_quota_request_timeout_seconds() -> u64 {
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS
-}
-
-fn default_cooldown_after_failures() -> u8 {
-    DEFAULT_COOLDOWN_AFTER_FAILURES
-}
-
-fn default_keep_last_candidate_available() -> bool {
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {

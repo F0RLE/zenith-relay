@@ -1,3 +1,8 @@
+mod refresh;
+mod rotation_upgrade;
+mod source_refresh;
+pub(crate) use source_refresh::SourceRefreshFence;
+use source_refresh::{SourceRefreshRevisions, STATE_SOURCE_REVISIONS};
 pub mod secret_store;
 pub mod telemetry_db;
 pub(crate) mod vault;
@@ -14,15 +19,15 @@ use crate::{
     },
     storage_paths::StoragePaths,
 };
+pub(crate) use refresh::{AccountRefreshFence, AppliedAccountRefresh};
+use refresh::{RefreshRevisions, STATE_REFRESH_REVISIONS};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zenith_relay_core::{
-    automations::WakeExecutionPolicy, normalize_image_base_model, normalize_subscription_plan_order,
-};
+use zenith_relay_core::{automations::WakeExecutionPolicy, normalize_image_base_model};
 
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
@@ -52,6 +57,9 @@ pub struct LocalPoolStore {
     automations: AutomationRecords,
     remote_target: Option<RemoteTargetRecord>,
     ownership_operation: Option<OwnershipOperationRecord>,
+    refresh_revisions: RefreshRevisions,
+    source_refresh_revisions: SourceRefreshRevisions,
+    refresh_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl LocalPoolStore {
@@ -61,7 +69,7 @@ impl LocalPoolStore {
         let root = paths.data_root();
         let database = Arc::new(TelemetryDb::open(&paths.database_file())?);
         let state = load_or_initialize_state(&root, &database)?;
-        let gateway = state.gateway;
+        let mut gateway = state.gateway;
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
@@ -73,6 +81,8 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let accounts = state.accounts;
+        rotation_upgrade::upgrade_saved_gateway(&database, &mut gateway, &sources, &accounts)?;
+
         let mut automations = state.automations;
         let mut automation_policy_changed = false;
         for task in &mut automations.tasks {
@@ -98,6 +108,34 @@ impl LocalPoolStore {
                 .validate()
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
+        let refresh_revisions = match state.refresh_revisions {
+            Some(revisions) => {
+                revisions.validate(&accounts)?;
+                revisions
+            }
+            None => {
+                let revisions = RefreshRevisions::initialize(&accounts)?;
+                database.replace_state_json(&[(
+                    STATE_REFRESH_REVISIONS,
+                    serialize_state(&revisions)?,
+                )])?;
+                revisions
+            }
+        };
+        let source_refresh_revisions = match state.source_refresh_revisions {
+            Some(revisions) => {
+                revisions.validate(&sources)?;
+                revisions
+            }
+            None => {
+                let revisions = SourceRefreshRevisions::default().with_sources(&[], &sources)?;
+                database.replace_state_json(&[(
+                    STATE_SOURCE_REVISIONS,
+                    serialize_state(&revisions)?,
+                )])?;
+                revisions
+            }
+        };
         cleanup_legacy_state_files(&root)?;
         Ok(Self {
             database,
@@ -108,6 +146,9 @@ impl LocalPoolStore {
             automations,
             remote_target: state.remote_target,
             ownership_operation: state.ownership_operation,
+            refresh_revisions,
+            source_refresh_revisions,
+            refresh_changed: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -381,7 +422,22 @@ impl LocalPoolStore {
             return Ok(());
         }
 
-        let mut values = Vec::with_capacity(4);
+        let revisions = if changed.accounts {
+            self.refresh_revisions
+                .with_accounts(&self.accounts, &accounts)?
+        } else {
+            self.refresh_revisions.clone()
+        };
+        let source_revisions = self
+            .source_refresh_revisions
+            .with_sources(&self.sources, &sources)?;
+        let mut values = Vec::with_capacity(6);
+        if source_revisions != self.source_refresh_revisions {
+            values.push((STATE_SOURCE_REVISIONS, serialize_state(&source_revisions)?));
+        }
+        if revisions != self.refresh_revisions {
+            values.push((STATE_REFRESH_REVISIONS, serialize_state(&revisions)?));
+        }
         if changed.sources {
             values.push((STATE_SOURCES, serialize_state(&sources)?));
         }
@@ -404,14 +460,25 @@ impl LocalPoolStore {
                 .replace_state_json_and_delete_accounts_data(&values, deleted_account_ids)?;
         }
 
+        let refresh_changed = self.refresh_registration_changed(&revisions, &accounts)
+            || source_revisions != self.source_refresh_revisions;
+        self.source_refresh_revisions = source_revisions;
         self.sources = sources;
         self.accounts = accounts;
         self.keys = keys;
         self.automations = automations;
+        self.refresh_revisions = revisions;
+        if refresh_changed {
+            self.notify_refresh_changed();
+        }
         Ok(())
     }
 
     pub fn replace_gateway(&mut self, mut gateway: GatewaySettings) -> Result<()> {
+        gateway.tool_policy = gateway
+            .tool_policy
+            .normalized()
+            .map_err(LocalPoolError::invalid_state)?;
         gateway.hidden_models = crate::local_pool::models::normalized_values(gateway.hidden_models);
         gateway.model_price_overrides = gateway
             .model_price_overrides
@@ -430,9 +497,6 @@ impl LocalPoolStore {
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.model_display_order =
             zenith_relay_core::normalize_model_ids(gateway.model_display_order);
-        gateway.subscription_plan_order =
-            normalize_subscription_plan_order(gateway.subscription_plan_order)
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
             .map_err(LocalPoolError::invalid_state)?;
         if gateway == self.gateway {
@@ -441,9 +505,20 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        self.database
-            .replace_state_json(&[(STATE_GATEWAY, serialize_state(&gateway)?)])?;
+        let revisions = self
+            .refresh_revisions
+            .with_gateway(&self.gateway, &gateway)?;
+        let mut values = vec![(STATE_GATEWAY, serialize_state(&gateway)?)];
+        if revisions != self.refresh_revisions {
+            values.push((STATE_REFRESH_REVISIONS, serialize_state(&revisions)?));
+        }
+        self.database.replace_state_json(&values)?;
+        let refresh_changed = revisions != self.refresh_revisions;
         self.gateway = gateway;
+        self.refresh_revisions = revisions;
+        if refresh_changed {
+            self.notify_refresh_changed();
+        }
         Ok(())
     }
 
@@ -492,14 +567,23 @@ impl LocalPoolStore {
                 .validate()
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         }
+        let revisions = self
+            .refresh_revisions
+            .with_accounts(&self.accounts, &accounts)?;
         self.database.replace_state_json(&[
             (STATE_ACCOUNTS, serialize_state(&accounts)?),
             (STATE_KEYS, serialize_state(&keys)?),
             (STATE_OWNERSHIP_OPERATION, serialize_state(&operation)?),
+            (STATE_REFRESH_REVISIONS, serialize_state(&revisions)?),
         ])?;
+        let refresh_changed = self.refresh_registration_changed(&revisions, &accounts);
         self.accounts = accounts;
         self.keys = keys;
         self.ownership_operation = operation;
+        self.refresh_revisions = revisions;
+        if refresh_changed {
+            self.notify_refresh_changed();
+        }
         Ok(())
     }
 
@@ -600,6 +684,8 @@ struct PersistedState {
     automations: AutomationRecords,
     remote_target: Option<RemoteTargetRecord>,
     ownership_operation: Option<OwnershipOperationRecord>,
+    refresh_revisions: Option<RefreshRevisions>,
+    source_refresh_revisions: Option<SourceRefreshRevisions>,
 }
 
 #[derive(Deserialize)]
@@ -629,6 +715,14 @@ fn load_or_initialize_state(root: &Path, database: &TelemetryDb) -> Result<Persi
         automations: load_state_from_values(&values, STATE_AUTOMATIONS)?,
         remote_target: load_optional_state_from_values(&values, STATE_REMOTE_TARGET)?,
         ownership_operation: load_optional_state_from_values(&values, STATE_OWNERSHIP_OPERATION)?,
+        source_refresh_revisions: values
+            .contains_key(STATE_SOURCE_REVISIONS)
+            .then(|| load_state_from_values(&values, STATE_SOURCE_REVISIONS))
+            .transpose()?,
+        refresh_revisions: values
+            .contains_key(STATE_REFRESH_REVISIONS)
+            .then(|| load_state_from_values(&values, STATE_REFRESH_REVISIONS))
+            .transpose()?,
     })
 }
 
@@ -727,6 +821,8 @@ fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
         automations: read_legacy_json(&root.join("automations.json"))?,
         remote_target,
         ownership_operation: None,
+        refresh_revisions: None,
+        source_refresh_revisions: None,
     }))
 }
 
@@ -961,6 +1057,9 @@ fn legacy_io_error(error: std::io::Error) -> LocalPoolError {
 
 #[cfg(test)]
 mod tests {
+    mod refresh;
+    mod rotation_upgrade;
+    mod source_refresh;
     use super::*;
     use crate::local_pool::models::{OwnershipOperationKind, OwnershipOperationPhase};
     use std::collections::{BTreeMap, BTreeSet};
@@ -973,7 +1072,7 @@ mod tests {
             AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
         },
         quota::{QuotaSnapshot, Subscription},
-        RoutingStrategy, WireApi,
+        WireApi,
     };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -993,7 +1092,7 @@ mod tests {
         let root = temp_root();
         let store = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(store.gateway().port, 14998);
-        assert_eq!(store.database().state_count().unwrap(), 7);
+        assert_eq!(store.database().state_count().unwrap(), 9);
         assert!(root.join("data/database/relay.sqlite").exists());
         assert!(!root.join("data/metadata.json").exists());
         drop(store);
@@ -1009,10 +1108,11 @@ mod tests {
         let root = temp_root();
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let mut gateway = store.gateway().clone();
+        gateway.tool_policy = zenith_relay_core::ToolPolicy {
+            mode: zenith_relay_core::ToolPolicyMode::Automatic,
+        };
         gateway.quota_request_timeout_seconds = 10;
         gateway.chatgpt_interface_quota_reserve_basis_points = 700;
-        gateway.routing_strategy = RoutingStrategy::SubscriptionExpiry;
-        gateway.subscription_plan_order = vec!["business".into(), "plus".into()];
         gateway.image_base_model = Some("gpt-5.4-mini".into());
         gateway.model_price_overrides.insert(
             "GPT-5.4".into(),
@@ -1028,20 +1128,20 @@ mod tests {
         drop(store);
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(
+            reopened.gateway().tool_policy.mode,
+            zenith_relay_core::ToolPolicyMode::Automatic
+        );
+        assert_eq!(
+            reopened.gateway().tool_policy.mode,
+            zenith_relay_core::ToolPolicyMode::Automatic
+        );
         assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
         assert_eq!(
             reopened
                 .gateway()
                 .chatgpt_interface_quota_reserve_basis_points,
             700
-        );
-        assert_eq!(
-            reopened.gateway().routing_strategy,
-            RoutingStrategy::SubscriptionExpiry
-        );
-        assert_eq!(
-            reopened.gateway().subscription_plan_order,
-            ["business", "plus"]
         );
         assert_eq!(
             reopened.gateway().image_base_model.as_deref(),

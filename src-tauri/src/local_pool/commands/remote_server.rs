@@ -46,6 +46,7 @@ const MAX_CONFIGURATION_PRESET_BYTES: usize = 1024 * 1024;
 #[tauri::command]
 pub async fn get_remote_source_stats(
     source_id: String,
+    force: Option<bool>,
     state: State<'_, DesktopState>,
 ) -> Result<SourceProviderStats, CommandError> {
     let Some((_, client)) = active_client(&state)? else {
@@ -53,7 +54,10 @@ pub async fn get_remote_source_stats(
             LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
         );
     };
-    client.source_stats(&source_id).await.map_err(remote_error)
+    client
+        .source_stats(&source_id, force.unwrap_or(false))
+        .await
+        .map_err(remote_error)
 }
 
 #[derive(Deserialize)]
@@ -113,6 +117,7 @@ pub enum RemoteServerAction {
     StartGateway,
     StopGateway,
     SetCodexBackgroundTasks,
+    SetToolPolicy,
     SetChatgptRetryUntilAvailable,
     SetCodexWebsockets,
     CreateWakeTask,
@@ -222,7 +227,7 @@ pub async fn connect_remote_server(
         }
     }
     if let Some(snapshot) = &remote_snapshot {
-        ownership::reconcile_remote_account_locations(&state, &target, snapshot)?;
+        ownership::reconcile_remote_account_locations(&state, &target, snapshot).await?;
     }
     Ok(RemoteConnectionState {
         target,
@@ -241,7 +246,7 @@ pub async fn get_remote_server_state(
         return Ok(None);
     };
     let snapshot = client.state().await.map_err(remote_error)?;
-    ownership::reconcile_remote_account_locations(&state, &target, &snapshot)?;
+    ownership::reconcile_remote_account_locations(&state, &target, &snapshot).await?;
     Ok(Some(snapshot))
 }
 
@@ -415,18 +420,37 @@ async fn require_preset_protocol_contract(
                 )
             })
         });
-    if needs_contract
-        && !client
-            .capabilities()
-            .await
-            .map_err(remote_error)?
-            .supports(zenith_relay_core::protocol::Feature::SourceProtocols)
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::UnsupportedSchema,
-            "server does not support this configuration preset protocol version",
-        )
-        .into());
+    let needs_tool_policy =
+        preset.schema_version >= 5 || preset.settings.routing.tool_policy.is_some();
+    let needs_rotation = preset.schema_version >= 6
+        || preset
+            .settings
+            .routing
+            .pool_routing
+            .as_ref()
+            .is_some_and(zenith_relay_core::PoolRoutingPolicy::is_current_rotation);
+    let capabilities = client.capabilities().await.map_err(remote_error)?;
+    for (needed, feature) in [
+        (
+            needs_contract,
+            zenith_relay_core::protocol::Feature::SourceProtocols,
+        ),
+        (
+            needs_tool_policy,
+            zenith_relay_core::protocol::Feature::ToolPolicy,
+        ),
+        (
+            needs_rotation,
+            zenith_relay_core::protocol::Feature::Rotation,
+        ),
+    ] {
+        if needed && !capabilities.supports(feature) {
+            return Err(LocalPoolError::new(
+                ErrorCode::UnsupportedSchema,
+                "server does not support this configuration preset protocol version",
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -646,6 +670,39 @@ pub async fn execute_remote_server_action(
         );
     };
     let (method, path, requires_payload) = action_request(&input.action)?;
+    let needs_rotation = matches!(input.action, RemoteServerAction::SetRoutingPolicy)
+        && input
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.pointer("/poolRouting/version"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|version| version >= 2);
+    if needs_rotation
+        && !client
+            .capabilities()
+            .await
+            .map_err(remote_error)?
+            .supports(zenith_relay_core::protocol::Feature::Rotation)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::UnsupportedSchema,
+            "server does not support pool rotation",
+        )
+        .into());
+    }
+    if matches!(input.action, RemoteServerAction::SetToolPolicy)
+        && !client
+            .capabilities()
+            .await
+            .map_err(remote_error)?
+            .supports(zenith_relay_core::protocol::Feature::ToolPolicy)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::UnsupportedSchema,
+            "server does not support tool catalog policy",
+        )
+        .into());
+    }
     let uses_protocol_contract = matches!(&input.action, RemoteServerAction::ProbeSource { .. })
         || (matches!(
             &input.action,
@@ -789,6 +846,7 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::SetRoutingPolicy => {
             (Method::POST, "/routing/settings".to_string(), true)
         }
+
         RemoteServerAction::RefreshAllQuotas => {
             (Method::POST, "/pool/quota/refresh".to_string(), false)
         }
@@ -811,6 +869,9 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
             "/gateway/codex-background-tasks".to_string(),
             true,
         ),
+        RemoteServerAction::SetToolPolicy => {
+            (Method::POST, "/gateway/tool-policy".to_string(), true)
+        }
         RemoteServerAction::SetChatgptRetryUntilAvailable => (
             Method::POST,
             "/gateway/chatgpt-retry-until-available".to_string(),

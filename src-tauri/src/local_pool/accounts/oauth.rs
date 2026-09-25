@@ -17,6 +17,7 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code,
 };
+use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
 use zenith_relay_core::{normalize_error_code, ProxyConfig};
 
 use crate::local_pool::random_urlsafe;
@@ -130,17 +131,20 @@ impl CodexOAuthClient {
         callback: OAuthCallback,
         now_ms: u64,
     ) -> Result<OAuthTokenSet, OAuthError> {
-        let response = self
-            .http
-            .post(self.token_endpoint.clone())
-            .form(&AuthorizationCodeRequest {
-                grant_type: "authorization_code",
-                code: callback.code(),
-                redirect_uri: &pending.redirect_uri,
-                client_id: CODEX_OAUTH_CLIENT_ID,
-                code_verifier: &pending.code_verifier,
-            })
-            .send()
+        let (response, permit) = management_http_gate()
+            .send(
+                &self.http,
+                self.http
+                    .post(self.token_endpoint.clone())
+                    .form(&AuthorizationCodeRequest {
+                        grant_type: "authorization_code",
+                        code: callback.code(),
+                        redirect_uri: &pending.redirect_uri,
+                        client_id: CODEX_OAUTH_CLIENT_ID,
+                        code_verifier: &pending.code_verifier,
+                    }),
+                HttpClass::Auth,
+            )
             .await
             .map_err(|_| OAuthError::new(OAuthErrorCode::Transport, true))?;
         let status = response.status();
@@ -152,6 +156,7 @@ impl CodexOAuthClient {
                     OAuthError::new(OAuthErrorCode::ResponseTooLarge, false)
                 }
             })?;
+        drop(permit);
         if !status.is_success() {
             return Err(OAuthError {
                 code: OAuthErrorCode::TokenEndpointRejected,
@@ -175,15 +180,18 @@ impl CodexOAuthClient {
                 error_codes::INVALID_REFRESH_TOKEN,
             )
         })?;
-        let response = self
-            .http
-            .post(self.token_endpoint.clone())
-            .json(&RefreshTokenRequest {
-                client_id: CODEX_OAUTH_CLIENT_ID,
-                grant_type: "refresh_token",
-                refresh_token,
-            })
-            .send()
+        let (response, permit) = management_http_gate()
+            .send(
+                &self.http,
+                self.http
+                    .post(self.token_endpoint.clone())
+                    .json(&RefreshTokenRequest {
+                        client_id: CODEX_OAUTH_CLIENT_ID,
+                        grant_type: "refresh_token",
+                        refresh_token,
+                    }),
+                HttpClass::Auth,
+            )
             .await
             .map_err(|_| {
                 TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
@@ -200,6 +208,7 @@ impl CodexOAuthClient {
                     "response_too_large",
                 ),
             })?;
+        drop(permit);
         if !status.is_success() {
             let code = token_refresh_provider_error_code(&body)
                 .unwrap_or_else(|| "token_refresh_failed".into());

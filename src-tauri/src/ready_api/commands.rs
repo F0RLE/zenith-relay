@@ -1,8 +1,8 @@
 use super::{client::*, models::*, top_up};
 use crate::{
     codex_config::{
-        deactivate_provider, enable_provider, load_api_key_for_launch, provider_has_token,
-        reset_provider,
+        deactivate_provider, enable_provider, enable_provider_explicit, load_api_key_for_launch,
+        provider_has_token, reset_provider,
     },
     key_storage::{load_saved_app_key, save_app_key},
     launcher::{is_codex_running, launch_codex, launch_codex_with_profile},
@@ -222,7 +222,7 @@ pub(super) fn activate_ready_api_with_history(
         &default_codex_home(),
         local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
     )?;
-    enable_provider(api_key, &state.ready_api_backup_root())?;
+    enable_provider_explicit(api_key, &state.ready_api_backup_root())?;
     let result = (|| {
         if save_key {
             save_app_key(api_key)?;

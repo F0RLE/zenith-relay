@@ -1,6 +1,10 @@
 use super::import_orchestrator::{
-    apply_model_discovery, apply_model_discovery_failure, credential_local_error,
-    imported_identity, preserve_newer_account_state, ImportItemError, ImportItemStatus,
+    credential_local_error, imported_identity, ImportItemError, ImportItemStatus,
+};
+#[cfg(test)]
+use super::refresh_observations::model_refresh_error_kind;
+use super::refresh_observations::{
+    apply_models_read, apply_quota_read, record_read_error, AccountRefreshScope, RefreshReadKind,
 };
 use crate::local_pool::accounts::authority::{
     CredentialPersistence, ProcessAccountLocks, ProcessLockConfig, ProcessLockError,
@@ -11,7 +15,6 @@ use crate::local_pool::accounts::credentials::{
 };
 use crate::local_pool::accounts::oauth::CodexOAuthClient;
 use crate::local_pool::accounts::proxy::effective_proxy_config;
-use crate::local_pool::accounts::quota_service::apply_quota_failure;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::{
     current_time_ms, sync_account_state_if_running, sync_refreshed_account_or_rollback,
@@ -19,7 +22,8 @@ use crate::local_pool::commands::{
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
 use crate::local_pool::profiles::codex;
-use crate::local_pool::state::{DesktopState, QuotaRefreshReservation};
+use crate::local_pool::refresh::{self, RefreshRead};
+use crate::local_pool::state::DesktopState;
 use futures_util::{stream, StreamExt};
 use reqwest::header::HeaderValue;
 use reqwest::redirect::Policy;
@@ -39,6 +43,7 @@ use zenith_relay_core::providers::chatgpt::{
     ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition, Subscription};
+use zenith_relay_core::scheduler::refresh::{http::ManagementHttpScope, RefreshKind};
 use zenith_relay_core::ProxyConfig;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -68,14 +73,6 @@ pub(super) const TOKEN_REFRESH_SKEW_MS: u64 = 60_000;
 pub(super) const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration = Duration::from_secs(5);
 
 pub(super) const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
-
-pub(super) const QUOTA_REFRESH_RETRY_MS: u64 = 60_000;
-
-pub(super) const QUOTA_IDLE_REFRESH_MS: u64 = 15 * 60_000;
-
-pub(super) const QUOTA_RESET_REFRESH_MIN_DELAY_MS: u64 = 5_000;
-
-pub(super) const QUOTA_RESET_REFRESH_JITTER_MS: u64 = 10_000;
 
 // A profile observation is best effort. It must never hold a request or quota
 // refresh behind an automatic credential rotation for the normal five-second
@@ -178,13 +175,27 @@ pub(crate) struct PreparedAccountCredentials {
 }
 
 #[derive(Clone)]
-pub(super) struct PreparedAccountAuthorization {
+pub(in crate::local_pool) struct PreparedAccountAuthorization {
     pub(super) authorization: HeaderValue,
     pub(super) subscription_authorization: Option<HeaderValue>,
     pub(super) tokens: Option<TokenSet>,
     pub(super) agent_task_id: Option<String>,
     pub(super) provider_account_id: String,
     pub(super) proxy: Option<ProxyConfig>,
+}
+
+impl fmt::Debug for PreparedAccountAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedAccountAuthorization")
+            .field("authorization", &"[redacted]")
+            .field("subscription_authorization", &"[redacted]")
+            .field("tokens", &"[redacted]")
+            .field("agent_task_id", &"[redacted]")
+            .field("provider_account_id", &"[redacted]")
+            .field("proxy", &"[redacted]")
+            .finish()
+    }
 }
 
 impl PreparedAccountAuthorization {
@@ -895,17 +906,13 @@ pub(super) async fn refresh_manual_account_quota(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    match refresh_account_quota_once(state, account_id, true, true).await {
-        Ok(response) => {
-            settle_manual_quota_refresh(state, account_id, &response)?;
-            Ok(response)
-        }
-        Err(error) => {
-            let _ = record_quota_refresh_error(state, account_id, &error, current_time_ms());
-            settle_manual_quota_error(state, account_id, &error)?;
-            Err(error)
-        }
-    }
+    // Independent kind jobs; each joins its own automatic read. A models
+    // failure is persisted separately and must not erase a successful quota.
+    let (quota, _models) = tokio::join!(
+        refresh_account_quota_once(state, account_id),
+        refresh_account_models_once(state, account_id),
+    );
+    quota
 }
 
 pub(crate) async fn sync_managed_account_profile(
@@ -1211,8 +1218,11 @@ pub(super) async fn prepare_account_credentials_with_remote_policy(
             "failed to initialize account refresh locks",
         )
     })?;
-    let persistence =
-        CredentialPersistence::new(credentials.clone(), state.account_metadata_sink());
+    let persistence = CredentialPersistence::new(
+        credentials.clone(),
+        state.account_metadata_sink(),
+        state.transient_root(),
+    );
     let now_ms = current_time_ms();
     let prepared = authority
         .prepare_and_persist(
@@ -1276,41 +1286,43 @@ pub(super) async fn prepare_account_credentials_with_remote_policy(
 pub(crate) async fn refresh_account_quota_once(
     state: &DesktopState,
     account_id: &str,
-    force_subscription_refresh: bool,
-    refresh_models: bool,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    match state.reserve_quota_refresh(account_id)? {
-        QuotaRefreshReservation::Leader(leader) => {
-            let result = refresh_account_quota_as_leader(
-                state,
-                account_id,
-                force_subscription_refresh,
-                refresh_models,
-            )
-            .await;
-            leader.finish(result)
-        }
-        QuotaRefreshReservation::Follower(follower) => follower.wait().await,
+    match refresh::request(state, account_id, RefreshKind::Quota).await? {
+        RefreshRead::Quota(response) => Ok(*response),
+        _ => Err(LocalPoolError::invalid_state(
+            "unexpected quota refresh result",
+        )),
     }
 }
 
-async fn refresh_account_quota_as_leader(
+pub(in crate::local_pool) async fn read_account_quota_once(
     state: &DesktopState,
-    account_id: &str,
+    scope: &AccountRefreshScope,
     force_subscription_refresh: bool,
-    refresh_models: bool,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    let quota_lock = state.quota_account_lock(account_id)?;
+    let quota_lock = state.quota_account_lock(&scope.fence.account_id)?;
     let _quota_guard = quota_lock.lock().await;
-    let mut prepared = prepare_account_request_authorization(state, account_id).await?;
+    scope.validate(state)?;
+    let result = read_account_quota(state, scope, force_subscription_refresh).await;
+    if let Err(error) = &result {
+        record_read_error(state, scope, RefreshReadKind::Quota, error).await;
+    }
+    result
+}
+
+async fn read_account_quota(
+    state: &DesktopState,
+    scope: &AccountRefreshScope,
+    force_subscription_refresh: bool,
+) -> LocalResult<AccountQuotaRefreshResponse> {
+    let account_id = &scope.fence.account_id;
+    let mut prepared = refresh::request_authorization(state, &scope.fence).await?;
+    scope.validate(state)?;
+    let http_scope = scope.http_scope(state);
     let now_ms = current_time_ms();
     let request_timeout =
         Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
-    let account_before_refresh = state
-        .store()?
-        .account(account_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    let account_before_refresh = &scope.before;
     let mut subscription = account_before_refresh.account.subscription.clone();
     if subscription.active_until_ms.is_none() {
         if let Some(active_until_ms) = prepared.tokens.as_ref().and_then(|tokens| {
@@ -1335,37 +1347,47 @@ async fn refresh_account_quota_as_leader(
         );
     if refresh_subscription {
         let _subscription_guard = state.subscription_refresh_guard().await;
+        scope.validate(state)?;
         if let Some(metadata) =
-            request_subscription_metadata(&prepared, request_timeout, now_ms).await
+            request_subscription_metadata(&prepared, request_timeout, now_ms, &http_scope).await
         {
             apply_subscription_metadata(&mut subscription, metadata, now_ms);
         }
     }
-    let (mut refreshed, mut discovered_models) = request_account_metadata(
+    scope.validate(state)?;
+    let mut refreshed = request_account_quota_metadata(
         &prepared,
         request_timeout,
         now_ms,
         &subscription,
         refresh_subscription,
-        refresh_models,
+        &http_scope,
     )
     .await?;
-    if prepared.tokens.is_some()
-        && (quota_refresh_was_unauthorized(&refreshed)
-            || model_discovery_was_unauthorized(&discovered_models))
-    {
-        match recover_account_authorization(state, account_id, current_time_ms()).await {
+    respect_quota_retry_after(state, scope, &refreshed);
+    scope.validate(state)?;
+    if prepared.tokens.is_some() && quota_refresh_was_unauthorized(&refreshed) {
+        match recover_account_authorization(
+            state,
+            account_id,
+            prepared.tokens.as_ref().map(TokenSet::generation),
+            current_time_ms(),
+        )
+        .await
+        {
             Ok(recovered) => {
                 prepared = PreparedAccountAuthorization::from_tokens(recovered)?;
-                (refreshed, discovered_models) = request_account_metadata(
+                scope.validate(state)?;
+                refreshed = request_account_quota_metadata(
                     &prepared,
                     request_timeout,
                     current_time_ms(),
                     &subscription,
                     refresh_subscription,
-                    refresh_models,
+                    &http_scope,
                 )
                 .await?;
+                respect_quota_retry_after(state, scope, &refreshed);
             }
             Err(_) if account_auth_is_access_only(state, account_id)? => {
                 mark_access_only_reauthentication(state, account_id).await?;
@@ -1379,8 +1401,7 @@ async fn refresh_account_quota_as_leader(
             Err(_) => {}
         }
     } else if let Some(task_id) = prepared.agent_task_id.as_deref() {
-        let invalid_task = quota_refresh_has_invalid_agent_task(&refreshed)
-            || model_discovery_has_invalid_agent_task(&discovered_models);
+        let invalid_task = quota_refresh_has_invalid_agent_task(&refreshed);
         if invalid_task {
             let stored = CredentialStore::from_backend(NativeSecretBackend)
                 .require(account_id)
@@ -1399,119 +1420,101 @@ async fn refresh_account_quota_as_leader(
                 )?,
                 Err(error) => return Err(error),
             };
-            (refreshed, discovered_models) = request_account_metadata(
+            scope.validate(state)?;
+            refreshed = request_account_quota_metadata(
                 &prepared,
                 request_timeout,
                 current_time_ms(),
                 &subscription,
                 refresh_subscription,
-                refresh_models,
+                &http_scope,
             )
             .await?;
+            respect_quota_retry_after(state, scope, &refreshed);
         }
     }
 
-    let observed_plan = match &refreshed {
-        Ok(QuotaRefreshOutcome::Updated(data)) => data
-            .quota
-            .subscription
-            .as_ref()
-            .and_then(|subscription| subscription.plan_type.as_deref())
-            .or(subscription.plan_type.as_deref()),
-        Ok(QuotaRefreshOutcome::Failed { .. }) | Err(_) => subscription.plan_type.as_deref(),
-    };
-    if discovered_models.is_none()
-        && zenith_relay_core::quota::subscription_plan_changed(
-            account_before_refresh
-                .account
-                .subscription
-                .plan_type
-                .as_deref(),
-            observed_plan,
-        )
-    {
-        discovered_models = Some(discover_account_models(&prepared).await);
-    }
     let _mutation = state.setup_guard().await;
-    let (previous_account, account, outcome, exhaustion_transitions, models_changed) = {
+    let quota = refreshed.unwrap_or_else(|_| QuotaRefreshOutcome::Failed {
+        failure: QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true),
+        subscription: subscription.clone(),
+    });
+    let applied = {
         let mut store = state.store()?;
-        let current_account = store
-            .account(account_id)
-            .cloned()
-            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-        let mut account = current_account.clone();
-        let (outcome, exhaustion_transitions) = match refreshed {
-            Ok(outcome) => {
-                let (outcome, exhaustion_transitions) =
-                    super::import_orchestrator::apply_quota_outcome_with_transitions(
-                        &mut account,
-                        outcome,
-                        now_ms,
-                    );
-                (outcome, exhaustion_transitions)
-            }
-            Err(_) => {
-                let failure = QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true);
-                apply_quota_failure(&mut account, &failure, now_ms);
-                (
-                    AccountQuotaOutcome::Failed {
-                        code: failure.code,
-                        retryable: failure.retryable,
-                    },
-                    Vec::new(),
-                )
-            }
-        };
-        if current_account.account.subscription == account_before_refresh.account.subscription
-            && subscription != account_before_refresh.account.subscription
-        {
-            // The dedicated subscription probe is authoritative even when the
-            // quota endpoint returns an older or incomplete plan hint.
-            account.account.subscription = subscription.clone();
-        }
-        let models_changed = discovered_models
-            .map(|discovered_models| apply_model_discovery(&mut account, discovered_models))
-            .unwrap_or(false);
-        preserve_newer_account_state(&mut account, &account_before_refresh, &current_account);
-        store.upsert_account(account.clone())?;
-        (
-            current_account,
-            account,
-            outcome,
-            exhaustion_transitions,
-            models_changed,
-        )
+        apply_quota_read(&mut store, scope, quota, subscription, None)?
     };
-    sync_refreshed_account_or_rollback(state, previous_account, account.clone(), models_changed)
-        .await?;
+    if zenith_relay_core::quota::subscription_plan_changed(
+        applied.previous.account.subscription.plan_type.as_deref(),
+        applied.account.account.subscription.plan_type.as_deref(),
+    ) {
+        state
+            .refresh
+            .mark_dirty(&scope.fence.identity(), RefreshKind::Models);
+    }
+    sync_refreshed_account_or_rollback(
+        state,
+        applied.previous,
+        applied.account.clone(),
+        applied.value.models_changed,
+    )
+    .await?;
     Ok(AccountQuotaRefreshResponse {
-        account,
-        quota: outcome,
-        exhaustion_transitions,
+        account: applied.account,
+        quota: applied.value.outcome,
+        exhaustion_transitions: applied.value.exhaustion_transitions,
     })
 }
 
-/// Refresh only the account's upstream model catalog.
-///
-/// This is used for startup and membership-triggered discovery. Regular
-/// automatic quota refreshes can request the same discovery inline so the
-/// account's quota and model list stay current after one scheduled pass.
+/// Request the independent model-kind job (not an inline quota subrequest).
 pub(crate) async fn refresh_account_models_once(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<()> {
-    let model_lock = state.quota_account_lock(account_id)?;
-    let _model_guard = model_lock.lock().await;
-    let mut prepared = prepare_account_request_authorization(state, account_id).await?;
-    let mut discovered_models = discover_account_models(&prepared).await;
+    refresh::request(state, account_id, RefreshKind::Models)
+        .await
+        .map(|_| ())
+}
+
+pub(in crate::local_pool) async fn read_account_models_once(
+    state: &DesktopState,
+    scope: &AccountRefreshScope,
+) -> LocalResult<bool> {
+    scope.validate(state)?;
+    let result = read_account_models(state, scope).await;
+    if let Err(error) = &result {
+        record_read_error(state, scope, RefreshReadKind::Models, error).await;
+    }
+    result
+}
+
+async fn read_account_models(
+    state: &DesktopState,
+    scope: &AccountRefreshScope,
+) -> LocalResult<bool> {
+    let account_id = &scope.fence.account_id;
+    let mut prepared = refresh::request_authorization(state, &scope.fence).await?;
+    scope.validate(state)?;
+    let http_scope = scope.http_scope(state);
+    let mut discovered_models = discover_account_models(&prepared, &http_scope).await;
+    respect_models_retry_after(state, scope, &discovered_models);
+    scope.validate(state)?;
 
     if prepared.tokens.is_some()
         && model_discovery_was_unauthorized(&Some(discovered_models.clone()))
     {
-        match recover_account_authorization(state, account_id, current_time_ms()).await {
+        match recover_account_authorization(
+            state,
+            account_id,
+            prepared.tokens.as_ref().map(TokenSet::generation),
+            current_time_ms(),
+        )
+        .await
+        {
             Ok(recovered) => {
                 prepared = PreparedAccountAuthorization::from_tokens(recovered)?;
-                discovered_models = discover_account_models(&prepared).await;
+                scope.validate(state)?;
+                discovered_models = discover_account_models(&prepared, &http_scope).await;
+                respect_models_retry_after(state, scope, &discovered_models);
             }
             Err(_) if account_auth_is_access_only(state, account_id)? => {
                 mark_access_only_reauthentication(state, account_id).await?;
@@ -1535,29 +1538,27 @@ pub(crate) async fn refresh_account_models_once(
                 )?,
                 Err(error) => return Err(error),
             };
-        discovered_models = discover_account_models(&prepared).await;
+        scope.validate(state)?;
+        discovered_models = discover_account_models(&prepared, &http_scope).await;
+        respect_models_retry_after(state, scope, &discovered_models);
     }
 
     let _mutation = state.setup_guard().await;
-    let (previous_account, account, models_changed) = {
+    let succeeded = discovered_models.is_ok();
+    let applied = {
         let mut store = state.store()?;
-        let current_account = store
-            .account(account_id)
-            .cloned()
-            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-        let mut account = current_account.clone();
-        let models_changed = apply_model_discovery(&mut account, discovered_models);
-        store.upsert_account(account.clone())?;
-        (current_account, account, models_changed)
+        apply_models_read(&mut store, scope, discovered_models)?
     };
-    sync_refreshed_account_or_rollback(state, previous_account, account, models_changed).await?;
-    Ok(())
+    sync_refreshed_account_or_rollback(state, applied.previous, applied.account, applied.value)
+        .await?;
+    Ok(succeeded)
 }
 
 pub(super) async fn request_subscription_metadata(
     prepared: &PreparedAccountAuthorization,
     request_timeout: Duration,
     now_ms: u64,
+    http_scope: &ManagementHttpScope,
 ) -> Option<CodexSubscriptionMetadata> {
     let authorization = prepared.subscription_authorization.clone()?;
     let builder = reqwest::Client::builder()
@@ -1571,6 +1572,7 @@ pub(super) async fn request_subscription_metadata(
     .ok()?;
     CodexSubscriptionClient::new(client)
         .ok()?
+        .with_http_scope(http_scope.clone())
         .fetch_authorized(authorization, &prepared.provider_account_id, now_ms)
         .await
         .ok()
@@ -1597,17 +1599,14 @@ pub(super) fn apply_subscription_metadata(
     });
 }
 
-pub(super) async fn request_account_metadata(
+async fn request_account_quota_metadata(
     prepared: &PreparedAccountAuthorization,
     request_timeout: Duration,
     now_ms: u64,
     subscription: &Subscription,
     refresh_subscription: bool,
-    refresh_models: bool,
-) -> LocalResult<(
-    std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
-    Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
-)> {
+    http_scope: &ManagementHttpScope,
+) -> LocalResult<std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>> {
     let quota =
         CodexQuotaClient::new_with_proxy_and_timeout(prepared.proxy.as_ref(), request_timeout)
             .map_err(|failure| {
@@ -1615,33 +1614,58 @@ pub(super) async fn request_account_metadata(
                     ErrorCode::InvalidState,
                     format!("failed to initialize quota client: {}", failure.code),
                 )
-            })?;
-    let model_discovery = async {
-        if !refresh_models {
-            return None;
-        }
-        Some(discover_account_models(prepared).await)
-    };
-    Ok(tokio::join!(
-        tokio::time::timeout(
-            request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
-            quota.refresh_quota_with_subscription_authorization(
-                prepared.authorization.clone(),
-                prepared.subscription_authorization.clone(),
-                &prepared.provider_account_id,
-                now_ms,
-                subscription,
-                refresh_subscription,
-            ),
+            })?
+            .with_http_scope(http_scope.clone());
+    Ok(tokio::time::timeout(
+        request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
+        quota.refresh_quota_with_subscription_authorization(
+            prepared.authorization.clone(),
+            prepared.subscription_authorization.clone(),
+            &prepared.provider_account_id,
+            now_ms,
+            subscription,
+            refresh_subscription,
         ),
-        model_discovery,
-    ))
+    )
+    .await)
+}
+
+fn respect_quota_retry_after(
+    state: &DesktopState,
+    scope: &AccountRefreshScope,
+    result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
+) {
+    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = result {
+        if let Some(delay) = failure.retry_after_ms() {
+            state
+                .refresh
+                .respect_retry_after(&scope.fence.identity(), RefreshKind::Quota, delay);
+        }
+    }
+}
+
+fn respect_models_retry_after(
+    state: &DesktopState,
+    scope: &AccountRefreshScope,
+    result: &std::result::Result<Vec<String>, ModelDiscoveryFailure>,
+) {
+    if let Some(delay) = result
+        .as_ref()
+        .err()
+        .and_then(|failure| failure.retry_after_ms)
+    {
+        state
+            .refresh
+            .respect_retry_after(&scope.fence.identity(), RefreshKind::Models, delay);
+    }
 }
 
 pub(super) async fn discover_account_models(
     prepared: &PreparedAccountAuthorization,
+    http_scope: &ManagementHttpScope,
 ) -> std::result::Result<Vec<String>, ModelDiscoveryFailure> {
-    let client = CodexModelsClient::new_with_proxy(prepared.proxy.as_ref())?;
+    let client = CodexModelsClient::new_with_proxy(prepared.proxy.as_ref())?
+        .with_http_scope(http_scope.clone());
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
     client
         .discover_authorized(
@@ -1652,7 +1676,7 @@ pub(super) async fn discover_account_models(
         .await
 }
 
-pub(super) async fn prepare_account_request_authorization(
+pub(in crate::local_pool) async fn prepare_account_request_authorization(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<PreparedAccountAuthorization> {
@@ -1761,9 +1785,10 @@ pub(super) async fn ensure_local_agent_identity_task(
     let persistence = CredentialPersistence::new(
         CredentialStore::from_backend(NativeSecretBackend),
         state.account_metadata_sink(),
+        state.transient_root(),
     );
     persistence
-        .persist_agent_task_id(account_id, agent.task_id(), &new_task_id)
+        .persist_agent_task_id_for_identity(account_id, agent, &new_task_id)
         .await
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.code))?;
     CredentialStore::from_backend(NativeSecretBackend)
@@ -1818,13 +1843,25 @@ pub(super) fn model_discovery_was_unauthorized(
 pub(super) async fn recover_account_authorization(
     state: &DesktopState,
     account_id: &str,
+    failed_generation: Option<u64>,
     now_ms: u64,
 ) -> LocalResult<PreparedAccountCredentials> {
+    let generation = failed_generation
+        .ok_or_else(|| LocalPoolError::invalid_state("rejected token generation is missing"))?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let persistence = CredentialPersistence::new(credentials, state.account_metadata_sink());
+    let persistence = CredentialPersistence::new(
+        credentials,
+        state.account_metadata_sink(),
+        state.transient_root(),
+    );
     state
         .token_authority()
-        .invalidate_access_and_persist(account_id, now_ms, &persistence)
+        .invalidate_access_generation_and_persist(
+            account_id,
+            Some(generation),
+            now_ms,
+            &persistence,
+        )
         .await
         .map_err(|error| {
             LocalPoolError::new(
@@ -1875,150 +1912,6 @@ pub(super) async fn mark_access_only_reauthentication(
         "access_token_expired",
     )
     .await
-}
-
-pub(super) fn settle_manual_quota_refresh(
-    state: &DesktopState,
-    account_id: &str,
-    response: &AccountQuotaRefreshResponse,
-) -> LocalResult<()> {
-    state.remove_quota_refresh(account_id)?;
-    if let Some(due_at_ms) = next_quota_refresh_at(response, current_time_ms()) {
-        state.sync_account_quota_refresh(account_id, due_at_ms)?;
-    }
-    Ok(())
-}
-
-pub(super) fn settle_manual_quota_error(
-    state: &DesktopState,
-    account_id: &str,
-    error: &LocalPoolError,
-) -> LocalResult<()> {
-    state.remove_quota_refresh(account_id)?;
-    if !matches!(&error.code, ErrorCode::NotFound) {
-        state.sync_account_quota_refresh(
-            account_id,
-            current_time_ms().saturating_add(QUOTA_REFRESH_RETRY_MS),
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) fn record_quota_refresh_error(
-    state: &DesktopState,
-    account_id: &str,
-    error: &LocalPoolError,
-    observed_at_ms: u64,
-) -> LocalResult<()> {
-    if matches!(error.code, ErrorCode::NotFound) {
-        return Ok(());
-    }
-    let code = match error.code {
-        ErrorCode::SecretStoreUnavailable => error_codes::QUOTA_SECRET_STORE,
-        ErrorCode::GatewayUnavailable => error_codes::QUOTA_PROXY_UNAVAILABLE,
-        ErrorCode::Conflict => error_codes::QUOTA_ACCOUNT_LOCATION,
-        ErrorCode::Io | ErrorCode::RecoveryRequired => error_codes::QUOTA_STORAGE,
-        ErrorCode::InvalidState
-        | ErrorCode::SourceTestFailed
-        | ErrorCode::ProfileRestoreBlocked
-        | ErrorCode::UnsupportedSchema => error_codes::QUOTA_PREPARE,
-        ErrorCode::NotFound | ErrorCode::SourceProbeStale => return Ok(()),
-    };
-    let mut store = state.store()?;
-    let Some(mut account) = store.account(account_id).cloned() else {
-        return Ok(());
-    };
-    apply_quota_failure(
-        &mut account,
-        &QuotaRefreshFailure::new(code, true),
-        observed_at_ms,
-    );
-    store.upsert_account(account)
-}
-
-/// Persist failures that happen before the model endpoint can be queried.
-///
-/// The quota worker already records its preparation failures, but model
-/// discovery has an independent eight-hour lifecycle. Keeping this mapping
-/// separate prevents a credential-store or proxy failure from disappearing in
-/// the background worker while retaining the last successful catalog for
-/// routing.
-pub(crate) fn record_model_refresh_error(
-    state: &DesktopState,
-    account_id: &str,
-    error: &LocalPoolError,
-) -> LocalResult<()> {
-    let Some((code, retryable)) = model_refresh_error_kind(error.code) else {
-        return Ok(());
-    };
-    let mut store = state.store()?;
-    let Some(mut account) = store.account(account_id).cloned() else {
-        return Ok(());
-    };
-    // A token-expiry transition has a more actionable auth state than a
-    // generic preparation error. Leave that state to the auth UI instead of
-    // replacing it with `models_prepare`.
-    if account.account.auth_state.requires_fresh_login() && code == error_codes::MODELS_PREPARE {
-        return Ok(());
-    }
-    apply_model_discovery_failure(&mut account, code, retryable);
-    store.upsert_account(account)
-}
-
-fn model_refresh_error_kind(code: ErrorCode) -> Option<(&'static str, bool)> {
-    Some(match code {
-        ErrorCode::SecretStoreUnavailable => (error_codes::MODELS_SECRET_STORE, true),
-        ErrorCode::GatewayUnavailable => (error_codes::MODELS_PROXY_UNAVAILABLE, true),
-        ErrorCode::Conflict => (error_codes::MODELS_ACCOUNT_LOCATION, false),
-        ErrorCode::Io | ErrorCode::RecoveryRequired => (error_codes::MODELS_STORAGE, true),
-        ErrorCode::InvalidState | ErrorCode::SourceTestFailed | ErrorCode::UnsupportedSchema => {
-            (error_codes::MODELS_PREPARE, true)
-        }
-        ErrorCode::ProfileRestoreBlocked => (error_codes::MODELS_PROFILE_RESTORE, false),
-        ErrorCode::NotFound | ErrorCode::SourceProbeStale => return None,
-    })
-}
-
-pub(crate) fn next_quota_refresh_at(
-    response: &AccountQuotaRefreshResponse,
-    now_ms: u64,
-) -> Option<u64> {
-    let idle_due = now_ms.saturating_add(QUOTA_IDLE_REFRESH_MS);
-    match &response.quota {
-        AccountQuotaOutcome::Updated { .. } => {
-            let reset_delay = quota_reset_refresh_delay(&response.account.account.id);
-            let reset_due = response
-                .account
-                .account
-                .quota
-                .primary
-                .iter()
-                .chain(response.account.account.quota.secondary.iter())
-                .filter_map(|window| window.reset_at_ms)
-                .filter(|reset_at_ms| *reset_at_ms > now_ms)
-                .map(|reset_at_ms| reset_at_ms.saturating_add(reset_delay))
-                .min();
-            Some(reset_due.map_or(idle_due, |due_at_ms| due_at_ms.min(idle_due)))
-        }
-        AccountQuotaOutcome::Failed { retryable, .. } => {
-            if response.account.account.auth_state.requires_fresh_login() {
-                None
-            } else if *retryable {
-                Some(now_ms.saturating_add(QUOTA_REFRESH_RETRY_MS))
-            } else {
-                Some(idle_due)
-            }
-        }
-        AccountQuotaOutcome::Skipped => Some(idle_due),
-    }
-}
-
-pub(super) fn quota_reset_refresh_delay(account_id: &str) -> u64 {
-    QUOTA_RESET_REFRESH_MIN_DELAY_MS.saturating_add(
-        account_id.bytes().fold(0_u64, |hash, byte| {
-            hash.wrapping_mul(16_777_619) ^ u64::from(byte)
-        }) % QUOTA_RESET_REFRESH_JITTER_MS,
-    )
 }
 
 #[cfg(test)]
@@ -2092,5 +1985,27 @@ mod tests {
             Some(("models_profile_restore", false))
         );
         assert_eq!(model_refresh_error_kind(ErrorCode::NotFound), None);
+    }
+
+    #[test]
+    fn authorization_debug_and_refresh_cache_never_expose_prepared_secrets() {
+        let prepared = PreparedAccountAuthorization {
+            authorization: bearer_authorization("synthetic-unique-access").unwrap(),
+            subscription_authorization: None,
+            tokens: None,
+            agent_task_id: Some("synthetic-unique-task".into()),
+            provider_account_id: "synthetic-unique-provider".into(),
+            proxy: None,
+        };
+        let value = Ok(RefreshRead::Authorization(Box::new(prepared)));
+        let debug = format!("{value:?}");
+        for secret in [
+            "synthetic-unique-access",
+            "synthetic-unique-task",
+            "synthetic-unique-provider",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(!refresh::cache_observation(&value));
     }
 }

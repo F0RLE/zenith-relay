@@ -28,6 +28,10 @@ struct UsageAggregate {
 
 impl UsageAggregate {
     fn from_event(event: &UsageEvent) -> Self {
+        let cache_write_ttl = event
+            .cache_write_ttl
+            .as_deref()
+            .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls);
         Self::from_values(
             if event.account_id.is_some() {
                 "account"
@@ -46,9 +50,7 @@ impl UsageAggregate {
             event.input_tokens,
             event.cached_input_tokens,
             event.cache_write_input_tokens,
-            event
-                .cache_write_ttl
-                .and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
+            cache_write_ttl.as_deref(),
             event.output_tokens,
             event.total_tokens,
         )
@@ -350,7 +352,9 @@ impl TelemetryDb {
                     event.error_origin().map(|origin| origin.as_str()),
                     requested_reasoning_effort,
                     effective_reasoning_effort,
-                    event.cache_write_ttl.and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
+                    event.cache_write_ttl.as_deref().and_then(
+                        zenith_relay_core::usage::normalize_reported_cache_ttls,
+                    ),
                     event.client_context_id,
                     upstream_error_json,
                 ],

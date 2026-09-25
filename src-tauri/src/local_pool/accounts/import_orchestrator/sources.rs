@@ -314,6 +314,15 @@ pub(crate) async fn persist_imported_source(
         })
         .transpose()?
         .flatten();
+    state
+        .store()
+        .and_then(|mut store| store.invalidate_source_refresh(&record.id))
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::SOURCE_STORE_FAILED,
+                "source revision could not be saved",
+            )
+        })?;
     secret_store::save(&record.secret_ref, api_key).map_err(|_| {
         ImportItemError::new(
             error_codes::SOURCE_SECRET_STORE_FAILED,

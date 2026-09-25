@@ -232,16 +232,12 @@ impl TelemetryDb {
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
-            let (cache_write_5m, cache_write_1h, unknown_cache_write) = match event.cache_write_ttl
-            {
-                Some(zenith_relay_core::CacheWriteTtl::FiveMinutes) => {
-                    (event.cache_write_input_tokens, Some(0), Some(0))
-                }
-                Some(zenith_relay_core::CacheWriteTtl::OneHour) => {
-                    (Some(0), event.cache_write_input_tokens, Some(0))
-                }
-                _ => (Some(0), Some(0), event.cache_write_input_tokens),
-            };
+            let (cache_write_5m, cache_write_1h, unknown_cache_write) =
+                match event.cache_write_ttl.as_deref() {
+                    Some("5m") => (event.cache_write_input_tokens, Some(0), Some(0)),
+                    Some("1h") => (Some(0), event.cache_write_input_tokens, Some(0)),
+                    _ => (Some(0), Some(0), event.cache_write_input_tokens),
+                };
             event.api_equivalent = resolver.estimate(
                 candidate_kind,
                 candidate_id,

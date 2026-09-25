@@ -10,98 +10,10 @@ use zenith_relay_core::{
         WakeAdapterPolicy, WakeCompletion, WakeCoordinator, WakeDecision, WakeOutcome, WakePermit,
         WakeTask,
     },
-    quota::{QuotaRefreshPermit, QuotaRefreshQueue, QuotaTransition},
+    quota::QuotaTransition,
 };
 
 impl DesktopState {
-    pub(crate) fn mark_quota_refresh(&self, account_id: &str, due_at_ms: u64) -> Result<bool> {
-        let changed = self
-            .quota_refresh_queue()?
-            .mark_dirty(account_id, due_at_ms)
-            .map_err(LocalPoolError::invalid_state)?;
-        if changed {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(changed)
-    }
-
-    pub(crate) fn restore_quota_refresh(&self, previous: QuotaRefreshQueue) -> Result<()> {
-        *self.quota_refresh_queue()? = previous;
-        self.quota_refresh_notify.notify_one();
-        Ok(())
-    }
-
-    pub(crate) fn quota_refresh_snapshot(&self) -> Result<QuotaRefreshQueue> {
-        Ok(self.quota_refresh_queue()?.clone())
-    }
-
-    pub(crate) fn remove_quota_refresh(&self, account_id: &str) -> Result<bool> {
-        let removed = self.quota_refresh_queue()?.remove(account_id);
-        if removed {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(removed)
-    }
-
-    pub(crate) fn sync_account_quota_refresh(
-        &self,
-        account_id: &str,
-        due_at_ms: u64,
-    ) -> Result<bool> {
-        let monitored_account = {
-            let store = self.store()?;
-            store.account(account_id).is_some_and(|account| {
-                account.remote_location.is_none()
-                    && account.account.is_automatic_quota_monitoring_eligible()
-            })
-        };
-        if monitored_account {
-            self.mark_quota_refresh(account_id, due_at_ms)
-        } else {
-            self.remove_quota_refresh(account_id)
-        }
-    }
-
-    pub(crate) fn quota_refresh_in_flight(&self, account_id: &str) -> Result<bool> {
-        Ok(self.quota_refresh_queue()?.is_in_flight(account_id))
-    }
-
-    pub(crate) fn claim_due_quota_refreshes(
-        &self,
-        now_ms: u64,
-        max_claims: usize,
-    ) -> Result<Vec<QuotaRefreshPermit>> {
-        Ok(self.quota_refresh_queue()?.claim_due(now_ms, max_claims))
-    }
-
-    pub(crate) fn reschedule_quota_refresh(
-        &self,
-        permit: QuotaRefreshPermit,
-        due_at_ms: u64,
-    ) -> Result<bool> {
-        let rescheduled = self.quota_refresh_queue()?.reschedule(permit, due_at_ms);
-        if rescheduled {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(rescheduled)
-    }
-
-    pub(crate) fn complete_quota_refresh(&self, permit: QuotaRefreshPermit) -> Result<bool> {
-        let completed = self.quota_refresh_queue()?.complete(permit);
-        if completed {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(completed)
-    }
-
-    pub(crate) fn next_quota_refresh_due(&self) -> Result<Option<u64>> {
-        Ok(self.quota_refresh_queue()?.next_due())
-    }
-
-    pub(crate) async fn wait_for_quota_refresh(&self) {
-        self.quota_refresh_notify.notified().await;
-    }
-
     pub(crate) fn evaluate_wake_transition(
         &self,
         task: &WakeTask,
@@ -200,12 +112,6 @@ impl DesktopState {
 
     pub(crate) async fn wait_for_wake(&self) {
         self.wake_notify.notified().await;
-    }
-
-    fn quota_refresh_queue(&self) -> Result<MutexGuard<'_, QuotaRefreshQueue>> {
-        self.quota_refresh
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota refresh queue lock poisoned"))
     }
 
     fn remove_pending_wakes(

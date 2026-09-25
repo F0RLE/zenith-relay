@@ -9,7 +9,10 @@ use super::super::{
         NativeSecretBackend,
     },
     error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result},
-    models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
+    models::{
+        GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, OwnershipOperationKind,
+        ProviderSourceRecord,
+    },
     profiles::codex,
     state::{DesktopState, LocalRuntimeInputs},
     store::secret_store,
@@ -28,9 +31,9 @@ use zenith_relay_core::{
         account_candidate_enabled, account_operational_state, AccountOperationalInput,
         AccountOperationalState, ClientWireApi,
     },
-    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeCandidatePolicy,
-    RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource,
-    QUOTA_STALE_AFTER_MS,
+    ExecutionFence, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+    RuntimeCandidatePolicy, RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey,
+    RuntimeSource, QUOTA_STALE_AFTER_MS,
 };
 #[cfg(test)]
 use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
@@ -72,12 +75,14 @@ pub(in crate::local_pool) async fn runtime_from_store(
         account_credentials,
         ..
     } = state.runtime_inputs().await?;
+    let pending_move_ids = pending_move_account_ids(state)?;
     let pool_routing = settings.pool_routing_for(&source_records, &account_records);
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed profile can expose every verified source protocol. Requests
     // still select only the protocol they actually use at the gateway edge.
-    let (mut pool_source_ids, pool_account_ids) =
+    let (mut pool_source_ids, mut pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
+    pool_account_ids.retain(|id| !pending_move_ids.contains(id));
     let mut sources = Vec::new();
     let mut source_ids = HashSet::new();
     for source in source_records {
@@ -171,13 +176,20 @@ pub(in crate::local_pool) async fn runtime_from_store(
         // model-list response. Do not fold a temporary exhausted quota into
         // this flag: doing so makes a healthy pool look structurally invalid
         // until a later refresh happens to repair it.
-        let candidate_enabled =
-            account_candidate_enabled(account.account.enabled, operational.routing_block_reason);
+        let candidate_enabled = account_candidate_enabled(
+            account.account.enabled
+                && account.remote_location.is_none()
+                && !pending_move_ids.contains(&account_id),
+            operational.routing_block_reason,
+        );
         accounts.push(RuntimeChatGptAccount {
             id: account_id.clone(),
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
+            basis_points_enabled: settings.basis_points_enabled
+                && secret.has_oauth()
+                && !secret.is_agent_identity(),
             models,
             enabled: candidate_enabled,
             draining: account.account.draining,
@@ -232,6 +244,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     let persistence = Arc::new(CredentialPersistence::new(
         credentials,
         state.account_metadata_sink(),
+        state.transient_root(),
     ));
     let auth = RuntimeChatGptAuth {
         token_authority: authority,
@@ -241,12 +254,9 @@ pub(in crate::local_pool) async fn runtime_from_store(
         agent_identities,
     };
     let options = GatewayRuntimeOptions {
+        tool_policy: settings.tool_policy,
         max_retry_candidates: usize::from(settings.max_retry_candidates),
-        cooldown_after_failures: settings.cooldown_after_failures,
-        keep_last_candidate_available: settings.keep_last_candidate_available,
-        routing_strategy: settings.routing_strategy,
         pool_routing: Some(pool_routing),
-        subscription_plan_order: settings.subscription_plan_order,
         hidden_models: settings.hidden_models,
         default_service_tier: settings.default_service_tier,
         quota_stale_after_ms,
@@ -255,7 +265,6 @@ pub(in crate::local_pool) async fn runtime_from_store(
         model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
         model_reasoning_allowed_levels: settings.model_reasoning_allowed_levels,
         response_affinity_store: Some(state.response_affinity_store()),
-        provider_storm_breaker: false,
     };
     let usage_callback = state.usage_callback();
     // A desktop configuration can legitimately have no route while the user
@@ -284,7 +293,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
-    runtime.set_chatgpt_retry_until_available(settings.chatgpt_retry_until_available);
+    runtime.set_route_recovery_enabled(settings.chatgpt_retry_until_available);
     runtime
         .set_model_service_tier_overrides(settings.model_service_tier_overrides)
         .map_err(core_error)?;
@@ -460,23 +469,27 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
     runtime: &GatewayRuntime,
 ) -> Result<bool> {
     let system_key = pool::ensure_system_gateway_key(state)?;
-    let (sources, accounts, settings) = {
+    let (sources, accounts, settings, pending_move_ids) = {
         let store = state.store()?;
         (
             store.sources().to_vec(),
             store.accounts().to_vec(),
             store.gateway().clone(),
+            store
+                .ownership_operation()
+                .filter(|operation| operation.kind == OwnershipOperationKind::MoveToRemote)
+                .map(|operation| {
+                    operation
+                        .local_account_ids
+                        .iter()
+                        .cloned()
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default(),
         )
     };
-    runtime
-        .set_pool_routing_policy(
-            settings.pool_routing_for(&sources, &accounts),
-            settings.max_retry_candidates,
-            settings.cooldown_after_failures,
-            settings.keep_last_candidate_available,
-        )
-        .map_err(core_error)?;
-    let (source_ids, account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
+    let (source_ids, mut account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
+    account_ids.retain(|id| !pending_move_ids.contains(id));
     // Authorization follows configured membership. Temporary auth failures,
     // cooldowns and disables are enforced by the scheduler and must recover
     // without a second membership edit.
@@ -485,7 +498,43 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
         account_ids: Some(account_ids),
         model_rules: Default::default(),
     };
-    Ok(runtime.update_key_scope(&system_key.id, scope))
+    runtime
+        .set_pool_routing_policy_with_key_scopes(
+            settings.pool_routing_for(&sources, &accounts),
+            settings.max_retry_candidates,
+            &[(system_key.id, scope)],
+        )
+        .map_err(core_error)
+}
+
+fn pending_move_account_ids(state: &DesktopState) -> Result<HashSet<String>> {
+    Ok(state
+        .store()?
+        .ownership_operation()
+        .filter(|operation| operation.kind == OwnershipOperationKind::MoveToRemote)
+        .map(|operation| operation.local_account_ids.iter().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// Keep pending final dispatches on the old physical routes closed while a
+/// desktop command persists and publishes changed permissions or transport.
+/// The returned guards must outlive the save, hot apply and any rollback.
+pub(in crate::local_pool) fn fence_runtime_candidates(
+    runtime: Option<&GatewayRuntime>,
+    account_ids: &[String],
+    source_ids: &[String],
+) -> Vec<ExecutionFence> {
+    let Some(runtime) = runtime else {
+        return Vec::new();
+    };
+    let mut fences = account_ids
+        .iter()
+        .filter_map(|id| runtime.fence_candidate_dispatch(id))
+        .collect::<Vec<_>>();
+    for id in source_ids {
+        fences.extend(runtime.fence_source_dispatch(id));
+    }
+    fences
 }
 
 /// Refreshes the managed local key's candidate scope without replacing the
@@ -544,7 +593,7 @@ pub(in crate::local_pool) fn runtime_account_policy(
     let operational = runtime_account_operational_state(&account.account, now_ms);
     RuntimeCandidatePolicy {
         enabled: account_candidate_enabled(
-            account.account.enabled,
+            account.account.enabled && account.remote_location.is_none(),
             operational.routing_block_reason,
         ),
         draining: account.account.draining,
@@ -612,9 +661,6 @@ pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
     models_changed: bool,
 ) -> Result<()> {
     let account_id = attempted_account.account.id.clone();
-    if models_changed {
-        return sync_account_or_rollback(state, previous_account, attempted_account).await;
-    }
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
@@ -623,7 +669,18 @@ pub(in crate::local_pool) async fn sync_refreshed_account_or_rollback(
         .account(&account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    if sync_runtime_account_state(&runtime, &account, current_time_ms()) {
+    let observed_at_ms = current_time_ms();
+    let health_changed =
+        runtime_account_operational_state(&previous_account.account, observed_at_ms).health
+            != runtime_account_operational_state(&account.account, observed_at_ms).health;
+    if (!models_changed || runtime.update_account_models(&account_id, account.effective_models()))
+        && sync_runtime_account_state_with_live_block(
+            &runtime,
+            &account,
+            observed_at_ms,
+            !health_changed,
+        )
+    {
         return Ok(());
     }
     sync_account_or_rollback(state, previous_account, attempted_account).await
@@ -634,14 +691,35 @@ pub(in crate::local_pool) fn sync_runtime_account_state(
     account: &LocalAccountRecord,
     observed_at_ms: u64,
 ) -> bool {
+    sync_runtime_account_state_with_live_block(runtime, account, observed_at_ms, false)
+}
+
+fn sync_runtime_account_state_with_live_block(
+    runtime: &GatewayRuntime,
+    account: &LocalAccountRecord,
+    observed_at_ms: u64,
+    preserve_live_block: bool,
+) -> bool {
     let operational = runtime_account_operational_state(&account.account, observed_at_ms);
-    runtime.sync_account_availability_with_quota(
-        &account.account.id,
-        account_candidate_enabled(account.account.enabled, operational.routing_block_reason),
-        operational.health,
-        &account.account.quota,
-        observed_at_ms,
-    )
+    let enabled =
+        account_candidate_enabled(account.account.enabled, operational.routing_block_reason);
+    if preserve_live_block {
+        runtime.sync_account_refresh_availability_with_quota(
+            &account.account.id,
+            enabled,
+            operational.health,
+            &account.account.quota,
+            observed_at_ms,
+        )
+    } else {
+        runtime.sync_account_availability_with_quota(
+            &account.account.id,
+            enabled,
+            operational.health,
+            &account.account.quota,
+            observed_at_ms,
+        )
+    }
 }
 
 pub(in crate::local_pool) async fn sync_gateway_or_rollback(
@@ -687,6 +765,31 @@ pub(in crate::local_pool) async fn restart_or_rollback(
                 .await);
             };
             apply_rollback(state, rollback).await?;
+            // A caller may already have hot-applied one member before it fell
+            // back to a full rebuild. Restoring only the durable records
+            // would leave that old runtime with newer permissions once its
+            // dispatch fences are released.
+            let restored = match runtime_from_store(state).await {
+                Ok(runtime) => runtime,
+                Err(restore) => {
+                    return Err(fail_closed(
+                        state,
+                        format!("{error}; failed to rebuild restored gateway: {restore}"),
+                    )
+                    .await)
+                }
+            };
+            if let Some(previous) = state.gateway.runtime().await {
+                previous.retire_for_replacement();
+            }
+            state.gateway.stop().await;
+            if let Err(restart) = state.gateway.start(restored, address.port()).await {
+                return Err(fail_closed(
+                    state,
+                    format!("{error}; failed to restart restored gateway: {restart}"),
+                )
+                .await);
+            }
             return Err(error);
         }
     };
@@ -696,6 +799,11 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         "gateway_stop_started",
         &[("port", address.port().to_string())],
     );
+    // A delayed request may still hold the old Arc after the listener stops.
+    // Failed activation rebuilds a fresh runtime from restored storage.
+    if let Some(previous) = state.gateway.runtime().await {
+        previous.retire_for_replacement();
+    }
     state.gateway.stop().await;
     crate::diagnostics::breadcrumb(
         "gateway-runtime",
@@ -770,6 +878,9 @@ pub(in crate::local_pool) async fn fail_closed(
     message: String,
 ) -> LocalPoolError {
     crate::diagnostics::record_error("gateway-runtime", Some("fail_closed"), &message, &[]);
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.retire_for_replacement();
+    }
     state.gateway.stop().await;
     match disable_gateway(state) {
         Ok(()) => LocalPoolError::new(ErrorCode::RecoveryRequired, message),
@@ -783,7 +894,8 @@ pub(in crate::local_pool) async fn fail_closed(
 pub(in crate::local_pool) fn core_error(error: zenith_relay_core::Error) -> LocalPoolError {
     let message = error.to_string();
     let code = match &error {
-        zenith_relay_core::Error::Upstream(_)
+        zenith_relay_core::Error::ManagementHttpUnavailable
+        | zenith_relay_core::Error::Upstream(_)
         | zenith_relay_core::Error::UpstreamBodyTooLarge
         | zenith_relay_core::Error::UpstreamStatus(_)
         | zenith_relay_core::Error::InvalidUpstreamResponse(_) => ErrorCode::SourceTestFailed,
@@ -918,10 +1030,14 @@ mod tests {
         let response = reqwest::Client::new()
             .get(format!("http://{address}/v1/models"))
             .bearer_auth(&secret)
+            .header(reqwest::header::CONNECTION, "close")
             .send()
             .await
             .unwrap();
         assert!(response.status().is_success());
+        // Drain our own response before shutting down. An unread body can keep
+        // the connection task (and its runtime/store handles) alive on Windows.
+        assert!(response.text().await.unwrap().contains("gpt-test"));
 
         state.gateway.stop().await;
         secret_store::delete(&source_secret_ref).unwrap();
@@ -1275,6 +1391,11 @@ mod tests {
             .unwrap();
         let secret = secret_store::load(&key.secret_ref).unwrap().unwrap();
         let address = state.gateway.start(runtime, 0).await.unwrap();
+        let previous_runtime = state.gateway.runtime().await.unwrap();
+        assert!(previous_runtime
+            .candidate_runtime_order_for_key(&key.id)
+            .iter()
+            .any(|candidate| candidate.available));
         let mut gateway = state.store().unwrap().gateway().clone();
         gateway.port = address.port();
         state.store().unwrap().replace_gateway(gateway).unwrap();
@@ -1307,6 +1428,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.gateway.address().await, Some(address));
+        assert!(previous_runtime
+            .candidate_runtime_order_for_key(&key.id)
+            .iter()
+            .all(|candidate| !candidate.available));
+        drop(previous_runtime);
         let client = reqwest::Client::new();
         let evicted_models: serde_json::Value = client
             .get(format!("http://{address}/v1/models"))

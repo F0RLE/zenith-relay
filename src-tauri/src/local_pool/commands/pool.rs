@@ -1,6 +1,6 @@
 use super::{
-    cleanup_created_secret, connections::validate_source_record, restart_or_rollback,
-    runtime_account_policy, sync_gateway_or_rollback,
+    cleanup_created_secret, connections::validate_source_record, fence_runtime_candidates,
+    restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback,
 };
 use crate::{
     files::atomic_write,
@@ -33,7 +33,6 @@ use zenith_relay_core::{
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
     validate_resolved_configuration_preset_members, ApiModelPriceOverride, DefaultServiceTier,
-    RoutingStrategy,
 };
 
 mod model_policy;
@@ -70,7 +69,9 @@ pub fn export_local_configuration_preset(
     write_configuration_preset(&preset, &app)
 }
 
-fn local_configuration_preset(state: &DesktopState) -> CommandResult<ConfigurationPreset> {
+pub(super) fn local_configuration_preset(
+    state: &DesktopState,
+) -> CommandResult<ConfigurationPreset> {
     let (gateway, sources, accounts) = {
         let store = state.store()?;
         (
@@ -147,12 +148,10 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
             sources,
             accounts,
             routing: PresetRoutingPolicy {
+                tool_policy: Some(gateway.tool_policy),
+                basis_points_enabled: gateway.basis_points_enabled,
                 max_retry_candidates: gateway.max_retry_candidates,
-                cooldown_after_failures: gateway.cooldown_after_failures,
-                keep_last_candidate_available: gateway.keep_last_candidate_available,
-                routing_strategy: gateway.routing_strategy,
                 pool_routing: gateway.pool_routing,
-                subscription_plan_order: gateway.subscription_plan_order,
                 default_service_tier: gateway.default_service_tier,
                 image_base_model: gateway.image_base_model,
             },
@@ -175,7 +174,7 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
     Ok(preset)
 }
 
-fn local_preset_revision(preset: &ConfigurationPreset) -> CommandResult<String> {
+pub(super) fn local_preset_revision(preset: &ConfigurationPreset) -> CommandResult<String> {
     let bytes = serde_json::to_vec(preset).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -540,11 +539,11 @@ pub async fn apply_local_configuration_preset(
     }
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = settings.routing.max_retry_candidates;
-    gateway.cooldown_after_failures = settings.routing.cooldown_after_failures;
-    gateway.keep_last_candidate_available = settings.routing.keep_last_candidate_available;
-    gateway.routing_strategy = settings.routing.routing_strategy;
+    if let Some(policy) = &settings.routing.tool_policy {
+        gateway.tool_policy = policy.clone();
+    }
+    gateway.basis_points_enabled = settings.routing.basis_points_enabled;
     gateway.pool_routing = settings.routing.pool_routing.clone();
-    gateway.subscription_plan_order = settings.routing.subscription_plan_order.clone();
     gateway.default_service_tier = settings.routing.default_service_tier;
     gateway.image_base_model = settings.routing.image_base_model.clone();
     gateway.quota_request_timeout_seconds = settings.quota.request_timeout_seconds;
@@ -554,10 +553,38 @@ pub async fn apply_local_configuration_preset(
     gateway.model_reasoning_allowed_levels = settings.model_reasoning_allowed_levels.clone();
     gateway.model_service_tier_overrides = settings.model_service_tier_overrides.clone();
     gateway.model_display_order = settings.model_display_order.clone();
+    // Presets may change several scopes (including source routes and the
+    // account-proxy requirement) in two durable writes. Fence the previous
+    // physical graph until the replacement runtime or rollback is published.
+    let account_ids = old_accounts
+        .iter()
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let source_ids = old_sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &account_ids, &source_ids);
     state
         .store()?
         .replace_pool_records(sources, accounts, old_keys.clone())?;
-    state.store()?.replace_gateway(gateway)?;
+    if let Err(error) = state
+        .store()
+        .and_then(|mut store| store.replace_gateway(gateway))
+    {
+        if let Err(restore) = state.store().and_then(|mut store| {
+            store.replace_pool_records(old_sources.clone(), old_accounts.clone(), old_keys.clone())
+        }) {
+            return Err(super::fail_closed(
+                &state,
+                format!("preset gateway save failed: {error}; failed to restore pool: {restore}"),
+            )
+            .await
+            .into());
+        }
+        return Err(error.into());
+    }
     if let Err(error) = restart_or_rollback(&state, || {
         state
             .store()?
@@ -829,13 +856,9 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
 pub struct UpdateRoutingInput {
     pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     expected_pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
+    #[serde(default)]
+    basis_points_enabled: Option<bool>,
     max_retry_candidates: u8,
-    #[serde(default)]
-    cooldown_after_failures: Option<u8>,
-    #[serde(default)]
-    keep_last_candidate_available: Option<bool>,
-    routing_strategy: RoutingStrategy,
-    subscription_plan_order: Option<Vec<String>>,
     #[serde(default)]
     default_service_tier: DefaultServiceTier,
 }
@@ -844,10 +867,10 @@ pub struct UpdateRoutingInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PoolMembershipInput {
     #[serde(default)]
-    account_ids: Vec<String>,
+    pub(super) account_ids: Vec<String>,
     #[serde(default)]
-    source_ids: Vec<String>,
-    in_pool: bool,
+    pub(super) source_ids: Vec<String>,
+    pub(super) in_pool: bool,
 }
 
 #[derive(Deserialize)]
@@ -1009,6 +1032,32 @@ pub async fn set_local_pool_membership(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
+    let (snapshot, updated_in_place, model_refresh_account_ids) = {
+        let _mutation = state.setup_guard().await;
+        apply_local_pool_membership(input, &state).await?
+    };
+    if updated_in_place {
+        let catalog_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = catalog_app.state::<DesktopState>();
+            let result = super::profiles::refresh_active_client_catalogs(&state).await;
+            super::record_catalog_refresh_result(&state, &result);
+            let _ = catalog_app.emit("zenith-state-changed", ());
+        });
+    }
+    crate::local_pool::background::refresh_account_models_in_background(
+        app,
+        model_refresh_account_ids,
+    );
+    Ok(snapshot)
+}
+
+/// Caller holds setup_guard. Split from the Tauri event wrapper so the
+/// durable membership and live routing transaction can be exercised locally.
+pub(super) async fn apply_local_pool_membership(
+    input: PoolMembershipInput,
+    state: &DesktopState,
+) -> CommandResult<(LocalPoolSnapshot, bool, Vec<String>)> {
     let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
     let source_ids = input.source_ids.into_iter().collect::<BTreeSet<_>>();
     if account_ids.is_empty() && source_ids.is_empty() {
@@ -1019,7 +1068,6 @@ pub async fn set_local_pool_membership(
         .into());
     }
 
-    let _mutation = state.setup_guard().await;
     let (old_sources, old_accounts, old_keys) = {
         let store = state.store()?;
         (
@@ -1086,7 +1134,7 @@ pub async fn set_local_pool_membership(
         }
     }
     if sources == old_sources && accounts == old_accounts {
-        return state.snapshot().await.map_err(Into::into);
+        return Ok((state.snapshot().await?, false, Vec::new()));
     }
 
     let changed_accounts = accounts
@@ -1094,6 +1142,21 @@ pub async fn set_local_pool_membership(
         .filter(|account| account_ids.contains(&account.account.id))
         .cloned()
         .collect::<Vec<_>>();
+    let fenced_accounts = old_accounts
+        .iter()
+        .filter(|account| {
+            account_ids.contains(&account.account.id) && account.account.in_pool != input.in_pool
+        })
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let fenced_sources = old_sources
+        .iter()
+        .filter(|source| source_ids.contains(&source.id) && source.in_pool != input.in_pool)
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), &fenced_accounts, &fenced_sources);
     state
         .store()?
         .replace_pool_records(sources, accounts, old_keys.clone())?;
@@ -1104,12 +1167,12 @@ pub async fn set_local_pool_membership(
                 &account.account.id,
                 runtime_account_policy(account, policy_now_ms),
             )
-        }) && super::apply_local_gateway_key_scope(&state, &runtime).unwrap_or(false)
+        }) && super::apply_local_gateway_key_scope(state, &runtime).unwrap_or(false)
     } else {
         false
     };
     if !updated_in_place {
-        restart_or_rollback(&state, || {
+        restart_or_rollback(state, || {
             state
                 .store()?
                 .replace_pool_records(old_sources, old_accounts, old_keys)
@@ -1121,21 +1184,7 @@ pub async fn set_local_pool_membership(
         state.sync_account_quota_refresh(&account_id, now_ms)?;
     }
     let snapshot = state.snapshot().await?;
-    drop(_mutation);
-    if updated_in_place {
-        let catalog_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = catalog_app.state::<DesktopState>();
-            let result = super::profiles::refresh_active_client_catalogs(&state).await;
-            super::record_catalog_refresh_result(&state, &result);
-            let _ = catalog_app.emit("zenith-state-changed", ());
-        });
-    }
-    crate::local_pool::background::refresh_account_models_in_background(
-        app,
-        model_refresh_account_ids,
-    );
-    Ok(snapshot)
+    Ok((snapshot, updated_in_place, model_refresh_account_ids))
 }
 
 #[tauri::command]
@@ -1172,15 +1221,8 @@ async fn update_local_routing_at(
             .map_err(|message| LocalPoolError::new(ErrorCode::Conflict, message))?;
         gateway.pool_routing = Some(policy);
     }
-    if let Some(value) = input.cooldown_after_failures {
-        gateway.cooldown_after_failures = value;
-    }
-    if let Some(value) = input.keep_last_candidate_available {
-        gateway.keep_last_candidate_available = value;
-    }
-    gateway.routing_strategy = input.routing_strategy;
-    if let Some(subscription_plan_order) = input.subscription_plan_order {
-        gateway.subscription_plan_order = subscription_plan_order;
+    if let Some(value) = input.basis_points_enabled {
+        gateway.basis_points_enabled = value;
     }
     gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {
@@ -1197,25 +1239,20 @@ async fn update_local_routing_at(
                 .clone()
                 .unwrap_or_else(|| current_pool.clone()),
             gateway.max_retry_candidates,
-            gateway.cooldown_after_failures,
-            gateway.keep_last_candidate_available,
         ) {
             state.store()?.replace_gateway(old_gateway)?;
             return Err(LocalPoolError::invalid_state(error).into());
         }
+        runtime.set_basis_points_enabled(gateway.basis_points_enabled);
         runtime.set_default_service_tier(default_service_tier);
     }
     if let Err(error) = codex::sync_default_service_tier(codex_home, default_service_tier) {
         state.store()?.replace_gateway(old_gateway.clone())?;
         if let Some(runtime) = runtime {
             runtime
-                .set_pool_routing_policy(
-                    current_pool,
-                    old_gateway.max_retry_candidates,
-                    old_gateway.cooldown_after_failures,
-                    old_gateway.keep_last_candidate_available,
-                )
+                .set_pool_routing_policy(current_pool, old_gateway.max_retry_candidates)
                 .map_err(LocalPoolError::invalid_state)?;
+            runtime.set_basis_points_enabled(old_gateway.basis_points_enabled);
             runtime.set_default_service_tier(old_gateway.default_service_tier);
         }
         return Err(error.into());
@@ -1287,7 +1324,7 @@ mod tests {
         for mode in [
             PoolRoutingMode::InOrder,
             PoolRoutingMode::RoundRobin,
-            PoolRoutingMode::Smart,
+            PoolRoutingMode::Automatic,
         ] {
             let displayed = super::super::state::build_local_runtime_state(&state)
                 .await
@@ -1309,9 +1346,12 @@ mod tests {
                 serde_json::from_value(serde_json::json!({
                     "poolRouting": next,
                     "expectedPoolRouting": displayed,
-                    "routingStrategy": "adaptive",
                     "maxRetryCandidates": 3,
-                    "defaultServiceTier": "standard"
+                    "defaultServiceTier": "standard",
+                    "cooldownAfterFailures": 0,
+                    "keepLastCandidateAvailable": true,
+                    "routingStrategy": "quota_highest",
+                    "subscriptionPlanOrder": ["not a valid\nplan"]
                 }))
                 .unwrap()
             };
@@ -1319,6 +1359,8 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(result.gateway.pool_routing, Some(next.clone()));
+            let saved_gateway = state.store().unwrap().gateway().clone();
+            assert_eq!(saved_gateway.max_retry_candidates, 3);
             let refreshed = super::super::state::build_local_runtime_state(&state)
                 .await
                 .unwrap();

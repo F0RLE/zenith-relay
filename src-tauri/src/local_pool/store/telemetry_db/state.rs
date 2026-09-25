@@ -1,7 +1,6 @@
 use super::{
     db_error, lock_error, ErrorCode, LocalPoolError, Result, TelemetryDb, MAX_STATE_JSON_BYTES,
 };
-#[cfg(test)]
 use rusqlite::OptionalExtension;
 use rusqlite::{params, TransactionBehavior};
 use std::collections::HashMap;
@@ -19,7 +18,6 @@ impl TelemetryDb {
             .collect::<std::result::Result<HashMap<_, _>, _>>()
     }
 
-    #[cfg(test)]
     pub(crate) fn state_json(&self, key: &str) -> Result<Option<String>> {
         validate_state_key(key)?;
         self.connection

@@ -1663,6 +1663,157 @@ fn missing_managed_catalog_is_migrated_for_safe_restore() {
 }
 
 #[test]
+fn externally_edited_managed_catalog_does_not_trap_profile_recovery() {
+    for (case, external_catalog) in [
+        ("json", r#"{"models":[{"slug":"external-model"}]}"#),
+        ("other", "externally changed"),
+    ] {
+        let (root, home, backups) = profile_dirs(&format!("edited-managed-catalog-{case}"));
+        let original_config = "model_provider = 'openai'\nuser_setting = 'keep'\n";
+        let original_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"original"}}"#;
+        fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+        fs::write(home.join(AUTH_FILE), original_auth).unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            r#"{"models":[{"slug":"managed-model"}]}"#,
+            &secrets,
+        )
+        .unwrap();
+
+        let catalog_path = managed_model_catalog_path(&backups).unwrap();
+        fs::write(&catalog_path, external_catalog).unwrap();
+        assert!(local_backup(&home, &backups).unwrap().is_some());
+        assert_eq!(
+            credential_kind_locked(&home, &backups).unwrap(),
+            Some(ProfileCredentialKind::LocalGateway)
+        );
+        assert_eq!(profile_bindings(&home, &backups).unwrap().len(), 1);
+        let error = refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model"}]}"#,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProfileRestoreBlocked);
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), external_catalog);
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            original_auth
+        );
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), external_catalog);
+        assert!(!backup_path(&backups).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn changed_catalog_and_newer_login_survive_restore() {
+    let (root, home, backups) = profile_dirs("edited-catalog-newer-login");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"managed-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let external_catalog = "externally changed";
+    fs::write(&catalog_path, external_catalog).unwrap();
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert!(!fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap_or_default()
+        .contains(PROVIDER_ID));
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert_eq!(fs::read_to_string(&catalog_path).unwrap(), external_catalog);
+    assert!(!backup_path(&backups).exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_catalog_backup_path_still_requires_recovery() {
+    let (root, home, backups) = profile_dirs("invalid-managed-catalog-path");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"managed-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    fs::write(&catalog_path, "externally changed").unwrap();
+    let backup_path = backup_path(&backups);
+    let mut backup: Value = serde_json::from_slice(&fs::read(&backup_path).unwrap()).unwrap();
+    backup["managedModelCatalogPath"] = Value::String("other-catalog.json".into());
+    fs::write(&backup_path, serde_json::to_vec(&backup).unwrap()).unwrap();
+
+    let error = local_backup(&home, &backups).unwrap_err();
+    assert_eq!(error.code, ErrorCode::RecoveryRequired);
+    assert!(error.message.contains("model catalog reference"));
+    assert_eq!(
+        fs::read_to_string(&catalog_path).unwrap(),
+        "externally changed"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_backup_metadata_reports_which_invariant_failed_without_writing() {
+    for (field, replacement, reason) in [
+        ("version", json!(2), "unsupported backup version"),
+        ("managedKeyHash", json!("bad"), "managed key fingerprint"),
+        ("managedBaseUrl", json!(""), "managed gateway address"),
+    ] {
+        let (root, home, backups) = profile_dirs("invalid-backup-reason");
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "local-key",
+            &secrets,
+        )
+        .unwrap();
+        let config = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let auth = fs::read(home.join(AUTH_FILE)).unwrap();
+        let path = backup_path(&backups);
+        let mut backup: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        backup[field] = replacement;
+        let corrupted = serde_json::to_vec(&backup).unwrap();
+        fs::write(&path, &corrupted).unwrap();
+
+        let error = local_backup(&home, &backups).unwrap_err();
+        assert_eq!(error.code, ErrorCode::RecoveryRequired);
+        assert!(error.message.contains(reason), "{field}: {}", error.message);
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config);
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
     let catalog = r#"{"models":[{"slug":"vendor/model"}]}"#;
     for changed in [false, true] {
@@ -1694,7 +1845,7 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
 }
 
 #[test]
-fn restore_blocks_fresh_login_without_touching_files() {
+fn restore_preserves_fresh_login_and_removes_only_relay_settings() {
     let (root, home, backups) = profile_dirs("fresh-login");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
     fs::write(home.join(AUTH_FILE), "{\"auth_mode\":\"chatgpt\"}").unwrap();
@@ -1712,15 +1863,41 @@ fn restore_blocks_fresh_login_without_touching_files() {
         "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",
     )
     .unwrap();
-    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
     let auth_before = fs::read(home.join(AUTH_FILE)).unwrap();
 
-    let error = restore_with(&home, &backups, &secrets).unwrap_err();
-    assert!(matches!(error.code, ErrorCode::ProfileRestoreBlocked));
-    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        "model_provider = \"openai\"\n"
+    );
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth_before);
-    assert!(backup_path(&backups).exists());
+    assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn restore_preserves_an_unrecognized_auth_document() {
+    for (case, external_auth) in [
+        ("non-json", b"not a JSON login".as_slice()),
+        ("non-utf8", &[0xff, 0xfe][..]),
+    ] {
+        let (root, home, backups) = profile_dirs(&format!("external-auth-format-{case}"));
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        fs::write(home.join(AUTH_FILE), external_auth).unwrap();
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), external_auth);
+        assert!(!backup_path(&backups).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -1743,7 +1920,7 @@ fn profile_bindings_reports_orphaned_managed_provider_without_blocking_inventory
 }
 
 #[test]
-fn restore_blocks_changed_provider_origin() {
+fn restore_preserves_changed_provider_origin() {
     let (root, home, backups) = profile_dirs("changed-origin");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
     let secrets = MemorySecrets::default();
@@ -1759,15 +1936,17 @@ fn restore_blocks_changed_provider_origin() {
         .unwrap()
         .replace("14998", "14999");
     fs::write(home.join(CONFIG_FILE), changed).unwrap();
-    assert!(matches!(
-        restore_with(&home, &backups, &secrets).unwrap_err().code,
-        ErrorCode::ProfileRestoreBlocked
-    ));
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(restored.contains("model_provider = \"openai\""));
+    assert!(restored.contains("14999"));
+    assert!(!restored.contains("zlr_key"));
+    assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn restore_blocks_changed_gateway_bearer() {
+fn restore_preserves_changed_gateway_bearer() {
     let (root, home, backups) = profile_dirs("changed-bearer");
     let secrets = MemorySecrets::default();
     attach_with(
@@ -1783,10 +1962,11 @@ fn restore_blocks_changed_gateway_bearer() {
         .replace("zlr_key", "zlr_other");
     fs::write(home.join(CONFIG_FILE), changed).unwrap();
 
-    assert!(matches!(
-        restore_with(&home, &backups, &secrets).unwrap_err().code,
-        ErrorCode::ProfileRestoreBlocked
-    ));
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(restored.contains("experimental_bearer_token = \"zlr_other\""));
+    assert!(!restored.contains("zlr_key"));
+    assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1866,6 +2046,295 @@ fn repeated_attach_blocks_after_fresh_login() {
     assert!(fs::read_to_string(home.join(AUTH_FILE))
         .unwrap()
         .contains("fresh"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn switching_to_an_account_does_not_replace_a_fresh_login() {
+    let (root, home, backups) = profile_dirs("switch-fresh-login");
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        &secrets,
+    )
+    .unwrap();
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let backup_before = fs::read(backup_path(&backups)).unwrap();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+
+    let error = switch_to_account_with(
+        &home,
+        &backups,
+        "account-local",
+        &tokens,
+        "provider-account",
+        &secrets,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ProfileRestoreBlocked);
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+    assert_eq!(fs::read(backup_path(&backups)).unwrap(), backup_before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_local_reconnect_uses_the_new_login_as_its_restore_baseline() {
+    let (root, home, backups) = profile_dirs("explicit-reconnect-fresh-login");
+    fs::write(home.join(CONFIG_FILE), "model_provider = 'openai'\n").unwrap();
+    fs::write(
+        home.join(AUTH_FILE),
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"old"}}"#,
+    )
+    .unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "first-key",
+        &secrets,
+    )
+    .unwrap();
+
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+    let mut config = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    config["user_setting"] = value("keep");
+    fs::write(home.join(CONFIG_FILE), config.to_string()).unwrap();
+
+    switch_to_local_with(
+        &home,
+        &backups,
+        "local_gateway",
+        "http://127.0.0.1:14998/v1",
+        "next-key",
+        LocalAttachOptions {
+            rebase_newer_login: true,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+    assert_eq!(
+        local_backup(&home, &backups)
+            .unwrap()
+            .unwrap()
+            .previous_auth_hash
+            .as_deref(),
+        Some(bytes_hash(fresh_auth.as_bytes()).as_str())
+    );
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some("openai"));
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_account_activation_rebases_new_login_from_either_managed_profile() {
+    for from_account in [false, true] {
+        let (root, home, backups) = profile_dirs("explicit-account-fresh-login");
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+        if from_account {
+            attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+        } else {
+            attach_with(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "local-key",
+                &secrets,
+            )
+            .unwrap();
+        }
+        let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+        fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+
+        switch_to_account_with_intent(&home, &backups, "next", &tokens, "provider", true, &secrets)
+            .unwrap();
+        restore_account_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            fresh_auth
+        );
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn explicit_account_activation_keeps_an_external_config_change() {
+    let (root, home, backups) = profile_dirs("explicit-account-external-config");
+    fs::write(home.join(CONFIG_FILE), "model_provider = 'original'\n").unwrap();
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+    attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model_provider = 'external'\nuser_setting = 'keep'\n",
+    )
+    .unwrap();
+
+    switch_to_account_with_intent(&home, &backups, "next", &tokens, "provider", true, &secrets)
+        .unwrap();
+    restore_account_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some("external"));
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    assert_eq!(profile_backup_count(&backups), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_local_activation_rebases_new_login_from_managed_account() {
+    let (root, home, backups) = profile_dirs("explicit-local-from-account-fresh-login");
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+    attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+
+    switch_to_local_with(
+        &home,
+        &backups,
+        "local_gateway",
+        "http://127.0.0.1:14998/v1",
+        "next-key",
+        LocalAttachOptions {
+            rebase_newer_login: true,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert_eq!(profile_backup_count(&backups), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_explicit_reconnect_rolls_back_without_replacing_new_login() {
+    for from_account in [false, true] {
+        let (root, home, backups) = profile_dirs("failed-explicit-reconnect");
+        let secrets = SwitchFaultSecrets::default();
+        let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+        if from_account {
+            attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+        } else {
+            attach_with(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "local-key",
+                &secrets,
+            )
+            .unwrap();
+        }
+        let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+        fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+        let original_config = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let backup_file = if from_account {
+            account_backup_for_profile(&home, &backups)
+                .unwrap()
+                .unwrap()
+        } else {
+            backup_path(&backups)
+        };
+        let original_backup = fs::read(&backup_file).unwrap();
+        let original_secrets = secrets.memory.0.lock().unwrap().clone();
+        *secrets.fail_projection_save.lock().unwrap() = true;
+
+        let error = switch_to_local_with(
+            &home,
+            &backups,
+            "next",
+            "http://127.0.0.1:14998/v1",
+            "next-key",
+            LocalAttachOptions {
+                rebase_newer_login: true,
+                ..LocalAttachOptions::default()
+            },
+            &secrets,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::SecretStoreUnavailable);
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            fresh_auth
+        );
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), original_config);
+        assert_eq!(fs::read(&backup_file).unwrap(), original_backup);
+        assert_eq!(*secrets.memory.0.lock().unwrap(), original_secrets);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn explicit_reconnect_does_not_overwrite_a_login_written_during_activation() {
+    let (root, home, backups) = profile_dirs("explicit-reconnect-concurrent-login");
+    let original_config = "model_provider = \"openai\"\n";
+    fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "first-key",
+        &secrets,
+    )
+    .unwrap();
+    let auth_path = home.join(AUTH_FILE);
+    fs::write(
+        &auth_path,
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"before-reconnect"}}"#,
+    )
+    .unwrap();
+    let concurrent_auth =
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"concurrent-login"}}"#;
+    let mutating = MutatingSecrets::new(auth_path.clone(), concurrent_auth.to_vec());
+    *mutating.values.lock().unwrap() = secrets.0.lock().unwrap().clone();
+
+    let error = switch_to_local_with(
+        &home,
+        &backups,
+        "local_gateway",
+        "http://127.0.0.1:14998/v1",
+        "next-key",
+        LocalAttachOptions {
+            rebase_newer_login: true,
+            ..LocalAttachOptions::default()
+        },
+        &mutating,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.code,
+        ErrorCode::ProfileRestoreBlocked | ErrorCode::RecoveryRequired
+    ));
+    assert_eq!(fs::read(auth_path).unwrap(), concurrent_auth);
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        original_config
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2947,7 +3416,7 @@ fn local_gateway_keeps_api_key_projection_when_bound_oauth_has_no_id_token() {
 }
 
 #[test]
-fn oauth_account_restore_refuses_a_fresh_manual_login() {
+fn oauth_account_restore_preserves_a_fresh_manual_login() {
     let (root, home, backups) = profile_dirs("oauth-fresh-login");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
     let secrets = MemorySecrets::default();
@@ -2970,15 +3439,56 @@ fn oauth_account_restore_refuses_a_fresh_manual_login() {
     )
     .unwrap();
 
-    assert!(matches!(
-        restore_account_with(&home, &backups, &secrets)
-            .unwrap_err()
-            .code,
-        ErrorCode::ProfileRestoreBlocked
-    ));
+    let restored = restore_account_with(&home, &backups, &secrets)
+        .unwrap()
+        .unwrap();
+    assert!(!restored.active);
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        "model_provider = \"custom\"\n"
+    );
     assert!(fs::read_to_string(home.join(AUTH_FILE))
         .unwrap()
         .contains("fresh"));
+    assert!(account_bindings(&backups).unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn oauth_restore_merges_external_toml_edits_and_keeps_new_login() {
+    let (root, home, backups) = profile_dirs("oauth-external-config-login");
+    let original_config =
+        "model_provider = 'custom'\nopenai_base_url = 'https://example.test/v1'\n";
+    fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+    attach_account_with(
+        &home,
+        &backups,
+        "account-local",
+        &tokens,
+        "provider-account",
+        &secrets,
+    )
+    .unwrap();
+    let changed_config = "model_provider = 'other'\nuser_setting = 'keep'\n";
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(CONFIG_FILE), changed_config).unwrap();
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+
+    restore_account_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some("other"));
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    assert_eq!(
+        root_openai_base_url(&restored).as_deref(),
+        Some("https://example.test/v1")
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert!(account_bindings(&backups).unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
 

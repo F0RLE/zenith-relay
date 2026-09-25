@@ -40,7 +40,13 @@ impl DesktopState {
         &self,
     ) -> impl Fn(RuntimeActivitySnapshot) + Send + Sync + 'static {
         let events = self.oauth_events.clone();
-        move |activity| events.emit_runtime_activity(activity)
+        let refresh = self.refresh.clone();
+        move |activity| {
+            if activity.in_flight > 0 || activity.active_request_count > 0 {
+                refresh.set_member_active(&activity.member_key);
+            }
+            events.emit_runtime_activity(activity);
+        }
     }
 
     pub(crate) fn runtime_team_breaker_callback(
@@ -65,8 +71,7 @@ impl DesktopState {
             telemetry: self.telemetry.clone(),
             store: self.store.clone(),
             transient_root: self.transient_root(),
-            quota_refresh: self.quota_refresh.clone(),
-            quota_refresh_notify: self.quota_refresh_notify.clone(),
+            refresh: self.refresh.clone(),
             wake: self.wake.clone(),
             failed: self.failed_usage_writes.clone(),
             wake_notify: self.wake_notify.clone(),

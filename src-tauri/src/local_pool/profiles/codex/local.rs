@@ -4,6 +4,7 @@ use std::{fs, path::Path, thread, time::Duration};
 pub(super) fn prepare_existing_local_binding_locked(
     codex_home: &Path,
     backup_root: &Path,
+    rebase_newer_login: bool,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let _ = local_backup(codex_home, backup_root)?;
@@ -18,6 +19,11 @@ pub(super) fn prepare_existing_local_binding_locked(
     let mut document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
     if external_provider_took_over(&document, &backup) {
         return Ok(());
+    }
+    // Only an explicit activation may adopt a newer user login as the next
+    // baseline. Automatic rollbacks still refuse to replace that login.
+    if !rebase_newer_login {
+        ensure_no_newer_login(&profile_dir, &backup)?;
     }
     if managed_config_matches(&document, &backup)
         && normalize_managed_provider_name(&mut document, &backup)
@@ -39,6 +45,18 @@ pub(super) fn prepare_existing_local_binding_locked(
     restore_local_locked(codex_home, backup_root, secrets)
 }
 
+/// Explicit recovery can leave a new login alone. A switch that will write a
+/// replacement credential must instead stop before touching that login.
+pub(super) fn ensure_no_newer_login(profile_dir: &Path, backup: &ProfileBackup) -> Result<()> {
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let auth = read_optional_bytes(&auth_path)?;
+    if !managed_auth_matches_snapshot(&auth, &auth_path, backup)?
+        && !previous_auth_matches_snapshot(&auth, backup)
+    {
+        return Err(profile_restore_blocked());
+    }
+    Ok(())
+}
 pub(super) fn attach_local_locked(
     codex_home: &Path,
     backup_root: &Path,
@@ -471,7 +489,9 @@ pub(super) fn restore_local_locked(
     };
     let catalog_path = managed_model_catalog_path(backup_root)?;
     let catalog_bytes = read_stable_optional_bytes(&catalog_path)?;
-    if !valid_managed_model_catalog(&backup, &catalog_path, &catalog_bytes) {
+    let external_catalog =
+        externally_changed_managed_model_catalog(&backup, &catalog_path, &catalog_bytes);
+    if !valid_managed_model_catalog(&backup, &catalog_path, &catalog_bytes) && !external_catalog {
         return Err(profile_restore_blocked());
     }
     let config_path = codex_home.join(CONFIG_FILE);
@@ -483,7 +503,8 @@ pub(super) fn restore_local_locked(
     validate_config_shape(&document)?;
     let config_matches_managed = managed_config_matches(&document, &backup);
     let config_matches_previous = previous_config_matches(&document, &backup);
-    if !config_matches_managed && !config_matches_previous {
+    if backup.projection_secret_ref.is_none() && !config_matches_managed && !config_matches_previous
+    {
         return Err(profile_restore_blocked());
     }
     if config_matches_managed && normalize_managed_provider_name(&mut document, &backup) {
@@ -491,39 +512,39 @@ pub(super) fn restore_local_locked(
         replace_if_unchanged(&config_path, &original_config_bytes, &normalized)?;
         original_config_bytes = Some(normalized.into_bytes());
     }
-    let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
-        Some(secret_ref) => secrets.load(secret_ref)?,
-        None => None,
-    };
-    if backup.previous_auth_hash.is_none() {
-        backup.previous_auth_hash = previous_auth
-            .as_deref()
-            .map(|content| bytes_hash(content.as_bytes()));
-    }
-    if let (Some(expected), Some(content)) = (
-        backup.previous_auth_hash.as_deref(),
-        previous_auth.as_deref(),
-    ) {
-        if bytes_hash(content.as_bytes()) != expected {
-            return Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "ChatGPT profile backup secret does not match its integrity hash",
-            ));
-        }
-    }
     let auth_matches_managed =
         managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, &backup)?;
-    let auth_matches_previous = previous_auth_matches_snapshot(&original_auth_bytes, &backup);
-    if !auth_matches_managed && !auth_matches_previous {
-        return Err(profile_restore_blocked());
-    }
-    if auth_matches_managed && backup.previous_auth_secret_ref.is_some() && previous_auth.is_none()
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT profile backup secret is missing",
-        ));
-    }
+    let previous_auth = if auth_matches_managed && backup.projection_secret_ref.is_none() {
+        let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
+            Some(secret_ref) => secrets.load(secret_ref)?,
+            None => None,
+        };
+        if backup.previous_auth_hash.is_none() {
+            backup.previous_auth_hash = previous_auth
+                .as_deref()
+                .map(|content| bytes_hash(content.as_bytes()));
+        }
+        if let (Some(expected), Some(content)) = (
+            backup.previous_auth_hash.as_deref(),
+            previous_auth.as_deref(),
+        ) {
+            if bytes_hash(content.as_bytes()) != expected {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "ChatGPT profile backup secret does not match its integrity hash",
+                ));
+            }
+        }
+        if backup.previous_auth_secret_ref.is_some() && previous_auth.is_none() {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT profile backup secret is missing",
+            ));
+        }
+        previous_auth
+    } else {
+        None
+    };
     if read_stable_optional_bytes(&backup_path)? != backup_bytes {
         return Err(profile_changed_at(&backup_path));
     }
@@ -542,28 +563,25 @@ pub(super) fn restore_local_locked(
         model_catalog.as_deref(),
         current_model_reasoning_effort.as_deref(),
     );
-    let restored = match backup.projection_secret_ref.as_deref() {
-        Some(secret_ref) => projection::restore(
-            secret_ref,
-            snapshot_text(&original_config_bytes, &config_path)?,
-            snapshot_text(&original_auth_bytes, &auth_path)?,
-            secrets,
-        )?,
-        None => UserProfileSnapshot {
-            config: Some(document.to_string()),
-            auth: projection::merge_auth(
-                snapshot_text(&original_auth_bytes, &auth_path)?,
-                previous_auth.as_deref(),
-            )?,
-        },
-    };
+    let restored = projection::restore_from_backup(
+        backup.projection_secret_ref.as_deref(),
+        &document,
+        (&config_path, &original_config_bytes),
+        (&auth_path, &original_auth_bytes),
+        auth_matches_managed,
+        previous_auth.as_deref(),
+        secrets,
+    )?;
+    if read_stable_optional_bytes(&backup_path)? != backup_bytes {
+        return Err(profile_changed_at(&backup_path));
+    }
     replace_with_snapshot(
         &config_path,
         &original_config_bytes,
         restored.config.as_deref(),
     )?;
 
-    if !auth_matches_previous {
+    if auth_matches_managed {
         let auth_result = match restored.auth.as_deref() {
             Some(previous_auth) => {
                 replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
@@ -586,7 +604,7 @@ pub(super) fn restore_local_locked(
         }
     }
 
-    if catalog_bytes.is_some() {
+    if catalog_bytes.is_some() && !external_catalog {
         remove_if_unchanged(&catalog_path, &catalog_bytes)?;
     }
     discard_backup(
