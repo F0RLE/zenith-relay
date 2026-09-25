@@ -1,59 +1,52 @@
 # Relay instructions
 
-Relay is a separate local-first desktop/personal-pool product. Read the workspace
-[AGENTS.md](../AGENTS.md) when present; its authorization and secret-handling
-rules apply. Production Zenith catalog and route-evidence policies do not
-define the personal Relay catalog.
+Relay is a separate local-first desktop and personal-pool product. Read the
+workspace [AGENTS.md](../AGENTS.md); production Zenith rules do not define Relay.
 
-## Ownership and contracts
+## Sources of truth
 
-- `src/src`: React rendering, local UI state, i18n, typed Tauri wrappers.
-- `src-tauri/src`: desktop I/O, credentials, OAuth, profiles, process lifecycle.
-- `crates/relay-core`: shared discovery, scheduling, protocol, gateway, usage.
-- `relay-server`: user-managed runtime, encrypted vault, persistence, management.
+- Source code and focused tests define implemented behavior.
+- [PLANNING.md](docs/project/PLANNING.md) describes current contracts;
+  [ROADMAP.md](docs/project/ROADMAP.md) describes open work and acceptance.
+- Localized Help describes user steps; `CONTRIBUTING.md` owns development and
+  release procedures. The pool rotation core is connected; its design includes
+  unfinished host/acceptance gates tracked in ROADMAP, not a completed contract.
+- Memory is recall context, never authority. Explicit user requests take
+  precedence over skill recommendations.
 
-Keep side effects and validation in Rust, not React. Keep hosted API, local
-pool, and user-managed remote pool distinct in UI, configuration, and storage.
+When sources conflict, inspect the owning code and correct each affected
+document in scope. Avoid copying architecture details into multiple files.
 
-- Never import production Zenith credentials, customer inventory, or internal
-  business/routing logic. A user's own Zenith API key is an ordinary personal
-  provider source, not access to production internals.
-- Accounts stay on the user's device by default. Secret transfer requires an
-  explicit confirmed operation to that user's own server. Use existing desktop
-  credential storage/server encryption and keep snapshots/exports redacted.
-- Management tokens and pool request keys are not interchangeable.
-- Profile changes use inspect, snapshot, attach, verify, and restore. Preserve
-  newer user logins; do not overwrite them during recovery.
-- Account/source inventory preserves all models actually provided, subject to
-  explicit user filters, regardless of current endpoint/client support.
-  Compatibility belongs at client/admission/routing boundaries, not discovery
-  filtering.
-  Do not replace discovery with a hardcoded model allowlist.
-- Model descriptions and capabilities are Relay-owned. Resolve identity,
-  grouping, reasoning, modalities, tools and limits from the shared validated
-  reference catalogs, filling missing fields with documented Relay defaults.
-  Do not fetch, infer or gate these properties from participant declarations.
-  Request speed is a model-family rule: OpenAI conversational models offer
-  Standard, Fast and Ultrafast without a model-version allowlist or source
-  entitlement check. Explicit client choices survive rotation unchanged.
-  Prices are the exception: use a participant's valid declared prices first,
-  then trusted catalog prices and manual fallback. Never invent prices,
-  numeric limits, reasoning enums or observed usage. Inventory, endpoint and
-  native transport configuration, authentication and quota remain separate.
-- Preserve model metadata and its provenance. Price/cache-write accounting must
-  follow actual upstream protocol evidence; adapters must not invent counters,
-  zero costs, or unsupported cache semantics.
-- Keep quota monitoring distinct from routing eligibility. No inferred
-  Free-account policy or hardcoded quota window. Retry only before visible
-  response bytes; preserve response ownership affinity.
-- Migrations are append-only. Use stable dependencies and existing i18n paths.
+## Ownership
 
-## Verification and docs
+| Area | Owns |
+| --- | --- |
+| `src/src` | React rendering, i18n, UI state, typed Tauri wrappers |
+| `src-tauri/src` | Desktop I/O, credentials, OAuth, profiles, process lifecycle |
+| `crates/relay-core` | Shared discovery, scheduling, protocols, gateway, quota, usage |
+| `relay-server` | User-managed runtime, encrypted vault, persistence, management API |
 
-Use the affected frontend, desktop, core, or server checks in `CONTRIBUTING.md`.
-CI guardrail and duplicate-code gates remain required; packaging/updater
-changes also require `bun run app:build` from `src`.
+Keep validation and side effects in Rust. Keep hosted API, local pool, and
+user-managed server distinct. Never import production credentials, customer
+inventory, or internal Gateway/Control logic. Accounts stay on the user's device
+by default. Store secrets only in the credential store or that user's encrypted
+server vault; transfer requires explicit confirmation. Management tokens and
+pool request keys are distinct. Redact snapshots, logs, exports, and diagnostics.
 
-Current architecture: `docs/project/PLANNING.md`. Open work/live acceptance:
-`docs/project/ROADMAP.md`. User steps: `docs/help/<locale>/README.md`.
-Local desktop rebuild entry point: `../scripts/rebuild-relay-desktop.cmd`.
+Preserve account inventory; resolve model meaning from Relay's validated
+reference catalog, not participant capability declarations. Price evidence,
+quota monitoring, and route eligibility are separate concerns; detailed rules
+live in `PLANNING.md`. Retry only after a proven pre-execution rejection or
+not-sent outcome, before response bytes reach the client, and with preserved
+ownership. Complete history does not make unknown execution safe to repeat.
+Server migrations are append-only. Profile
+recovery follows inspect, snapshot, attach, verify, and restore, preserving
+newer user logins.
+
+Check branch, status, and local changes before editing. Change the owning layer,
+update callers when its contract changes, and run the relevant `CONTRIBUTING.md`
+checks. Do not commit, push, create PRs, merge, deploy, or publish without
+explicit current authorization.
+
+Develop on `release/1.1.3` by default. Leave `main` untouched unless the user
+explicitly directs otherwise.

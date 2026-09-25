@@ -4,6 +4,53 @@ Zenith Relay is a local-first desktop application. Keep changes small, prove
 the behavior they alter, and do not move private Zenith backend concerns into
 this repository.
 
+## License and contributor agreement
+
+Zenith Relay is published under **AGPL-3.0-only**, as recorded in [LICENSE](LICENSE)
+and the package manifests. AGPL grants permission to use, modify, and distribute
+the project; it does not transfer a contributor's copyright to the maintainer.
+Keep its standard license text intact.
+
+Before submitting a PR, read the [Contributor Agreement, version
+1.0](CONTRIBUTOR_LICENSE_AGREEMENT.md). It assigns copyright in your accepted,
+original Contribution to the Project Owner, `F0RLE`, and permits relicensing of
+rights the Project Owner actually receives. You retain a license to reuse your
+own Contribution. Existing AGPL grants and third-party licenses remain in force.
+This agreement does not apply retroactively to earlier contributions or impose
+extra conditions on people who only use, distribute, or fork the project.
+
+For each PR, describe the change and validation, open the agreement linked in
+the template, and check **one Contributor Agreement checkbox** yourself. The
+checkbox covers agreement, assignment, authority, and required disclosures
+together. Keep its wording unchanged. If the Contribution is entirely your own
+and has no other rights holders or excluded material, no extra ownership form
+or separate consent comment is required by this workflow.
+
+Only when relevant, list co-authors, employer ownership, and included
+pre-existing or third-party material with its source and license. Obtain
+consent from every relevant rights holder; co-authors can repeat the same
+confirmation in comments under their own accounts. An authorized employer
+representative or a separate signed instrument may be needed. Do not publish
+private identity or employer documents in the PR.
+
+Use the agreement version in the PR's **base branch**, not changed terms
+proposed by that PR. Keep consent accurate when updating the PR. If the
+agreement version changes, read it and give fresh consent before acceptance.
+To withdraw consent before acceptance, say so explicitly in the PR and clear
+the checkbox.
+
+The `Release context` check validates the template and confirmation. It does
+not verify legal identity, employer authority, or co-author consent. Before
+acceptance, the maintainer must review those records and retain the accepted
+commits, agreement version, and consent. Complete any legally required separate
+signature or identity formalities privately before accepting the Contribution.
+
+Only dependency maintenance PRs from GitHub's `dependabot[bot]` that touch
+manifests, lockfiles, or Actions workflow files are exempt from the human PR
+template. That exemption does not assign ownership of dependencies or cover
+original work by human authors; the maintainer must review provenance and obtain
+their consent separately. Other bot PRs are not exempt.
+
 ## Repository boundaries
 
 | Area | Owns |
@@ -49,8 +96,9 @@ headers, prompts, response bodies, or provider session material.
   either credential in a snapshot, log, export, or example.
 - Preserve the distinction between quota monitoring and routing eligibility.
   Do not reinstate a Free-account routing policy or a hard-coded quota window.
-- Retry another candidate only before any response bytes have reached the
-  client. Keep response ownership affinity intact.
+- Retry another candidate only after a proven pre-execution rejection or
+  not-sent result, and before any response bytes reach the client. Preserve
+  response ownership; saved history proves portability, not execution safety.
 - Database migrations are append-only. Add a new numbered migration; never
   edit a migration that can already have been applied.
 - Update a profile through the existing inspect, snapshot, attach, verify, and
@@ -68,17 +116,22 @@ README.md
 CONTRIBUTING.md
 docs/project/PLANNING.md
 docs/project/ROADMAP.md
+docs/project/ROTATION_DESIGN.md (target design; see ROADMAP for open gates)
 docs/releases/CHANGELOG.md
 docs/help/<locale>/README.md
 docs/screenshots/*.png
 ~~~
 
-<code>AGENTS.md</code> is repository guidance, <code>LICENSE</code> is legal
-metadata, and <code>relay-server/openapi.yaml</code> is the machine-readable
-server contract. Do not add parallel architecture, design, handoff, or
-historical planning documents. Fold current behavior into
-<code>docs/project/PLANNING.md</code>, future work into
-<code>docs/project/ROADMAP.md</code>, and user steps into localized Help files.
+<code>AGENTS.md</code> is repository guidance. <code>LICENSE</code> and
+<code>CONTRIBUTOR_LICENSE_AGREEMENT.md</code> are legal documents, and
+<code>relay-server/openapi.yaml</code> is the machine-readable server contract.
+Do not add parallel architecture, design, handoff, or historical planning
+documents. The existing <code>docs/project/ROTATION_DESIGN.md</code> is a
+user-requested target design, with a connected core but unfinished acceptance
+gates. Do not mark the entire design implemented or use it as current-runtime
+evidence. Put implemented contracts in
+<code>docs/project/PLANNING.md</code>, accepted unfinished work in
+<code>docs/project/ROADMAP.md</code>, and user steps in localized Help files.
 
 ### Changelog and release notes
 
@@ -128,6 +181,18 @@ bun run screenshots
 Run the narrowest relevant checks while iterating. Before a commit that changes
 the frontend, desktop host, shared runtime, or server, run the corresponding
 commands below.
+
+For PR template or metadata-workflow changes, run the isolated policy tests:
+
+~~~powershell
+bun test ./.github/tools/pr-metadata.test.mjs
+~~~
+
+The metadata workflow loads its validator from the PR's base commit. It must
+never check out or execute PR-head code in `pull_request_target`, interpolate
+PR text into scripts, or require write permissions or repository secrets.
+The regular Build workflow also runs these tests against the proposed changes
+in its unprivileged `pull_request` context.
 
 ### Frontend and desktop
 
@@ -196,9 +261,54 @@ behavior.
    noise.
 6. Update <code>docs/releases/CHANGELOG.md</code> for user-visible behavior, or state in the
    PR why no entry is needed.
-7. Merge reviewed work into <code>main</code>. Tag and publish a product release
+7. Verify contributor consent and rights, required checks, and the applicable
+   CODEOWNER review. Target the development/release branch designated by the
+   maintainer; do not assume every PR should go directly to <code>main</code>.
+8. Merge reviewed release work into <code>main</code> when the maintainer is
+   ready to release it. Tag and publish a product release
    after the release checks pass; reserve a <code>production-ready</code> claim
    for the live acceptance gates in <code>docs/project/ROADMAP.md</code>.
+
+### macOS distribution
+
+macOS builds use Tauri's ad-hoc identity (`APPLE_SIGNING_IDENTITY=-`); they do
+not need an Apple Developer Program membership or Apple secrets. CI checks the
+app inside the DMG and the updater archive for a valid ad-hoc signature, then
+publishes after all platform builds succeed. Release assets include SHA-256
+checksums. Ad-hoc signing does not establish a trusted developer identity and
+is not Apple notarization, so downloaded apps still require the one-time macOS
+approval described in the localized Help. Test fresh installation and in-app
+updating on separate Intel and Apple Silicon Macs before claiming that those
+flows work end to end. Never remove quarantine from the whole system or all
+downloads. The `TAURI_SIGNING_PRIVATE_KEY` secret remains required for signed
+in-app updates; it is separate from macOS code signing.
+
+### GitHub merge requirements
+
+In GitHub branch protection or rulesets for the development/release branches
+and <code>main</code>, require PRs, the <code>Release context</code> status check,
+an up-to-date branch, and code-owner review for the paths in
+<code>.github/CODEOWNERS</code>. Restrict
+bypass permissions to the intended maintainers. These files alone do not enable
+branch protection. A PR author cannot approve their own PR as a code owner;
+owner-authored policy changes need another authorized reviewer or an explicitly
+managed maintainer exception.
+
+GitHub loads the <code>pull_request_target</code> workflow from the repository's
+default branch; this workflow explicitly loads the validator from the PR's base
+commit. Bootstrap the workflow in the default branch and the agreement,
+template, validator, and tests in each target branch through maintainer review
+before making the check required. If an Actions event policy blocks
+<code>pull_request_target</code>, allow this reviewed metadata workflow there
+before relying on the check. Do not enable unreviewed workflows or broaden token
+permissions as a workaround.
+
+Policy changes use the agreement currently in the base branch and must not use
+their proposed wording to authorize themselves. Keep the template's agreement
+link pointed at the reviewed version in the designated development/release
+branch. When changing that link or agreement terms, update the template,
+validator, and tests together; terms changes also require a new version and
+fresh consent on open PRs. Update those PRs against the new base before merging.
 
 ### Updater changelog for release admins
 

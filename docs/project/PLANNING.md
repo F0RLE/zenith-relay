@@ -1,8 +1,11 @@
 # Zenith Relay architecture
 
-Current product contracts and limits. Implementation lives in source/tests;
-unfinished work and live acceptance are in [ROADMAP.md](ROADMAP.md). Check
-commands are in [CONTRIBUTING.md](../../CONTRIBUTING.md), user steps in Help.
+Current implemented product contracts and limits. Source code and focused tests
+define exact behavior; this document explains the shared contracts. Unfinished
+work and acceptance gates are in [ROADMAP.md](ROADMAP.md), check commands in
+[CONTRIBUTING.md](../../CONTRIBUTING.md), and user steps in Help. The separate
+[pool rotation design](ROTATION_DESIGN.md) includes both connected components
+and unfinished target requirements; it is not proof of full acceptance.
 
 ## Product and ownership
 
@@ -126,10 +129,11 @@ unknown `/models` response preserves inventory and routes every catalog model
 through the source fallback protocol. Existing records keep their stored data,
 but their routes are recomputed by the same automatic resolver.
 Capabilities distinguish declared, confirmed, unsupported, and unknown states.
-An explicit bounded synthetic generation probe records diagnostic evidence but
-does not admit or remove models; catalog refresh never generates. URL/key
-changes invalidate evidence and bump
-the configuration revision; stale probes and discovery cannot overwrite it.
+Source setup, catalog refresh, and automatic routing do not send generation
+probes. A legacy explicit diagnostic endpoint remains for compatibility; its
+result does not add or remove catalog models or control route eligibility.
+Address/key changes invalidate evidence and bump the configuration revision;
+late diagnostics and discovery cannot overwrite the new configuration.
 
 Model semantics are resolved once from fixed, validated reference sources:
 models.dev identity and detailed records, the public OpenRouter catalog, and
@@ -141,6 +145,14 @@ context or speed fields cannot replace reference metadata. No additional
 participant metadata prefetch runs during management polling or catalog export.
 Native Codex cards retain account-owned transport controls and instructions;
 model labels and semantic capabilities use the same resolver as API sources.
+Codex Ultra is a client-side orchestration mode, not an upstream reasoning
+effort. The desktop projection reads the installed Codex's bundled model
+catalog offline; an exact model card may expose Ultra only when the pool can
+route Max and any specified subagent effort. A matching native ChatGPT account
+card can also provide this evidence to the gateway catalog. Provider model
+names, a Messages-to-Responses bridge, and a generic Max declaration do not
+by themselves enable Ultra. Other reasoning levels remain reference and route
+constrained; Codex's own toggle still controls whether Ultra is visible.
 
 Missing reference fields use Relay's common text/image, text-output, function
 tool and structured-output baseline. Explicit reference exclusions remain in
@@ -164,12 +176,21 @@ Cache-file equality checks use a bounded buffer instead of reading a second
 complete file into memory.
 Backend ordering places OpenAI, Anthropic, Google,
 then xAI first, followed by other companies alphabetically, and uses
-contiguous catalog families ranked by their newest release, then release/update
-dates within each family. Missing families follow known families; missing dates
-follow dated versions in the same family. Model/family ranking comes from
-catalog metadata, without model-name or version lists.
-Explicit manual order takes precedence; React does not re-rank
-models. An empty model
+contiguous catalog families ranked by their newest release. Families that share
+the same numbered model generation form a cohort and use the newest release in
+that cohort, then normalized family IDs; this keeps sibling variants together
+instead of letting a later launch date outrank another variant. Release/update
+dates order versions within a family. Missing families follow known families;
+missing dates follow dated versions in the same family. Equal dates use
+normalized family and model IDs as deterministic tie-breakers, so provider
+inventory order cannot change catalog ranking. Company/family ordering comes
+from validated catalog metadata except for the documented company presentation
+order; no model-name or version lists are maintained. Selectors show catalog families within each
+company while preserving backend order. Explicit manual order takes precedence.
+The model-order editor keeps the supplied sequence and company blocks draggable;
+selection and price editors first align member inventory to snapshot order, then
+show metadata families. IDs absent from that snapshot follow in stable ID order.
+An empty model
 order update clears the persisted override in desktop and server, restoring
 catalog ordering for existing and future models. Remote clients offer reset
 only when the server advertises `model_order_reset`. Both hosts use the shared
@@ -188,8 +209,10 @@ Model Rules are operational; source prices remain in the source/member editor.
 ## API source statistics
 
 `relay-core/sources/stats` owns balance transport, format detection, and amount
-normalization for both desktop and server. Zenith, DeepSeek and SiliconFlow use their key
-endpoints. OpenRouter uses `/key` for inference keys and queries `/credits`
+normalization for both desktop and server. Zenith and DeepSeek use their key
+endpoints. SiliconFlow retired `/user/info` on 2026-08-14; balance is reported
+unsupported without a credentialed probe until an official replacement exists.
+OpenRouter uses `/key` for inference keys and queries `/credits`
 only for a reported management key. Custom sources try Sub2API `/v1/usage`,
 New API `/api/usage/token/`, then compatible One API billing subscription/usage.
 Requests preserve the configured origin and reverse-proxy prefix, disable
@@ -200,60 +223,137 @@ Statistics distinguish wallet, key quota, and subscription allowance, preserve
 native currency/unknown quota units, and parse decimal values with integer
 arithmetic. New API conversion requires its published `quota_per_unit`;
 Sub2API `actual_cost` is spend, while `cost` is only an equivalent. Legacy
-billing usage is cents in the server's advertised display currency. Legacy
+billing usage is cents in the server's advertised display currency; absent
+status metadata cannot safely be treated as USD. Legacy
 microUSD fields contain USD only. Additional fields default when reading an
 older Relay Server. Missing spend remains missing. React presents provider
 spend separately from Relay's local estimate and marks retained values stale
 after an unsuccessful refresh. Adapter names remain internal and do not add a
 caption to the cards. These statistics never decide route eligibility.
+Desktop and server share a bounded, resource-scoped refresh owner for source
+models and balance. Page entry reads a runtime-only cached statistic when one
+exists; an explicit refresh requests new provider data and joins an in-flight
+read. A successful value has an observation time. A failed read retains the
+last value for the same source revision with a stale warning and failure reason;
+confirmed unsupported statistics have no periodic recheck. The cache is not
+durable across application/server restarts. Source key, address, catalog and
+eligibility edits retire late reads behind durable incarnation/configuration
+revisions, including delete/re-add. Models and balance remain independent;
+neither a stats denial nor a stale balance changes routing eligibility.
+The redacted source summary exposes a non-secret `refreshRevision`; local and
+remote pages use it to clear a previous key's balance even when address and
+credential-availability flags are unchanged. Older servers may omit the field.
+Source records and their revisions are captured together. The optional
+`providerStats` projection carries the cached value in normal snapshots, so
+background completion updates both Pool and Choose API without another
+provider read. Automatic address normalization also checks the exact observed
+endpoint before delivering cached data. Preparation failures reach explicit
+callers but do not erase a same-scope last observation. Explicit force-refresh
+intent applies to one UI operation, not future page/configuration changes.
+Local and server summaries also expose independent `refreshState` for source
+models/balance and account models/quota. `fresh` and `stale` reflect the current
+refresh owner; saved model/quota observations start `stale` after restart rather
+than pretending that the new process has checked them. Missing saved observations
+remain `unknown`, and only confirmed adapter results are `unsupported`. These labels
+are advisory, never substitutes for routing eligibility or a provider error.
+Older server snapshots without this field remain readable.
 
 ## Quota and execution
 
-Accounts and API sources share a versioned `poolRouting` policy with one tagged
-member order. Smart ranks eligible members by physical member load, fresh quota
-and recent failures, independently of manual order. The failure score decays
-linearly to neutral within 60 seconds of the last observed failure; persisted
-counts without a runtime observation time do not impose a permanent penalty.
-Unknown quota and
-quota observations that have aged beyond the refresh window are neutral, even
-if no background refresh has replaced the stored value. Confirmed exhaustion
-remains ineligible. It rotates by weight among all members near the best score;
-soft affinity can retain a successful session only within that same group,
-measured against the best eligible score rather than the weighted winner.
-In order selects the
-first eligible member. Round robin uses smooth weighted rotation, ignoring soft
-affinity. Mandatory response ownership applies in every mode.
+Accounts and API sources use the same pool rotation admission engine and a
+versioned `poolRouting` member order. New profiles use policy version 2 and
+**Automatic**. On the normal 1.1.3 upgrade, desktop and server automatically
+convert version-1 policies (including profiles without a saved policy) before
+building a runtime. No confirmation or migration notification is required.
+The host-refresh and remaining acceptance gates in
+[ROADMAP.md](ROADMAP.md) remain open. The design is a target, not proof of
+full acceptance.
 
-Weights range from 1 to 100. A member's request limit covers all its protocol
-routes and text/image lanes; zero adds no policy limit. OAuth image concurrency
-retains its separate one-request limit. Saturated capacity and an occupied
-recovery probe wait for a lease release or policy change for at most 30 seconds
-before failing. A reservation owns its recovery probe: an older request's
-release cannot clear a newer probe, even after another cooldown. Preview does
-not advance rotation. Credits change only after successful reservation.
+Automatic selection compares normalized local load (`in_flight / effective
+capacity`) among eligible physical members, then uses weights among equal-load
+members. It does not score quota percentages, balance, recent latency or money.
+Unknown and stale quota are neutral; confirmed exhaustion remains a block.
+Soft affinity only breaks a tie among equally eligible automatic winners.
+In order selects the first ready member in the saved order; busy or blocked
+members do not prevent trying the next one. Round robin uses smooth weighted
+rotation and ignores soft affinity. Hard response ownership applies in every
+mode. Protocol aliases share physical capacity and do not gain extra weight.
 
-Provider retry hints use the longer of the header and body delay for every
-failure category, including model-scoped rejections and overload. A configured
-source recovery delay can extend that pause but cannot shorten it. Without a
-hint, the configured delay overrides the automatic error-specific delay.
-Model-scoped failures leave the source's other models eligible.
-Unified pool recovery ignores legacy retry-count, failure-threshold and
-last-candidate exemption fields. Its attempt budget covers every configured
-route and one bounded recovery pass. Temporary failures pause for at least
-5 seconds, then 60 seconds on the next failure, doubling up to 30 minutes.
-Longer provider hints and configured source pauses take precedence. Recovery
-waits hold no lease, stay within 30 seconds, and still enforce scoped eligibility
-and exclusive half-open probes. Explicit persistent ChatGPT recovery remains
-separate. Invalid client input remains terminal; auth, access and model failures
-can fall through to other candidates. `model_not_available` is a transient,
-model-scoped 503. A new client request resets its attempt index but does not
-reset the candidate's failure count or cooldown.
+Weights range from 1 to 100. A member's limit covers all its protocol routes and
+text/image lanes; zero means no additional member cap, not infinite runtime
+capacity. OAuth images retain their separate one-request limit. Reservation
+and release belong to their own lease, including recovery permits. Preview does
+not advance weighted credits. Capacity and recovery waits share a bounded
+runtime queue: 1,024 waiters / 256 MiB, at most 256 waiters / 128 MiB per request
+key. Retained parsed envelopes, repair copies and queue metadata are charged;
+requests with immediately free capacity do not consume queue slots. Capacity
+admission selects the oldest compatible waiter with round-robin turns between
+principals, so an incompatible head cannot block another model. Cancellation
+removes its registration synchronously. Events, known due times and deadlines
+wake waiters; there is no periodic availability polling. The 30-second total
+queue budget survives retry passes and WS/HTTP handoff; explicit persistent
+waiting removes the time bound, not count/byte limits or the dispatch budget.
+Local saturation/expiry returns a Relay-origin 503 (`admission_queue_full` or
+`admission_wait_expired`), without a provider-health vote or generation debit.
 
-Desktop and server resolve the same policy from the full configured pool,
-including unavailable members. Legacy API roles become an initial manual order:
-primary APIs, accounts, ordinary APIs, reserve APIs. Roles and old strategy fields
-remain import compatibility data. Desktop and server always install the unified
-policy; direct core callers without `pool_routing` retain legacy compatibility.
+One logical request owns the dispatch and transport budgets, retry window and
+irreversible execution latch through HTTP, SSE, WebSocket, images, auth replay
+and compatibility repair. The default is three generation dispatches and the
+validated setting allows 1..8. A failed connection attempt still consumes its
+transport/dispatch budget. A rejected final admission fence consumes no
+generation. Before dispatch the runtime rechecks live principal scope and the
+reserved configuration, auth, quota, rate and circuit observations.
+
+Replay needs an explicit pre-execution rejection or a proven not-sent result,
+repeatable input, preserved semantics and permitted ownership. Generic 5xx,
+broken streams, disconnects after send and uncertain acceptance do not authorize
+a second generation, even with complete history. Once output is committed or
+execution is unknown, repair, a new driver and persistent waiting cannot reset
+the latch. A quiet active generation does not expire the retry window: the
+window starts at the first replay-safe rejection. The default retry window is
+30 seconds; optional persistent text-route waiting for all four API inputs can remove that deadline, not the send
+budget. Recovery waits hold no lease.
+
+Dispatched physical members are tracked separately from incompatible routes
+in the shared request context, including WS-to-HTTP handoff. A rejected alias
+cannot masquerade as an untried independent source. A proven compatibility
+repair may retry its owner without refunding any sends. Ordinary same-member
+recovery starts a new selection pass only after waiting for the scheduler.
+
+Provider header/body retry hints use the longer deadline. Mandatory rate and
+access observations are installed with settlement under one scheduler lock,
+before release notifications or another admission. Shared resource failures
+cover the source's aliases; route-specific access failures leave other models
+and unrelated upstream protocols usable. Configured source delays apply to
+these mandatory/provider pauses and cannot shorten an explicit provider hint.
+Transient inference health is separate: the first two independent request
+failures pace the route for 250 and 500 ms; three within the incident window
+open its circuit. Open backoff starts at 2 seconds and is capped at 60 seconds.
+A logical request contributes at most one failure vote per circuit incident.
+Recovery uses one half-open lease and a pool-wide exploration budget rather
+than a last-member exemption. Late outcomes release their own resources but
+cannot update a removed/re-added identity or close a newer circuit incident.
+
+Desktop and server install the same engine from the complete configured pool,
+including unavailable members; direct core callers also use it. Legacy roles
+still map to the initial saved order (primary APIs, accounts, ordinary APIs,
+reserve APIs). The forward-only startup converter maps Smart to
+Automatic; In order/Round robin retain their mode, order, weights and limits.
+The conversion is idempotent, persists before listener construction and does
+not change gateway enabled state, credentials, membership, source delays,
+persistent waiting or other user controls. No migration preview/apply API,
+confirmation banner or compatibility rollback UI remains. Old scalar threshold,
+keep-last and scoring fields are accepted in older JSON/presets and ignored by
+pool rotation; startup removes them from desktop state and the server migration
+deletes their metadata keys. New snapshots and presets omit them. Older clients'
+scalar fields on routing requests are accepted but ignored. Source roles seed
+the visible order; they do not add a hidden gate. Only `poolRouting` and
+`maxRetryCandidates` alter rotation on cold construction and hot updates.
+There is no hot switch between two engines and no database downgrade promise.
+Desktop and server advertise `rotation_v2`. Both UI and Rust remote transport
+refuse unsupported rotation-policy writes; management protocol version remains 2. Older
+presets undergo the same conversion after ID remapping; omission of a policy
+preserves the current destination policy.
 Policy saves compare the previous policy and membership before applying
 atomically. Hot policy changes preserve leases, cooldowns, and response ownership.
 The rotation editor applies edits immediately through a serialized queue. Each
@@ -267,6 +367,155 @@ Portable presets remap tagged member IDs before validation and application.
 
 Monitoring can refresh enabled accounts outside the pool, while draining, or
 with unknown quota. Provider windows/reset times are displayed as reported.
+Desktop and server account quota, account/source models and source balance use independent resource-kind
+jobs in the shared refresh service. Startup, manual requests and wake verification join
+that owner; cancellation of one caller does not cancel shared work. Jobs use
+monotonic due times, bounded runtime/origin concurrency and start spacing,
+weighted class fairness and provider Retry-After floors. Quota reads use the
+active/idle 5/15-minute cadence; account models use 8/24 hours. A UI read alone
+does not mark an account active. Disabled accounts have no periodic read.
+Dispatch activity marks the physical `account:` or `source:` member, including
+protocol aliases; both hosts retain recently used members in the active cadence
+for ten minutes. This activity read does not build a routing-preview snapshot.
+After a new passive inference quota snapshot is persisted, both hosts can defer
+the automatic quota poll only while every reported window is still fresh and
+subscription metadata is not due. This does not defer manual requests, confirmed
+quota errors, independent model/balance work or a provider-reported future
+reset check. The reset check uses a stable short jitter and still respects
+provider Retry-After. A header without a fresh quota window does not count as a
+successful poll.
+Account and source observations update the latest stored record in a transaction,
+with durable login/configuration/incarnation fences; they do not save a pre-HTTP
+configuration snapshot or resurrect a deleted member. Account quota/model
+readers and initial reset-credit checks on both hosts request an on-demand Auth
+prerequisite through the same
+service. Auth has reserved worker capacity, joins concurrent readers, and
+continues to use the existing token authority for refresh/persistence. Its
+prepared credential is shared only with current waiters, never kept in the
+observation cache; stale login/configuration revisions are rejected before
+the initial provider read. Explicit token refresh, post-401 recovery and Agent
+task retry remain owner-local rather than separate scheduled refresh jobs.
+Server quota/model 401 recovery compares the exact rejected bearer tokens
+with the token authority. A late rejection cannot invalidate a newer OAuth
+generation or a replacement login with a reused generation; an Agent assertion
+has no OAuth bearer and does not trigger that recovery path. Server token and
+Agent-task persistence binds to the credential reference captured before HTTP;
+import switches that reference and retires the previous authority slot before
+new work. Server runtime builds serialize their publication with account
+import/delete: a build started before the switch finishes before the commit,
+and the replacement runtime is built before metadata HTTP. Delayed preparation
+and writes cannot target the replacement login. Provider-facing management
+HTTP on both hosts shares a process-local concurrency gate with per-origin
+limits, reserved Auth permits and waiter slots, bounded waits, and a permit
+held through response-body consumption. Each retry obtains a new permit;
+account/source reads recheck their durable revision after admission and before
+the physical send. This does not replace the installed-client freshness/reason,
+large-pool traffic or live-provider gates in ROADMAP.
+Quota updates and account model reads synchronize the existing server and
+desktop runtime instead of replacing its scheduler. Changed OAuth model
+inventory updates the candidate, executor and model registry under the same
+scheduler lock, preserving live physical leases, cooldowns and health. Removed
+model routes reject an unstarted lease at final dispatch; a changed virtual
+image base also revokes an unstarted image lease without spending a generation.
+Final dispatch also rechecks Auth execution fences, capability blocks, protected
+quota reserve, the principal scope revision and the exact revision of a bound
+response owner. An invalidated or rebound opaque owner cannot send through its
+old pending lease, even if the same candidate id is rebound. An exclude/re-add
+of a principal's source also revokes an older lease; an unchanged scope save
+does not. Candidate permission edits retain a separate revision, so a
+disable/re-enable or model removal/re-add cannot revive a pending lease;
+weight-only changes do not revoke it. Rejected leases do not spend a wire
+attempt.
+Prepared OAuth authorization is bound to its in-memory token-slot revision;
+refresh, invalidation, replacement and removal retire the old preparation even
+when the persisted generation or bearer repeats. Agent-task replacement has
+its own revision. HTTP and WebSocket payload dispatch validate that revision
+inside the request-budget/scheduler transaction, so a rejected preparation
+does not spend a generation. This is the dispatch start boundary, not a lock
+held through upstream network I/O.
+Desktop and server apply a changed pool policy together with their internal
+gateway key scopes under the same scope/scheduler lock order. A missing key
+leaves both unchanged rather than exposing a partially updated routing graph.
+Server single-account policy edits hold the configuration/build locks;
+permission-changing edits additionally hold a candidate dispatch fence from
+before the durable save through hot apply or replacement. An old pending lease
+cannot send during that gap. Priority/weight-only edits do not fence it. A failed
+rollback/rebuild retires the previous runtime rather than serving stale
+permissions; already started attempts may still settle. Fences are scoped to
+the candidate incarnation, so releasing an old guard cannot unfreeze a
+removed and re-added candidate.
+Server single-source updates and deletion also hold the build lock and fence
+every physical protocol route before changing the credential, endpoint or
+saved permission. Priority/weight-only edits do not fence pending work. A
+failed source credential restoration or an uncertain vault
+delete retires the old runtime. A policy-only save may keep the scheduler;
+transport replacement retires its previous runtime after publication.
+Server batch pool-membership edits validate all members first, then hold the
+configuration/build locks and fence only changed account and physical source
+candidates across the atomic store commit and policy/key-scope update. A failed
+apply restores membership and rebuilds under that same lock; failed restore
+retires the previous runtime. Unchanged membership does not fence requests.
+Server account re-import and deletion fence the old candidate before replacing
+its credential reference or deleting its store row. A failed vault deletion
+restores the record and builds a fresh runtime; an unrecoverable restore retires
+the old runtime rather than reopening its pending dispatches.
+Server common/required proxy policy, per-account proxy and bulk assignment
+edits also hold the configuration/build locks. Before a durable transport
+change, affected account candidates are fenced through the replacement build
+or rollback; an unchanged assignment does not add a dispatch fence. Started
+attempts retain their existing transport until settlement.
+Desktop batch membership, single-account policy and source policy/endpoint/key
+edits also fence affected physical candidates before saving until the live
+scope/policy update or replacement/rollback finishes. Desktop common and
+required proxy settings, individual/bulk assignments and successful source
+model discovery fence the old routes through transport replacement. Applying
+a configuration preset fences its previous pool across both durable writes;
+failure of the second write restores the first. If a desktop replacement build
+fails after a partial hot apply, the restored records produce a fresh runtime
+before dispatch resumes; an unrecoverable restore retires the old runtime.
+Rotating the desktop request key fences the previous physical pool before
+changing the saved principal secret and replacing its listener.
+Desktop re-import and OAuth sign-in fence the previous account candidate before
+committing a replacement login and keep the fence through runtime replacement.
+If OAuth cannot restore a failed account write with certainty, it retires the
+running gateway instead of allowing old pending dispatches.
+Desktop single and batch account deletion fence the old physical candidates
+before touching credentials. If restoring a failed deletion cannot recover
+credentials, profiles, wake state or proxy assignments, the gateway stops and
+is disabled before those fences are released.
+Desktop ownership moves fence local candidates through remote import and its
+verified cleanup. A pending move or remote-linked account is excluded from the
+local runtime and key scope even after a restart. Once remote ownership is
+committed, a failed local runtime replacement leaves the local route disabled
+for recovery instead of reactivating two owners. Returning an account restores
+its previous inactive ownership on failed activation. Remote reconciliation
+also applies a live policy/scope change or replaces the runtime; it never rolls
+back to an erroneously enabled remote-owned record.
+Refresh reads cannot lift a newer live health block unless the durable read
+records a health transition. A superseded server runtime, or a desktop runtime
+being restarted, rejects new admission and pre-dispatch attempts while allowing
+started leases to settle; waiting requests wake without a synthetic retry.
+Other desktop token/login/ownership transitions and delayed-result cases remain
+in the final-dispatch matrix tracked in ROADMAP.
+Desktop quota/model readers also apply observations against the latest record
+behind durable account/configuration revisions. Login/import, secret-backed
+proxy changes, enable/ownership changes and delete/readd retire older reads;
+restoring an earlier configuration does not restore its revision. Normal token
+rotation, usage, display settings and pool weighting do not invalidate quota.
+Preparation errors obey the same fence as successful observations, and a newer
+passive quota snapshot wins even if the wall clock moves backwards. Superseded
+quota reads do not emit wake/reset transitions. The desktop owner reconciles
+registrations on durable configuration/eligibility events, not a polling scan;
+ordinary usage does not rescan inventory. UI reads do not activate accounts.
+Quota reads no longer discover models inline; plan changes mark the independent
+model job dirty. Reported future resets can accelerate quota work without
+bypassing provider floors. Only the quota job finalizes automation transitions;
+reset verification reads within that job instead of recursively waiting on it.
+Deletion retires both resource kinds before secret changes. Rollback derives
+registrations from current storage, never from a cloned queue or old revision.
+Opening desktop storage alone does not start provider work; the native host
+starts the service, which keeps no strong host reference while idle. Start and
+completion events publish the committed in-flight state to existing UI listeners.
 Backoff retains the actual safe failure reason; successful refresh can restore
 health. Credential, proxy, auth, and capacity failures are not all quota errors.
 Model discovery can recover its own errors, but cannot clear an independent
@@ -277,9 +526,9 @@ successful catalog refresh.
 Pool and Connections display operational groups in the same order: rotation,
 quota wait, unavailable, disabled. Scheduler order remains intact within each
 group; Connections can additionally group by subscription. The rotation editor
-also groups by operational status in Smart and Round robin, while In order
+also groups by operational status in Automatic and Round robin, while In order
 preserves the editable manual queue. Only In order exposes
-reordering, and only Smart and Round robin expose weights. The dialog uses one
+reordering, and only Automatic and Round robin expose weights. The dialog uses one
 scrolling body, concise status labels and detailed explanations in Help.
 The scheduler supplies the next-route preview using the request key's scope,
 model rules, protocols and current member capacity. It names a physical member
@@ -294,9 +543,10 @@ availability snapshots. These presentation rules do not change dispatch.
 Execution checks membership, enablement/draining, credentials/proxy, model,
 protocol/adapter support, health/cooldown, quota, and capacity. Response IDs and
 active connections preserve upstream ownership. Soft prompt/session affinity
-cannot force an unhealthy member. Retry and credential refresh are bounded;
-no transparent fallback occurs after response bytes reach the client. Native
-Responses continuations keep a bounded local materialized replay chain. Before
+cannot force an unhealthy member. Retry and credential refresh share the request budget;
+no transparent fallback occurs after response bytes reach the client or when
+remote execution is uncertain. Native
+Responses continuations keep a bounded local materialized replay chain. After a proven pre-execution rejection and before
 any response bytes are visible, Relay can use that chain to move a
 continuation from a temporarily unavailable owner to another compatible
 candidate; the replacement receives the full input without the old opaque
@@ -324,7 +574,12 @@ recovery must never discard it to retry without the earlier context. See the
 Plaintext recovery requires a saved predecessor scoped to the same local key
 and owner; it materializes that history before removing the reference. An
 unpaired tool output needs a known owner, while paired tool history without an
-opaque reference may rotate. Recovery never deletes incomplete tool calls.
+opaque reference may rotate. After an explicit upstream missing-tool-output
+error, native Responses recovery may remove one unmatched function or
+custom-tool call from same-key saved history only when its kind and any reported
+ID identify it uniquely. It preserves every tool output and leaves ambiguous
+history, missing replay state, encrypted content, compaction/context-management
+state, and unsupported replay items untouched.
 After an explicit upstream tool-link rejection, native HTTP/SSE and WebSocket
 may repair one unambiguous call/result mapping before visible output. Call IDs
 remain distinct from item IDs; matching respects tool kind and namespace.
@@ -348,6 +603,18 @@ keep both sides active while waiting for a provider, including HTTP fallback.
 Idle WebSocket cleanup applies only when no request is in flight. Provider
 completion/failure, transport failure or client cancellation ends a generation;
 silence alone does not release its lease, penalize a source or trigger a retry.
+After an SSE terminal event, Relay discards later frames even when they share
+the same transport chunk. A completed WebSocket turn also drops late upstream
+`response.*` frames while no request owns them; neither path emits a second
+usage event for that turn.
+For native Responses, a bare SSE `[DONE]` without `response.completed` is an
+incomplete response, not a success or a reusable continuation. The HTTP/SSE
+to WebSocket bridge must deliver a terminal response event or fail explicitly;
+the marker alone cannot leave a WebSocket client waiting indefinitely.
+HTTP/SSE success requires the terminal event of the client's wire protocol:
+Responses completion, Chat Completions `[DONE]`, or Messages `message_stop`.
+Gemini streams have no such marker and require a candidate `finishReason: STOP`
+before a clean EOF; foreign protocol markers cannot establish success.
 
 Failures preserve `relay`, `account`, or `provider` route origin plus safe
 category, status, and timings across protocols, storage, UI, and exports.
@@ -391,8 +658,9 @@ is prepared. The bounded expiring store retains only fingerprints, so delayed
 responses cannot transfer state to another owner or credential.
 
 An open upstream WebSocket is reused only while its authorization fingerprint
-matches the current credential. A changed credential requires a new connection
-and complete portable history; opaque continuation state fails explicitly.
+and in-memory credential incarnation match the current preparation. A changed
+credential or replaced token slot requires a new connection and complete
+portable history; opaque continuation state fails explicitly.
 Background Codex catalog updates recheck the original profile binding under
 the profile lock before writing a fetched catalog.
 Codex launch applies deferred catalog updates before starting the client; a
@@ -415,6 +683,27 @@ bounded, respects cookie path and expiry, and only sends to HTTPS port 443 on
 `chatgpt.com/backend-api`. Proxy/runtime replacement creates a new store;
 late responses hold the old jar. Browser/authentication cookies are excluded,
 and no cookie values enter storage, diagnostics, or client responses.
+
+The optional Excel / Basis Points transport is configured in API as
+**Model substitution protection** and identified in Usage. The name describes
+the intended workaround, not verification of the model running at the provider.
+The API control uses the existing shared routing setting and saves immediately.
+There are no switches in Connections, Pool or account cards.
+The control appears when a compatible account exists, even before it joins
+the pool, or when the setting is already enabled so it can be turned off.
+Remote servers without the setting field do not expose the control. It uses the
+same physical OAuth account, quota and rotation slot.
+Clients use any of the four Relay protocols. The account executor maps
+function/custom calls and outputs through its native `run_officejs` envelope,
+then the protocol adapter converts the result to the client's format. The
+upstream returns completed JSON, so requested SSE is buffered and emitted only
+after completion.
+Images and explicit nonstandard service tiers are incompatible with this route;
+opaque `previous_response_id` continuation is rejected before dispatch rather
+than silently removed. Completed and incomplete buffered responses retain
+their respective terminal status in JSON and synthesized SSE.
+it does not publish native Codex Fast/Ultrafast metadata. Relay does not claim
+incremental streaming or provider acceptance without a live request.
 
 The adapter registry supports four native contracts and twelve conversions:
 Responses (`/v1/responses`), Chat Completions (`/v1/chat/completions`), Messages
@@ -449,6 +738,23 @@ is retained unless a complete portable history permits replay. Opaque state,
 encrypted reasoning and unpaired tool results are never discarded for retry.
 
 Streams retain tool IDs and order, terminal status, and actual upstream usage.
+Adjacent Responses function calls remain one assistant turn when bridged to
+Chat Completions, followed by their tool results. A Messages `refusal` is a
+terminal filtered response in converted JSON and streams, not a malformed
+upstream response. The dedicated Responses-to-Messages bridge carries a
+reported refusal and output-token limit as an incomplete Responses response,
+including when the provider returns no content. It rejects absent or unknown
+terminal reasons instead of reporting success. Chat Completions `refusal`
+fields and refusal content parts retain their text and filtered terminal state
+when translated.
+Gemini prompt blocks with an explicit `promptFeedback.blockReason` and no
+candidates, and filtered or token-limited candidates without content, retain
+their incomplete terminal status in JSON and SSE conversions. Missing candidates
+without a known block reason and unknown finish reasons do not become successes.
+Native Gemini SSE likewise needs a recognized final reason before EOF can be
+recorded as success; an interrupted stream remains a failed attempt. Native
+media and code parts count as output for streaming admission without rewriting
+their provider-owned bytes or claiming cross-protocol conversion support.
 Portable reasoning text is preserved in Chat Completions JSON, streamed deltas
 and tool-turn history using `reasoning_content`. Unsigned Messages thinking,
 Gemini thoughts and public Responses summaries can use this representation.
@@ -465,6 +771,40 @@ server, and client configuration. Frontend renders this projection.
 Cross-protocol WebSocket, Realtime, audio/video conversion, and server-tool
 emulation are excluded. Native Responses WebSocket remains available; Codex
 uses HTTP/SSE when its catalog includes converted Responses routes.
+The current WebSocket bridge processes one response at a time and binds at most
+one named `stream_id` per connection. It does not yet implement the official
+multi-lane concurrency, per-lane queuing, or cross-lane forks. Named HTTP/SSE
+fallback scopes JSON response events to the request's stream; non-JSON opaque
+compaction cannot be scoped and fails explicitly rather than producing a
+misattributed lane event. Do not claim full WebSocket multiplexing support.
+
+## Tool catalog policy
+
+The shared Rust runtime owns two opt-in modes: `pass_through` (default) sends
+the complete catalog unchanged, and `automatic` enables provider-native
+deferred schema loading on every eligible request. Relay does not select, hide, or
+rename tools by name and does not perform local semantic relevance search.
+The complete trusted catalog remains available to the provider; the provider
+performs its own tool search and loading. Catalog size does not affect whether
+automatic mode is applied.
+
+Automatic mode uses the provider-native Responses `tool_search` contract only
+on native Responses routes with automatic or unspecified `tool_choice`.
+Converted protocols, explicit tool choices, and WebSocket payloads keep the
+ordinary full catalog path. If a compatible native endpoint rejects the
+deferred fields, Relay retries once before output without optimization. This
+fallback is compatibility behavior, not a second policy mode.
+
+Each request captures an immutable policy through retries and HTTP/WebSocket
+fallback. Desktop and server persist compare-and-set updates and hot-apply
+them to new requests without restarting the listener. A single UI switch saves
+the selected mode immediately; remote editing requires `tool_policy_v1`.
+Usage stores aggregate input/forwarded counts and catalog JSON bytes, mode,
+outcome, compatibility fallback and whether provider-hosted deferred tool
+search was used, not schemas or tool names. Bytes are not token/billing
+savings; provider-reported usage remains the source of truth, and changes to
+catalog serialization can affect prompt-cache reuse. This is not an execution
+authorization boundary.
 
 ## Usage and prices
 
@@ -479,6 +819,15 @@ price. Endpoint/protocol changes invalidate stale source evidence. Input,
 cached input, cache writes, output, and request/image prices remain distinct;
 missing required counters/prices are unknown, not `$0`. Adapters follow the
 actual upstream cache contract without borrowing another protocol's semantics.
+Explicit 5m/1h prices in a source catalog remain visible in source pricing
+regardless of the catalog endpoint; an untagged cache-write price does not
+establish a TTL. Displaying a price does not establish route capability.
+Usage history shows cache-read and cache-write counters separately. An exact
+provider-reported cache-write window is shown as reported; when usage omits the
+window, the UI marks it as unreported. Model documentation is separate from
+usage evidence: GPT-5.6 and later have an OpenAI-documented minimum `30m` after
+the latest write or reuse, shown only as a note. Relay cannot calculate a live
+remaining time or exact expiry without cache identity and reuse events.
 
 LiteLLM is the external reference price catalog. Cached startup is nonblocking;
 conditional refresh runs at startup and then the cache TTL (currently 24 hours)
@@ -506,10 +855,19 @@ display-only and require complete priced Relay usage for the relevant window.
 ## Profiles and user-managed server
 
 Profile changes follow inspect, protected snapshot, attach/apply, verify, and
-restore. Only Relay-owned config/auth/catalog fields are managed; newer manual
-sign-ins and unrelated settings survive. Cross-provider history repair is
+restore. Ordinary detach undoes only unchanged Relay-owned config leaves and
+the Relay-owned login; newer manual sign-ins, edited config leaves, and unrelated
+settings survive. An explicit activation may safely detach an old binding,
+keep a newer sign-in as the next protected baseline, and then attach Relay.
+Automatic rollback never adopts a newer sign-in and stops before replacing it.
+Cross-provider history repair is
 reversible and rolls back if profile application fails. Named ChatGPT recovery
 points are separate explicit restores of configuration/authentication.
+An external edit to the known managed model-catalog file does not invalidate
+the profile backup: automatic detach restores the previous config/auth but
+leaves that edited file untouched. Refresh still refuses to replace it, and
+newer sign-ins remain protected. Invalid backup metadata is reported by the
+failed invariant and is not auto-repaired.
 History scans fingerprint bytes during the metadata pass and skip constructing
 JSON trees for conversation/tool events. All session metadata records are still
 checked, including later records in imported histories; rollback checks retain
@@ -543,10 +901,19 @@ process-local and is never written to a JSON cache. Direct client identity
 headers remain client-owned.
 
 Remote management negotiates capabilities and uses revision-checked operations.
-`source_protocols_v1` gates endpoint evidence, probes, and the adapter contract.
-Preset schema 4 accepts the legacy protocol mode field during import but does
-not export or apply it. Adapter settings unsupported by an older server are
-rejected before upload.
+`source_protocols_v1` gates endpoint evidence, automatic computed routes, and
+the legacy explicit diagnostic operation.
+`route_recovery_v1` announces that the existing saved recovery switch applies
+to all four text API inputs. Older servers may expose only the legacy
+`chatgpt_retry_until_available` feature, which covers ChatGPT clients; the
+cross-protocol control is hidden for those servers.
+Preset schema 6 requires support for the current rotation policy and accepts versions
+2 through 6. Schema 5 added optional tool policy. Presets without a pool policy
+preserve the destination policy version; explicit cross-version policies require
+migrating the destination first. Member IDs are remapped before application.
+An omitted policy preserves the destination's settings; an explicit default
+policy resets them. Legacy protocol mode fields are ignored. Adapter or tool
+policy contracts unsupported by an older server are rejected before upload.
 Secret transfer is separate from profile/config publication. Backup/restore
 uses the server CLI with a locked data directory. Real account, proxy, client
 tool-use, streaming, restart, and restore acceptance remains necessary before

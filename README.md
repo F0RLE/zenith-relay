@@ -26,18 +26,21 @@ Download the package for your platform from
 - **Windows:** use the Setup installer. The portable EXE runs without
   installation, but its folder must be writable for in-place updates.
 - **Linux:** choose AppImage, DEB, or RPM.
-- **macOS:** choose the DMG for Intel or Apple Silicon.
+- **macOS:** choose the DMG for Intel or Apple Silicon. This build is ad-hoc
+  signed and is not Apple notarized; follow the one-time [English](docs/help/en/README.md#install-on-macos)
+  or [Russian](docs/help/ru/README.md#установка-на-macos) installation steps.
 
-The first launch opens Quick Setup. Choose where Relay should run, add a
-connection, and select the client that will use the endpoint. Quick Setup can
-be opened again from **Help**.
+The first launch opens Quick Setup. Choose whether the shared pool runs on
+this computer or your server, add accounts and API sources to it, then select
+the client. You can add more connections later. Quick Setup can be opened
+again from **Help**.
 
 ## Choose a mode
 
 | Mode | Use it when | What remains running |
 | --- | --- | --- |
-| **Computer** | You want to combine personal accounts without deploying a server. | Relay and the local endpoint must stay open. |
-| **Choose API** | You already have a compatible hosted API and its key. | The provider runs the requests. |
+| **Computer** | You want to combine personal accounts and API sources without deploying a server. | Relay and the local endpoint must stay open. |
+| **Choose API** | You want to connect an application directly to one saved API source; select this mode after setup. | The provider runs the requests. |
 | **On your server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. |
 
 ## Everyday workflow
@@ -96,6 +99,11 @@ Development and release checks are documented in
 [CONTRIBUTING.md](CONTRIBUTING.md). Current product boundaries live in
 [PLANNING.md](docs/project/PLANNING.md); unfinished work is tracked in the
 [roadmap](docs/project/ROADMAP.md).
+
+The project is licensed under [AGPL-3.0-only](LICENSE). Before submitting a PR,
+read the [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md): accepted
+original contributions are assigned to the project owner, with a license back
+to their authors. Existing AGPL grants and third-party rights remain unchanged.
 
 ```powershell
 cd src
