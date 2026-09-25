@@ -1,10 +1,15 @@
 mod capabilities;
 mod connector;
 mod discovery;
+mod observations;
 mod probe;
+pub use observations::SourceRead;
 mod stats;
 
-pub use probe::{probe_source_generation, SourceProbeInput, SourceProbeResult};
+pub use probe::{
+    probe_source_generation, probe_source_generation_with_scope, SourceProbeInput,
+    SourceProbeResult,
+};
 
 pub use capabilities::{
     endpoint_url_protocol, service_protocol, CapabilityOrigin, CapabilityStatus,
@@ -15,11 +20,13 @@ pub(crate) use discovery::discover_models_with_client;
 pub use discovery::{
     discover_source_models, discover_source_models_and_protocol_bindings,
     discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
-    SourceDiscovery,
+    discover_source_with_protocol_config_with_scope, read_source_models,
+    read_source_models_with_scope, SourceDiscovery,
 };
 pub use stats::{
-    fetch_source_provider_stats, SourceBalanceKind, SourceProviderStats, SourceStatsAmount,
-    SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus,
+    fetch_source_provider_stats, read_source_provider_stats, read_source_provider_stats_with_scope,
+    SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
+    SourceStatsProvider, SourceStatsStatus,
 };
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};

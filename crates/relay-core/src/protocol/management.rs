@@ -8,19 +8,20 @@ use crate::{
     codex_model_display_name, codex_model_is_picker_eligible, normalize_image_base_model,
     normalize_model_ids, normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
     normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
-    normalize_subscription_plan_order, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
-    SourceProtocolBinding, TokenPrice, WireApi,
+    ApiModelPriceOverride, DefaultServiceTier, SourceProtocolBinding, TokenPrice, WireApi,
 };
 mod account;
 mod model;
 mod model_policy;
 mod model_protocols;
+mod preset_routing_reader;
 mod routing;
 mod usage;
 
 pub use account::{
-    api_equivalent_projection_window, model_has_native_account_route, AccountSummary,
-    QuotaWindowUsage, RemoteAccountLocation, RevealedAccountIdentity, SourceSummary,
+    api_equivalent_projection_window, model_has_native_account_route, AccountRefreshState,
+    AccountSummary, QuotaWindowUsage, RefreshStatus, RemoteAccountLocation,
+    RevealedAccountIdentity, SourceRefreshState, SourceSummary,
 };
 pub use model::{
     apply_member_model_display_order, apply_model_display_order,
@@ -116,7 +117,7 @@ impl fmt::Debug for ProfileKeyRotation {
 }
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
-pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 4;
+pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 6;
 const MIN_CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESET_MEMBERS: usize = 2_048;
 const MAX_PRESET_MODELS: usize = 4_096;
@@ -153,17 +154,20 @@ pub fn normalize_configuration_preset(
     }
     normalize_source_preset_rules(&mut preset.settings.sources)?;
     normalize_account_preset_rules(&mut preset.settings.accounts)?;
+    preset.settings.routing.tool_policy = preset
+        .settings
+        .routing
+        .tool_policy
+        .map(crate::ToolPolicy::normalized)
+        .transpose()
+        .map_err(str::to_string)?;
     if let Some(policy) = &preset.settings.routing.pool_routing {
         policy.validate().map_err(str::to_string)?;
     }
-    preset.settings.routing.subscription_plan_order =
-        normalize_subscription_plan_order(preset.settings.routing.subscription_plan_order)
-            .map_err(str::to_string)?;
     preset.settings.routing.image_base_model =
         normalize_image_base_model(preset.settings.routing.image_base_model)
             .map_err(|error| error.to_string())?;
     if !(1..=8).contains(&preset.settings.routing.max_retry_candidates)
-        || !(1..=8).contains(&preset.settings.routing.cooldown_after_failures)
         || !(10..=20).contains(&preset.settings.quota.request_timeout_seconds)
     {
         return Err("configuration preset policy is invalid".into());
@@ -207,7 +211,18 @@ pub fn merge_configuration_preset_settings(
         |rule| &rule.id,
         "account",
     )?;
+    let tool_policy = requested
+        .routing
+        .tool_policy
+        .clone()
+        .or_else(|| current.routing.tool_policy.clone());
     merged.routing.clone_from(&requested.routing);
+    merged.routing.tool_policy = tool_policy;
+    // Older presets use the same forward-only compatibility conversion as
+    // persisted profiles. Omission preserves the destination's current order.
+    if requested.routing.pool_routing.is_none() {
+        merged.routing.pool_routing = current.routing.pool_routing.clone();
+    }
     merged.routing.pool_routing = Some(merged.resolved_pool_routing());
     merged.quota.clone_from(&requested.quota);
     merged.hidden_models.clone_from(&requested.hidden_models);
@@ -597,28 +612,21 @@ pub struct AccountPresetRule {
     pub bypass_common_proxy: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PresetRoutingPolicy {
+    /// Absent in older presets: preserve the destination's current policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<crate::ToolPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
+    /// Use the explicitly labelled Excel/Basis Points route for compatible
+    /// OAuth accounts. This is a route preference, not a second pool member.
+    #[serde(default)]
+    pub basis_points_enabled: bool,
     pub max_retry_candidates: u8,
-    #[serde(default = "default_cooldown_after_failures")]
-    pub cooldown_after_failures: u8,
-    #[serde(default = "default_keep_last_candidate_available")]
-    pub keep_last_candidate_available: bool,
-    pub routing_strategy: RoutingStrategy,
-    pub subscription_plan_order: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub image_base_model: Option<String>,
-}
-
-fn default_cooldown_after_failures() -> u8 {
-    crate::DEFAULT_COOLDOWN_AFTER_FAILURES
-}
-
-fn default_keep_last_candidate_available() -> bool {
-    crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1009,6 +1017,8 @@ mod tests {
             label: "Account".into(),
             identity_hint: "account".into(),
             provider_family: None,
+            basis_points_available: false,
+            basis_points_enabled: false,
             enabled: true,
             in_pool,
             draining: false,
@@ -1026,6 +1036,7 @@ mod tests {
             subscription: Subscription::default(),
             quota: QuotaSnapshot::default(),
             quota_refresh_status: QuotaRefreshStatus::default(),
+            refresh_state: AccountRefreshState::default(),
             secret_available: true,
             remote_location: None,
             proxy_mode: ProxyMode::Direct,
@@ -1064,7 +1075,45 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         }
+    }
+
+    #[test]
+    fn source_revision_is_optional_in_old_snapshots_and_non_secret_in_new_ones() {
+        let mut source = source_summary("synthetic", &["test"]);
+        let mut legacy = serde_json::to_value(&source).unwrap();
+        legacy.as_object_mut().unwrap().remove("refreshState");
+        assert!(legacy.get("refreshRevision").is_none());
+        assert_eq!(
+            serde_json::from_value::<SourceSummary>(legacy)
+                .unwrap()
+                .refresh_state,
+            SourceRefreshState::default()
+        );
+        source.refresh_revision = Some(42);
+        source.refresh_state.models = RefreshStatus::Stale;
+        source.refresh_state.balance = RefreshStatus::Unsupported;
+        let projection = serde_json::to_value(&source).unwrap();
+        assert_eq!(
+            projection
+                .get("refreshRevision")
+                .and_then(|value| value.as_u64()),
+            Some(42)
+        );
+        assert_eq!(projection["refreshState"]["models"], "stale");
+        assert_eq!(projection["refreshState"]["balance"], "unsupported");
+        let mut old_account = serde_json::to_value(account_summary(true, &["test"])).unwrap();
+        old_account.as_object_mut().unwrap().remove("refreshState");
+        assert_eq!(
+            serde_json::from_value::<AccountSummary>(old_account)
+                .unwrap()
+                .refresh_state,
+            AccountRefreshState::default()
+        );
+        assert!(!projection.to_string().contains("credential"));
     }
 
     fn test_token_price(input: u64, output: u64) -> TokenPrice {
@@ -1307,6 +1356,9 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         };
         assert!(model_has_api_source_route(
             std::slice::from_ref(&source),
@@ -1371,6 +1423,9 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         };
 
         let models = pool_model_summaries(&[source], &[], &["GPT-5.4-MINI".into()]);
@@ -1516,7 +1571,7 @@ mod tests {
         let original_account = accounts[0].clone();
 
         apply_member_model_display_order(&mut sources, &mut accounts, &[], &metadata);
-        let expected = ["newer", "older", "unknown-z", "unknown-a"];
+        let expected = ["newer", "older", "unknown-a", "unknown-z"];
         assert_eq!(sources[0].models, expected);
         assert_eq!(accounts[0].models, expected);
         let mut expected_source = original_source;
@@ -1546,7 +1601,7 @@ mod tests {
         );
         assert_eq!(
             sources[0].models,
-            ["older", "newer", "unknown-z", "unknown-a"]
+            ["older", "newer", "unknown-a", "unknown-z"]
         );
         assert_eq!(accounts[0].models, sources[0].models);
     }
@@ -1899,12 +1954,10 @@ mod tests {
             }],
             accounts: Vec::new(),
             routing: PresetRoutingPolicy {
+                tool_policy: None,
                 pool_routing: None,
+                basis_points_enabled: false,
                 max_retry_candidates: 3,
-                cooldown_after_failures: 3,
-                keep_last_candidate_available: true,
-                routing_strategy: RoutingStrategy::Adaptive,
-                subscription_plan_order: Vec::new(),
                 default_service_tier: DefaultServiceTier::Standard,
                 image_base_model: None,
             },
@@ -2007,6 +2060,35 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preset_rotation_upgrades_without_consent_or_losing_member_limits() {
+        let mut current = valid_configuration_preset().settings;
+        current.routing.pool_routing = Some(current.resolved_pool_routing());
+        let mut requested = current.clone();
+        let old = requested.routing.pool_routing.as_mut().unwrap();
+        old.version = 1;
+        old.mode = crate::PoolRoutingMode::Smart;
+        old.members.reverse();
+        for member in &mut old.members {
+            member.weight = 7;
+            member.max_concurrency = 4;
+        }
+        let expected_members = old.members.clone();
+        let merged = merge_configuration_preset_settings(&current, &requested).unwrap();
+        let policy = merged.routing.pool_routing.unwrap();
+        assert!(policy.is_current_rotation());
+        assert_eq!(policy.mode, crate::PoolRoutingMode::Automatic);
+        assert_eq!(policy.members, expected_members);
+        requested.routing.pool_routing = None;
+        assert_eq!(
+            merge_configuration_preset_settings(&current, &requested)
+                .unwrap()
+                .routing
+                .pool_routing,
+            current.routing.pool_routing
+        );
+    }
+
+    #[test]
     fn sparse_configuration_preset_keeps_newer_model_policy() {
         let current = valid_configuration_preset().settings;
         let mut current = ConfigurationPresetSettings {
@@ -2080,6 +2162,9 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         };
         let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
         let price_overrides = BTreeMap::from([(
@@ -2149,6 +2234,9 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         };
         let runtime = GatewayRuntime::from_pool(
             vec![RuntimeSource::unrestricted(ProviderSource {
@@ -2229,6 +2317,9 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         };
 
         let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
@@ -2281,6 +2372,9 @@ mod tests {
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
+            refresh_revision: None,
+            refresh_state: SourceRefreshState::default(),
+            provider_stats: None,
         };
         assert_eq!(
             legacy.models_for_wire_api(WireApi::Responses),
@@ -2332,20 +2426,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_preset_routing_defaults_new_cooldown_policy() {
+    fn legacy_preset_routing_fields_are_read_but_not_exported() {
         let policy: PresetRoutingPolicy = serde_json::from_str(
-            r#"{"maxRetryCandidates":3,"routingStrategy":"adaptive","subscriptionPlanOrder":[],"defaultServiceTier":"standard","imageBaseModel":null}"#,
+            r#"{"maxRetryCandidates":3,"routingStrategy":"adaptive","subscriptionPlanOrder":["business"],"cooldownAfterFailures":7,"keepLastCandidateAvailable":false,"defaultServiceTier":"standard","imageBaseModel":null}"#,
         )
         .unwrap();
-
-        assert_eq!(
-            policy.cooldown_after_failures,
-            crate::DEFAULT_COOLDOWN_AFTER_FAILURES
-        );
-        assert_eq!(
-            policy.keep_last_candidate_available,
-            crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
-        );
+        assert_eq!(policy.max_retry_candidates, 3);
+        let saved = serde_json::to_value(policy).unwrap();
+        for old in [
+            "cooldownAfterFailures",
+            "keepLastCandidateAvailable",
+            "routingStrategy",
+            "subscriptionPlanOrder",
+        ] {
+            assert!(saved.get(old).is_none(), "{old} must not be exported");
+        }
+        let mut unsupported = saved;
+        unsupported["unknownRoutingControl"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<PresetRoutingPolicy>(unsupported).is_err());
     }
 
     #[test]

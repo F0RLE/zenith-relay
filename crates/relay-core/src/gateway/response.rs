@@ -3,11 +3,11 @@ use super::now_ms;
 use super::streaming::{parse_sse_event, StreamBootstrapFailure, TerminalOutcome};
 use crate::error_codes;
 use crate::protocol::sse_event_end;
-use crate::runtime::ExecutorRoute;
-use crate::usage::ReasoningEffortDiagnostics;
+use crate::runtime::{AccountTransport, ExecutorRoute};
+use crate::usage::{normalize_reported_cache_ttls, ReasoningEffortDiagnostics};
 use crate::{
-    normalize_observed_service_tier, CacheWriteTtl, Error, ErrorOrigin, GatewayRuntime,
-    ObservedServiceTier, ToolUseDiagnostics, UsageEvent,
+    normalize_observed_service_tier, Error, ErrorOrigin, GatewayRuntime, ObservedServiceTier,
+    ToolUseDiagnostics, UsageEvent,
 };
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
@@ -209,7 +209,12 @@ pub(super) fn usage_event(
 ) -> UsageEvent {
     let mut routing = route.routing.clone();
     if let Some(diagnostics) = routing.as_mut() {
-        diagnostics.endpoint_kind = Some(route.adapter.route_suffix(route.wire_api).to_string());
+        diagnostics.endpoint_kind = Some(match route.account_transport {
+            AccountTransport::NativeResponses => {
+                route.adapter.route_suffix(route.wire_api).to_string()
+            }
+            AccountTransport::ExcelBasisPoints => "excel_basis_points".to_string(),
+        });
     }
     let mut event = UsageEvent {
         request_id: request_id.to_string(),
@@ -317,6 +322,7 @@ pub(super) fn completed_upstream_response(
         {
             let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(bytes));
             return Err(Box::new(StreamBootstrapFailure {
+                execution: failure.execution,
                 upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(None, &value)),
                 preserved: super::errors::preserved_upstream_error_value(&failure, &value),
                 ..failure.into()
@@ -329,6 +335,7 @@ pub(super) fn completed_upstream_response(
     }
     let mut offset = 0;
     let mut output = Vec::new();
+    let mut saw_output = false;
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
         if terminal.has_data && !terminal.valid {
@@ -353,6 +360,11 @@ pub(super) fn completed_upstream_response(
                     terminal.cooldown_hint,
                 );
                 return Err(Box::new(StreamBootstrapFailure {
+                    execution: if saw_output {
+                        crate::scheduler::rotation::ExecutionObservation::accepted()
+                    } else {
+                        failure.execution
+                    },
                     upstream_error: terminal.upstream_error,
                     preserved: terminal.preserved_error,
                     ..failure.into()
@@ -374,6 +386,7 @@ pub(super) fn completed_upstream_response(
             }
             None => {}
         }
+        saw_output |= terminal.semantic_output;
         offset += end;
     }
     Err(Box::new(
@@ -457,10 +470,8 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     if let Some(cache_write_input_tokens) = cache_write_input_tokens {
         event.cache_write_input_tokens = Some(cache_write_input_tokens);
     }
-    event.cache_write_ttl = event
-        .cache_write_input_tokens
-        .filter(|written| *written > 0)
-        .and_then(|_| cache_write_ttl_from_usage(usage).or(event.cache_write_ttl));
+    event.cache_write_ttl =
+        cache_write_ttl_from_usage(usage).or_else(|| event.cache_write_ttl.clone());
     let reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
@@ -504,28 +515,77 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     }
 }
 
-fn cache_write_ttl_from_usage(usage: &Value) -> Option<CacheWriteTtl> {
-    usage
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cache_write_ttl"))
-        .or_else(|| usage.get("cache_write_ttl"))
-        .and_then(Value::as_str)
-        .and_then(CacheWriteTtl::from_anthropic_ttl)
-        .or_else(|| {
-            let creation = usage.get("cache_creation")?;
-            creation
-                .get("ephemeral_1h_input_tokens")
-                .and_then(Value::as_u64)
-                .filter(|tokens| *tokens > 0)
-                .map(|_| CacheWriteTtl::OneHour)
-                .or_else(|| {
-                    creation
-                        .get("ephemeral_5m_input_tokens")
-                        .and_then(Value::as_u64)
-                        .filter(|tokens| *tokens > 0)
-                        .map(|_| CacheWriteTtl::FiveMinutes)
-                })
-        })
+fn cache_write_ttl_from_usage(usage: &Value) -> Option<String> {
+    let mut windows = Vec::new();
+    let mut usage_objects = vec![usage];
+    for field in [
+        "input_tokens_details",
+        "prompt_tokens_details",
+        "inputTokensDetails",
+        "promptTokensDetails",
+    ] {
+        if let Some(details) = usage.get(field) {
+            usage_objects.push(details);
+        }
+    }
+
+    for object in usage_objects {
+        for field in [
+            "cache_write_ttl",
+            "cacheWriteTtl",
+            "cache_creation_ttl",
+            "cacheCreationTtl",
+        ] {
+            if let Some(value) = object.get(field).and_then(Value::as_str) {
+                windows.push(value.to_string());
+            }
+        }
+
+        if let Some(object) = object.as_object() {
+            for (key, tokens) in object {
+                if tokens.as_u64().is_some_and(|tokens| tokens > 0) {
+                    if let Some(window) = cache_window_from_token_field(key) {
+                        windows.push(window);
+                    }
+                }
+            }
+        }
+
+        if let Some(creation) = object
+            .get("cache_creation")
+            .or_else(|| object.get("cacheCreation"))
+            .and_then(Value::as_object)
+        {
+            for (key, tokens) in creation {
+                let window = key
+                    .strip_prefix("ephemeral_")
+                    .and_then(|key| key.strip_suffix("_input_tokens"));
+                if tokens.as_u64().is_some_and(|tokens| tokens > 0) {
+                    if let Some(window) = window {
+                        windows.push(window.to_string());
+                    }
+                }
+            }
+        }
+    }
+    normalize_reported_cache_ttls(&windows.join(","))
+}
+
+fn cache_window_from_token_field(key: &str) -> Option<String> {
+    let normalized = key.to_ascii_lowercase();
+    [
+        "cache_creation_input_tokens_",
+        "cache_creation_tokens_",
+        "cachecreationinputtokens",
+        "cachecreationtokens",
+        "cache_write_input_tokens_",
+        "cachewriteinputtokens",
+        "cache_write_tokens_",
+        "cachewritetokens",
+    ]
+    .into_iter()
+    .find_map(|prefix| normalized.strip_prefix(prefix))
+    .map(str::to_string)
 }
 
 pub(super) fn find_usage(value: &Value) -> Option<&Value> {
@@ -636,13 +696,70 @@ mod tests {
             &mut event,
             br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":20},"output_tokens":10}}"#,
         );
-        assert_eq!(event.cache_write_ttl, Some(CacheWriteTtl::OneHour));
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("1h"));
 
         populate_tokens(
             &mut event,
             br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":20},"output_tokens":10}}"#,
         );
-        assert_eq!(event.cache_write_ttl, Some(CacheWriteTtl::FiveMinutes));
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn cache_usage_keeps_all_reported_provider_windows() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":10,"ephemeral_5m_input_tokens":10,"ephemeral_15m_input_tokens":0},"output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("5m, 1h"));
+
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_write_ttl":"15m","output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("15m"));
+    }
+
+    #[test]
+    fn cache_usage_accepts_generic_provider_window_fields() {
+        let usage = serde_json::json!({
+            "cache_creation_ttl": "2h",
+            "cache_creation_tokens_5m": 2,
+            "input_tokens_details": {
+                "cache_write_tokens_30m": 5
+            },
+            "prompt_cache_ttl": "24h",
+            "cache_creation_input_tokens": 7
+        });
+
+        assert_eq!(
+            cache_write_ttl_from_usage(&usage).as_deref(),
+            Some("5m, 30m, 2h")
+        );
+    }
+
+    #[test]
+    fn cache_usage_keeps_unknown_windows_unreported() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_input_tokens, Some(20));
+        assert_eq!(event.cache_write_ttl, None);
+    }
+
+    #[test]
+    fn cache_usage_keeps_provider_reported_ttl_without_write_counter() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_write_ttl":"45m","output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_input_tokens, None);
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("45m"));
     }
 
     #[test]

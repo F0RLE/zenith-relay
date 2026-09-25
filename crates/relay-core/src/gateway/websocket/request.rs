@@ -6,8 +6,9 @@ use crate::error_codes;
 use crate::gateway::continuation;
 use crate::gateway::request::{
     client_context_fingerprint, codex_background_request_kind, is_managed_codex_client,
-    repair_legacy_responses_call_ids, ServiceTierPolicy,
+    repair_legacy_responses_call_ids, RequestToolPolicy, ServiceTierPolicy,
 };
+use crate::scheduler::rotation::SharedRequestBudget;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
 use axum::http::HeaderMap;
@@ -15,7 +16,9 @@ use serde_json::Value;
 
 #[derive(Clone)]
 pub(super) struct ClientRequest {
+    pub(super) tool_policy: RequestToolPolicy,
     pub(super) request_id: String,
+    pub(super) budget: SharedRequestBudget,
     value: Value,
     pub(super) requested_model: String,
     pub(super) resolved_model: String,
@@ -28,10 +31,25 @@ pub(super) struct ClientRequest {
     pub(super) has_unpaired_tool_output: bool,
     pub(super) prompt_affinity_key: Option<String>,
     pub(super) background_kind: Option<&'static str>,
-    pub(super) wait_for_candidate_availability: bool,
 }
 
 impl ClientRequest {
+    pub(super) fn error_stream_id(payload: &[u8]) -> Option<String> {
+        serde_json::from_slice::<Value>(payload)
+            .ok()?
+            .get("stream_id")?
+            .as_str()
+            .filter(|stream_id| valid_stream_id(stream_id))
+            .map(str::to_string)
+    }
+
+    pub(super) fn account_retained_input(&self) {
+        self.budget
+            .retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
+                &self.value,
+            ));
+    }
+
     pub(super) fn parse(
         runtime: &GatewayRuntime,
         key: &AuthenticatedKey,
@@ -55,6 +73,7 @@ impl ClientRequest {
         }
         let mut value: Value = serde_json::from_slice(payload)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
+        let tool_policy = RequestToolPolicy::new(runtime, &value);
         let object = value
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
@@ -70,22 +89,12 @@ impl ClientRequest {
         let stream_id = match object.get("stream_id") {
             None => None,
             Some(Value::String(stream_id)) => {
-                let stream_id = stream_id.trim();
-                if stream_id.is_empty()
-                    || stream_id.len() > 256
-                    || stream_id.chars().any(char::is_control)
-                {
-                    return Err(GatewayFailure::invalid_request(
-                        "stream_id must be a valid non-empty string",
-                    ));
+                if !valid_stream_id(stream_id) {
+                    return Err(GatewayFailure::invalid_stream_id());
                 }
-                Some(stream_id.to_string())
+                Some(stream_id.clone())
             }
-            Some(_) => {
-                return Err(GatewayFailure::invalid_request(
-                    "stream_id must be a valid non-empty string",
-                ));
-            }
+            Some(_) => return Err(GatewayFailure::invalid_stream_id()),
         };
         let requested_model = object
             .get("model")
@@ -99,11 +108,6 @@ impl ClientRequest {
         } else {
             ServiceTierPolicy::client_owned(&value)
         };
-        let managed_codex_client = is_managed_codex_client(headers);
-        // Preserve client eligibility with the request. The live control is
-        // checked in the connection/retry loop so an in-flight wait can be
-        // disabled without reconnecting the client.
-        let wait_for_candidate_availability = managed_codex_client;
         let background_kind = codex_background_request_kind(headers, &value);
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
@@ -112,7 +116,8 @@ impl ClientRequest {
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .or_else(|| {
-                (managed_codex_client && runtime.chatgpt_retry_until_available())
+                runtime
+                    .route_recovery_enabled()
                     .then(|| {
                         runtime.resolve_configured_model(key, &requested_model, WEBSOCKET_PROTOCOLS)
                     })
@@ -167,7 +172,9 @@ impl ClientRequest {
             client_context_id.as_deref(),
         );
         Ok(Self {
+            tool_policy,
             request_id,
+            budget: SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),
             value,
             requested_model,
             resolved_model,
@@ -180,7 +187,6 @@ impl ClientRequest {
             has_unpaired_tool_output: continuation.has_unpaired_tool_output,
             prompt_affinity_key,
             background_kind,
-            wait_for_candidate_availability,
         })
     }
 
@@ -211,8 +217,21 @@ impl ClientRequest {
     }
 
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
-        serde_json::to_string(&self.value_for(route))
+        let (value, _) = self.filtered_value_for(route)?;
+        serde_json::to_string(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    fn filtered_value_for(
+        &self,
+        route: &ExecutorRoute,
+    ) -> Result<(Value, ToolUseDiagnostics), GatewayFailure> {
+        let mut value = self.value_for(route);
+        let mut policy = self.tool_policy.clone();
+        policy
+            .apply(&mut value)
+            .map_err(GatewayFailure::invalid_request)?;
+        Ok((value, policy.diagnostics))
     }
 
     pub(super) fn native_replay_value(&self) -> Value {
@@ -332,15 +351,9 @@ impl ClientRequest {
     }
 
     pub(super) fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {
-        let client = crate::gateway::request::tool_use_diagnostics(&self.value);
-        self.payload_for(route)
-            .map(|payload| {
-                crate::gateway::request::with_forwarded_tool_diagnostics(
-                    &client,
-                    payload.as_bytes(),
-                )
-            })
-            .unwrap_or(client)
+        self.filtered_value_for(route)
+            .map(|(_, diagnostics)| diagnostics)
+            .unwrap_or_else(|_| self.tool_policy.diagnostics.clone())
     }
 
     pub(super) fn has_previous_response_id(&self) -> bool {
@@ -380,6 +393,31 @@ impl ClientRequest {
         }
     }
 
+    pub(super) fn recover_stale_tool_history(
+        &mut self,
+        runtime: &GatewayRuntime,
+        local_key_id: &str,
+        upstream_error: &[u8],
+    ) -> bool {
+        let mut materialized = self.value.clone();
+        if !continuation::recover_stale_tool_history(
+            runtime,
+            local_key_id,
+            &mut materialized,
+            &self.resolved_model,
+            now_ms(),
+            true,
+            upstream_error,
+        ) {
+            return false;
+        }
+        self.value = materialized;
+        self.response_affinity_key = None;
+        self.requires_affinity_owner = false;
+        self.has_unpaired_tool_output = false;
+        true
+    }
+
     pub(super) fn repair_custom_tool_item_ids(&mut self) -> bool {
         crate::protocol::repair_custom_tool_item_ids(&mut self.value)
     }
@@ -402,6 +440,14 @@ impl ClientRequest {
             self.has_previous_response_id() || self.has_unpaired_tool_output;
         true
     }
+}
+
+fn valid_stream_id(stream_id: &str) -> bool {
+    !stream_id.is_empty()
+        && stream_id.len() <= 256
+        && stream_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn metadata_flag(value: &Value, key: &str) -> bool {

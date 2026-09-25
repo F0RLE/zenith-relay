@@ -1,10 +1,9 @@
 use crate::ApiModelPriceOverride;
 use serde_json::Value;
 
-/// Cache-write tariffs are Anthropic Messages-contract evidence.  A generic
-/// OpenAI-compatible model list can use similarly named fields for unrelated
-/// caches, so never expose 5m/1h creation prices unless discovery queried a
-/// real Messages route.
+/// Explicit 5m/1h prices carry their own TTL evidence regardless of the
+/// catalog endpoint. Untagged cache-write prices only imply Anthropic's 5m
+/// tariff when discovered through a Messages endpoint.
 pub(super) fn detected_model_price(
     model: &Value,
     messages_cache_write_supported: bool,
@@ -52,43 +51,51 @@ pub(super) fn detected_model_price(
             "input_cache_read",
         ],
     )
-    .or_else(|| ttl_price(model, "promptCacheReadCostsByTtl", "5m"))
-    .or_else(|| ttl_price(model, "promptCacheReadCostsByTtl", "1h"));
-    let (cache_write_5m, cache_write_1h) = if messages_cache_write_supported {
-        let write_5m = price_component(
-            model,
-            pricing,
-            &[
-                "cacheWrite5mMicrousdPerMillion",
-                "cacheWrite5mMicroUsdPerMillion",
-                "cache_write_5m_microusd_per_million",
-                "cache_write_5m_micro_usd_per_million",
-                "cacheCreationInputCostMicrousdPerMillion",
-                "cache_creation_input_cost_microusd_per_million",
-            ],
-            &[
-                "cacheWriteCostPerToken",
-                "cache_write_cost_per_token",
-                "input_cache_write",
-            ],
-        )
-        .or_else(|| ttl_price(model, "promptCacheWriteCostsByTtl", "5m"));
-        let write_1h = price_component(
-            model,
-            pricing,
-            &[
-                "cacheWrite1hMicrousdPerMillion",
-                "cacheWrite1hMicroUsdPerMillion",
-                "cache_write_1h_microusd_per_million",
-                "cache_write_1h_micro_usd_per_million",
-            ],
-            &[],
-        )
-        .or_else(|| ttl_price(model, "promptCacheWriteCostsByTtl", "1h"));
-        (write_5m, write_1h)
-    } else {
-        (None, None)
-    };
+    .or_else(|| ttl_price(model, pricing, "promptCacheReadCostsByTtl", "5m"))
+    .or_else(|| ttl_price(model, pricing, "promptCacheReadCostsByTtl", "1h"));
+    let cache_write_5m = price_component(
+        model,
+        pricing,
+        &[
+            "cacheWrite5mMicrousdPerMillion",
+            "cacheWrite5mMicroUsdPerMillion",
+            "cache_write_5m_microusd_per_million",
+            "cache_write_5m_micro_usd_per_million",
+        ],
+        &[],
+    )
+    .or_else(|| ttl_price(model, pricing, "promptCacheWriteCostsByTtl", "5m"))
+    .or_else(|| {
+        if messages_cache_write_supported {
+            price_component(
+                model,
+                pricing,
+                &[
+                    "cacheCreationInputCostMicrousdPerMillion",
+                    "cache_creation_input_cost_microusd_per_million",
+                ],
+                &[
+                    "cacheWriteCostPerToken",
+                    "cache_write_cost_per_token",
+                    "input_cache_write",
+                ],
+            )
+        } else {
+            None
+        }
+    });
+    let cache_write_1h = price_component(
+        model,
+        pricing,
+        &[
+            "cacheWrite1hMicrousdPerMillion",
+            "cacheWrite1hMicroUsdPerMillion",
+            "cache_write_1h_microusd_per_million",
+            "cache_write_1h_micro_usd_per_million",
+        ],
+        &[],
+    )
+    .or_else(|| ttl_price(model, pricing, "promptCacheWriteCostsByTtl", "1h"));
     ApiModelPriceOverride::from_optional_fields(
         Some(input),
         cached_input,
@@ -130,8 +137,17 @@ fn usd_per_request_field(value: &Value, fields: &[&str]) -> Option<u64> {
         .find_map(|field| usd_per_request_to_micro_usd(value.get(*field)?))
 }
 
-fn ttl_price(model: &Value, field: &str, ttl: &str) -> Option<u64> {
-    unsigned_integer(model.get(field)?.get(ttl)?)
+fn ttl_price(model: &Value, pricing: Option<&Value>, field: &str, ttl: &str) -> Option<u64> {
+    model
+        .get(field)
+        .and_then(|values| values.get(ttl))
+        .and_then(unsigned_integer)
+        .or_else(|| {
+            pricing
+                .and_then(|value| value.get(field))
+                .and_then(|values| values.get(ttl))
+                .and_then(unsigned_integer)
+        })
 }
 
 fn request_price(model: &Value, pricing: Option<&Value>) -> Option<u64> {
@@ -243,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_cache_creation_prices_outside_an_anthropic_messages_route() {
+    fn keeps_explicit_ttl_prices_outside_a_messages_route() {
         let price = detected_model_price(
             &json!({
                 "id": "openai-compatible-model",
@@ -256,6 +272,41 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(1_250_000));
+        assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(2_500_000));
+    }
+
+    #[test]
+    fn detects_ttl_cache_prices_inside_pricing() {
+        let price = detected_model_price(
+            &json!({
+                "id": "ttl-model",
+                "pricing": {
+                    "prompt": "0.000001",
+                    "completion": "0.000002",
+                    "promptCacheWriteCostsByTtl": { "5m": 1_250_000, "1h": 2_500_000 }
+                }
+            }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(1_250_000));
+        assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(2_500_000));
+    }
+
+    #[test]
+    fn does_not_guess_a_ttl_for_generic_cache_creation() {
+        let price = detected_model_price(
+            &json!({
+                "id": "generic-model",
+                "inputCostMicrousdPerMillion": 1_000_000,
+                "outputCostMicrousdPerMillion": 2_000_000,
+                "cacheCreationInputCostMicrousdPerMillion": 1_250_000,
+                "pricing": { "input_cache_write": "0.00000125" }
+            }),
+            false,
+        )
+        .unwrap();
         assert_eq!(price.cache_write_5m_micro_usd_per_million, None);
         assert_eq!(price.cache_write_1h_micro_usd_per_million, None);
     }

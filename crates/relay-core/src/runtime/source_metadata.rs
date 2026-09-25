@@ -1,7 +1,8 @@
 use super::{AuthenticatedKey, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
-use crate::{CandidateKind, Error, Result, SourceAdapter, WireApi};
+use crate::{CandidateKind, Error, Result, WireApi};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
@@ -12,7 +13,11 @@ impl GatewayRuntime {
             let Some(candidate) = scheduler.candidate(&account.id) else {
                 continue;
             };
-            for model in &account.configured_models {
+            let inventory = account
+                .model_inventory
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for model in &inventory.configured_models {
                 if key.model_rules.allows(model)
                     && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
                 {
@@ -26,32 +31,6 @@ impl GatewayRuntime {
         models.into_iter().collect()
     }
 
-    /// A bare Codex model keeps its account-owned transport whenever a
-    /// configured ChatGPT account can serve it. Semantic properties use the
-    /// same reference catalog as API sources.
-    ///
-    /// This deliberately checks configured routes rather than current health:
-    /// a temporary catalogue-discovery failure must not erase native
-    /// transport settings from a saved ChatGPT manifest.
-    pub(crate) fn codex_model_has_chatgpt_account(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        !self.codex_model_chatgpt_account_ids(key, model).is_empty()
-    }
-
-    pub(crate) fn codex_model_chatgpt_account_ids(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> Vec<String> {
-        let Some(model) = self.resolve_model(key, model) else {
-            return Vec::new();
-        };
-        self.codex_model_chatgpt_account_ids_for_resolved(key, &model)
-    }
-
     pub(crate) fn codex_model_chatgpt_account_ids_for_resolved(
         &self,
         key: &AuthenticatedKey,
@@ -63,6 +42,9 @@ impl GatewayRuntime {
             .values()
             .filter(|account| {
                 account
+                    .model_inventory
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .configured_models
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(model))
@@ -72,6 +54,58 @@ impl GatewayRuntime {
             })
             .map(|account| account.id.clone())
             .collect()
+    }
+
+    /// Returns only account routes that speak the native Responses contract.
+    /// Excel / Basis Points is an explicit Relay transport and must remain
+    /// visible in Relay while avoiding native Codex picker metadata such as
+    /// Fast and Ultrafast tiers that its upstream does not confirm.
+    pub(crate) fn codex_model_native_responses_account_ids(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Vec<String> {
+        let Some(model) = self.resolve_model(key, model) else {
+            return Vec::new();
+        };
+        let scope = key.scope_snapshot();
+        let scheduler = self.lock_scheduler();
+        self.chatgpt_accounts
+            .values()
+            .filter(|account| {
+                !account.basis_points_enabled.load(Ordering::Relaxed)
+                    && account
+                        .model_inventory
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .configured_models
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(&model))
+                    && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                        candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                    })
+            })
+            .map(|account| account.id.clone())
+            .collect()
+    }
+
+    /// Returns whether the key has at least one Responses route other than
+    /// the explicitly labelled Excel / Basis Points transport. The shared
+    /// speed policy can be projected for that model only when such a route
+    /// exists; Basis Points alone is standard speed.
+    pub(crate) fn codex_model_has_non_basis_responses_route(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> bool {
+        let Some(model) = self.resolve_model(key, model) else {
+            return false;
+        };
+        self.configured_executor_routes(key, &model, &[WireApi::Responses], false)
+            .iter()
+            .any(|route| {
+                route.account_transport != crate::runtime::AccountTransport::ExcelBasisPoints
+            })
     }
 
     /// Responses Lite is a whole-request transport contract, not a property
@@ -147,27 +181,6 @@ impl GatewayRuntime {
     /// participant's optional capability fields.
     pub fn model_reasoning_levels(&self, model: &str) -> Vec<String> {
         crate::canonicalize_reasoning_levels(self.model_capabilities(model).reasoning_effort_levels)
-    }
-
-    pub(crate) fn model_has_translated_ultra_route(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        let Some(model) = self.resolve_model(key, model) else {
-            return false;
-        };
-        let scope = key.scope_snapshot();
-        let scheduler = self.lock_scheduler();
-        self.source_candidate_bindings
-            .iter()
-            .any(|(candidate_id, binding)| {
-                binding.adapter == SourceAdapter::ResponsesToMessages
-                    && binding.reasoning_mode.supports_effort("ultra")
-                    && scheduler.candidate(candidate_id).is_some_and(|candidate| {
-                        candidate.is_configured(&model, &[WireApi::Responses], &scope)
-                    })
-            })
     }
 
     pub(crate) fn codex_model_display_name(&self, model: &str) -> String {

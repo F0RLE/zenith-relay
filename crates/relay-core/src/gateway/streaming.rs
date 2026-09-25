@@ -1,9 +1,9 @@
 use super::errors::{
-    api_error_type, apply_failure_cooldown_with_hint, apply_failure_state,
-    canonical_upstream_status, failure_category_requires_cooldown, preserved_upstream_error_value,
+    api_error_type, apply_failure_state, canonical_upstream_status, current_failure_state,
+    failure_category_requires_cooldown, failure_cooldown, preserved_upstream_error_value,
     rate_limit_body_hint_value, responses_tool_call_links_rejected_value,
     upstream_event_failure_category, upstream_failure_status, upstream_status_from_value,
-    zenith_gateway_invalid_request_value, AttemptFailure, CooldownContext, PreservedUpstreamError,
+    zenith_gateway_invalid_request_value, AttemptFailure, PreservedUpstreamError,
     RateLimitBodyHint,
 };
 use super::now_ms;
@@ -55,6 +55,7 @@ pub(super) use events::{
 };
 
 pub(super) struct StreamBootstrapFailure {
+    pub(super) execution: crate::scheduler::rotation::ExecutionObservation,
     pub(super) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(super) failure: AttemptFailure,
     pub(super) preserved: Option<PreservedUpstreamError>,
@@ -65,6 +66,7 @@ pub(super) struct StreamBootstrapFailure {
 impl From<AttemptFailure> for StreamBootstrapFailure {
     fn from(failure: AttemptFailure) -> Self {
         Self {
+            execution: crate::scheduler::rotation::ExecutionObservation::unknown(),
             failure,
             upstream_error: None,
             preserved: None,
@@ -128,6 +130,11 @@ pub(super) async fn bootstrap_stream(
                             event.cooldown_hint,
                         );
                         return Err(StreamBootstrapFailure {
+                            execution: if saw_output {
+                                crate::scheduler::rotation::ExecutionObservation::accepted()
+                            } else {
+                                failure.execution
+                            },
                             failure,
                             upstream_error: event.upstream_error,
                             preserved: event.preserved_error,
@@ -155,8 +162,15 @@ pub(super) async fn bootstrap_stream(
                     }) {
                         return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into());
                     }
-                    ready_to_forward |= event.outcome.is_some() || event.semantic_output;
+                    let terminal = event.outcome.is_some();
+                    ready_to_forward |= terminal || event.semantic_output;
                     inspected = absolute_end;
+                    if terminal {
+                        // A transport chunk may also contain later frames. The
+                        // first terminal owns the response; never expose its tail.
+                        buffered.truncate(inspected);
+                        break;
+                    }
                 }
                 if ready_to_forward {
                     return Ok((headers, Bytes::from(buffered), stream));
@@ -245,7 +259,6 @@ impl StreamExecution {
         let completion_source = route.candidate_id.clone();
         let completion_model = source_model.clone();
         let completion_prompt_affinity = prompt_affinity_key.clone();
-        let completion_half_open_probe = route.half_open_probe;
         let completion_headers = headers.clone();
         let completion_uses_response_affinity = wire_api == WireApi::Responses;
         let completion_bridge_state = adapter_request
@@ -257,8 +270,6 @@ impl StreamExecution {
         let completion_native_response_for_callback = completion_native_response.clone();
         let completion_native_template = request;
         let completion_local_key = local_key_id.clone();
-        let completion_scope = route.scope.clone();
-        let completion_allowed_protocols = route.allowed_protocols.clone();
         let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
             if let Some(capture) = &upstream_usage {
                 capture
@@ -266,7 +277,48 @@ impl StreamExecution {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .apply_to(event);
             }
-            lease.release();
+            if event.success {
+                lease.settle_rotation_success(now_ms());
+            } else {
+                // This callback belongs to an already returned response body.
+                // A terminal failure may affect health, but can never replay it.
+                let health = if event.error_category.as_deref().is_some_and(|category| {
+                    matches!(
+                        category,
+                        error_codes::UPSTREAM_SERVER_ERROR
+                            | error_codes::UPSTREAM_OVERLOADED
+                            | error_codes::UPSTREAM_UNAVAILABLE
+                    )
+                }) {
+                    crate::scheduler::rotation::HealthObservation::CountableTransient {
+                        provider_not_before_ms: None,
+                    }
+                } else {
+                    crate::scheduler::rotation::HealthObservation::Unknown
+                };
+                let now = std::time::SystemTime::now();
+                let cooldown = event.error_category.as_deref().and_then(|category| {
+                    failure_cooldown(
+                        &completion_runtime,
+                        &completion_source,
+                        &completion_model,
+                        StatusCode::from_u16(event.http_status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        category,
+                        &completion_headers,
+                        hint,
+                        now,
+                    )
+                });
+                completion_runtime.settle_rotation_failure(
+                    &lease,
+                    crate::scheduler::rotation::AttemptObservation {
+                        execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                        health,
+                    },
+                    cooldown,
+                    crate::unix_time_ms_at(now),
+                );
+            }
             // A response is healthy only after the upstream has emitted its
             // successful terminal event. An incomplete response may have
             // delivered bytes to the client, but it must not warm affinity or
@@ -330,27 +382,15 @@ impl StreamExecution {
                         );
                     }
                 }
-            } else if let Some(category) = event
+            } else if event
                 .error_category
                 .as_deref()
-                .filter(|category| failure_category_requires_cooldown(category))
+                .is_some_and(failure_category_requires_cooldown)
             {
-                let status =
-                    StatusCode::from_u16(event.http_status).unwrap_or(StatusCode::BAD_GATEWAY);
-                let cooldown_context = CooldownContext {
-                    scope: &completion_scope,
-                    allowed_protocols: &completion_allowed_protocols,
-                };
-                let state = apply_failure_cooldown_with_hint(
+                let state = current_failure_state(
                     &completion_runtime,
                     &completion_source,
                     &completion_model,
-                    status,
-                    category,
-                    &completion_headers,
-                    hint,
-                    &cooldown_context,
-                    completion_half_open_probe,
                 );
                 apply_failure_state(event, state);
             }
@@ -508,6 +548,8 @@ pub(super) struct UsageStream<S> {
     pub(super) response_id: Option<String>,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
     pub(super) native_gemini: bool,
+    native_gemini_incomplete: bool,
+    native_gemini_finished: bool,
     native_replay_capture: NativeReplayCapture,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
@@ -539,6 +581,8 @@ impl<S> UsageStream<S> {
             response_id: None,
             native_response: None,
             native_gemini,
+            native_gemini_incomplete: false,
+            native_gemini_finished: false,
             native_replay_capture: NativeReplayCapture::default(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
@@ -569,6 +613,8 @@ impl<S> UsageStream<S> {
             response_id: None,
             native_response,
             native_gemini,
+            native_gemini_incomplete: false,
+            native_gemini_finished: false,
             native_replay_capture: NativeReplayCapture::default(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
@@ -687,21 +733,21 @@ impl<S> UsageStream<S> {
         framed
     }
 
-    fn ingest_sse(&mut self, bytes: &[u8]) -> bool {
+    fn ingest_sse(&mut self, bytes: &[u8]) -> (bool, usize) {
         if self.terminated {
-            return false;
+            return (false, 0);
         }
         if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
             self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-            return false;
+            return (false, 0);
         }
         self.sse_pending.extend_from_slice(bytes);
         while let Some(end) = sse_event_end(&self.sse_pending) {
             if end > MAX_SSE_EVENT_BYTES {
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-                return false;
+                return (false, 0);
             }
             let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
@@ -709,7 +755,30 @@ impl<S> UsageStream<S> {
                 self.set_upstream_error(terminal.upstream_error);
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::STREAM_INVALID);
-                return false;
+                return (false, 0);
+            }
+            // A terminal marker from another wire protocol cannot prove this
+            // request or its continuation state completed successfully.
+            let valid_terminal = self
+                .event
+                .as_ref()
+                .is_some_and(|event| match event.wire_api {
+                    WireApi::Responses => terminal.payload.as_ref().is_some_and(|payload| {
+                        matches!(
+                            payload.get("type").and_then(Value::as_str),
+                            Some("response.completed" | "response.done")
+                        )
+                    }),
+                    WireApi::ChatCompletions => terminal.payload.is_none(),
+                    WireApi::Messages => terminal.payload.as_ref().is_some_and(|payload| {
+                        payload.get("type").and_then(Value::as_str) == Some("message_stop")
+                    }),
+                    WireApi::Gemini => false,
+                });
+            if terminal.outcome == Some(TerminalOutcome::Success) && !valid_terminal {
+                self.sse_pending.clear();
+                self.fail_stream(error_codes::STREAM_INCOMPLETE);
+                return (false, 0);
             }
             if let Some(payload) = terminal.payload.as_ref() {
                 if let Some(current) = self.event.as_mut() {
@@ -749,7 +818,6 @@ impl<S> UsageStream<S> {
                     self.capture_native_response(terminal.response);
                     self.finish(None, None);
                     self.terminated = true;
-                    return true;
                 }
                 Some(TerminalOutcome::Incomplete) => {
                     self.capture_native_response(terminal.response);
@@ -762,7 +830,6 @@ impl<S> UsageStream<S> {
                         ),
                     );
                     self.terminated = true;
-                    return true;
                 }
                 Some(TerminalOutcome::Failure) => {
                     self.cooldown_hint = terminal.cooldown_hint;
@@ -776,23 +843,26 @@ impl<S> UsageStream<S> {
                         ),
                     );
                     self.terminated = true;
-                    return true;
                 }
                 None => {}
+            }
+            if self.terminated {
+                let forward_len = bytes.len().saturating_sub(self.sse_pending.len());
+                self.sse_pending.clear();
+                return (true, forward_len);
             }
         }
         if self.sse_pending.len() > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
             self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-            return false;
+            return (false, 0);
         }
-        true
+        (true, bytes.len())
     }
 
-    /// Gemini's native SSE has ordinary JSON chunks and ends with a clean EOF;
-    /// it does not emit the Responses `response.completed` event. Inspect each
-    /// complete frame only for usage/TTFT diagnostics and leave the bytes
-    /// untouched for the client.
+    /// Gemini's native SSE ends at EOF rather than with `response.completed`.
+    /// Require a recognized final candidate or prompt block before treating
+    /// that EOF as a completed request; keep the provider bytes untouched.
     fn ingest_native_gemini(&mut self, bytes: &[u8]) -> bool {
         if self.terminated {
             return false;
@@ -806,6 +876,12 @@ impl<S> UsageStream<S> {
         while let Some(end) = sse_event_end(&self.sse_pending) {
             let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
+            if terminal.has_data && !terminal.valid {
+                self.set_upstream_error(terminal.upstream_error);
+                self.fail_stream(error_codes::STREAM_INVALID);
+                self.terminated = true;
+                return false;
+            }
             if terminal.outcome == Some(TerminalOutcome::Failure) {
                 self.cooldown_hint = terminal.cooldown_hint;
                 self.set_upstream_error(terminal.upstream_error);
@@ -819,6 +895,19 @@ impl<S> UsageStream<S> {
                 );
                 self.terminated = true;
                 return true;
+            }
+            if terminal.outcome == Some(TerminalOutcome::Incomplete) {
+                self.native_gemini_incomplete = true;
+            }
+            // Gemini has no generic [DONE] or Responses-style terminal event.
+            // Only a candidate's own finish reason proves a completed generation.
+            if terminal.payload.as_ref().is_some_and(|payload| {
+                payload
+                    .pointer("/candidates/0/finishReason")
+                    .and_then(Value::as_str)
+                    == Some("STOP")
+            }) {
+                self.native_gemini_finished = true;
             }
             if let Some(usage) = terminal.usage {
                 if let Some(current) = self.event.as_mut() {
@@ -882,8 +971,8 @@ where
                 Poll::Ready(Some(Ok(bytes))) => {
                     let now = TokioInstant::now();
                     this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
-                    let valid = if this.native_gemini {
-                        this.ingest_native_gemini(&bytes)
+                    let (valid, forward_len) = if this.native_gemini {
+                        (this.ingest_native_gemini(&bytes), bytes.len())
                     } else {
                         this.ingest_sse(&bytes)
                     };
@@ -893,8 +982,11 @@ where
                     if !valid {
                         return Poll::Ready(None);
                     }
-                    this.client_visible_output |= !bytes.is_empty();
-                    return Poll::Ready(Some(Ok(bytes)));
+                    let forwarded = bytes.slice(..forward_len);
+                    this.client_visible_output |= !forwarded.is_empty();
+                    if !forwarded.is_empty() {
+                        return Poll::Ready(Some(Ok(forwarded)));
+                    }
                 }
                 Poll::Ready(Some(Err(error))) => {
                     if this.fail_stream(error_codes::UPSTREAM_STREAM) {
@@ -904,7 +996,15 @@ where
                 }
                 Poll::Ready(None) => {
                     if this.native_gemini {
-                        this.finish(Some(true), None);
+                        if !this.sse_pending.is_empty() {
+                            this.fail_stream(error_codes::STREAM_INCOMPLETE);
+                        } else if this.native_gemini_incomplete {
+                            this.finish(Some(false), Some(error_codes::RESPONSE_INCOMPLETE));
+                        } else if this.native_gemini_finished {
+                            this.finish(Some(true), None);
+                        } else {
+                            this.fail_stream(error_codes::STREAM_INCOMPLETE);
+                        }
                         this.sse_pending.clear();
                         this.terminated = true;
                         return Poll::Ready(None);
@@ -1536,19 +1636,90 @@ data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_
         assert!(rewritten.contains("\"message\":\"safe upstream message\""));
     }
 
-    #[tokio::test]
-    async fn native_gemini_error_is_not_promoted_to_success_at_eof() {
+    type EmptyGeminiUsageStream =
+        UsageStream<futures_util::stream::Empty<Result<Bytes, Infallible>>>;
+
+    fn native_gemini_test_stream() -> (EmptyGeminiUsageStream, Arc<Mutex<Vec<UsageEvent>>>) {
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let captured = recorded.clone();
         let mut event = test_usage_event();
         event.wire_api = WireApi::Gemini;
-        let mut stream = UsageStream::new(
+        let stream = UsageStream::new(
             futures_util::stream::empty::<Result<Bytes, Infallible>>(),
             Arc::new(move |event| captured.lock().unwrap().push(event)),
             event,
             Instant::now(),
             Arc::new(|_, _, _| {}),
         );
+        (stream, recorded)
+    }
+
+    #[tokio::test]
+    async fn native_responses_done_marker_without_terminal_is_not_success() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let input = stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"))]);
+        let mut stream = usage_stream_with_events(input, events.clone());
+        let failure = stream.next().await.unwrap().unwrap();
+        let terminal = parse_sse_event(&failure);
+        assert_eq!(terminal.outcome, Some(TerminalOutcome::Failure));
+        assert_eq!(
+            terminal.payload.as_ref().unwrap()["response"]["error"]["code"],
+            error_codes::STREAM_INCOMPLETE
+        );
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].success);
+        assert_eq!(
+            events[0].error_category.as_deref(),
+            Some(error_codes::STREAM_INCOMPLETE)
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_protocol_terminal_markers_never_complete_a_stream() {
+        for (wire_api, marker) in [
+            (
+                WireApi::Responses,
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".as_slice(),
+            ),
+            (
+                WireApi::Messages,
+                b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+            ),
+            (
+                WireApi::ChatCompletions,
+                b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+            ),
+        ] {
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let captured = recorded.clone();
+            let mut event = test_usage_event();
+            event.wire_api = wire_api;
+            let input = stream::iter([Ok::<_, Infallible>(Bytes::copy_from_slice(marker))]);
+            let mut stream = UsageStream::new(
+                input,
+                Arc::new(move |event| captured.lock().unwrap().push(event)),
+                event,
+                Instant::now(),
+                Arc::new(|_, _, _| {}),
+            );
+            while stream.next().await.is_some() {}
+            let events = recorded.lock().unwrap();
+            assert_eq!(events.len(), 1, "{wire_api:?}");
+            assert!(!events[0].success, "{wire_api:?}");
+            assert_eq!(
+                events[0].error_category.as_deref(),
+                Some(error_codes::STREAM_INCOMPLETE),
+                "{wire_api:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_gemini_error_is_not_promoted_to_success_at_eof() {
+        let (mut stream, recorded) = native_gemini_test_stream();
         assert!(stream.ingest_native_gemini(b"data: {\"error\":{\"code\":400,\"status\":\"INVALID_ARGUMENT\",\"message\":\"Invalid field: temperature\"}}\n\n"));
         assert!(stream.terminated);
         let recorded = recorded.lock().unwrap();
@@ -1561,6 +1732,45 @@ data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_
             details.message.as_deref(),
             Some("Invalid field: temperature")
         );
+    }
+
+    #[tokio::test]
+    async fn native_gemini_rejects_malformed_frame_after_valid_output() {
+        let (mut stream, recorded) = native_gemini_test_stream();
+        assert!(stream.ingest_native_gemini(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n"
+        ));
+        assert!(!stream.ingest_native_gemini(b"data: {broken\n\n"));
+        assert!(stream.terminated);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(!recorded[0].success);
+        assert_eq!(
+            recorded[0].error_category.as_deref(),
+            Some("stream_invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_gemini_foreign_terminal_markers_do_not_complete_generation() {
+        for marker in [
+            b"data: [DONE]\n\n".as_slice(),
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        ] {
+            let (mut stream, recorded) = native_gemini_test_stream();
+            assert!(stream.ingest_native_gemini(
+                b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n"
+            ));
+            assert!(stream.ingest_native_gemini(marker));
+            assert!(stream.next().await.is_none());
+            let events = recorded.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(!events[0].success);
+            assert_eq!(
+                events[0].error_category.as_deref(),
+                Some("stream_incomplete")
+            );
+        }
     }
 
     #[test]

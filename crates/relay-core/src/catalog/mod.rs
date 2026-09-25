@@ -8,11 +8,11 @@ mod speed;
 pub use crate::model_metadata::ModelMetadataCatalog;
 pub(crate) use codex::set_codex_service_tiers;
 pub use codex::{
-    codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias, normalize_codex_catalog_priorities,
-    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, source_row_declares_reasoning, CODEX_CATALOG_PRIORITY_BASE,
-    CODEX_RELAY_CATALOG_HASH,
+    apply_codex_ultra_from_official_model, codex_catalog_entry_is_compatible, codex_model_alias,
+    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
+    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
+    source_row_declares_reasoning, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use context::{
     deserialize_model_reasoning_allowed_levels, normalize_model_reasoning_allowed_levels,

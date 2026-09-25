@@ -30,7 +30,8 @@ use zenith_relay_core::providers::chatgpt::{
 use zenith_relay_core::{
     CandidateHealth, CandidateQuota, CandidateScope, DefaultServiceTier, GatewayRuntime,
     GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
-    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
+    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, SelectionReason, SourceAdapter,
+    SourceProtocolBinding, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p3-local-key";
@@ -66,6 +67,8 @@ mod client_compatibility;
 mod compaction;
 #[path = "support/long_requests.rs"]
 mod long_requests;
+#[path = "support/rotation_policy.rs"]
+mod rotation_policy;
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -425,13 +428,115 @@ async fn unauthorized_account_request_refreshes_once_and_retries_the_same_accoun
             10,
         )],
         vec![mixed_key(None, None)],
-        authority,
+        authority.clone(),
         refresh,
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
 
     assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    {
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer old-access")
+        );
+        assert_eq!(
+            requests[1].authorization.as_deref(),
+            Some("Bearer new-access")
+        );
+        assert!(requests.iter().all(|request| {
+            request.chatgpt_account_id.as_deref() == Some("provider-refresh-account")
+        }));
+    }
+    {
+        let recorded = events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].success);
+    }
+
+    assert_eq!(
+        authority.auth_state("relay-refresh-account").await,
+        Some(AccountAuthState::Active)
+    );
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[2].authorization.as_deref(),
+        Some("Bearer new-access")
+    );
+    drop(requests);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn unauthorized_sse_refreshes_before_output_and_emits_one_completion() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::UNAUTHORIZED,
+            json!({"error":{"code":"token_expired"}}),
+        ),
+        Reply::Stream(vec![
+            StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"id\":\"refreshed\"}}\n\n"),
+            StreamChunk::Data("data: {\"type\":\"response.output_text.delta\",\"delta\":\"once\"}\n\n"),
+            StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"refreshed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"),
+        ]),
+    ])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    authority
+        .register(
+            "relay-refresh-account",
+            TokenSet::new(
+                "old-access",
+                Some("refresh-secret".into()),
+                None,
+                Some(current_time_ms() + 600_000),
+                current_time_ms(),
+                1,
+            )
+            .unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    let refresh = Arc::new(RefreshAdapter {
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+        access_token: "new-access",
+    });
+    let (gateway, events, refresh, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account(
+            "relay-refresh-account",
+            "provider-refresh-account",
+            &upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh,
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    let frames = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[1]["delta"], "once");
+    assert_eq!(frames[2]["type"], "response.completed");
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
@@ -443,13 +548,82 @@ async fn unauthorized_account_request_refreshes_once_and_retries_the_same_accoun
         requests[1].authorization.as_deref(),
         Some("Bearer new-access")
     );
-    assert!(requests.iter().all(|request| {
-        request.chatgpt_account_id.as_deref() == Some("provider-refresh-account")
-    }));
     drop(requests);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
+    assert_eq!(events[0].total_tokens, Some(2));
+}
+
+#[tokio::test]
+async fn auth_replay_uses_the_same_three_dispatch_budget_as_route_fallback() {
+    let (first_upstream, first_state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::UNAUTHORIZED,
+            json!({"error":{"code":"token_expired"}}),
+        ),
+        Reply::Json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":{"code":"server_is_overloaded"}}),
+        ),
+    ])
+    .await;
+    let (second_upstream, second_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"error":{"code":"server_is_overloaded"}}),
+    )])
+    .await;
+    let (third_upstream, third_state) =
+        spawn_upstream(vec![success_reply("budget-must-not-reach-this-account")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    authority
+        .register(
+            "relay-refresh-account",
+            TokenSet::new(
+                "old-access",
+                Some("refresh-secret".into()),
+                None,
+                Some(current_time_ms() + 600_000),
+                current_time_ms(),
+                1,
+            )
+            .unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    register_ready(&authority, "second", "second-access").await;
+    register_ready(&authority, "third", "third-access").await;
+    let (gateway, _, refresh, _) = spawn_mixed_gateway_with_options(
+        Vec::new(),
+        vec![
+            account(
+                "relay-refresh-account",
+                "provider-first",
+                &first_upstream,
+                300,
+            ),
+            account("second", "provider-second", &second_upstream, 200),
+            account("third", "provider-third", &third_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        Arc::new(RefreshAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+            access_token: "new-access",
+        }),
+        Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions::default(),
+    )
+    .await;
+    rotation_policy::set_order(&gateway, &["relay-refresh-account", "second", "third"]);
+
+    assert_ne!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+    assert!(third_state.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1238,6 +1412,7 @@ async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model()
         reference_metadata_options(),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["relay-account", "generic-source"]);
 
     let catalog: Value = reqwest::Client::new()
         .get(format!(
@@ -1412,6 +1587,7 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["relay-account", "api-source"]);
     let client = reqwest::Client::new();
 
     // Populate the account-owned catalog metadata that identifies this Codex
@@ -1512,6 +1688,7 @@ async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["lite-account", "full-account"]);
     let client = reqwest::Client::new();
 
     // Both account manifests are needed: the selected account advertises Lite,
@@ -2224,13 +2401,13 @@ async fn model_switch_uses_materialized_http_history_before_selection() {
 }
 
 #[tokio::test]
-async fn http_continuation_materializes_the_full_chain_before_owner_transport_fallback() {
+async fn http_continuation_materializes_the_full_chain_before_owner_rejection_fallback() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
         success_reply("owner-first"),
         success_reply("owner-second"),
         Reply::Json(
-            StatusCode::BAD_GATEWAY,
-            json!({"error": {"code": "server_error", "message": "temporary failure"}}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": {"code": "server_is_overloaded"}}),
         ),
     ])
     .await;
@@ -2254,6 +2431,7 @@ async fn http_continuation_materializes_the_full_chain_before_owner_transport_fa
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["owner-account", "backup-account"]);
     let client = reqwest::Client::new();
 
     let first: Value = client
@@ -3145,6 +3323,7 @@ async fn compact_missing_owned_response_never_sends_opaque_id_to_another_account
             Arc::new(PersistenceAdapter::default()),
         )
         .await;
+        rotation_policy::set_order(&gateway, &["owner", "backup"]);
         let client = reqwest::Client::new();
         let first = request(&gateway, false).await;
         assert_eq!(first.status(), StatusCode::OK);
@@ -3236,6 +3415,7 @@ async fn assert_stale_http_continuation(sse_failure: bool) {
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["owner-account", "fallback-account"]);
 
     let client = reqwest::Client::new();
     let first: Value = client
@@ -3961,12 +4141,28 @@ async fn websocket_upgrade_refreshes_once_on_unauthorized() {
         ))
         .await
         .unwrap();
-    receive_websocket_completion(&mut socket).await;
+    assert_eq!(receive_websocket_json(&mut socket).await["delta"], "hello");
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.completed"
+    );
 
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create","model":MODEL,"input":"after refresh"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receive_websocket_json(&mut socket).await["delta"], "hello");
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.completed"
+    );
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
     let headers = state.headers.lock().unwrap();
-    assert_eq!(headers.len(), 2);
+    assert_eq!(headers.len(), 3);
     assert_eq!(
         header(&headers[0], AUTHORIZATION.as_str()).as_deref(),
         Some("Bearer old-access")
@@ -3975,14 +4171,71 @@ async fn websocket_upgrade_refreshes_once_on_unauthorized() {
         header(&headers[1], AUTHORIZATION.as_str()).as_deref(),
         Some("Bearer new-access")
     );
+    assert_eq!(
+        header(&headers[2], AUTHORIZATION.as_str()).as_deref(),
+        Some("Bearer new-access")
+    );
     drop(headers);
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+}
+
+#[tokio::test]
+async fn websocket_discards_late_response_frames_after_terminal() {
+    let (upstream, state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+            json!({"type":"response.output_text.delta","delta":"once"}),
+            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.output_text.delta","delta":"duplicate"}),
+            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+        ])))
+        .await;
+    let authority = ready_authority("once-account", "once-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("once-account", "provider-once", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create","model":MODEL,"input":"one turn"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receive_websocket_json(&mut socket).await["delta"], "once");
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.completed"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), socket.next())
+            .await
+            .is_err(),
+        "late frames from a completed response reached the client"
+    );
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
 }
 
 #[tokio::test]
-async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
+async fn account_websocket_retries_rejection_but_stops_after_unknown_disconnect() {
     let reset_at = current_time_ms() / 1_000 + 6 * 24 * 60 * 60;
     let (status_upstream, status_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
@@ -4023,6 +4276,10 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(
+        &gateway,
+        &["status-account", "closed-account", "success-account"],
+    );
 
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -4039,45 +4296,21 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
         .await
         .unwrap();
 
-    let first = receive_websocket_json(&mut socket).await;
-    assert_eq!(first["type"], "response.output_text.delta");
-    let completed = receive_websocket_completion(&mut socket).await;
-    assert_eq!(completed["type"], "response.completed");
-    socket
-        .send(ClientWsMessage::Text(
-            json!({
-                "type": "response.create",
-                "model": MODEL,
-                "input": "continue after fallback",
-                "previous_response_id": completed["response"]["id"]
-            })
-            .to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        receive_websocket_json(&mut socket).await["type"],
-        "response.output_text.delta"
-    );
-    assert_eq!(
-        receive_websocket_completion(&mut socket).await["type"],
-        "response.completed"
-    );
+    assert_eq!(receive_websocket_json(&mut socket).await["type"], "error");
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     assert_eq!(status_state.requests.lock().unwrap().len(), 1);
     assert_eq!(closed_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(success_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(success_state.requests.lock().unwrap().len(), 0);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 2);
     assert_eq!(
         events.iter().map(|event| event.attempt).collect::<Vec<_>>(),
-        [1, 2, 3, 1]
+        [1, 2]
     );
-    assert!(events[..3]
+    assert!(events[..2]
         .iter()
         .all(|event| event.request_id == events[0].request_id));
-    assert_ne!(events[0].request_id, events[3].request_id);
     assert_eq!(
         events[0].http_status,
         StatusCode::TOO_MANY_REQUESTS.as_u16()
@@ -4088,13 +4321,12 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
     );
     assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
     assert!(events[0].retry_at_ms.is_some());
-    assert_eq!(events[0].consecutive_failures, Some(1));
+    assert_eq!(events[0].consecutive_failures, Some(0));
     assert_eq!(
         events[1].error_category.as_deref(),
         Some("upstream_websocket_closed")
     );
-    assert!(events[2].success);
-    assert!(events[3].success);
+    assert!(!events[1].success);
 }
 
 #[tokio::test]
@@ -4112,7 +4344,7 @@ async fn persistent_websocket_retry_stops_when_the_client_disconnects() {
     )
     .await;
     let runtime = gateway.runtime.as_ref().unwrap();
-    runtime.set_chatgpt_retry_until_available(true);
+    runtime.set_route_recovery_enabled(true);
 
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -4169,7 +4401,7 @@ async fn persistent_websocket_retry_stops_when_retry_policy_is_disabled() {
     )
     .await;
     let runtime = gateway.runtime.as_ref().unwrap().clone();
-    runtime.set_chatgpt_retry_until_available(true);
+    runtime.set_route_recovery_enabled(true);
 
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -4194,7 +4426,7 @@ async fn persistent_websocket_retry_stops_when_retry_policy_is_disabled() {
     })
     .await
     .expect("persistent retry did not reach the upstream");
-    runtime.set_chatgpt_retry_until_available(false);
+    runtime.set_route_recovery_enabled(false);
 
     let failure = receive_websocket_json_with_timeout(&mut socket, Duration::from_secs(3)).await;
     assert_eq!(failure["type"], "error");
@@ -4202,7 +4434,7 @@ async fn persistent_websocket_retry_stops_when_retry_policy_is_disabled() {
 }
 
 #[tokio::test]
-async fn websocket_terminal_failure_does_not_retry_when_policy_is_disabled() {
+async fn websocket_unknown_terminal_transport_error_is_not_replayed() {
     let (upstream, upstream_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
             "type": "error",
@@ -4268,7 +4500,7 @@ async fn websocket_http_fallback_releases_its_lease_on_client_disconnect() {
         )
         .await;
         let runtime = gateway.runtime.as_ref().unwrap();
-        runtime.set_chatgpt_retry_until_available(true);
+        runtime.set_route_recovery_enabled(true);
         let upgraded = reqwest::Client::new()
             .get(format!("{}/v1/responses", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
@@ -4348,6 +4580,7 @@ async fn account_websocket_does_not_commit_on_a_setup_frame_before_disconnect() 
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["setup-primary", "setup-reserve"]);
 
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -4382,20 +4615,13 @@ async fn account_websocket_does_not_commit_on_a_setup_frame_before_disconnect() 
         .await
         .unwrap();
 
-    assert_eq!(
-        receive_websocket_json(&mut socket).await["type"],
-        "response.output_text.delta"
-    );
-    assert_eq!(
-        receive_websocket_json(&mut socket).await["type"],
-        "response.completed"
-    );
+    assert_eq!(receive_websocket_json(&mut socket).await["type"], "error");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(upstream_state.requests.lock().unwrap().len(), 2);
-    assert_eq!(reserve_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(reserve_state.requests.lock().unwrap().len(), 0);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert!(events[0].success);
     assert!(!events[1].success);
     assert_eq!(
@@ -4403,8 +4629,7 @@ async fn account_websocket_does_not_commit_on_a_setup_frame_before_disconnect() 
         Some("upstream_websocket_closed")
     );
     assert_eq!(events[1].account_id.as_deref(), Some("setup-primary"));
-    assert!(events[2].success);
-    assert_eq!(events[2].account_id.as_deref(), Some("setup-reserve"));
+    assert_eq!(events[1].retry_at_ms, None);
 }
 
 #[tokio::test]
@@ -4581,7 +4806,7 @@ async fn managed_websocket_quota_failure_falls_back_to_http_api_source() {
         .runtime
         .as_ref()
         .unwrap()
-        .set_chatgpt_retry_until_available(true);
+        .set_route_recovery_enabled(true);
 
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -5933,6 +6158,7 @@ async fn assert_stale_websocket_continuation(reconnect: bool) {
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["owner-account", "fallback-account"]);
 
     let client = reqwest::Client::new();
     let upgraded = client
@@ -6117,11 +6343,10 @@ async fn high_priority_api_source_runs_before_a_healthy_oauth_account() {
 }
 
 #[tokio::test]
-async fn negative_priority_api_source_waits_behind_a_healthy_oauth_account() {
-    let (source_upstream, source_state) =
-        spawn_upstream(vec![success_reply("api-must-not-run")]).await;
+async fn automatic_mode_does_not_treat_negative_api_priority_as_a_type_gate() {
+    let (source_upstream, source_state) = spawn_upstream(vec![success_reply("api-ready")]).await;
     let (account_upstream, account_state) =
-        spawn_upstream(vec![success_reply("oauth-first")]).await;
+        spawn_upstream(vec![success_reply("oauth-ready")]).await;
     let authority = ready_authority("oauth-account", "oauth-access").await;
     let (gateway, _, _, _) = spawn_mixed_gateway(
         vec![source(
@@ -6143,18 +6368,30 @@ async fn negative_priority_api_source_waits_behind_a_healthy_oauth_account() {
     )
     .await;
 
-    let response = request(&gateway, false).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.json::<Value>().await.unwrap()["id"], "oauth-first");
+    let mut ids = BTreeSet::new();
+    for _ in 0..2 {
+        let response = request(&gateway, false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        ids.insert(
+            response.json::<Value>().await.unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_eq!(
+        ids,
+        BTreeSet::from(["api-ready".into(), "oauth-ready".into()])
+    );
     assert_eq!(account_state.requests.lock().unwrap().len(), 1);
-    assert!(source_state.requests.lock().unwrap().is_empty());
+    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn failed_account_falls_back_to_api_source_in_the_same_scheduler() {
+async fn rejected_account_falls_back_to_api_source_in_the_same_scheduler() {
     let (account_upstream, account_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::SERVICE_UNAVAILABLE,
-        json!({"error": {"message": "synthetic"}}),
+        json!({"error": {"code": "server_is_overloaded"}}),
     )])
     .await;
     let (source_upstream, source_state) =
@@ -6297,10 +6534,10 @@ async fn terminal_account_auth_is_removed_from_following_requests() {
 }
 
 #[tokio::test]
-async fn retryable_oauth_failure_prefers_next_oauth_before_paid_source() {
+async fn rejected_account_follows_explicit_member_order_before_api_source() {
     let (primary_upstream, primary_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::SERVICE_UNAVAILABLE,
-        json!({"error": {"message": "synthetic"}}),
+        json!({"error": {"code": "server_is_overloaded"}}),
     )])
     .await;
     let (secondary_upstream, secondary_state) =
@@ -6327,6 +6564,10 @@ async fn retryable_oauth_failure_prefers_next_oauth_before_paid_source() {
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(
+        &gateway,
+        &["oauth-primary", "oauth-secondary", "paid-source"],
+    );
 
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -6359,7 +6600,7 @@ async fn unavailable_accounts_do_not_block_healthy_account_or_source_fallback() 
         success_reply("healthy-account"),
         Reply::Json(
             StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": {"message": "synthetic"}}),
+            json!({"error": {"code": "server_is_overloaded"}}),
         ),
     ])
     .await;
@@ -6401,6 +6642,15 @@ async fn unavailable_accounts_do_not_block_healthy_account_or_source_fallback() 
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(
+        &gateway,
+        &[
+            "oauth-eligible",
+            "source-fallback",
+            "oauth-exhausted",
+            "oauth-reauth",
+        ],
+    );
 
     let healthy_response = request(&gateway, false).await;
     assert_eq!(healthy_response.status(), StatusCode::OK);
@@ -6548,6 +6798,7 @@ async fn http_usage_limit_immediately_excludes_the_account_until_quota_refresh()
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["limited-account", "fallback-account"]);
 
     let first = request(&gateway, false).await;
     assert_eq!(first.status(), StatusCode::OK);
@@ -6563,7 +6814,7 @@ async fn http_usage_limit_immediately_excludes_the_account_until_quota_refresh()
     assert_eq!(events[0].candidate_id.as_deref(), Some("limited-account"));
     assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
     assert!(events[0].retry_at_ms.is_some());
-    assert_eq!(events[0].consecutive_failures, Some(1));
+    assert_eq!(events[0].consecutive_failures, Some(0));
     assert_eq!(events[2].candidate_id.as_deref(), Some("fallback-account"));
     assert!(events[2].success);
     assert_eq!(events[2].cooldown_scope, None);
@@ -6616,7 +6867,7 @@ async fn managed_http_retry_becomes_persistent_when_enabled_mid_request() {
     .expect("managed request did not reach the upstream");
     // The delayed first response gives the in-flight request time to observe
     // this live setting before its retry decision.
-    runtime.set_chatgpt_retry_until_available(true);
+    runtime.set_route_recovery_enabled(true);
 
     let response = tokio::time::timeout(Duration::from_secs(5), pending_response)
         .await
@@ -6628,6 +6879,160 @@ async fn managed_http_retry_becomes_persistent_when_enabled_mid_request() {
         "persistent-recovered"
     );
     assert_eq!(upstream_state.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn api_route_recovery_waits_for_configured_models_on_all_text_protocols() {
+    let cases = [
+        ("/v1/responses", json!({"model": MODEL, "input": "hello"})),
+        (
+            "/v1/chat/completions",
+            json!({"model": MODEL, "messages": [{"role": "user", "content": "hello"}]}),
+        ),
+        (
+            "/v1/messages",
+            json!({"model": MODEL, "max_tokens": 32, "messages": [{"role": "user", "content": "hello"}]}),
+        ),
+        (
+            "/v1beta/models/gpt-p3:generateContent",
+            json!({"contents": [{"role": "user", "parts": [{"text": "hello"}]}]}),
+        ),
+    ];
+    for (path, body) in cases {
+        let (upstream, upstream_state) = spawn_upstream(vec![Reply::Json(
+            StatusCode::OK,
+            json!({
+                "id": "recovered", "object": "response", "status": "completed", "model": MODEL,
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ready"}]}],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            }),
+        )]).await;
+        let mut api_source = source("recovery-source", &upstream, "source-key", 10);
+        api_source.protocol_bindings = [
+            (WireApi::Responses, SourceAdapter::Native),
+            (
+                WireApi::ChatCompletions,
+                SourceAdapter::ChatCompletionsToResponses,
+            ),
+            (WireApi::Messages, SourceAdapter::MessagesToResponses),
+            (WireApi::Gemini, SourceAdapter::GeminiToResponses),
+        ]
+        .into_iter()
+        .map(|(wire_api, adapter)| SourceProtocolBinding {
+            wire_api,
+            adapter,
+            reasoning_mode: Default::default(),
+            cache_write_ttl: Default::default(),
+            model_ids: vec![MODEL.into()],
+        })
+        .collect();
+        let (gateway, _, _, _) = spawn_mixed_gateway(
+            vec![api_source],
+            Vec::new(),
+            vec![mixed_key(None, None)],
+            Arc::new(TokenAuthority::new(4).unwrap()),
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let runtime = gateway.runtime.as_ref().unwrap().clone();
+        let candidates = runtime
+            .candidate_runtime_order()
+            .into_iter()
+            .map(|candidate| candidate.candidate_id)
+            .collect::<Vec<_>>();
+        assert!(!candidates.is_empty());
+        for candidate in &candidates {
+            assert!(runtime.set_candidate_health(candidate, CandidateHealth::Unhealthy));
+        }
+        let client = reqwest::Client::new();
+        let url = format!("{}{path}", gateway.base_url);
+        let send = |client: reqwest::Client, url: String, body: Value| async move {
+            client
+                .post(url)
+                .bearer_auth(LOCAL_KEY)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        };
+        let unavailable = send(client.clone(), url.clone(), body.clone()).await;
+        assert_eq!(unavailable.status(), StatusCode::NOT_FOUND, "{path}");
+
+        runtime.set_route_recovery_enabled(true);
+        let pending = tokio::spawn(send(client, url, body));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            !pending.is_finished(),
+            "{path} should wait without a ChatGPT header"
+        );
+        assert!(upstream_state.requests.lock().unwrap().is_empty());
+        for candidate in &candidates {
+            assert!(runtime.set_candidate_health(candidate, CandidateHealth::Healthy));
+        }
+        let response = tokio::time::timeout(Duration::from_secs(3), pending)
+            .await
+            .expect("route recovery did not wake")
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{path}: {}",
+            response.text().await.unwrap()
+        );
+        assert_eq!(upstream_state.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn non_chatgpt_websocket_waits_for_route_recovery() {
+    let (upstream, upstream_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Success).await;
+    let authority = ready_authority("recovery-account", "recovery-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account(
+            "recovery-account",
+            "provider-recovery",
+            &upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap();
+    runtime.set_route_recovery_enabled(true);
+    assert!(runtime.set_candidate_health("recovery-account", CandidateHealth::Unhealthy));
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "wait"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(upstream_state.requests.lock().unwrap().is_empty());
+    assert!(runtime.set_candidate_health("recovery-account", CandidateHealth::Healthy));
+    let first = tokio::time::timeout(Duration::from_secs(3), receive_websocket_json(&mut socket))
+        .await
+        .expect("websocket route recovery did not wake");
+    assert_eq!(first["type"], "response.output_text.delta");
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["type"],
+        "response.completed"
+    );
+    assert_eq!(upstream_state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -6877,7 +7282,7 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 }
 
 #[tokio::test]
-async fn independent_chat_keeps_an_occupied_oauth_account_ahead_of_a_reserve_api() {
+async fn independent_chat_uses_a_ready_api_while_an_oauth_account_is_occupied() {
     let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("source-response")]).await;
@@ -6885,7 +7290,7 @@ async fn independent_chat_keeps_an_occupied_oauth_account_ahead_of_a_reserve_api
     register_ready(&authority, "stream-account", "stream-access").await;
     let (gateway, events, _, _) = spawn_mixed_gateway(
         vec![source(
-            "reserve-api",
+            "z-reserve-api",
             &source_upstream,
             "source-key",
             -1_000_000,
@@ -6909,11 +7314,11 @@ async fn independent_chat_keeps_an_occupied_oauth_account_ahead_of_a_reserve_api
 
     let independent = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
         .await
-        .expect("the independent chat did not reuse the OAuth account");
+        .expect("the independent chat did not use the lower-load member");
     assert_eq!(independent.status(), StatusCode::OK);
     let _ = independent.bytes().await.unwrap();
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
-    assert!(source_state.requests.lock().unwrap().is_empty());
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
 
     stream_state.release.notify_one();
     let _ = open_stream.bytes().await.unwrap();
@@ -6923,7 +7328,9 @@ async fn independent_chat_keeps_an_occupied_oauth_account_ahead_of_a_reserve_api
     assert!(events
         .iter()
         .any(|event| event.account_id.as_deref() == Some("stream-account")));
-    assert!(events.iter().all(|event| event.source_id != "reserve-api"));
+    assert!(events
+        .iter()
+        .any(|event| event.source_id == "z-reserve-api"));
 }
 
 #[tokio::test]
@@ -7074,18 +7481,22 @@ async fn cancelled_sse_releases_its_lease_without_cooling_the_account() {
 async fn pre_output_failure_releases_only_replayable_tool_affinity() {
     for stream in [false, true] {
         for (include_call, previous_response) in [(true, false), (false, false), (true, true)] {
-            for failure in [
-                Reply::Json(
+            for (failure, replay_safe) in [
+                (Reply::Json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": {"code": "server_is_overloaded"}}),
+                ), true),
+                (Reply::Json(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     json!({"error": {"type": "server_error", "code": "server_error"}}),
-                ),
-                Reply::Stream(vec![
+                ), false),
+                (Reply::Stream(vec![
                     StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed-setup\"}}\n\n"),
                     StreamChunk::Data("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"code\":\"server_error\"}}}\n\n"),
-                ]),
-                Reply::Stream(vec![StreamChunk::Error]),
+                ]), false),
+                (Reply::Stream(vec![StreamChunk::Error]), false),
             ] {
-                assert_tool_affinity_retry(stream, include_call, previous_response, failure)
+                assert_tool_affinity_retry(stream, include_call, previous_response, failure, replay_safe)
                     .await;
             }
         }
@@ -7097,11 +7508,11 @@ async fn assert_tool_affinity_retry(
     include_call: bool,
     previous_response: bool,
     failure: Reply,
+    replay_safe: bool,
 ) {
-    // Native replay materializes the previous turn, so an owner-bound
-    // continuation may be handed to the next candidate after a pre-output
-    // failure. Some synthetic failures intentionally have no replay state.
-    let fallback_expected = include_call && !previous_response;
+    // Complete tool history proves portability, not execution safety. Generic
+    // 5xx, terminal errors and broken streams must not create a second generation.
+    let fallback_expected = include_call && !previous_response && replay_safe;
     let call = json!({
         "type": "function_call", "id": "fc_test", "call_id": "call_test",
         "name": "lookup", "arguments": "{}"
@@ -7114,6 +7525,8 @@ async fn assert_tool_affinity_retry(
                 "output": [call.clone()]
             }),
         ),
+        failure.clone(),
+        failure.clone(),
         failure,
     ])
     .await;
@@ -7138,6 +7551,7 @@ async fn assert_tool_affinity_retry(
         Arc::new(PersistenceAdapter::default()),
     )
     .await;
+    rotation_policy::set_order(&gateway, &["owner", "backup"]);
     let first = request(&gateway, false).await;
     assert_eq!(first.status(), StatusCode::OK);
     let _: Value = first.json().await.unwrap();
@@ -7162,7 +7576,7 @@ async fn assert_tool_affinity_retry(
     let status = response.status();
     let bytes = response.bytes().await.unwrap();
     let fallback = status.is_success();
-    if !previous_response {
+    if !previous_response || !replay_safe {
         assert_eq!(
             fallback,
             fallback_expected,
@@ -7171,13 +7585,20 @@ async fn assert_tool_affinity_retry(
         );
     }
     assert!(!String::from_utf8_lossy(&bytes).contains("failed-setup"));
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    let owner_attempts = owner_state.requests.lock().unwrap().len();
+    if replay_safe && !include_call && !previous_response {
+        // An unpaired result stays with its owner. The owner may recover, but
+        // this must stay inside the same three-send request budget.
+        assert!((2..=4).contains(&owner_attempts));
+    } else {
+        assert_eq!(owner_attempts, 2);
+    }
     assert_eq!(
         backup_state.requests.lock().unwrap().len(),
         usize::from(fallback)
     );
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2 + usize::from(fallback));
+    assert_eq!(events.len(), owner_attempts + usize::from(fallback));
     assert_eq!(
         events[1].routing.as_ref().unwrap().reason,
         SelectionReason::ResponseAffinity
@@ -7278,6 +7699,7 @@ fn account(
         source_id: "openai-codex".to_string(),
         chatgpt_account_id: chatgpt_account_id.to_string(),
         responses_url: format!("{}/v1/responses", server.base_url),
+        basis_points_enabled: false,
         models: vec![MODEL.to_string()],
         enabled: true,
         draining: false,

@@ -2,16 +2,16 @@ use super::super::auth::{invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::now_ms;
 use crate::catalog::{
-    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    set_codex_service_tiers,
+    apply_codex_ultra_from_official_model, normalize_codex_catalog_priorities,
+    normalize_native_codex_catalog_entry, set_codex_service_tiers,
 };
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
 use crate::runtime::AuthenticatedKey;
 use crate::{
-    codex_model_is_picker_eligible, is_valid_model_id, routed_codex_catalog_entry, GatewayRuntime,
-    WireApi,
+    codex_model_is_picker_eligible, is_valid_model_id, routed_codex_catalog_entry,
+    DefaultServiceTier, GatewayRuntime, WireApi,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -178,7 +178,14 @@ async fn fetch_codex_account_manifest(
             .get(url.clone())
             .timeout(Duration::from_secs(10));
         let Ok(response) = runtime
-            .send_authorized_request(candidate_id, request, Some(client_version.as_str()), None)
+            .send_authorized_request(
+                candidate_id,
+                request,
+                Some(client_version.as_str()),
+                None,
+                None,
+                None,
+            )
             .await
         else {
             continue;
@@ -286,8 +293,8 @@ fn build_codex_models_response_from_manifests(
         // These helpers accept the client-facing model spelling because they
         // resolve the key prefix internally. Passing the already-resolved
         // upstream id would make prefixed keys look like API-only routes.
-        let has_native_account_route = runtime.codex_model_has_chatgpt_account(key, &display_id);
-        let native_account_ids = runtime.codex_model_chatgpt_account_ids(key, &display_id);
+        let native_account_ids = runtime.codex_model_native_responses_account_ids(key, &display_id);
+        let has_native_account_route = !native_account_ids.is_empty();
         let capabilities = runtime.model_capabilities(&upstream_id);
         let native_entries = upstream_by_model
             .get(&normalized)
@@ -308,16 +315,27 @@ fn build_codex_models_response_from_manifests(
                     // Ignore participant semantic fields before validation too:
                     // malformed reasoning/image metadata must not discard the
                     // account's otherwise valid transport template.
+                    let official = entry.clone();
                     let mut entry = entry.clone();
                     capabilities.apply_to_codex(&mut entry);
                     entry["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
-                    entry.as_object().and_then(|entry| {
-                        normalize_native_codex_catalog_entry(entry, &upstream_id, priority, None)
-                    })
+                    entry
+                        .as_object()
+                        .and_then(|normalized| {
+                            normalize_native_codex_catalog_entry(
+                                normalized,
+                                &upstream_id,
+                                priority,
+                                None,
+                            )
+                        })
+                        .map(|normalized| (normalized, official))
                 })
             })
             .flatten();
         let mut model = native_catalog_model
+            .as_ref()
+            .map(|(normalized, _)| normalized.clone())
             .unwrap_or_else(|| routed_codex_catalog_entry(None, &display_id, priority, None));
         model["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
         // Account models and unqualified GPT IDs retain their public spelling,
@@ -344,7 +362,12 @@ fn build_codex_models_response_from_manifests(
             );
         }
         capabilities.apply_to_codex(&mut model);
-        let supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
+        let mut supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
+        if native_catalog_model.as_ref().is_some_and(|(_, official)| {
+            apply_codex_ultra_from_official_model(&mut model, official, &upstream_id)
+        }) {
+            supported.push("ultra".into());
+        }
         let catalog_default = model["default_reasoning_level"]
             .as_str()
             .filter(|default| supported.iter().any(|level| level == default))
@@ -360,12 +383,13 @@ fn build_codex_models_response_from_manifests(
                 .collect::<Vec<_>>();
             apply_model_reasoning_allowed_levels(&mut model, Some(&allowed));
         }
-        if runtime.model_has_translated_ultra_route(key, &display_id) {
-            add_translated_ultra_after_max(&mut model);
-        }
         set_codex_service_tiers(
             &mut model,
-            runtime.model_supported_service_tiers(&upstream_id),
+            if runtime.codex_model_has_non_basis_responses_route(key, &display_id) {
+                runtime.model_supported_service_tiers(&upstream_id)
+            } else {
+                &[DefaultServiceTier::Standard]
+            },
         );
         sort_supported_reasoning_levels(&mut model);
         models.push(model);
@@ -376,33 +400,6 @@ fn build_codex_models_response_from_manifests(
         None
     } else {
         Some(json!({ "models": models }))
-    }
-}
-
-fn add_translated_ultra_after_max(model: &mut Value) {
-    let Some(levels) = model
-        .get_mut("supported_reasoning_levels")
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    let has_max = levels.iter().any(|level| {
-        level
-            .get("effort")
-            .and_then(Value::as_str)
-            .is_some_and(|effort| effort.eq_ignore_ascii_case("max"))
-    });
-    let has_ultra = levels.iter().any(|level| {
-        level
-            .get("effort")
-            .and_then(Value::as_str)
-            .is_some_and(|effort| effort.eq_ignore_ascii_case("ultra"))
-    });
-    if has_max && !has_ultra {
-        levels.push(json!({
-            "effort": "ultra",
-            "description": "ultra"
-        }));
     }
 }
 
@@ -627,6 +624,7 @@ mod tests {
                     source_id: "chatgpt".into(),
                     chatgpt_account_id: "chatgpt-account".into(),
                     responses_url: "https://example.test/v1/responses".into(),
+                    basis_points_enabled: false,
                     models: models.iter().map(|model| (*model).into()).collect(),
                     enabled: true,
                     draining: false,
@@ -722,6 +720,33 @@ mod tests {
                 assert_eq!(request["service_tier"], "ultrafast");
             }
         }
+    }
+
+    #[test]
+    fn basis_points_only_account_does_not_publish_native_speed_tiers() {
+        let models = ["gpt-future"];
+        let runtime =
+            native_catalog_test_runtime_with_accounts(None, None, &["basis-account"], &models);
+        runtime.set_basis_points_enabled(true);
+        let key = runtime.authenticate_secret("secret").unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        let manifest = json!({
+            "models": [{
+                "slug": "gpt-future",
+                "service_tiers": [{"id": "priority"}],
+                "additional_speed_tiers": ["fast"]
+            }]
+        });
+        let response = build_codex_models_response_from_manifests(
+            &runtime,
+            &key,
+            &visible,
+            [("basis-account".into(), manifest)],
+        )
+        .unwrap();
+        let model = &response["models"][0];
+        assert_eq!(model["service_tiers"], json!([]));
+        assert_eq!(model["additional_speed_tiers"], json!([]));
     }
 
     #[test]
@@ -847,7 +872,9 @@ mod tests {
             .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
             .unwrap();
         let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
-        assert!(runtime.codex_model_has_chatgpt_account(&key, "gpt-native"));
+        assert!(!runtime
+            .codex_model_native_responses_account_ids(&key, "gpt-native")
+            .is_empty());
         let mut native_entry = routed_codex_catalog_entry(None, "gpt-native", 1_000, None)
             .as_object()
             .unwrap()
@@ -915,6 +942,49 @@ mod tests {
         );
         assert_eq!(response["models"][0]["supports_search_tool"], false);
         assert_eq!(response["models"][0]["default_reasoning_level"], "low");
+    }
+
+    #[test]
+    fn native_codex_ultra_survives_reference_projection_when_max_is_routable() {
+        use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+        let catalog = ModelMetadataCatalog::from_models_dev_json(
+            r#"{"gpt-native":{"reasoning":true,"reasoning_effort_levels":["low","xhigh","max"]}}"#,
+        )
+        .unwrap();
+        let runtime =
+            native_catalog_test_runtime(None, Some(ModelMetadataCatalogHandle::new(catalog)));
+        let key = runtime
+            .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        let official = json!({"models": [{
+            "slug": "gpt-native",
+            "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}],
+            "multi_agent_version": "v2",
+            "multi_agent_reasoning_effort": "xhigh"
+        }]});
+        let result = build_codex_models_response_from_manifests(
+            &runtime,
+            &key,
+            &visible,
+            [("native-account".into(), official)],
+        )
+        .unwrap();
+        let row = &result["models"][0];
+        assert_eq!(row["slug"], "gpt-native");
+        assert_eq!(row["multi_agent_version"], "v2");
+        assert_eq!(row["multi_agent_reasoning_effort"], "xhigh");
+        assert_eq!(
+            row["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .collect::<Vec<_>>(),
+            ["low", "xhigh", "max", "ultra"]
+        );
+        assert!(crate::codex_catalog_entry_is_compatible(row));
     }
 
     #[test]

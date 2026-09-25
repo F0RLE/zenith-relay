@@ -1,12 +1,65 @@
 use super::*;
 use crate::error_codes;
+use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
 
 impl AttemptFailure {
+    /// Explicit provider rejections and connection failures have different
+    /// health effects from authentication, allowance and local preparation.
+    pub(crate) fn settle_rotation_rejection(
+        &self,
+        runtime: &GatewayRuntime,
+        lease: &crate::runtime::CandidateLease,
+        cooldown: Option<CooldownRequest<'_>>,
+        now_ms: u64,
+    ) {
+        let health = if !lease.has_dispatched()
+            || matches!(
+                self.category,
+                error_codes::ACCOUNT_REFRESH
+                    | error_codes::ACCOUNT_TOKEN_PERSISTENCE
+                    | error_codes::ACCOUNT_AUTH
+            ) {
+            HealthObservation::LocalError
+        } else if matches!(
+            self.category,
+            error_codes::UPSTREAM_SERVER_ERROR
+                | error_codes::UPSTREAM_BAD_GATEWAY
+                | error_codes::UPSTREAM_UNAVAILABLE
+                | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+                | error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_TRANSPORT_CONNECT
+        ) {
+            HealthObservation::CountableTransient {
+                provider_not_before_ms: cooldown.map(|request| request.retry_at_ms).or_else(|| {
+                    self.cooldown_hint
+                        .retry_after_ms
+                        .map(|delay| now_ms.saturating_add(delay))
+                }),
+            }
+        } else if self.execution.certainty
+            == crate::scheduler::rotation::ExecutionCertainty::Unknown
+        {
+            HealthObservation::Unknown
+        } else {
+            HealthObservation::ClientError
+        };
+        runtime.settle_rotation_failure(
+            lease,
+            AttemptObservation {
+                execution: self.execution,
+                health,
+            },
+            cooldown,
+            now_ms,
+        );
+    }
+
     pub(crate) fn authorized_request(error: AuthorizedRequestError) -> Self {
         match error {
             AuthorizedRequestError::Prepare(error) => Self::prepare(error),
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
             AuthorizedRequestError::NotReplayable => Self::body(),
+            AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
         }
     }
 
@@ -35,6 +88,11 @@ impl AttemptFailure {
             (error_codes::UPSTREAM_TRANSPORT, "upstream transport failed")
         };
         Self {
+            execution: if error.is_connect() {
+                ExecutionObservation::not_sent()
+            } else {
+                ExecutionObservation::unknown()
+            },
             status: StatusCode::BAD_GATEWAY,
             category,
             message,
@@ -44,6 +102,7 @@ impl AttemptFailure {
 
     pub(crate) fn body() -> Self {
         Self {
+            execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
             category: error_codes::UPSTREAM_ERROR,
             message: "upstream response failed",
@@ -53,6 +112,7 @@ impl AttemptFailure {
 
     pub(crate) fn invalid_request() -> Self {
         Self {
+            execution: ExecutionObservation::not_sent(),
             status: StatusCode::BAD_REQUEST,
             category: error_codes::INVALID_REQUEST,
             message: "request cannot be translated for an eligible source",
@@ -63,6 +123,7 @@ impl AttemptFailure {
     pub(crate) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
         let classification = classify_upstream_error(status, body);
         Self {
+            execution: rejection_execution(status, classification.category),
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
@@ -76,6 +137,7 @@ impl AttemptFailure {
         cooldown_hint: RateLimitBodyHint,
     ) -> Self {
         Self {
+            execution: rejection_execution(status, category),
             status: canonical_upstream_status(status, category),
             category,
             message: upstream_failure_message(category),
@@ -85,6 +147,7 @@ impl AttemptFailure {
 
     pub(crate) fn stream(category: &'static str) -> Self {
         Self {
+            execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
             category,
             message: "upstream stream failed before client output",
@@ -94,6 +157,7 @@ impl AttemptFailure {
 
     pub(crate) fn no_candidate() -> Self {
         Self {
+            execution: ExecutionObservation::not_sent(),
             status: StatusCode::SERVICE_UNAVAILABLE,
             category: error_codes::NO_ELIGIBLE_SOURCE,
             message: "no eligible source is available for this model",
@@ -105,6 +169,7 @@ impl AttemptFailure {
         match error {
             ExecutorPrepareError::Authentication | ExecutorPrepareError::InvalidCredential => {
                 Self {
+                    execution: ExecutionObservation::not_sent(),
                     status: StatusCode::UNAUTHORIZED,
                     category: error_codes::ACCOUNT_AUTH,
                     message: "account authorization is unavailable",
@@ -112,18 +177,52 @@ impl AttemptFailure {
                 }
             }
             ExecutorPrepareError::Persistence => Self {
+                execution: ExecutionObservation::not_sent(),
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 category: error_codes::ACCOUNT_TOKEN_PERSISTENCE,
                 message: "refreshed account authorization could not be persisted",
                 cooldown_hint: RateLimitBodyHint::default(),
             },
             ExecutorPrepareError::Transient => Self {
+                execution: ExecutionObservation::not_sent(),
                 status: StatusCode::BAD_GATEWAY,
                 category: error_codes::ACCOUNT_REFRESH,
                 message: "account authorization refresh failed",
                 cooldown_hint: RateLimitBodyHint::default(),
             },
         }
+    }
+}
+
+/// HTTP status alone does not prove that a non-idempotent operation was
+/// rejected before execution. Only admission failures can authorize replay;
+/// an unclassified terminal event, timeout or generic 5xx remains uncertain.
+fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservation {
+    if matches!(
+        category,
+        error_codes::UPSTREAM_TERMINAL
+            | error_codes::UPSTREAM_REQUEST_TIMEOUT
+            | error_codes::UPSTREAM_CONFLICT
+            | error_codes::UPSTREAM_TRANSPORT
+            | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+    ) {
+        return ExecutionObservation::unknown();
+    }
+    if status.is_client_error()
+        || matches!(
+            category,
+            error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_MODEL_CAPACITY
+                | error_codes::UPSTREAM_RATE_LIMITED
+                | error_codes::UPSTREAM_QUOTA_EXHAUSTED
+                | error_codes::UPSTREAM_WEBSOCKET_CONNECTION_LIMIT
+                | error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+                | error_codes::UPSTREAM_CANDIDATE_REJECTED
+        )
+    {
+        ExecutionObservation::not_sent()
+    } else {
+        ExecutionObservation::unknown()
     }
 }
 
@@ -313,7 +412,7 @@ pub(crate) fn responses_call_id_is_missing_value(value: &Value) -> bool {
     code || responses_call_id_is_missing_text(&upstream_error_text(value))
 }
 
-fn responses_call_id_is_missing_text(text: &str) -> bool {
+pub(super) fn responses_call_id_is_missing_text(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
     if (!text.contains("call_id") && !text.contains("call id"))
         || text.contains("invalid call_id")
@@ -421,7 +520,7 @@ pub(crate) fn zenith_gateway_invalid_request_value(value: &Value) -> bool {
 
 /// Strict Responses endpoints use a separate `fc_` namespace for
 /// `function_call.id`; the matching `call_id` is unchanged. This is only a
-/// recovery signal — the request repair itself still verifies that it has a
+/// recovery signal вЂ” the request repair itself still verifies that it has a
 /// call-prefixed function item before retrying.
 pub(crate) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> bool {
     let text = normalized_error_text(payload);

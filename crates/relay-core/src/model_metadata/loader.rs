@@ -517,8 +517,12 @@ impl ModelMetadataCatalogLoader {
                 request = request.header(header::IF_MODIFIED_SINCE, v);
             }
         }
-        let response = request
-            .send()
+        let (response, permit) = crate::scheduler::refresh::http::management_http_gate()
+            .send(
+                &self.client,
+                request,
+                crate::scheduler::refresh::http::HttpClass::Ordinary,
+            )
             .await
             .map_err(|_| ModelMetadataError::Network)?;
         let headers = response.headers().clone();
@@ -540,6 +544,7 @@ impl ModelMetadataCatalogLoader {
         } else {
             return Err(ModelMetadataError::HttpStatus(response.status().as_u16()));
         };
+        drop(permit);
         envelope.validators(&headers);
         Ok(envelope)
     }

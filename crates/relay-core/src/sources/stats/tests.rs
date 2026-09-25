@@ -4,6 +4,74 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn failed_stats_keep_only_a_fenced_success_and_unsupported_discards_it() {
+    let good =
+        SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::Available)
+            .observed(None, 123);
+    let retained =
+        SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::RateLimited)
+            .observed(Some(&good), 456);
+    assert_eq!(retained.as_of_ms, Some(123));
+    assert!(retained.stale);
+    assert_eq!(retained.refresh_error, Some(SourceStatsStatus::RateLimited));
+    let unsupported = SourceProviderStats::empty(
+        SourceStatsProvider::Unsupported,
+        SourceStatsStatus::Unsupported,
+    )
+    .observed(Some(&good), 789);
+    assert_eq!(unsupported.status, SourceStatsStatus::Unsupported);
+    assert_eq!(unsupported.as_of_ms, None);
+    assert!(!unsupported.stale);
+}
+
+#[test]
+fn source_stats_scheduler_distinguishes_transient_failure_from_unsupported() {
+    use crate::scheduler::refresh::{source_stats_outcome, RefreshOutcome};
+    let available =
+        SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::Available);
+    assert_eq!(
+        source_stats_outcome(&available, 100),
+        RefreshOutcome::Success
+    );
+    let failed =
+        SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::RateLimited);
+    assert_eq!(
+        source_stats_outcome(&failed, 100),
+        RefreshOutcome::FailedRetryAt(60_100)
+    );
+    let unsupported = SourceProviderStats::empty(
+        SourceStatsProvider::Unsupported,
+        SourceStatsStatus::Unsupported,
+    );
+    assert_eq!(
+        source_stats_outcome(&unsupported, 100),
+        RefreshOutcome::Unsupported
+    );
+}
+
+#[tokio::test]
+async fn rate_limited_stats_return_retry_after_even_without_a_valid_payload() {
+    use axum::{routing::get, Router};
+    let app = Router::new().route(
+        "/v1/usage",
+        get(|| async {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "2")],
+                "not JSON",
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let read = read_source_provider_stats(&format!("http://{address}/v1"), "synthetic-key").await;
+    assert_eq!(read.value.unwrap().status, SourceStatsStatus::RateLimited);
+    assert!(read.retry_after_ms.is_some_and(|delay| delay >= 1_000));
+    server.abort();
+}
+
+#[test]
 fn amounts_preserve_zero_debt_decimal_precision_and_bounds() {
     for (input, expected) in [
         (json!(0), Some(0)),
@@ -93,7 +161,7 @@ fn sub2api_does_not_infer_subscription_allowance_from_incomplete_windows() {
 
 #[test]
 fn new_api_uses_advertised_conversion_and_never_guesses_quota_divisor() {
-    let payload = json!({"success":true,"data":{"object":"token_usage","total_available":3_000_000,"total_used":600_000,"unlimited_quota":false}});
+    let payload = json!({"code":true,"data":{"object":"token_usage","total_available":3_000_000,"total_used":600_000,"unlimited_quota":false}});
     let metadata =
         json!({"success":true,"data":{"quota_per_unit":600_000,"quota_display_type":"CNY"}});
     let stats = formats::new_api_stats(&payload, Some(&metadata)).unwrap();
@@ -103,19 +171,39 @@ fn new_api_uses_advertised_conversion_and_never_guesses_quota_divisor() {
     assert_eq!(stats.balance_micro_usd, None);
     assert_eq!(stats.amounts[0].currency, SourceStatsCurrency::Credits);
     assert_eq!(stats.amounts[0].balance_micros, Some(3_000_000_000_000));
-    let stats = formats::new_api_stats(&json!({"success":true,"data":{"object":"token_usage","unlimited_quota":true,"total_available":0}}), None).unwrap();
+    let stats = formats::new_api_stats(&json!({"code":true,"data":{"object":"token_usage","unlimited_quota":true,"total_available":0}}), None).unwrap();
     assert!(stats.balance_unlimited);
     assert_eq!(stats.balance_kind, SourceBalanceKind::KeyQuota);
     assert!(stats.amounts.is_empty());
+    for rejected in [
+        json!({"code":false,"data":{"object":"token_usage","total_available":1}}),
+        json!({"code":true,"success":false,"data":{"object":"token_usage","total_available":1}}),
+        json!({"code":"true","data":{"object":"token_usage","total_available":1}}),
+    ] {
+        assert_eq!(
+            formats::new_api_stats(&rejected, None),
+            Err(SourceStatsStatus::InvalidResponse)
+        );
+    }
+    assert!(formats::new_api_stats(
+        &json!({"success":true,"data":{"object":"token_usage","total_used":1}}),
+        None
+    )
+    .is_ok());
 }
 
 #[test]
 fn billing_converts_cents_and_respects_display_currency() {
     let subscription = json!({"object":"billing_subscription","hard_limit_usd":"12.50"});
     let usage = json!({"object":"list","total_usage":"225"});
-    let stats = formats::billing_stats(&subscription, &usage, None).unwrap();
+    let usd_metadata = json!({"success":true,"data":{"quota_display_type":"USD"}});
+    let stats = formats::billing_stats(&subscription, &usage, Some(&usd_metadata)).unwrap();
     assert_eq!(stats.balance_micro_usd, Some(10_250_000));
     assert_eq!(stats.spent_micro_usd, Some(2_250_000));
+    assert_eq!(
+        formats::billing_stats(&subscription, &usage, None),
+        Err(SourceStatsStatus::InvalidResponse)
+    );
     for (meta, currency) in [
         (
             json!({"quota_display_type":"CNY"}),
@@ -162,25 +250,16 @@ fn deepseek_preserves_each_currency() {
     assert_eq!(stats.amounts[0].balance_micros, Some(110_000_000));
 }
 
-#[test]
-fn siliconflow_uses_total_balance_and_host_currency() {
-    let payload = json!({"code":20000,"status":true,"data":{
-        "balance":"0.88", "chargeBalance":"88.00", "totalBalance":"88.88"
-    }});
-    let stats = formats::siliconflow_stats(&payload, Some("api.siliconflow.cn")).unwrap();
-    assert_eq!(stats.provider, SourceStatsProvider::SiliconFlow);
-    assert_eq!(stats.amounts[0].currency, SourceStatsCurrency::Cny);
-    assert_eq!(stats.balance_micro_usd, None);
-    assert_eq!(stats.amounts[0].balance_micros, Some(88_880_000));
-    let stats = formats::siliconflow_stats(&payload, Some("api.siliconflow.com")).unwrap();
-    assert_eq!(stats.balance_micro_usd, Some(88_880_000));
+#[tokio::test]
+async fn siliconflow_retired_balance_endpoint_is_not_probed() {
+    let (base, seen, task) = mock_server(vec![]).await;
+    let client = StatsClient::new(&base, "synthetic").unwrap();
     assert_eq!(
-        formats::siliconflow_stats(
-            &json!({"code":20000,"status":true,"data":{"balance":"0.88"}}),
-            Some("api.siliconflow.cn")
-        ),
-        Err(SourceStatsStatus::InvalidResponse)
+        fetch_stats(&client, SourceStatsProvider::SiliconFlow).await,
+        Err(SourceStatsStatus::Unsupported)
     );
+    assert!(seen.lock().unwrap().is_empty());
+    task.abort();
 }
 
 #[test]
@@ -278,9 +357,18 @@ async fn custom_sub2api_is_discovered_without_name_or_dashboard_requests() {
 #[tokio::test]
 async fn missing_usage_falls_back_to_new_api_and_metadata_is_public() {
     let (base, seen, task) = mock_server(vec![
-        ("/proxy/api/usage/token/", 200, json!({"success":true,"data":{"object":"token_usage","total_available":5,"total_used":0}})),
-        ("/proxy/api/status", 200, json!({"success":true,"data":{"quota_per_unit":10}})),
-    ]).await;
+        (
+            "/proxy/api/usage/token/",
+            200,
+            json!({"code":true,"data":{"object":"token_usage","total_available":5,"total_used":0}}),
+        ),
+        (
+            "/proxy/api/status",
+            200,
+            json!({"success":true,"data":{"quota_per_unit":10}}),
+        ),
+    ])
+    .await;
     let stats = fetch_source_provider_stats(&base, "synthetic")
         .await
         .unwrap();
@@ -357,6 +445,30 @@ async fn billing_discovery_uses_matching_versioned_paths_and_display_units() {
         .unwrap()
         .iter()
         .all(|(path, _)| path.starts_with("/proxy/")));
+    task.abort();
+}
+
+#[tokio::test]
+async fn billing_without_status_does_not_guess_usd_for_unknown_site_currency() {
+    let (base, _, task) = mock_server(vec![
+        (
+            "/proxy/v1/dashboard/billing/subscription",
+            200,
+            json!({"object":"billing_subscription","hard_limit_usd":25}),
+        ),
+        (
+            "/proxy/v1/dashboard/billing/usage",
+            200,
+            json!({"object":"list","total_usage":450}),
+        ),
+    ])
+    .await;
+    let stats = fetch_source_provider_stats(&base, "synthetic")
+        .await
+        .unwrap();
+    assert_eq!(stats.provider, SourceStatsProvider::Billing);
+    assert_eq!(stats.status, SourceStatsStatus::InvalidResponse);
+    assert_eq!(stats.balance_micro_usd, None);
     task.abort();
 }
 

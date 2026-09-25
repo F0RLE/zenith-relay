@@ -128,7 +128,7 @@ mod tests {
             quota_reset_at_ms: None,
             cooldowns: BTreeMap::new(),
             last_used_at: None,
-            consecutive_failures: 0,
+
             secret_available: true,
         }
     }

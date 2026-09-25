@@ -1,4 +1,5 @@
 use super::{collect_response_body, valid_codex_client_version, ResponseBodyError};
+use crate::scheduler::refresh::http::{management_http_gate, HttpClass};
 use reqwest::{
     header::{HeaderName, ACCEPT},
     redirect::Policy,
@@ -91,11 +92,15 @@ async fn refresh_codex_client_release_from_endpoint(
         .user_agent(RELEASE_USER_AGENT)
         .build()
         .map_err(|_| CodexReleaseError::Client)?;
-    let response = client
-        .get(endpoint.clone())
-        .header(ACCEPT, GITHUB_ACCEPT)
-        .header(GITHUB_API_VERSION_HEADER, GITHUB_API_VERSION)
-        .send()
+    let (response, permit) = management_http_gate()
+        .send(
+            &client,
+            client
+                .get(endpoint.clone())
+                .header(ACCEPT, GITHUB_ACCEPT)
+                .header(GITHUB_API_VERSION_HEADER, GITHUB_API_VERSION),
+            HttpClass::Ordinary,
+        )
         .await
         .map_err(|_| CodexReleaseError::Transport)?;
     if !response.status().is_success() {
@@ -107,6 +112,7 @@ async fn refresh_codex_client_release_from_endpoint(
             ResponseBodyError::Transport => CodexReleaseError::Transport,
             ResponseBodyError::TooLarge => CodexReleaseError::ResponseTooLarge,
         })?;
+    drop(permit);
     let version =
         parse_stable_rust_release_response(&body).ok_or(CodexReleaseError::InvalidResponse)?;
     Ok(CodexRelease { version })

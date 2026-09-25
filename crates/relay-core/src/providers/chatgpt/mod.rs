@@ -42,6 +42,10 @@ pub use token_errors::{token_refresh_failure_kind, token_refresh_provider_error_
 
 pub const CODEX_MODELS_CLIENT_VERSION: &str = CODEX_CLIENT_VERSION;
 
+/// Official Responses endpoint used by the Excel/Basis Points route. It is a
+/// fixed provider route; user supplied API sources never use it.
+pub const BASIS_POINTS_RESPONSES_URL: &str = "https://bps.openai.com/basispoints/api/responses";
+
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 
 pub(super) fn valid_access_token(value: &str) -> bool {

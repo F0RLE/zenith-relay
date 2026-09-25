@@ -38,7 +38,9 @@ impl UpstreamUsage {
         event.total_tokens = self.event.total_tokens;
         event.cached_input_tokens = self.event.cached_input_tokens;
         event.cache_write_input_tokens = self.event.cache_write_input_tokens;
-        event.cache_write_ttl = self.event.cache_write_ttl;
+        event
+            .cache_write_ttl
+            .clone_from(&self.event.cache_write_ttl);
         event.reasoning_tokens = self.event.reasoning_tokens;
         event
             .applied_service_tier
@@ -63,7 +65,7 @@ mod tests {
         assert_eq!(event.input_tokens, Some(60));
         assert_eq!(event.output_tokens, Some(4));
         assert_eq!(event.cache_write_input_tokens, Some(30));
-        assert_eq!(event.cache_write_ttl, Some(crate::CacheWriteTtl::OneHour));
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("1h"));
         assert_eq!(event.total_tokens, None);
     }
 

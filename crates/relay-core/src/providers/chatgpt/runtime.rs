@@ -17,6 +17,10 @@ pub struct RuntimeChatGptAccount {
     pub source_id: String,
     pub chatgpt_account_id: String,
     pub responses_url: String,
+    /// Enables the explicitly labelled Excel/Basis Points Responses route for
+    /// this OAuth account. The route reuses the same candidate, quota and
+    /// concurrency reservation as native Codex traffic.
+    pub basis_points_enabled: bool,
     pub models: Vec<String>,
     pub enabled: bool,
     pub draining: bool,
@@ -44,6 +48,7 @@ impl fmt::Debug for RuntimeChatGptAccount {
             .field("source_id", &self.source_id)
             .field("chatgpt_account_id", &"[redacted]")
             .field("responses_url", &redacted_url(&self.responses_url))
+            .field("basis_points_enabled", &self.basis_points_enabled)
             .field("models", &self.models)
             .field("enabled", &self.enabled)
             .field("draining", &self.draining)

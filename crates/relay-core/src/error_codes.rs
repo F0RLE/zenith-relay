@@ -28,6 +28,8 @@ macro_rules! error_codes {
 
 #[rustfmt::skip]
 error_codes! {
+    ADMISSION_QUEUE_FULL => ("admission_queue_full", "admission_queue_full", None),
+    ADMISSION_WAIT_EXPIRED => ("admission_wait_expired", "admission_wait_expired", None),
     ACCESS_TOKEN_MISSING => ("access_token_missing", "access_token_missing", None),
     ACCESS_TOKEN_REJECTED => ("access_token_rejected", "access_token_rejected", None),
     ACCOUNT_AUTH => ("account_auth", "account_auth", None),
@@ -89,7 +91,6 @@ error_codes! {
     PROXY_CHECK_INVALID_RESPONSE => ("proxy_check_invalid_response", "proxy_check_invalid_response", None),
     PROXY_CHECK_UNAVAILABLE => ("proxy_check_unavailable", "proxy_check_unavailable", None),
     COMPACTION_RESPONSE_INVALID => ("compaction_response_invalid", "compaction_response_invalid", Some((502, "upstream compaction did not finish with a valid encrypted result; request was not replayed"))),
-    COOLDOWN_AFTER_FAILURES_INVALID => ("cooldown_after_failures_invalid", "cooldown_after_failures_invalid", None),
     CREDENTIAL_LOAD_FAILED => ("credential_load_failed", "credential_load_failed", None),
     CREDENTIAL_PERSIST_FAILED => ("credential_persist_failed", "credential_persist_failed", None),
     CREDENTIAL_REFRESH_REQUIRES_REAUTH => ("credential_refresh_requires_reauth", "credential_refresh_requires_reauth", None),
@@ -137,6 +138,7 @@ error_codes! {
     INVALID_LOGIN_ID => ("invalid_login_id", "invalid_login_id", None),
     INVALID_REFRESH_TOKEN => ("invalid_refresh_token", "invalid_refresh_token", None),
     INVALID_REQUEST => ("invalid_request", "invalid_request", None),
+    INVALID_STREAM_ID => ("invalid_stream_id", "invalid_stream_id", None),
     INVALID_SESSION_ID => ("invalid_session_id", "invalid_session_id", None),
     INVALID_SOURCE_FILE => ("invalid_source_file", "invalid_source_file", None),
     INVALID_STATE => ("invalid_state", "invalid_state", None),

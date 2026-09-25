@@ -13,12 +13,21 @@ use super::super::request::{
 use super::request::{execute_request, RequestExecution};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
+use crate::scheduler::rotation::SharedRequestBudget;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// WebSocket -> HTTP fallback carries the same identity and physical
+/// dispatch counter; a transport change is not a new client request.
+#[derive(Clone)]
+pub(in crate::gateway) struct RoutedRequestIdentity {
+    pub(in crate::gateway) request_id: String,
+    pub(in crate::gateway) budget: SharedRequestBudget,
+}
 
 pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
@@ -66,6 +75,11 @@ async fn execute_client_request_inner(
         Ok(object) => Value::Object(object),
         Err(response) => return *response,
     };
+    let tool_policy = parts
+        .extensions
+        .get::<super::super::request::RequestToolPolicy>()
+        .cloned()
+        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request));
     let managed_codex_client = is_managed_codex_client(&headers);
     let service_tier_policy = if managed_codex_client {
         ServiceTierPolicy::pool_owned(&request)
@@ -103,7 +117,16 @@ async fn execute_client_request_inner(
     let background_kind = (wire_api == WireApi::Responses)
         .then(|| codex_background_request_kind(&headers, &request))
         .flatten();
-    let request_id = request_id();
+    let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
+    let (request_id, budget) = identity.map_or_else(
+        || {
+            (
+                request_id(),
+                SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),
+            )
+        },
+        |identity| (identity.request_id, identity.budget),
+    );
     let stream = match request.get("stream") {
         Some(Value::Bool(stream)) => *stream,
         Some(_) => {
@@ -151,7 +174,8 @@ async fn execute_client_request_inner(
             now_ms(),
         )
         .or_else(|| {
-            (managed_codex_client && runtime.chatgpt_retry_until_available())
+            runtime
+                .route_recovery_enabled()
                 .then(|| {
                     runtime.resolve_configured_model(
                         &key,
@@ -180,6 +204,7 @@ async fn execute_client_request_inner(
         WireApi::Gemini => super::super::request::forwarded_bridge_gemini_headers(&headers),
     };
     execute_request(RequestExecution {
+        tool_policy,
         runtime: runtime.clone(),
         key,
         request,
@@ -195,14 +220,11 @@ async fn execute_client_request_inner(
             .and_then(|continuation| continuation.response_affinity_key.clone()),
         requires_affinity_owner: continuation
             .is_some_and(|continuation| continuation.requires_affinity_owner),
-        // Keep client eligibility with the request. The mutable setting is
-        // read at every wait decision so a running request observes a toggle
-        // change without granting this behavior to non-ChatGPT clients.
-        wait_for_candidate_availability: managed_codex_client,
         wire_api,
         responses_lite,
         allow_previous_response_reset: true,
         attempt_offset: 0,
+        budget,
     })
     .await
 }

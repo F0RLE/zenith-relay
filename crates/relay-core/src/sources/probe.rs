@@ -2,6 +2,7 @@ use super::{
     CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ProtocolFeature, ProviderSource,
     SourceConnector, SourceProtocolBinding, WireApi,
 };
+use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 use crate::{error_codes, transport::collect_limited, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -32,6 +33,14 @@ pub struct SourceProbeResult {
 pub async fn probe_source_generation(
     source: &ProviderSource,
     input: &SourceProbeInput,
+) -> Result<SourceProbeResult> {
+    probe_source_generation_with_scope(source, input, ManagementHttpScope::default()).await
+}
+
+pub async fn probe_source_generation_with_scope(
+    source: &ProviderSource,
+    input: &SourceProbeInput,
+    scope: ManagementHttpScope,
 ) -> Result<SourceProbeResult> {
     source.validate()?;
     let model = source
@@ -70,9 +79,13 @@ pub async fn probe_source_generation(
         error_code: Some(error_codes::SOURCE_PROBE_UNAVAILABLE.into()),
     };
     let exchange = async {
-        let response = request.send().await?;
+        let (response, permit) = scope
+            .send(&client, request, HttpClass::Ordinary)
+            .await
+            .map_err(|_| Error::ManagementHttpUnavailable)?;
         let status = response.status();
         let body = collect_limited(response, MAX_PROBE_BYTES).await?;
+        drop(permit);
         Ok::<_, Error>((status, body))
     };
     if let Ok(Ok((status, body))) = tokio::time::timeout(PROBE_TIMEOUT, exchange).await {

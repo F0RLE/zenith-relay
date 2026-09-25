@@ -147,6 +147,113 @@ pub(super) fn drop_materialized_previous_response_id(
     true
 }
 
+/// Replays a saved native Responses turn after the provider explicitly rejects
+/// one unanswered function/custom-tool call. The replay and removal are staged
+/// together so a failed or ambiguous repair leaves the original request intact.
+pub(super) fn recover_stale_tool_history(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    model: &str,
+    now_ms: u64,
+    stream: bool,
+    upstream_error: &[u8],
+) -> bool {
+    if !super::errors::responses_tool_call_is_missing_output(upstream_error)
+        || request.get("context_management").is_some()
+        || request.get("truncation").is_some()
+        || contains_encrypted_content(request)
+    {
+        return false;
+    }
+    let Some(previous_id) = request.get("previous_response_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(current_input_item_count) = replay_input_item_count(request) else {
+        return false;
+    };
+    let Some(owner) = runtime
+        .response_affinity_key(Some(previous_id))
+        .and_then(|key| runtime.response_affinity_candidate(&key, now_ms))
+    else {
+        return false;
+    };
+    let Some(replay) =
+        runtime.load_native_responses_replay(local_key_id, previous_id, &owner, now_ms)
+    else {
+        return false;
+    };
+    let Ok(mut materialized) = replay.replay_request(request, replay.model(), stream) else {
+        return false;
+    };
+    let Some(historical_item_count) = materialized
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|input| input.len().checked_sub(current_input_item_count))
+    else {
+        return false;
+    };
+    if !has_materialized_tool_history(&materialized)
+        || !super::request::remove_unpaired_responses_tool_call(
+            &mut materialized,
+            historical_item_count,
+            upstream_error,
+        )
+    {
+        return false;
+    }
+    materialized["model"] = Value::String(model.to_string());
+    *request = materialized;
+    true
+}
+
+fn replay_input_item_count(request: &Value) -> Option<usize> {
+    match request.get("input")? {
+        Value::Array(items) => Some(items.len()),
+        Value::String(_) | Value::Object(_) => Some(1),
+        _ => None,
+    }
+}
+
+fn has_materialized_tool_history(request: &Value) -> bool {
+    if request.get("context_management").is_some()
+        || request.get("truncation").is_some()
+        || contains_encrypted_content(request)
+        || request
+            .get("conversation")
+            .is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
+    let Some(input) = request.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+    !input.is_empty()
+        && input.iter().all(|item| {
+            let Some(object) = item.as_object() else {
+                return false;
+            };
+            match object.get("type").and_then(Value::as_str) {
+                Some("message") | None => {
+                    object
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .is_some_and(|role| {
+                            matches!(role, "user" | "assistant" | "developer" | "system")
+                        })
+                }
+                Some(
+                    "function_call"
+                    | "function_call_output"
+                    | "custom_tool_call"
+                    | "custom_tool_call_output"
+                    | "reasoning",
+                ) => true,
+                Some(_) => false,
+            }
+        })
+}
+
 fn has_materialized_plaintext_history(request: &Value) -> bool {
     if request.get("context_management").is_some()
         || request.get("truncation").is_some()
@@ -421,6 +528,49 @@ mod tests {
         );
         assert_eq!(request["input"][1], output["output"][0]);
         assert_eq!(request["input"][2]["content"][0]["text"], "Continue");
+    }
+
+    #[test]
+    fn stale_custom_tool_recovery_replays_and_removes_only_the_unanswered_call() {
+        let runtime = runtime();
+        let first = json!({
+            "model":"model",
+            "input":[{"type":"message","role":"user","content":"start"}]
+        });
+        let output = json!({
+            "id":"resp_stale_tool",
+            "output":[
+                {"type":"function_call","call_id":"fc_done","name":"lookup","arguments":"{}"},
+                {"type":"function_call_output","call_id":"fc_done","output":"keep this result"},
+                {"type":"custom_tool_call","id":"item_stale","call_id":"ctc_stale","name":"patch","input":"{}"}
+            ]
+        });
+        runtime.capture_native_responses_replay("key", "source", &first, "model", &output, 10);
+        runtime.bind_response_affinity(Some("resp_stale_tool"), "source", 10);
+
+        let mut request = json!({
+            "previous_response_id":"resp_stale_tool",
+            "model":"model",
+            "input":[{"type":"message","role":"user","content":"continue"}]
+        });
+        let error =
+            br#"{"error":{"message":"No tool output found for custom tool call ctc_stale."}}"#;
+
+        assert!(recover_stale_tool_history(
+            &runtime,
+            "key",
+            &mut request,
+            "model",
+            10,
+            false,
+            error,
+        ));
+        assert!(request.get("previous_response_id").is_none());
+        assert_eq!(request["model"], "model");
+        assert_eq!(request["input"].as_array().unwrap().len(), 4);
+        assert_eq!(request["input"][1]["call_id"], "fc_done");
+        assert_eq!(request["input"][2]["output"], "keep this result");
+        assert_eq!(request["input"][3]["content"], "continue");
     }
 
     #[test]

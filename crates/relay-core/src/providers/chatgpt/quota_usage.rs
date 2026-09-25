@@ -10,6 +10,7 @@ use crate::quota::{
     QuotaRefreshFailure, QuotaRefreshResult, QuotaWindowInput, QuotaWindowKind, ResetTime,
     Subscription, SubscriptionInput, SupplementalQuotaWindowInput,
 };
+use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 use crate::{providers::chatgpt::CodexIdentityEnvelope, DefaultServiceTier, ProxyConfig};
 use futures_util::future::BoxFuture;
 use reqwest::{
@@ -35,6 +36,7 @@ pub struct CodexQuotaClient {
     http: reqwest::Client,
     usage_endpoint: Url,
     subscription: CodexSubscriptionClient,
+    scope: ManagementHttpScope,
 }
 
 impl CodexQuotaClient {
@@ -80,7 +82,14 @@ impl CodexQuotaClient {
             http,
             usage_endpoint,
             subscription,
+            scope: ManagementHttpScope::default(),
         })
+    }
+
+    pub fn with_http_scope(mut self, scope: ManagementHttpScope) -> Self {
+        self.subscription = self.subscription.with_http_scope(scope.clone());
+        self.scope = scope;
+        self
     }
 
     pub fn capabilities(&self) -> QuotaAdapterCapabilities {
@@ -193,17 +202,23 @@ impl CodexQuotaClient {
         let identity = CodexIdentityEnvelope::standard(chatgpt_account_id).map_err(|_| {
             QuotaRefreshFailure::new(error_codes::INVALID_CHATGPT_ACCOUNT_ID, false)
         })?;
-        let response = identity
-            .apply(
-                self.http
-                    .get(self.usage_endpoint.clone())
-                    .header(AUTHORIZATION, authorization)
-                    .header(ACCEPT, "application/json"),
+        let (response, permit) = self
+            .scope
+            .send(
+                &self.http,
+                identity.apply(
+                    self.http
+                        .get(self.usage_endpoint.clone())
+                        .header(AUTHORIZATION, authorization)
+                        .header(ACCEPT, "application/json"),
+                ),
+                HttpClass::Ordinary,
             )
-            .send()
             .await
             .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true))?;
         let status = response.status();
+        let retry_after_ms =
+            crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
         let body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
@@ -213,9 +228,13 @@ impl CodexQuotaClient {
                 ResponseBodyError::TooLarge => {
                     QuotaRefreshFailure::new(error_codes::QUOTA_RESPONSE_TOO_LARGE, false)
                 }
-            })?;
+            })
+            .map_err(|failure| failure.with_retry_after(retry_after_ms))?;
+        drop(permit);
         if !status.is_success() {
-            return Err(classify_quota_failure(status.as_u16(), &body));
+            return Err(
+                classify_quota_failure(status.as_u16(), &body).with_retry_after(retry_after_ms)
+            );
         }
         parse_codex_usage(&body, now_ms)
     }
@@ -762,6 +781,26 @@ mod tests {
     };
     use serde_json::json;
 
+    fn client_with_subscription(usage_endpoint: Url) -> CodexQuotaClient {
+        let http = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .unwrap();
+        CodexQuotaClient {
+            subscription: CodexSubscriptionClient::with_endpoints(
+                http.clone(),
+                usage_endpoint
+                    .join("/backend-api/accounts/check/v4-2023-04-27")
+                    .unwrap(),
+                usage_endpoint.join("/backend-api/subscriptions").unwrap(),
+            )
+            .unwrap(),
+            http,
+            usage_endpoint,
+            scope: ManagementHttpScope::default(),
+        }
+    }
+
     #[test]
     fn chatgpt_adapter_implements_the_shared_quota_contract() {
         let client = CodexQuotaClient::with_endpoint(
@@ -979,6 +1018,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quota_retains_provider_retry_after_for_the_shared_scheduler() {
+        let (base, server) = spawn(Router::new().route(
+            "/backend-api/wham/usage",
+            get(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "120")],
+                    "{}",
+                )
+            }),
+        ))
+        .await;
+        let endpoint = base.join("/backend-api/wham/usage").unwrap();
+        let failure = CodexQuotaClient::with_endpoint(endpoint)
+            .unwrap()
+            .refresh_data("synthetic-access", "synthetic-account", 1_000)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.http_status(), Some(429));
+        assert_eq!(failure.retry_after_ms(), Some(120_000));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn shared_client_sends_safe_headers_and_refreshes_subscription() {
         let router = Router::new()
             .route("/backend-api/wham/usage", get(successful_agent_usage))
@@ -988,22 +1051,7 @@ mod tests {
             )
             .route("/backend-api/subscriptions", get(subscription_status));
         let (usage_endpoint, server) = spawn(router).await;
-        let http = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .build()
-            .unwrap();
-        let client = CodexQuotaClient {
-            subscription: CodexSubscriptionClient::with_endpoints(
-                http.clone(),
-                usage_endpoint
-                    .join("/backend-api/accounts/check/v4-2023-04-27")
-                    .unwrap(),
-                usage_endpoint.join("/backend-api/subscriptions").unwrap(),
-            )
-            .unwrap(),
-            http,
-            usage_endpoint,
-        };
+        let client = client_with_subscription(usage_endpoint);
 
         let QuotaRefreshOutcome::Updated(data) = client
             .refresh_quota_with_subscription_authorization(
@@ -1039,22 +1087,7 @@ mod tests {
                 get(subscription_status_without_expiry),
             );
         let (usage_endpoint, server) = spawn(router).await;
-        let http = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .build()
-            .unwrap();
-        let client = CodexQuotaClient {
-            subscription: CodexSubscriptionClient::with_endpoints(
-                http.clone(),
-                usage_endpoint
-                    .join("/backend-api/accounts/check/v4-2023-04-27")
-                    .unwrap(),
-                usage_endpoint.join("/backend-api/subscriptions").unwrap(),
-            )
-            .unwrap(),
-            http,
-            usage_endpoint,
-        };
+        let client = client_with_subscription(usage_endpoint);
         let previous = Subscription {
             plan_type: Some("team".into()),
             active_until_ms: Some(1_800_000_000_000),
@@ -1095,22 +1128,7 @@ mod tests {
             )
             .route("/backend-api/subscriptions", get(upstream_failure));
         let (usage_endpoint, server) = spawn(router).await;
-        let http = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .build()
-            .unwrap();
-        let client = CodexQuotaClient {
-            subscription: CodexSubscriptionClient::with_endpoints(
-                http.clone(),
-                usage_endpoint
-                    .join("/backend-api/accounts/check/v4-2023-04-27")
-                    .unwrap(),
-                usage_endpoint.join("/backend-api/subscriptions").unwrap(),
-            )
-            .unwrap(),
-            http,
-            usage_endpoint,
-        };
+        let client = client_with_subscription(usage_endpoint);
         let previous = Subscription {
             plan_type: Some("business".into()),
             active_until_ms: Some(1_800_000_000_000),

@@ -923,10 +923,10 @@ fn websocket_connection_limit_is_account_global() {
 #[test]
 fn rate_limit_delay_uses_the_stronger_hint_and_keeps_explicit_zero() {
     assert_eq!(
-        cooldown::rate_limit_cooldown_ms(Some(1_000), Some(120_000), 1),
+        cooldown::retry_delay_ms(Some(1_000), Some(120_000), 1_000),
         120_000
     );
-    assert_eq!(cooldown::rate_limit_cooldown_ms(Some(0), None, 5), 0);
+    assert_eq!(cooldown::retry_delay_ms(Some(0), None, 1_000), 0);
 }
 
 #[test]
@@ -940,31 +940,4 @@ fn source_recovery_delay_overrides_automatic_but_not_provider_retry_after() {
         120_000
     );
     assert_eq!(cooldown::source_cooldown_ms(5_000, None, false), 5_000);
-}
-
-#[test]
-fn no_header_rate_limit_backoff_is_exponential_and_capped() {
-    assert_eq!(cooldown::exponential_backoff_ms(1), 1_000);
-    assert_eq!(cooldown::exponential_backoff_ms(2), 2_000);
-    assert_eq!(cooldown::exponential_backoff_ms(3), 4_000);
-    assert_eq!(
-        cooldown::exponential_backoff_ms(32),
-        MAX_RATE_LIMIT_COOLDOWN_MS
-    );
-}
-
-#[test]
-fn failed_half_open_probes_back_off_without_shortening_retry_after() {
-    assert_eq!(cooldown::half_open_backoff_ms(0, 2, true), 2_000);
-    assert_eq!(cooldown::half_open_backoff_ms(60_000, 2, false), 60_000);
-    assert_eq!(cooldown::half_open_backoff_ms(60_000, 2, true), 120_000);
-    assert_eq!(cooldown::half_open_backoff_ms(60_000, 3, true), 240_000);
-    assert_eq!(
-        cooldown::half_open_backoff_ms(60_000, 32, true),
-        MAX_RATE_LIMIT_COOLDOWN_MS
-    );
-    assert_eq!(
-        cooldown::half_open_backoff_ms(MAX_RATE_LIMIT_RETRY_HINT_MS, 2, true),
-        MAX_RATE_LIMIT_RETRY_HINT_MS
-    );
 }

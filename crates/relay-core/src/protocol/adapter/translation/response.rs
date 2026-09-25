@@ -34,11 +34,14 @@ pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterRes
                     .ok_or_else(invalid)?,
             )?;
             let message = choice.get("message").ok_or_else(invalid)?;
-            if message
+            let refusal = message
                 .get("refusal")
-                .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
-            {
-                return Err(invalid());
+                .filter(|value| !value.is_null())
+                .map(|value| value.as_str().ok_or_else(invalid))
+                .transpose()?
+                .filter(|value| !value.is_empty());
+            if refusal.is_some() {
+                response.finish = Finish::Filter;
             }
             if let Some(reasoning) = message
                 .get("reasoning_content")
@@ -49,9 +52,32 @@ pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterRes
                 ));
             }
             if let Some(text) = message.get("content").filter(|value| !value.is_null()) {
-                response
-                    .blocks
-                    .push(Block::Text(text.as_str().ok_or_else(invalid)?.into()));
+                if let Some(text) = text.as_str() {
+                    response.blocks.push(Block::Text(text.into()));
+                } else {
+                    for part in text.as_array().ok_or_else(invalid)? {
+                        match part.get("type").and_then(Value::as_str) {
+                            Some("text") => response.blocks.push(Block::Text(
+                                part.get("text")
+                                    .and_then(Value::as_str)
+                                    .ok_or_else(invalid)?
+                                    .into(),
+                            )),
+                            Some("refusal") => {
+                                response.finish = Finish::Filter;
+                                response.blocks.push(Block::Text(
+                                    part.get("refusal")
+                                        .and_then(Value::as_str)
+                                        .ok_or_else(invalid)?
+                                        .into(),
+                                ));
+                            }
+                            _ => return Err(invalid()),
+                        }
+                    }
+                }
+            } else if let Some(refusal) = refusal {
+                response.blocks.push(Block::Text(refusal.into()));
             }
             if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
                 for call in calls {
@@ -210,6 +236,10 @@ pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterRes
             }
         }
         WireApi::Gemini => {
+            if super::super::gemini::prompt_blocked(value).map_err(|()| invalid())? {
+                response.finish = Finish::Filter;
+                return Ok(response);
+            }
             let candidates = value
                 .get("candidates")
                 .and_then(Value::as_array)
@@ -225,13 +255,13 @@ pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterRes
                     .and_then(Value::as_str)
                     .ok_or_else(invalid)?,
             )?;
-            for (index, part) in candidate
+            let parts = candidate
                 .pointer("/content/parts")
-                .and_then(Value::as_array)
-                .ok_or_else(invalid)?
-                .iter()
-                .enumerate()
-            {
+                .and_then(Value::as_array);
+            if parts.is_none() && !matches!(response.finish, Finish::Filter | Finish::Length) {
+                return Err(invalid());
+            }
+            for (index, part) in parts.into_iter().flatten().enumerate() {
                 if part.get("thoughtSignature").is_some() {
                     return Err(invalid());
                 }
@@ -310,9 +340,20 @@ pub(super) fn finish(protocol: WireApi, value: &str) -> AdapterResult<Finish> {
         | (WireApi::Messages, "max_tokens")
         | (WireApi::Gemini, "MAX_TOKENS") => Ok(Finish::Length),
         (WireApi::ChatCompletions, "content_filter")
-        | (WireApi::Gemini, "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT") => {
-            Ok(Finish::Filter)
-        }
+        | (WireApi::Messages, "refusal")
+        | (
+            WireApi::Gemini,
+            "SAFETY"
+            | "RECITATION"
+            | "LANGUAGE"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_RECITATION"
+            | "ESCALATION",
+        ) => Ok(Finish::Filter),
         _ => Err(AdapterError::upstream_response_invalid()),
     }
 }
@@ -500,7 +541,7 @@ pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> Ada
                 "output":content,"usage":usage,"incomplete_details":if incomplete { json!({"reason":if response.finish == Finish::Length { "max_output_tokens" } else { "content_filter" }}) } else { Value::Null }})
         }
         WireApi::ChatCompletions => {
-            let mut message = json!({"role":"assistant","content":if text.is_empty() && !calls.is_empty() { Value::Null } else { text.into() }});
+            let mut message = json!({"role":"assistant","content":if text.is_empty() && (!calls.is_empty() || response.finish == Finish::Filter) { Value::Null } else { text.into() }});
             if !calls.is_empty() {
                 message["tool_calls"] = calls.into();
             }

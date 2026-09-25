@@ -1,5 +1,5 @@
 use crate::gateway::request::{candidate_protocols, requested_reasoning_effort, ServiceTierPolicy};
-use crate::runtime::AuthenticatedKey;
+use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier};
 use crate::{
     AdapterError, AdapterRequestContext, CapabilityStatus, GatewayRuntime, ProtocolFeature, WireApi,
 };
@@ -25,6 +25,17 @@ pub(super) fn incompatible_routes(
     for route in runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
     {
         let validate = || {
+            if route.account_transport == AccountTransport::ExcelBasisPoints {
+                if let Some(error) = basis_points_route_error(
+                    request,
+                    stream,
+                    tier_policy,
+                    tier_policy.select_for_model(runtime, &route.source_model),
+                ) {
+                    return Err(error);
+                }
+            }
+
             // Reference model capabilities constrain conversions, never the
             // participant's optional /models fields. Native payloads pass through.
             if !route.adapter.is_passthrough() {
@@ -105,6 +116,23 @@ pub(super) fn incompatible_routes(
         }
     }
     (excluded, last_error)
+}
+
+pub(super) fn basis_points_route_error(
+    request: &Value,
+    stream: bool,
+    tier_policy: &ServiceTierPolicy,
+    selected_tier: DefaultServiceTier,
+) -> Option<AdapterError> {
+    if tier_policy.has_explicit_client_tier() || selected_tier != DefaultServiceTier::Standard {
+        return Some(AdapterError::parameter_unsupported_for("service_tier"));
+    }
+
+    let features = requested_features(request, stream);
+    if features.contains(&ProtocolFeature::Images) {
+        return Some(AdapterError::parameter_unsupported_for("input.image"));
+    }
+    None
 }
 
 fn requested_features(request: &Value, stream: bool) -> Vec<ProtocolFeature> {
@@ -216,5 +244,58 @@ mod tests {
         assert!(features.contains(&ProtocolFeature::StructuredOutput));
         assert!(features.contains(&ProtocolFeature::Reasoning));
         assert!(features.contains(&ProtocolFeature::Streaming));
+    }
+
+    #[test]
+    fn basis_points_rejects_unverified_speed_and_images_but_keeps_tool_bridge_eligible() {
+        let implicit = ServiceTierPolicy::pool_owned(&json!({}));
+        assert!(basis_points_route_error(
+            &json!({"input": "hello"}),
+            false,
+            &implicit,
+            DefaultServiceTier::Standard,
+        )
+        .is_none());
+
+        let explicit_speed = ServiceTierPolicy::pool_owned(&json!({"service_tier": "priority"}));
+        assert_eq!(
+            basis_points_route_error(
+                &json!({"input": "hello"}),
+                false,
+                &explicit_speed,
+                DefaultServiceTier::Standard,
+            )
+            .and_then(|error| error.parameter()),
+            Some("service_tier")
+        );
+        assert_eq!(
+            basis_points_route_error(
+                &json!({"input": "hello"}),
+                false,
+                &implicit,
+                DefaultServiceTier::Fast,
+            )
+            .and_then(|error| error.parameter()),
+            Some("service_tier")
+        );
+        assert_eq!(
+            basis_points_route_error(
+                &json!({
+                    "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}]}]
+                }),
+                false,
+                &implicit,
+                DefaultServiceTier::Standard,
+            )
+            .and_then(|error| error.parameter()),
+            Some("input.image")
+        );
+        assert!(basis_points_route_error(
+            &json!({"tools": [{"type": "function", "name": "lookup"}]}),
+            false,
+            &implicit,
+            DefaultServiceTier::Standard,
+        )
+        .is_none());
     }
 }

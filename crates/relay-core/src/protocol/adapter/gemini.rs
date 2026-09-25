@@ -182,13 +182,35 @@ pub fn translate_gemini_response(
     request: GeminiBridgeRequest,
     upstream: &Value,
 ) -> AdapterResult<GeminiBridgeResponse> {
+    if prompt_blocked(upstream).map_err(|()| AdapterError::upstream_response_invalid())? {
+        let response_id = request.response_id.clone();
+        let mut response_body = responses_body_from_output(
+            &response_id,
+            &request.model,
+            Vec::new(),
+            upstream.get("usageMetadata"),
+        );
+        response_body["status"] = Value::String("incomplete".into());
+        response_body["incomplete_details"] = json!({"reason":"content_filter"});
+        return Ok(GeminiBridgeResponse {
+            response_body,
+            response_id,
+            continuation: request.state,
+        });
+    }
     let candidate = first_candidate(upstream)?;
-    let parts = candidate
+    let incomplete_reason =
+        candidate_incomplete_reason(candidate.get("finishReason").and_then(Value::as_str))?;
+    let parts = match candidate
         .pointer("/content/parts")
         .and_then(Value::as_array)
-        .ok_or_else(AdapterError::upstream_response_invalid)?;
+    {
+        Some(parts) => parts.as_slice(),
+        None if incomplete_reason.is_some() => &[],
+        None => return Err(AdapterError::upstream_response_invalid()),
+    };
     let (output, _) = responses_output_from_gemini_parts(&request, parts)?;
-    if output.is_empty() {
+    if output.is_empty() && incomplete_reason.is_none() {
         return Err(AdapterError::upstream_response_invalid());
     }
     let response_id = request.response_id.clone();
@@ -198,11 +220,9 @@ pub fn translate_gemini_response(
         output,
         upstream.get("usageMetadata"),
     );
-    if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
-        if !matches!(reason, "STOP" | "FINISH_REASON_UNSPECIFIED") {
-            response_body["status"] = Value::String("incomplete".to_string());
-            response_body["incomplete_details"] = json!({"reason": reason.to_ascii_lowercase()});
-        }
+    if let Some(reason) = incomplete_reason {
+        response_body["status"] = Value::String("incomplete".to_string());
+        response_body["incomplete_details"] = json!({"reason": reason});
     }
     let mut continuation = request.state.clone();
     append_message(&mut continuation, "model", parts.to_vec());
@@ -211,6 +231,64 @@ pub fn translate_gemini_response(
         response_id,
         continuation,
     })
+}
+
+pub(super) fn candidate_incomplete_reason(
+    reason: Option<&str>,
+) -> AdapterResult<Option<&'static str>> {
+    match reason {
+        None | Some("STOP") => Ok(None),
+        Some("MAX_TOKENS") => Ok(Some("max_output_tokens")),
+        Some(
+            "SAFETY"
+            | "RECITATION"
+            | "LANGUAGE"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_RECITATION"
+            | "ESCALATION",
+        ) => Ok(Some("content_filter")),
+        _ => Err(AdapterError::upstream_response_invalid()),
+    }
+}
+
+/// Gemini can block a prompt before producing candidates. Only an explicit
+/// block reason is a filtered terminal; missing candidates alone are not.
+pub(super) fn prompt_blocked(value: &Value) -> Result<bool, ()> {
+    let Some(reason) = value.pointer("/promptFeedback/blockReason") else {
+        return Ok(false);
+    };
+    if !matches!(
+        reason.as_str(),
+        Some("SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY")
+    ) || value
+        .get("candidates")
+        .is_some_and(|candidates| candidates.as_array().is_none_or(|items| !items.is_empty()))
+    {
+        return Err(());
+    }
+    Ok(true)
+}
+
+/// Recognize only Gemini terminal reasons the response adapter can translate.
+/// The gateway uses this before releasing a stream with no generated output.
+pub(crate) fn gemini_incomplete(value: &Value) -> bool {
+    let Ok(blocked) = prompt_blocked(value) else {
+        return false;
+    };
+    blocked
+        || value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("finishReason"))
+            .and_then(Value::as_str)
+            .is_some_and(|reason| {
+                candidate_incomplete_reason(Some(reason)).is_ok_and(|reason| reason.is_some())
+            })
 }
 
 pub(super) fn responses_body_from_output(
@@ -394,9 +472,12 @@ fn translate_tool_choice(
     choice: &Value,
     state: &MessagesBridgeState,
 ) -> AdapterResult<(Option<Value>, Option<BTreeSet<String>>)> {
-    let mode = choice
-        .as_str()
-        .or_else(|| choice.get("mode").and_then(Value::as_str));
+    let mode = choice.as_str().or_else(|| {
+        choice
+            .get("mode")
+            .filter(|_| choice.get("type").and_then(Value::as_str) != Some("allowed_tools"))
+            .and_then(Value::as_str)
+    });
     if let Some(mode) = mode {
         let mode = match mode.to_ascii_lowercase().as_str() {
             "none" => "NONE",

@@ -1,15 +1,35 @@
 use super::{
-    runtime_now_ms, AuthorizedRequestError, AuthorizedResponse, ChatGptAccountExecutor,
-    CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime, PreparedAuthorization,
+    runtime_now_ms, AuthorizationIncarnation, AuthorizedRequestError, AuthorizedResponse,
+    CandidateLease, ChatGptAccountExecutor, CodexTurnStateScope, ExecutorPrepareError,
+    GatewayRuntime, PreparedAuthorization,
 };
-use crate::accounts::TokenAuthorityError;
+use crate::accounts::{TokenAuthorityError, TokenDispatchRevisionGuard};
 use crate::providers::chatgpt::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
 };
+use crate::scheduler::rotation::{ExecutionCertainty, SharedRequestBudget};
 use crate::CandidateHealth;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use std::sync::atomic::Ordering;
+use std::sync::RwLockReadGuard;
+
+pub(super) struct PreparedAuthorizationDispatchGuard<'a> {
+    _token: Option<TokenDispatchRevisionGuard<'a>>,
+    _agent: Option<RwLockReadGuard<'a, Option<AgentIdentityCredential>>>,
+}
+
+impl AuthorizedRequestError {
+    /// A transport error after execute() starts does not prove that the
+    /// provider did not accept the generation. Only a connection failure is
+    /// known to be pre-send; never transparently replay an unknown outcome.
+    pub(crate) fn execution_certainty(&self) -> ExecutionCertainty {
+        match self {
+            Self::Transport(error) if !error.is_connect() => ExecutionCertainty::Unknown,
+            _ => ExecutionCertainty::NotSent,
+        }
+    }
+}
 
 impl GatewayRuntime {
     pub(crate) async fn prepare_authorization(
@@ -31,8 +51,10 @@ impl GatewayRuntime {
                 authorization,
                 identity: None,
                 token_generation: None,
+                token_revision: None,
                 agent_task_id: None,
                 agent_credential_fingerprint: None,
+                agent_identity_revision: None,
             });
         }
         let account = self
@@ -62,8 +84,12 @@ impl GatewayRuntime {
                                 .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
                         ),
                         token_generation: None,
+                        token_revision: None,
                         agent_task_id: agent.task_id().map(str::to_string),
                         agent_credential_fingerprint: Some(agent_credential_fingerprint(&agent)),
+                        agent_identity_revision: Some(
+                            account.agent_identity_revision.load(Ordering::Acquire),
+                        ),
                     });
                 }
                 Err(error) if account.token_authority.tokens(&account.id).await.is_none() => {
@@ -125,8 +151,10 @@ impl GatewayRuntime {
                     .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
             ),
             token_generation: Some(prepared.tokens.generation()),
+            token_revision: Some(prepared.dispatch_revision),
             agent_task_id: None,
             agent_credential_fingerprint: None,
+            agent_identity_revision: None,
         })
     }
 
@@ -188,6 +216,8 @@ impl GatewayRuntime {
         request: reqwest::RequestBuilder,
         client_version: Option<&str>,
         turn_scope: Option<&CodexTurnStateScope<'_>>,
+        budget: Option<&SharedRequestBudget>,
+        lease: Option<&CandidateLease>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
         let first_request = request
             .try_clone()
@@ -203,6 +233,8 @@ impl GatewayRuntime {
                 &prepared,
                 client_version,
                 turn_scope,
+                budget,
+                lease,
             )
             .await?;
         if response.status() == StatusCode::UNAUTHORIZED {
@@ -221,7 +253,19 @@ impl GatewayRuntime {
                         account_token_generation: prepared.token_generation,
                     });
                 }
+                // Preserve the real 401 when there is no room for a second
+                // generation. A hidden auth retry must never bypass the
+                // outer request's dispatch budget.
+                if budget.is_some_and(|budget| !budget.can_dispatch()) {
+                    return Ok(AuthorizedResponse {
+                        response,
+                        account_token_generation: prepared.token_generation,
+                    });
+                }
                 drop(response);
+                if let Some(budget) = budget {
+                    budget.observe_rejection();
+                }
                 let refreshed = self
                     .refresh_agent_identity_task_after_unauthorized(
                         candidate_id,
@@ -237,6 +281,8 @@ impl GatewayRuntime {
                         &refreshed,
                         client_version,
                         turn_scope,
+                        budget,
+                        lease,
                     )
                     .await?;
                 self.observe_codex_quota_headers(
@@ -264,8 +310,17 @@ impl GatewayRuntime {
             });
         }
 
+        if budget.is_some_and(|budget| !budget.can_dispatch()) {
+            return Ok(AuthorizedResponse {
+                response,
+                account_token_generation: prepared.token_generation,
+            });
+        }
         drop(response);
-        let _fence = self.fence_execution(candidate_id);
+        if let Some(budget) = budget {
+            budget.observe_rejection();
+        }
+        let fence = self.fence_execution(candidate_id);
         let refreshed = self
             .refresh_authorization_after_unauthorized(
                 candidate_id,
@@ -274,6 +329,10 @@ impl GatewayRuntime {
             )
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
+        // The owner retains its lease for this proven 401 repair. Once the
+        // token authority has produced the replacement, release the Auth
+        // admission fence before that same lease passes final dispatch.
+        drop(fence);
         let response = self
             .send_prepared_authorization(
                 candidate_id,
@@ -281,6 +340,8 @@ impl GatewayRuntime {
                 &refreshed,
                 client_version,
                 turn_scope,
+                budget,
+                lease,
             )
             .await?;
         self.observe_codex_quota_headers(
@@ -334,7 +395,7 @@ impl ChatGptAccountExecutor {
             .map_err(classify_agent_identity_error)?;
         let task_id = self
             .persistence_adapter
-            .persist_agent_task_id(&self.id, current.task_id(), &task_id)
+            .persist_agent_task_id_for_identity(&self.id, &current, &task_id)
             .await
             .map_err(|_| ExecutorPrepareError::Persistence)?;
         let updated = current
@@ -343,10 +404,12 @@ impl ChatGptAccountExecutor {
         if !self.active.load(Ordering::Acquire) {
             return Err(ExecutorPrepareError::Authentication);
         }
-        *self
+        let mut identity = self
             .agent_identity
             .write()
-            .map_err(|_| ExecutorPrepareError::Transient)? = Some(updated.clone());
+            .map_err(|_| ExecutorPrepareError::Transient)?;
+        *identity = Some(updated.clone());
+        self.agent_identity_revision.fetch_add(1, Ordering::Release);
         Ok(updated)
     }
 }
@@ -428,6 +491,7 @@ impl GatewayRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_prepared_authorization(
         &self,
         candidate_id: &str,
@@ -435,6 +499,8 @@ impl GatewayRuntime {
         prepared: &PreparedAuthorization,
         client_version: Option<&str>,
         scope: Option<&CodexTurnStateScope<'_>>,
+        budget: Option<&SharedRequestBudget>,
+        lease: Option<&CandidateLease>,
     ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
         let (client, mut request) =
             apply_prepared_authorization(request, prepared, client_version)?;
@@ -443,6 +509,42 @@ impl GatewayRuntime {
         let cookies = self.routing_cookies(candidate_id, prepared);
         if let Some(cookies) = &cookies {
             cookies.apply(&url, request.headers_mut());
+        }
+        let stale_authorization =
+            || AuthorizedRequestError::Prepare(ExecutorPrepareError::Transient);
+        if let Some(budget) = budget {
+            if let Some(lease) = lease {
+                lease
+                    .begin_rotation_http_dispatch_for(prepared, self)
+                    .map_err(|error| {
+                        if error == crate::scheduler::rotation::DispatchStartError::BudgetExhausted
+                        {
+                            AuthorizedRequestError::DispatchBudgetExhausted
+                        } else {
+                            AuthorizedRequestError::Prepare(ExecutorPrepareError::Transient)
+                        }
+                    })?;
+            } else {
+                budget.with_budget(|request_budget| {
+                    let _guard = prepared
+                        .dispatch_guard(self, candidate_id)
+                        .ok_or_else(stale_authorization)?;
+                    if !request_budget.can_start_wire() || !request_budget.can_dispatch() {
+                        return Err(AuthorizedRequestError::DispatchBudgetExhausted);
+                    }
+                    request_budget
+                        .start_dispatch()
+                        .expect("dispatch capacity was checked under the budget lock");
+                    request_budget
+                        .start_wire_attempt()
+                        .expect("wire capacity was checked under the budget lock");
+                    Ok(())
+                })?;
+            }
+        } else {
+            let _guard = prepared
+                .dispatch_guard(self, candidate_id)
+                .ok_or_else(stale_authorization)?;
         }
         let response = client
             .execute(request)
@@ -476,6 +578,56 @@ fn agent_credential_fingerprint(agent: &AgentIdentityCredential) -> [u8; 32] {
 }
 
 impl PreparedAuthorization {
+    pub(crate) fn incarnation(&self) -> AuthorizationIncarnation {
+        if let Some(revision) = &self.token_revision {
+            AuthorizationIncarnation::OAuth(revision.clone())
+        } else if let Some(revision) = self.agent_identity_revision {
+            AuthorizationIncarnation::Agent(revision)
+        } else {
+            AuthorizationIncarnation::Source
+        }
+    }
+
+    /// Hold the credential's incarnation through the same budget/scheduler
+    /// transaction that starts a generation. No async lock or provider I/O is
+    /// performed under this guard.
+    pub(super) fn dispatch_guard<'a>(
+        &'a self,
+        runtime: &'a GatewayRuntime,
+        candidate_id: &str,
+    ) -> Option<PreparedAuthorizationDispatchGuard<'a>> {
+        if let Some(revision) = &self.token_revision {
+            let account = runtime.chatgpt_accounts.get(candidate_id)?;
+            if !account.active.load(Ordering::Acquire) {
+                return None;
+            }
+            return Some(PreparedAuthorizationDispatchGuard {
+                _token: Some(revision.guard()?),
+                _agent: None,
+            });
+        }
+        if let Some(expected) = self.agent_identity_revision {
+            let account = runtime.chatgpt_accounts.get(candidate_id)?;
+            let identity = account.agent_identity.read().ok()?;
+            if !account.active.load(Ordering::Acquire)
+                || account.agent_identity_revision.load(Ordering::Acquire) != expected
+                || identity.as_ref().map(agent_credential_fingerprint)
+                    != self.agent_credential_fingerprint
+            {
+                return None;
+            }
+            return Some(PreparedAuthorizationDispatchGuard {
+                _token: None,
+                _agent: Some(identity),
+            });
+        }
+        runtime.source_candidate_bindings.get(candidate_id)?;
+        Some(PreparedAuthorizationDispatchGuard {
+            _token: None,
+            _agent: None,
+        })
+    }
+
     pub(crate) fn credential_fingerprint(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         Sha256::digest(self.turn_state_credential()).into()
@@ -550,8 +702,10 @@ mod tests {
             authorization: agent.authorization(timestamp).unwrap(),
             identity: None,
             token_generation: None,
+            token_revision: None,
             agent_task_id: agent.task_id().map(str::to_string),
             agent_credential_fingerprint: Some(agent_credential_fingerprint(agent)),
+            agent_identity_revision: Some(0),
         };
         let first = prepare(&agent, 1_000);
         let next = prepare(&agent, 2_000);

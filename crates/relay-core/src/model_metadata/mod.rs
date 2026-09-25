@@ -111,10 +111,17 @@ pub struct MetadataSourceStatus {
     pub stale: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct FamilyOrder {
     newest_release: Option<u32>,
-    source_order: usize,
+    catalog_release: Option<u32>,
+    generation: Option<ModelGeneration>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ModelGeneration {
+    prefix: String,
+    version: Vec<u32>,
 }
 
 impl ModelMetadataCatalog {
@@ -265,13 +272,13 @@ impl ModelMetadataCatalog {
     {
         let source = crate::normalize_model_ids(models);
         let family_order = self.family_order(&source);
-        let mut indexed = source.into_iter().enumerate().collect::<Vec<_>>();
-        indexed.sort_by(|(left_index, left_id), (right_index, right_id)| {
+        let mut indexed = source.into_iter().collect::<Vec<_>>();
+        indexed.sort_by(|left_id, right_id| {
             compare_metadata(self.resolve(left_id), self.resolve(right_id), &family_order)
-                .then_with(|| left_index.cmp(right_index))
                 .then_with(|| normalize(left_id).cmp(&normalize(right_id)))
+                .then_with(|| left_id.cmp(right_id))
         });
-        indexed.into_iter().map(|(_, id)| id).collect()
+        indexed
     }
 
     /// Preserve the relative order explicitly saved by the user. Newly
@@ -328,7 +335,7 @@ impl ModelMetadataCatalog {
 
     fn family_order(&self, models: &[String]) -> BTreeMap<(String, String), FamilyOrder> {
         let mut families = BTreeMap::new();
-        for (source_order, id) in models.iter().enumerate() {
+        for id in models {
             let Some(metadata) = self.resolve(id) else {
                 continue;
             };
@@ -339,15 +346,45 @@ impl ModelMetadataCatalog {
                 continue;
             };
             let release = metadata.release_date.as_deref().and_then(date_key);
+            let generation = model_generation(id);
             families
                 .entry((key, family))
                 .and_modify(|order: &mut FamilyOrder| {
                     order.newest_release = order.newest_release.max(release);
+                    order.catalog_release = order.newest_release;
+                    merge_generation(&mut order.generation, generation.clone());
                 })
                 .or_insert(FamilyOrder {
                     newest_release: release,
-                    source_order,
+                    catalog_release: release,
+                    generation,
                 });
+        }
+
+        // Sibling families in one numbered model generation form a catalog
+        // cohort. Rank that cohort by its newest release, then order its
+        // variants by their stable metadata family IDs. A newer sibling such
+        // as GPT-6 Sol must not leapfrog GPT-6 Astra just because it launched
+        // later.
+        let mut cohort_releases = BTreeMap::new();
+        for ((provider, _), order) in &families {
+            let Some(generation) = &order.generation else {
+                continue;
+            };
+            cohort_releases
+                .entry((provider.clone(), generation.clone()))
+                .and_modify(|release: &mut Option<u32>| {
+                    *release = (*release).max(order.newest_release);
+                })
+                .or_insert(order.newest_release);
+        }
+        for ((provider, _), order) in &mut families {
+            if let Some(generation) = &order.generation {
+                order.catalog_release = cohort_releases
+                    .get(&(provider.clone(), generation.clone()))
+                    .copied()
+                    .unwrap_or(order.newest_release);
+            }
         }
         families
     }
@@ -607,16 +644,73 @@ fn compare_families(
 ) -> Ordering {
     match (left.and_then(family_key), right.and_then(family_key)) {
         (Some(left), Some(right)) if left != right => {
-            let left_order = families[&(provider.to_string(), left.clone())];
-            let right_order = families[&(provider.to_string(), right.clone())];
-            compare_optional_date_desc(left_order.newest_release, right_order.newest_release)
-                .then_with(|| left_order.source_order.cmp(&right_order.source_order))
+            let left_order = &families[&(provider.to_string(), left.clone())];
+            let right_order = &families[&(provider.to_string(), right.clone())];
+            compare_optional_date_desc(left_order.catalog_release, right_order.catalog_release)
                 .then_with(|| left.cmp(&right))
         }
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         _ => Ordering::Equal,
     }
+}
+
+fn merge_generation(current: &mut Option<ModelGeneration>, incoming: Option<ModelGeneration>) {
+    match (current.as_ref(), incoming) {
+        (Some(existing), Some(incoming)) if existing.prefix == incoming.prefix => {
+            if compare_generation_version(&incoming.version, &existing.version) == Ordering::Greater
+            {
+                *current = Some(incoming);
+            }
+        }
+        (None, None) => {}
+        _ => *current = None,
+    }
+}
+
+fn model_generation(id: &str) -> Option<ModelGeneration> {
+    let normalized = normalize(id);
+    let leaf = model_leaf(&normalized);
+    let start = leaf.find(|character: char| character.is_ascii_digit())?;
+    let prefix = leaf[..start].trim_end_matches(['-', '_', '.']);
+    if prefix.is_empty() {
+        return None;
+    }
+
+    let version_end = leaf[start..]
+        .char_indices()
+        .take_while(|(offset, character)| {
+            character.is_ascii_digit()
+                || (*character == '.'
+                    && leaf[start + offset + 1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| next.is_ascii_digit()))
+        })
+        .map(|(offset, character)| offset + character.len_utf8())
+        .last()?;
+    let version = leaf[start..start + version_end]
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!version.is_empty()).then(|| ModelGeneration {
+        prefix: prefix.to_owned(),
+        version,
+    })
+}
+
+fn compare_generation_version(left: &[u32], right: &[u32]) -> Ordering {
+    let width = left.len().max(right.len());
+    (0..width)
+        .map(|index| {
+            left.get(index)
+                .copied()
+                .unwrap_or_default()
+                .cmp(&right.get(index).copied().unwrap_or_default())
+        })
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or(Ordering::Equal)
 }
 
 fn compare_model_dates(left: Option<&ModelMetadata>, right: Option<&ModelMetadata>) -> Ordering {
@@ -1129,6 +1223,31 @@ mod tests {
     }
 
     #[test]
+    fn same_generation_families_use_stable_family_order_not_release_date() {
+        let catalog = catalog(
+            r#"{
+                "openai/gpt-6-sol":{"name":"GPT-6 Sol","family":"gpt-sol","release_date":"2026-09-22"},
+                "openai/gpt-5.6-sol":{"name":"GPT-5.6 Sol","family":"gpt-sol","release_date":"2026-07-09"},
+                "openai/gpt-6-astra":{"name":"GPT-6 Astra","family":"gpt-astra","release_date":"2026-09-04"},
+                "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","family":"gpt-luna","release_date":"2026-07-09"},
+                "openai/gpt-5.6-terra":{"name":"GPT-5.6 Terra","family":"gpt-terra","release_date":"2026-07-09"}
+            }"#,
+        );
+        let expected = [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+        ];
+        assert_eq!(
+            catalog.order_model_ids(expected.into_iter().rev()),
+            expected
+        );
+        assert_eq!(catalog.order_model_ids(expected), expected);
+    }
+
+    #[test]
     fn company_blocks_do_not_merge_matching_family_names() {
         let catalog = catalog(
             r#"{
@@ -1226,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_dates_keep_family_blocks_and_source_order_within_family() {
+    fn equal_dates_use_stable_family_and_model_ids() {
         let catalog = catalog(
             r#"{
                 "alpha/first":{"family":"small","release_date":"2026-01-01"},
@@ -1236,12 +1355,16 @@ mod tests {
         );
         assert_eq!(
             catalog.order_model_ids(["first", "second", "third"]),
-            ["first", "third", "second"]
+            ["second", "first", "third"]
+        );
+        assert_eq!(
+            catalog.order_model_ids(["third", "first", "second"]),
+            ["second", "first", "third"]
         );
     }
 
     #[test]
-    fn invalid_dates_do_not_displace_discovery_order() {
+    fn invalid_or_missing_dates_use_stable_ids_and_unknown_models_stay_last() {
         let catalog = catalog(
             r#"{
                 "alpha/first":{"name":"First","family":"alpha","release_date":"not-a-date"},
@@ -1250,7 +1373,11 @@ mod tests {
         );
         assert_eq!(
             catalog.order_model_ids(["second", "first", "unknown"]),
-            ["second", "first", "unknown"]
+            ["first", "second", "unknown"]
+        );
+        assert_eq!(
+            catalog.order_model_ids(["unknown", "first", "second"]),
+            ["first", "second", "unknown"]
         );
     }
 

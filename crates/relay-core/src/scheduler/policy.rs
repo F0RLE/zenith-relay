@@ -1,11 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod upgrade;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolRoutingMode {
-    #[default]
+    /// Compatibility-only value for reading a pre-1.1.3 policy. It is
+    /// upgraded before a policy can reach the scheduler.
     Smart,
+    #[default]
+    Automatic,
     InOrder,
     RoundRobin,
 }
@@ -38,14 +43,26 @@ pub struct PoolRoutingPolicy {
 impl Default for PoolRoutingPolicy {
     fn default() -> Self {
         Self {
-            version: 1,
-            mode: PoolRoutingMode::Smart,
+            version: 2,
+            mode: PoolRoutingMode::Automatic,
             members: Vec::new(),
         }
     }
 }
 
 impl PoolRoutingPolicy {
+    pub fn is_current_rotation(&self) -> bool {
+        self.version == 2 && self.mode != PoolRoutingMode::Smart
+    }
+
+    pub fn validate_activation(&self) -> Result<(), &'static str> {
+        self.validate()?;
+        if !self.is_current_rotation() {
+            return Err("unsupported runtime rotation policy version");
+        }
+        Ok(())
+    }
+
     pub fn remap_member_ids(
         &mut self,
         ids: &BTreeMap<(PoolMemberKind, String), String>,
@@ -68,6 +85,9 @@ impl PoolRoutingPolicy {
         expected: Option<&Self>,
     ) -> Result<(), &'static str> {
         self.validate()?;
+        if self.version != current.version {
+            return Err("unsupported pool routing policy version for this runtime");
+        }
         if expected != Some(current) {
             return Err("pool routing changed; reload the current policy before saving");
         }
@@ -84,7 +104,10 @@ impl PoolRoutingPolicy {
         Ok(())
     }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && self.mode == PoolRoutingMode::Automatic)
+            || (self.version == 2 && self.mode == PoolRoutingMode::Smart)
+        {
             return Err("unsupported pool routing policy version");
         }
         if self.members.len() > 4096 {
@@ -153,11 +176,13 @@ pub fn resolve_pool_routing(
         .map(|(kind, id, _, weight)| PoolRoutingMember {
             kind,
             id,
-            weight: weight.clamp(1, 100),
+            weight,
             max_concurrency: 0,
         })
         .collect();
-    saved.cloned().unwrap_or_default().reconcile(members)
+    let mut policy = saved.cloned().unwrap_or_default();
+    policy.upgrade_legacy_format();
+    policy.reconcile(members)
 }
 
 #[cfg(test)]

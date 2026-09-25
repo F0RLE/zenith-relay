@@ -307,12 +307,21 @@ impl PricingCatalogLoader {
                 request = request.header(header::IF_MODIFIED_SINCE, last_modified);
             }
         }
-        let response = match request.send().await {
-            Ok(response) => response,
+        let (response, permit) = match crate::scheduler::refresh::http::management_http_gate()
+            .send(
+                &self.client,
+                request,
+                crate::scheduler::refresh::http::HttpClass::Ordinary,
+            )
+            .await
+        {
+            Ok(result) => result,
             Err(_) => return self.refresh_failed(PricingError::Network),
         };
         if response.status() == StatusCode::NOT_MODIFIED {
-            return self.accept_not_modified(response).await;
+            let result = self.accept_not_modified(response).await;
+            drop(permit);
+            return result;
         }
         if response.status() != StatusCode::OK {
             return self.refresh_failed(PricingError::HttpStatus(response.status().as_u16()));
@@ -322,6 +331,7 @@ impl PricingCatalogLoader {
             Ok(payload) => payload,
             Err(error) => return self.refresh_failed(map_catalog_io_error(error, false)),
         };
+        drop(permit);
         let payload_sha256 = match payload_hash(&payload) {
             Ok(hash) => hash,
             Err(error) => return self.refresh_failed(error),

@@ -1,10 +1,12 @@
 use super::{AccountAuthState, ReauthReason};
 use crate::error::safe_error_code;
+use crate::providers::chatgpt::AgentIdentityCredential;
 use futures_util::future::BoxFuture;
 use futures_util::lock::Mutex as AsyncMutex;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct TokenSet {
@@ -156,6 +158,20 @@ pub trait TokenRefreshAdapter: Send + Sync {
         refresh_token: &'a str,
         now_ms: u64,
     ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>>;
+
+    /// Adapters that write credentials as part of refresh must override this
+    /// method and hold the revision guard over their final synchronous write.
+    /// Adapters that only perform the provider exchange can use the default.
+    fn refresh_fenced<'a>(
+        &'a self,
+        account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+        revision: &'a TokenDispatchRevision,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        let _ = revision;
+        self.refresh(account_id, refresh_token, now_ms)
+    }
 }
 
 pub trait TokenPersistenceAdapter: Send + Sync {
@@ -165,11 +181,33 @@ pub trait TokenPersistenceAdapter: Send + Sync {
         tokens: &'a TokenSet,
     ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>>;
 
+    /// Secret stores with reusable account ids must override this and hold the
+    /// revision guard over the final write after any asynchronous lock wait.
+    fn persist_fenced<'a>(
+        &'a self,
+        account_id: &'a str,
+        tokens: &'a TokenSet,
+        revision: &'a TokenDispatchRevision,
+    ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
+        let _ = revision;
+        self.persist(account_id, tokens)
+    }
+
     fn persist_auth_state<'a>(
         &'a self,
         account_id: &'a str,
         auth_state: AccountAuthState,
     ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>>;
+
+    fn persist_auth_state_fenced<'a>(
+        &'a self,
+        account_id: &'a str,
+        auth_state: AccountAuthState,
+        revision: &'a TokenDispatchRevision,
+    ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
+        let _ = revision;
+        self.persist_auth_state(account_id, auth_state)
+    }
 
     fn persist_agent_task_id<'a>(
         &'a self,
@@ -177,6 +215,17 @@ pub trait TokenPersistenceAdapter: Send + Sync {
         expected_task_id: Option<&'a str>,
         task_id: &'a str,
     ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>>;
+
+    /// Host adapters compare the entire identity after the provider call and
+    /// before the durable task write, not only a possibly empty task id.
+    fn persist_agent_task_id_for_identity<'a>(
+        &'a self,
+        account_id: &'a str,
+        expected: &'a AgentIdentityCredential,
+        task_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>> {
+        self.persist_agent_task_id(account_id, expected.task_id(), task_id)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,6 +289,53 @@ pub enum PrepareStatus {
 pub struct PreparedToken {
     pub status: PrepareStatus,
     pub tokens: TokenSet,
+    pub(crate) dispatch_revision: TokenDispatchRevision,
+}
+
+/// An in-memory incarnation, independent of persisted token generations and
+/// visible token fields. Its read lock spans the final scheduler debit.
+#[derive(Clone)]
+pub struct TokenDispatchRevision {
+    state: Arc<RwLock<DispatchRevisionState>>,
+    expected: u64,
+}
+
+impl PartialEq for TokenDispatchRevision {
+    fn eq(&self, other: &Self) -> bool {
+        self.expected == other.expected && Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl Eq for TokenDispatchRevision {}
+
+impl fmt::Debug for TokenDispatchRevision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenDispatchRevision")
+            .finish_non_exhaustive()
+    }
+}
+
+struct DispatchRevisionState {
+    value: u64,
+    active: bool,
+}
+
+#[must_use = "the guard must be held across the credential write"]
+pub struct TokenDispatchRevisionGuard<'a> {
+    _guard: RwLockReadGuard<'a, DispatchRevisionState>,
+}
+
+impl TokenDispatchRevision {
+    /// Retains the slot's exact in-memory incarnation until the guard is
+    /// dropped. Do not hold this synchronous guard across an async wait.
+    pub fn guard(&self) -> Option<TokenDispatchRevisionGuard<'_>> {
+        let guard = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (guard.active && guard.value == self.expected)
+            .then_some(TokenDispatchRevisionGuard { _guard: guard })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,6 +384,62 @@ struct TokenSlot {
     auth_state_persistence_pending: bool,
 }
 
+struct TokenSlotEntry {
+    slot: AsyncMutex<TokenSlot>,
+    revision: Arc<RwLock<DispatchRevisionState>>,
+}
+
+impl TokenSlotEntry {
+    fn new(slot: TokenSlot) -> Self {
+        Self {
+            slot: AsyncMutex::new(slot),
+            revision: Arc::new(RwLock::new(DispatchRevisionState {
+                value: 0,
+                active: true,
+            })),
+        }
+    }
+
+    fn bump(&self) {
+        let mut revision = self
+            .revision
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        revision.value = revision
+            .value
+            .checked_add(1)
+            .expect("token revision exhausted");
+    }
+
+    fn retire(&self) {
+        let mut revision = self
+            .revision
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        revision.active = false;
+    }
+
+    fn snapshot(&self) -> TokenDispatchRevision {
+        let expected = self
+            .revision
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .value;
+        TokenDispatchRevision {
+            state: self.revision.clone(),
+            expected,
+        }
+    }
+}
+
+impl Deref for TokenSlotEntry {
+    type Target = AsyncMutex<TokenSlot>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.slot
+    }
+}
+
 impl TokenSlot {
     fn fresh(tokens: TokenSet, auth_state: AccountAuthState) -> Self {
         Self {
@@ -301,14 +453,14 @@ impl TokenSlot {
 
 enum PreparedTokenSlot {
     Existing {
-        slot: Arc<AsyncMutex<TokenSlot>>,
+        slot: Arc<TokenSlotEntry>,
         candidate: TokenSlot,
     },
     Inserted,
 }
 
 pub struct TokenAuthority {
-    slots: Mutex<HashMap<String, Arc<AsyncMutex<TokenSlot>>>>,
+    slots: Mutex<HashMap<String, Arc<TokenSlotEntry>>>,
     max_accounts: usize,
 }
 
@@ -346,7 +498,10 @@ impl TokenAuthority {
         if slots.len() >= self.max_accounts {
             return Err(TokenAuthorityError::CapacityReached);
         }
-        slots.insert(account_id.to_string(), Arc::new(AsyncMutex::new(candidate)));
+        slots.insert(
+            account_id.to_string(),
+            Arc::new(TokenSlotEntry::new(candidate)),
+        );
         Ok(PreparedTokenSlot::Inserted)
     }
 
@@ -359,7 +514,10 @@ impl TokenAuthority {
         match self.prepare_slot(account_id, TokenSlot::fresh(tokens, auth_state))? {
             PreparedTokenSlot::Inserted => Ok(()),
             PreparedTokenSlot::Existing { slot, candidate } => {
-                *slot.lock().await = candidate;
+                let mut current = slot.lock().await;
+                let _slots = self.current_slots(account_id, &slot)?;
+                slot.bump();
+                *current = candidate;
                 Ok(())
             }
         }
@@ -380,9 +538,11 @@ impl TokenAuthority {
             PreparedTokenSlot::Inserted => Ok(true),
             PreparedTokenSlot::Existing { slot, candidate } => {
                 let mut existing = slot.lock().await;
+                let _slots = self.current_slots(account_id, &slot)?;
                 if !token_set_is_newer(&candidate.tokens, &existing.tokens) {
                     return Ok(false);
                 }
+                slot.bump();
                 *existing = candidate;
                 Ok(true)
             }
@@ -403,9 +563,11 @@ impl TokenAuthority {
             PreparedTokenSlot::Inserted => Ok(true),
             PreparedTokenSlot::Existing { slot, candidate } => {
                 let mut existing = slot.lock().await;
+                let _slots = self.current_slots(account_id, &slot)?;
                 if token_set_is_newer(&existing.tokens, &candidate.tokens) {
                     return Ok(false);
                 }
+                slot.bump();
                 *existing = candidate;
                 Ok(true)
             }
@@ -429,13 +591,25 @@ impl TokenAuthority {
         if account_id.is_empty() {
             return Err(TokenAuthorityError::InvalidAccountId);
         }
-        let slot = { lock(&self.slots).get(account_id).cloned() };
-        let Some(slot) = slot else {
+        let entry = { lock(&self.slots).get(account_id).cloned() };
+        let Some(entry) = entry else {
             return Ok(false);
         };
-        let mut slot = slot.lock().await;
+        let mut slot = entry.lock().await;
         if slot.auth_state != expected_auth_state || slot.tokens != *expected_tokens {
             return Ok(false);
+        }
+        // A failed mutation's rollback is a new authorization incarnation,
+        // even when it restores the same persisted generation and bearer.
+        {
+            let slots = lock(&self.slots);
+            if slots
+                .get(account_id)
+                .is_none_or(|current| !Arc::ptr_eq(current, &entry))
+            {
+                return Ok(false);
+            }
+            entry.bump();
         }
         *slot = TokenSlot {
             tokens: replacement_tokens,
@@ -477,6 +651,7 @@ impl TokenAuthority {
         {
             return Ok(false);
         }
+        slot.retire();
         slots.remove(account_id);
         Ok(true)
     }
@@ -487,31 +662,18 @@ impl TokenAuthority {
         tokens: TokenSet,
         auth_state: AccountAuthState,
     ) -> Result<bool, TokenAuthorityError> {
-        let account_id = account_id.trim();
-        if account_id.is_empty() {
-            return Err(TokenAuthorityError::InvalidAccountId);
-        }
-        let mut slots = lock(&self.slots);
-        if slots.contains_key(account_id) {
-            return Ok(false);
-        }
-        if slots.len() >= self.max_accounts {
-            return Err(TokenAuthorityError::CapacityReached);
-        }
-        slots.insert(
-            account_id.to_string(),
-            Arc::new(AsyncMutex::new(TokenSlot {
-                tokens,
-                auth_state,
-                persistence_pending: false,
-                auth_state_persistence_pending: false,
-            })),
-        );
-        Ok(true)
+        Ok(matches!(
+            self.prepare_slot(account_id, TokenSlot::fresh(tokens, auth_state))?,
+            PreparedTokenSlot::Inserted
+        ))
     }
 
     pub fn remove(&self, account_id: &str) -> bool {
-        lock(&self.slots).remove(account_id).is_some()
+        let mut slots = lock(&self.slots);
+        if let Some(slot) = slots.get(account_id) {
+            slot.retire();
+        }
+        slots.remove(account_id).is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -524,14 +686,16 @@ impl TokenAuthority {
 
     pub async fn auth_state(&self, account_id: &str) -> Option<AccountAuthState> {
         let slot = lock(&self.slots).get(account_id).cloned()?;
-        let state = slot.lock().await.auth_state;
-        Some(state)
+        let current = slot.lock().await;
+        let _slots = self.current_slots(account_id, &slot).ok()?;
+        Some(current.auth_state)
     }
 
     pub async fn tokens(&self, account_id: &str) -> Option<TokenSet> {
         let slot = lock(&self.slots).get(account_id).cloned()?;
-        let tokens = slot.lock().await.tokens.clone();
-        Some(tokens)
+        let current = slot.lock().await;
+        let _slots = self.current_slots(account_id, &slot).ok()?;
+        Some(current.tokens.clone())
     }
 
     pub async fn invalidate_access_and_persist(
@@ -552,22 +716,67 @@ impl TokenAuthority {
         now_ms: u64,
         persistence: &dyn TokenPersistenceAdapter,
     ) -> Result<bool, TokenAuthorityError> {
-        let slot = lock(&self.slots)
+        self.invalidate_access_with_fence(account_id, failed_generation, None, now_ms, persistence)
+            .await
+    }
+
+    /// A remote 401 belongs to the exact bearer that was sent. Generation
+    /// alone can be reused by a replacement login with the same account id.
+    pub async fn invalidate_access_if_current_and_persist(
+        &self,
+        account_id: &str,
+        rejected_tokens: &TokenSet,
+        now_ms: u64,
+        persistence: &dyn TokenPersistenceAdapter,
+    ) -> Result<bool, TokenAuthorityError> {
+        self.invalidate_access_with_fence(
+            account_id,
+            None,
+            Some(rejected_tokens),
+            now_ms,
+            persistence,
+        )
+        .await
+    }
+
+    async fn invalidate_access_with_fence(
+        &self,
+        account_id: &str,
+        failed_generation: Option<u64>,
+        rejected_tokens: Option<&TokenSet>,
+        now_ms: u64,
+        persistence: &dyn TokenPersistenceAdapter,
+    ) -> Result<bool, TokenAuthorityError> {
+        let entry = lock(&self.slots)
             .get(account_id)
             .cloned()
             .ok_or(TokenAuthorityError::AccountNotFound)?;
-        let mut slot = slot.lock().await;
-        if failed_generation.is_some_and(|generation| slot.tokens.generation != generation) {
+        let mut slot = entry.lock().await;
+        if failed_generation.is_some_and(|generation| slot.tokens.generation != generation)
+            || rejected_tokens.is_some_and(|tokens| slot.tokens != *tokens)
+        {
             return Ok(false);
+        }
+        {
+            let slots = lock(&self.slots);
+            if slots
+                .get(account_id)
+                .is_none_or(|current| !Arc::ptr_eq(current, &entry))
+            {
+                return Ok(false);
+            }
+            entry.bump();
         }
         slot.tokens.expires_at_ms = Some(now_ms);
         slot.tokens.issued_at_ms = now_ms;
         slot.tokens.generation = slot.tokens.generation.saturating_add(1);
         slot.persistence_pending = true;
+        let revision = entry.snapshot();
         persistence
-            .persist(account_id, &slot.tokens)
+            .persist_fenced(account_id, &slot.tokens, &revision)
             .await
             .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
+        self.ensure_current_slot(account_id, &entry)?;
         slot.persistence_pending = false;
         Ok(true)
     }
@@ -609,26 +818,31 @@ impl TokenAuthority {
         adapter: &dyn TokenRefreshAdapter,
         persistence: Option<&dyn TokenPersistenceAdapter>,
     ) -> Result<PreparedToken, TokenAuthorityError> {
-        let slot = lock(&self.slots)
+        let entry = lock(&self.slots)
             .get(account_id)
             .cloned()
             .ok_or(TokenAuthorityError::AccountNotFound)?;
-        let mut slot = slot.lock().await;
+        let mut slot = entry.lock().await;
+        self.ensure_current_slot(account_id, &entry)?;
         if slot.persistence_pending {
             let persistence = persistence.ok_or(TokenAuthorityError::PersistenceRequired)?;
+            let revision = entry.snapshot();
             persistence
-                .persist(account_id, &slot.tokens)
+                .persist_fenced(account_id, &slot.tokens, &revision)
                 .await
                 .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
+            self.ensure_current_slot(account_id, &entry)?;
             slot.persistence_pending = false;
             slot.auth_state_persistence_pending = true;
         }
         if slot.auth_state_persistence_pending {
             let persistence = persistence.ok_or(TokenAuthorityError::PersistenceRequired)?;
+            let revision = entry.snapshot();
             persistence
-                .persist_auth_state(account_id, slot.auth_state)
+                .persist_auth_state_fenced(account_id, slot.auth_state, &revision)
                 .await
                 .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
+            self.ensure_current_slot(account_id, &entry)?;
             slot.auth_state_persistence_pending = false;
         }
         if matches!(
@@ -638,8 +852,10 @@ impl TokenAuthority {
             // Older Relay versions persisted this transient OAuth race as a
             // hard reauthentication state. Heal the record before selecting a
             // token so an update can retry or use the still-valid access token.
+            entry.bump();
             slot.auth_state = AccountAuthState::Active;
-            persist_auth_state(account_id, &mut slot, persistence).await?;
+            persist_auth_state(account_id, &mut slot, persistence, &entry.snapshot()).await?;
+            self.ensure_current_slot(account_id, &entry)?;
         }
         if let AccountAuthState::RequiresReauth(reason) = slot.auth_state {
             return Err(TokenAuthorityError::RequiresReauth(reason));
@@ -648,17 +864,25 @@ impl TokenAuthority {
             return Ok(PreparedToken {
                 status: PrepareStatus::Ready,
                 tokens: slot.tokens.clone(),
+                dispatch_revision: entry.snapshot(),
             });
         }
         let Some(refresh_token) = slot.tokens.refresh_token.clone() else {
+            entry.bump();
             slot.auth_state = AccountAuthState::DegradedAccessOnly;
-            persist_auth_state(account_id, &mut slot, persistence).await?;
+            persist_auth_state(account_id, &mut slot, persistence, &entry.snapshot()).await?;
+            self.ensure_current_slot(account_id, &entry)?;
             return Err(TokenAuthorityError::AccessTokenExpired);
         };
 
         let previous_auth_state = slot.auth_state;
+        entry.bump();
         slot.auth_state = AccountAuthState::Refreshing;
-        match adapter.refresh(account_id, &refresh_token, now_ms).await {
+        let refresh_revision = entry.snapshot();
+        match adapter
+            .refresh_fenced(account_id, &refresh_token, now_ms, &refresh_revision)
+            .await
+        {
             Ok(refreshed) => {
                 let tokens = TokenSet {
                     access_token: refreshed.access_token,
@@ -668,26 +892,44 @@ impl TokenAuthority {
                     issued_at_ms: now_ms,
                     generation: slot.tokens.generation.saturating_add(1),
                 };
-                slot.tokens = tokens.clone();
-                slot.auth_state = AccountAuthState::Active;
+                {
+                    let slots = lock(&self.slots);
+                    if slots
+                        .get(account_id)
+                        .is_none_or(|registered| !Arc::ptr_eq(registered, &entry))
+                    {
+                        return Err(TokenAuthorityError::AccountNotFound);
+                    }
+                    entry.bump();
+                    slot.tokens = tokens.clone();
+                    slot.auth_state = AccountAuthState::Active;
+                }
                 if let Some(persistence) = persistence {
                     slot.persistence_pending = true;
+                    let revision = entry.snapshot();
                     persistence
-                        .persist(account_id, &slot.tokens)
+                        .persist_fenced(account_id, &slot.tokens, &revision)
                         .await
                         .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
+                    self.ensure_current_slot(account_id, &entry)?;
                     slot.persistence_pending = false;
-                    persist_auth_state(account_id, &mut slot, Some(persistence)).await?;
+                    persist_auth_state(account_id, &mut slot, Some(persistence), &entry.snapshot())
+                        .await?;
+                    self.ensure_current_slot(account_id, &entry)?;
                 }
                 Ok(PreparedToken {
                     status: PrepareStatus::Refreshed,
                     tokens,
+                    dispatch_revision: entry.snapshot(),
                 })
             }
             Err(failure) => {
+                self.ensure_current_slot(account_id, &entry)?;
                 if let Some(reason) = failure.reauth_reason() {
                     slot.auth_state = AccountAuthState::RequiresReauth(reason);
-                    persist_auth_state(account_id, &mut slot, persistence).await?;
+                    persist_auth_state(account_id, &mut slot, persistence, &entry.snapshot())
+                        .await?;
+                    self.ensure_current_slot(account_id, &entry)?;
                     Err(TokenAuthorityError::RequiresReauth(reason))
                 } else {
                     // Network, timeout, lock, and temporary storage failures do
@@ -700,19 +942,43 @@ impl TokenAuthority {
             }
         }
     }
+
+    fn current_slots<'a>(
+        &'a self,
+        account_id: &str,
+        entry: &Arc<TokenSlotEntry>,
+    ) -> Result<MutexGuard<'a, HashMap<String, Arc<TokenSlotEntry>>>, TokenAuthorityError> {
+        let slots = lock(&self.slots);
+        if slots
+            .get(account_id.trim())
+            .is_none_or(|registered| !Arc::ptr_eq(registered, entry))
+        {
+            return Err(TokenAuthorityError::AccountNotFound);
+        }
+        Ok(slots)
+    }
+
+    fn ensure_current_slot(
+        &self,
+        account_id: &str,
+        entry: &Arc<TokenSlotEntry>,
+    ) -> Result<(), TokenAuthorityError> {
+        self.current_slots(account_id, entry).map(|_| ())
+    }
 }
 
 async fn persist_auth_state(
     account_id: &str,
     slot: &mut TokenSlot,
     persistence: Option<&dyn TokenPersistenceAdapter>,
+    revision: &TokenDispatchRevision,
 ) -> Result<(), TokenAuthorityError> {
     let Some(persistence) = persistence else {
         return Ok(());
     };
     slot.auth_state_persistence_pending = true;
     persistence
-        .persist_auth_state(account_id, slot.auth_state)
+        .persist_auth_state_fenced(account_id, slot.auth_state, revision)
         .await
         .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
     slot.auth_state_persistence_pending = false;
@@ -813,6 +1079,336 @@ mod tests {
         assert!(!debug.contains("new-access-secret"));
         assert!(!debug.contains("refresh-secret"));
         assert!(!debug.contains("id-secret"));
+    }
+
+    #[tokio::test]
+    async fn prepared_token_revision_rejects_refresh_invalidation_and_readded_slot() {
+        let authority = TokenAuthority::new(1).unwrap();
+        let original = TokenSet::new(
+            "old-access-secret",
+            Some("refresh-secret".into()),
+            None,
+            Some(100),
+            0,
+            7,
+        )
+        .unwrap();
+        authority
+            .register("account", original.clone(), AccountAuthState::Active)
+            .await
+            .unwrap();
+        let adapter = RefreshOnce {
+            calls: AtomicUsize::new(0),
+        };
+        let before = authority.prepare("account", 10, 0, &adapter).await.unwrap();
+        assert!(before.dispatch_revision.guard().is_some());
+        let refreshed = authority
+            .prepare("account", 101, 0, &adapter)
+            .await
+            .unwrap();
+        assert!(before.dispatch_revision.guard().is_none());
+        assert!(refreshed.dispatch_revision.guard().is_some());
+
+        let persistence = CapturePersistence::default();
+        authority
+            .invalidate_access_and_persist("account", 102, &persistence)
+            .await
+            .unwrap();
+        assert!(refreshed.dispatch_revision.guard().is_none());
+
+        let after_invalidation = authority
+            .tokens("account")
+            .await
+            .expect("invalidated slot remains stored");
+        assert!(authority.remove("account"));
+        authority
+            .register("account", after_invalidation, AccountAuthState::Active)
+            .await
+            .unwrap();
+        assert!(refreshed.dispatch_revision.guard().is_none());
+        assert!(before.dispatch_revision.guard().is_none());
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn delayed_refresh_of_a_removed_slot_cannot_persist_or_authorize_the_readded_account() {
+        struct PausedRefresh {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+
+        impl TokenRefreshAdapter for PausedRefresh {
+            fn refresh<'a>(
+                &'a self,
+                _account_id: &'a str,
+                _refresh_token: &'a str,
+                now_ms: u64,
+            ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+                Box::pin(async move {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(TokenRefresh::new(
+                        "stale-refreshed-access",
+                        None,
+                        None,
+                        Some(now_ms + 60_000),
+                    )
+                    .unwrap())
+                })
+            }
+        }
+
+        let authority = Arc::new(TokenAuthority::new(1).unwrap());
+        let adapter = Arc::new(PausedRefresh {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let persistence = Arc::new(CapturePersistence::default());
+        let expired = TokenSet::new(
+            "old-access",
+            Some("old-refresh".into()),
+            None,
+            Some(1),
+            0,
+            1,
+        )
+        .unwrap();
+        authority
+            .register("account", expired, AccountAuthState::Active)
+            .await
+            .unwrap();
+        let old = {
+            let authority = authority.clone();
+            let adapter = adapter.clone();
+            let persistence = persistence.clone();
+            tokio::spawn(async move {
+                authority
+                    .prepare_and_persist("account", 10, 0, adapter.as_ref(), persistence.as_ref())
+                    .await
+            })
+        };
+        adapter.entered.notified().await;
+        assert!(authority.remove("account"));
+        authority
+            .register(
+                "account",
+                TokenSet::access_only("replacement-access", None, 10).unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        adapter.release.notify_one();
+        assert!(matches!(
+            old.await.unwrap(),
+            Err(TokenAuthorityError::AccountNotFound)
+        ));
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "replacement-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_slot_during_token_persistence_cannot_finish_preparation() {
+        struct PausedPersistence {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            capture: CapturePersistence,
+        }
+
+        impl TokenPersistenceAdapter for PausedPersistence {
+            fn persist<'a>(
+                &'a self,
+                account_id: &'a str,
+                tokens: &'a TokenSet,
+            ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
+                Box::pin(async move {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    self.capture.persist(account_id, tokens).await
+                })
+            }
+
+            fn persist_auth_state<'a>(
+                &'a self,
+                account_id: &'a str,
+                state: AccountAuthState,
+            ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
+                self.capture.persist_auth_state(account_id, state)
+            }
+
+            fn persist_agent_task_id<'a>(
+                &'a self,
+                account_id: &'a str,
+                expected_task_id: Option<&'a str>,
+                task_id: &'a str,
+            ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>> {
+                self.capture
+                    .persist_agent_task_id(account_id, expected_task_id, task_id)
+            }
+        }
+
+        let authority = Arc::new(TokenAuthority::new(1).unwrap());
+        authority
+            .register(
+                "account",
+                TokenSet::new(
+                    "expired",
+                    Some("refresh-secret".into()),
+                    None,
+                    Some(1),
+                    0,
+                    1,
+                )
+                .unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let persistence = Arc::new(PausedPersistence {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            capture: CapturePersistence::default(),
+        });
+        let old = {
+            let authority = authority.clone();
+            let persistence = persistence.clone();
+            tokio::spawn(async move {
+                authority
+                    .prepare_and_persist(
+                        "account",
+                        10,
+                        0,
+                        &RefreshOnce {
+                            calls: AtomicUsize::new(0),
+                        },
+                        persistence.as_ref(),
+                    )
+                    .await
+            })
+        };
+        persistence.entered.notified().await;
+        assert!(authority.remove("account"));
+        authority
+            .register(
+                "account",
+                TokenSet::access_only("replacement", None, 10).unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        persistence.release.notify_one();
+        assert!(matches!(
+            old.await.unwrap(),
+            Err(TokenAuthorityError::AccountNotFound)
+        ));
+        assert_eq!(persistence.capture.token_calls.load(Ordering::SeqCst), 1);
+        assert!(persistence.capture.auth_states.lock().unwrap().is_empty());
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_registrations_cannot_report_success_on_a_removed_slot() {
+        use futures_util::poll;
+        use std::task::Poll;
+
+        let authority = TokenAuthority::new(1).unwrap();
+        for case in 0..3 {
+            authority
+                .register(
+                    "account",
+                    TokenSet::new("original", None, None, None, 1, 1).unwrap(),
+                    AccountAuthState::Active,
+                )
+                .await
+                .unwrap();
+            let old = lock(&authority.slots).get("account").cloned().unwrap();
+            let held = old.lock().await;
+            let mut waiting = Box::pin(async {
+                let candidate = TokenSet::new("stale", None, None, None, 2, 2).unwrap();
+                match case {
+                    0 => authority
+                        .register("account", candidate, AccountAuthState::Active)
+                        .await
+                        .map(|_| true),
+                    1 => {
+                        authority
+                            .register_if_newer("account", candidate, AccountAuthState::Active)
+                            .await
+                    }
+                    _ => {
+                        authority
+                            .register_if_not_stale("account", candidate, AccountAuthState::Active)
+                            .await
+                    }
+                }
+            });
+            assert!(matches!(poll!(waiting.as_mut()), Poll::Pending));
+            assert!(authority.remove("account"));
+            authority
+                .register(
+                    "account",
+                    TokenSet::new("replacement", None, None, None, 1, 1).unwrap(),
+                    AccountAuthState::Active,
+                )
+                .await
+                .unwrap();
+            drop(held);
+            assert_eq!(waiting.await, Err(TokenAuthorityError::AccountNotFound));
+            assert_eq!(
+                authority.tokens("account").await.unwrap().access_token(),
+                "replacement"
+            );
+            authority.remove("account");
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_reads_cannot_return_credentials_from_a_removed_slot() {
+        use futures_util::poll;
+        use std::task::Poll;
+
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "account",
+                TokenSet::access_only("old-access", None, 1).unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let old = lock(&authority.slots).get("account").cloned().unwrap();
+        let held = old.lock().await;
+        let mut tokens = Box::pin(authority.tokens("account"));
+        let mut auth_state = Box::pin(authority.auth_state("account"));
+        assert!(matches!(poll!(tokens.as_mut()), Poll::Pending));
+        assert!(matches!(poll!(auth_state.as_mut()), Poll::Pending));
+
+        assert!(authority.remove("account"));
+        authority
+            .register(
+                "account",
+                TokenSet::access_only("new-access", None, 2).unwrap(),
+                AccountAuthState::DegradedAccessOnly,
+            )
+            .await
+            .unwrap();
+        drop(held);
+
+        assert!(tokens.await.is_none());
+        assert!(auth_state.await.is_none());
+        assert_eq!(
+            authority.tokens("account").await.unwrap().access_token(),
+            "new-access"
+        );
+        assert_eq!(
+            authority.auth_state("account").await,
+            Some(AccountAuthState::DegradedAccessOnly)
+        );
     }
 
     #[tokio::test]
@@ -1300,6 +1896,80 @@ mod tests {
         let tokens = authority.tokens("local-account").await.unwrap();
         assert_eq!(tokens.expires_at_ms(), Some(10));
         assert_eq!(tokens.generation(), 8);
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
+        let authority = TokenAuthority::new(1).unwrap();
+        let current = TokenSet::new(
+            "synthetic-new-access",
+            Some("synthetic-new-refresh".into()),
+            None,
+            Some(60_000),
+            2,
+            8,
+        )
+        .unwrap();
+        authority
+            .register("local-account", current.clone(), AccountAuthState::Active)
+            .await
+            .unwrap();
+        let persistence = CapturePersistence::default();
+        assert!(!authority
+            .invalidate_access_generation_and_persist("local-account", Some(7), 10, &persistence,)
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.tokens("local-account").await,
+            Some(current.clone())
+        );
+        assert_eq!(
+            authority.auth_state("local-account").await,
+            Some(AccountAuthState::Active)
+        );
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+
+        let same_generation_new_login = TokenSet::new(
+            "another-login",
+            Some("another-refresh".into()),
+            None,
+            Some(60_000),
+            2,
+            8,
+        )
+        .unwrap();
+        assert!(!authority
+            .invalidate_access_if_current_and_persist(
+                "local-account",
+                &same_generation_new_login,
+                10,
+                &persistence
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            authority.tokens("local-account").await,
+            Some(current.clone())
+        );
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+
+        assert!(authority
+            .invalidate_access_generation_and_persist("local-account", Some(8), 20, &persistence,)
+            .await
+            .unwrap());
+        assert!(!authority
+            .invalidate_access_generation_and_persist("local-account", Some(8), 30, &persistence,)
+            .await
+            .unwrap());
+        assert_eq!(
+            authority
+                .tokens("local-account")
+                .await
+                .unwrap()
+                .generation(),
+            9
+        );
         assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 1);
     }
 

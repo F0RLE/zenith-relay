@@ -4,15 +4,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const MAX_TRACKED_REQUEST_ORIGINS: usize = 4096;
-pub(crate) const DEFAULT_CHATGPT_RETRY_WINDOW_MS: u64 = 30_000;
+pub(crate) const DEFAULT_ROUTE_RECOVERY_WINDOW_MS: u64 = 30_000;
 
 /// Mutable runtime controls that are changed by management commands while the
 /// routing graph itself remains immutable for the lifetime of a runtime.
 pub(crate) struct RuntimeControl {
     codex_background_tasks_enabled: AtomicBool,
     codex_websockets_enabled: AtomicBool,
-    chatgpt_retry_until_available: AtomicBool,
-    chatgpt_retry_window_ms: AtomicU64,
+    route_recovery_enabled: AtomicBool,
+    route_recovery_window_ms: AtomicU64,
     request_origins: Mutex<BTreeMap<String, &'static str>>,
 }
 
@@ -21,8 +21,8 @@ impl Default for RuntimeControl {
         Self {
             codex_background_tasks_enabled: AtomicBool::new(true),
             codex_websockets_enabled: AtomicBool::new(true),
-            chatgpt_retry_until_available: AtomicBool::new(false),
-            chatgpt_retry_window_ms: AtomicU64::new(DEFAULT_CHATGPT_RETRY_WINDOW_MS),
+            route_recovery_enabled: AtomicBool::new(false),
+            route_recovery_window_ms: AtomicU64::new(DEFAULT_ROUTE_RECOVERY_WINDOW_MS),
             request_origins: Mutex::new(BTreeMap::new()),
         }
     }
@@ -47,21 +47,21 @@ impl RuntimeControl {
             .store(enabled, Ordering::Release);
     }
 
-    pub(crate) fn chatgpt_retry_until_available(&self) -> bool {
-        self.chatgpt_retry_until_available.load(Ordering::Acquire)
+    pub(crate) fn route_recovery_enabled(&self) -> bool {
+        self.route_recovery_enabled.load(Ordering::Acquire)
     }
 
-    pub(crate) fn set_chatgpt_retry_until_available(&self, enabled: bool) {
-        self.chatgpt_retry_until_available
+    pub(crate) fn set_route_recovery_enabled(&self, enabled: bool) {
+        self.route_recovery_enabled
             .store(enabled, Ordering::Release);
     }
 
-    pub(crate) fn chatgpt_retry_window_ms(&self) -> u64 {
-        self.chatgpt_retry_window_ms.load(Ordering::Acquire)
+    pub(crate) fn route_recovery_window_ms(&self) -> u64 {
+        self.route_recovery_window_ms.load(Ordering::Acquire)
     }
 
-    pub(crate) fn set_chatgpt_retry_window_ms(&self, value: u64) {
-        self.chatgpt_retry_window_ms
+    pub(crate) fn set_route_recovery_window_ms(&self, value: u64) {
+        self.route_recovery_window_ms
             .store(value.max(1_000), Ordering::Release);
     }
 
@@ -147,7 +147,7 @@ mod tests {
         let control = RuntimeControl::default();
         assert!(control.codex_background_tasks_enabled());
         assert!(control.codex_websockets_enabled());
-        assert!(!control.chatgpt_retry_until_available());
+        assert!(!control.route_recovery_enabled());
     }
 
     #[test]

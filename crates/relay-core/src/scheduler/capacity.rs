@@ -1,6 +1,5 @@
 use crate::quota::QuotaSnapshot;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 
 pub const QUOTA_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
 
@@ -27,21 +26,26 @@ impl CandidateQuota {
         {
             return Self::Stale;
         }
-        // Provider credits are an independent allowance. Match the upstream
-        // account-pool behavior: fresh, explicitly positive or unlimited
-        // credits keep a zero-window account schedulable, but at the lowest
-        // known quota preference because they are not a percentage window.
-        if quota.has_usable_provider_credits() {
-            return Self::Available(1);
-        }
-        match quota
+        // Keep the reported percentage while its window still has room. A
+        // separate provider credit balance must not reduce a 42% window to
+        // one basis point: the protected-account reserve is measured in those
+        // same basis points. Credits only keep an exhausted/unknown window
+        // eligible, with the lowest known preference.
+        let window_remaining = quota
             .primary
             .iter()
             .chain(quota.secondary.iter())
             .filter_map(|window| window.available_basis_points)
             .map(u64::from)
-            .min()
-        {
+            .min();
+        if quota.has_usable_provider_credits() {
+            return Self::Available(
+                window_remaining
+                    .filter(|remaining| *remaining > 0)
+                    .unwrap_or(1),
+            );
+        }
+        match window_remaining {
             Some(0) => Self::Exhausted,
             Some(remaining) => Self::Available(remaining),
             None => Self::Unknown,
@@ -50,15 +54,6 @@ impl CandidateQuota {
 
     pub(crate) fn is_eligible(self) -> bool {
         matches!(self, Self::Unknown | Self::Available(1..))
-    }
-
-    pub(crate) fn compare_preference(self, other: Self) -> Ordering {
-        match (self, other) {
-            (Self::Available(left), Self::Available(right)) => left.cmp(&right),
-            (Self::Available(_), _) => Ordering::Greater,
-            (_, Self::Available(_)) => Ordering::Less,
-            _ => Ordering::Equal,
-        }
     }
 }
 
@@ -104,6 +99,33 @@ mod tests {
         assert_eq!(
             CandidateQuota::from_snapshot(&quota, 1_001, QUOTA_STALE_AFTER_MS),
             CandidateQuota::Available(1)
+        );
+    }
+
+    #[test]
+    fn provider_credits_do_not_hide_remaining_percentage_quota() {
+        let quota = QuotaSnapshot {
+            primary: Some(crate::quota::QuotaWindow {
+                kind: crate::quota::QuotaWindowKind::Primary,
+                provider_cycle_id: None,
+                window_start_ms: None,
+                available_basis_points: Some(4_200),
+                explicitly_full: None,
+                reset_at_ms: Some(2_000),
+                window_minutes: Some(43_200),
+                observed_at_ms: 1_000,
+                full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
+            }),
+            provider_credits_available: true,
+            available_credits_micro_units: Some(250_000_000),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            CandidateQuota::from_snapshot(&quota, 1_001, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Available(4_200)
         );
     }
 

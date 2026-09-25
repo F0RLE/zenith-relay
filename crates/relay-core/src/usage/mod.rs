@@ -25,10 +25,53 @@ pub fn sql_like_contains_pattern(value: &str) -> String {
     escaped
 }
 
-use crate::{quota::QuotaSnapshot, CacheWriteTtl, DefaultServiceTier, RoutingDiagnostics, WireApi};
+use crate::{quota::QuotaSnapshot, DefaultServiceTier, RoutingDiagnostics, WireApi};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// Validates and normalizes provider-reported cache-window durations.
+/// Multiple values are kept in ascending duration order, for example
+/// `"5m, 1h"`. Unknown or malformed values stay unreported in the UI.
+pub fn normalize_reported_cache_ttls(value: &str) -> Option<String> {
+    let mut windows = Vec::new();
+    for raw in value.split([',', '+']) {
+        let raw = raw.trim().to_ascii_lowercase();
+        let (amount, unit) = ["ms", "s", "m", "h", "d"]
+            .into_iter()
+            .find_map(|unit| raw.strip_suffix(unit).map(|amount| (amount, unit)))?;
+        let amount = amount.parse::<u32>().ok()?;
+        if amount == 0 {
+            return None;
+        }
+        let multiplier = match unit {
+            "ms" => 1_u64,
+            "s" => 1_000,
+            "m" => 60_000,
+            "h" => 3_600_000,
+            "d" => 86_400_000,
+            _ => return None,
+        };
+        let duration_ms = u64::from(amount).checked_mul(multiplier)?;
+        if !windows.iter().any(|(duration, _)| *duration == duration_ms) {
+            windows.push((duration_ms, format!("{amount}{unit}")));
+        }
+        if windows.len() > 8 {
+            return None;
+        }
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    windows.sort_by_key(|(duration, _)| *duration);
+    Some(
+        windows
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
 
 pub type UsageCallback = Arc<dyn Fn(UsageEvent) + Send + Sync>;
 
@@ -191,6 +234,25 @@ pub enum TerminalOutputKind {
 pub struct ToolUseDiagnostics {
     pub client_tool_count: u16,
     pub forwarded_tool_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_schema_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_schema_bytes: Option<u64>,
+    #[serde(default)]
+    pub filtered_tool_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_mode: Option<crate::ToolPolicyMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_outcome: Option<crate::ToolPolicyOutcome>,
+    /// A single pre-output retry restored the original catalog after Relay's
+    /// own stream parser rejected a filtered native Responses attempt.
+    #[serde(default)]
+    pub policy_fallback: bool,
+    /// The native Responses request used provider-hosted deferred tool search.
+    /// The complete trusted catalog remains available to the provider; only
+    /// the tool schemas are loaded into model context on demand.
+    #[serde(default)]
+    pub deferred_tool_search: bool,
     #[serde(default)]
     pub tool_choice: ToolChoiceMode,
     pub tool_call_count: u16,
@@ -247,7 +309,7 @@ impl ToolUseDiagnostics {
     }
 
     pub fn tools_were_available_but_not_called(&self) -> bool {
-        self.client_tool_count > 0
+        self.forwarded_tool_count > 0
             && self.tool_call_count == 0
             && matches!(self.terminal_output, TerminalOutputKind::Text)
     }
@@ -257,6 +319,9 @@ impl ToolUseDiagnostics {
     pub fn has_evidence(&self) -> bool {
         self.client_tool_count > 0
             || self.forwarded_tool_count > 0
+            || self.filtered_tool_count > 0
+            || self.policy_fallback
+            || self.deferred_tool_search
             || self.tool_call_count > 0
             || !matches!(self.tool_choice, ToolChoiceMode::Unspecified)
     }
@@ -432,8 +497,9 @@ pub struct UsageEvent {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
+    /// Exact retention durations reported by the upstream usage payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_ttl: Option<CacheWriteTtl>,
+    pub cache_write_ttl: Option<String>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -519,6 +585,20 @@ fn adapter_error_category_is_relay(category: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn provider_cache_windows_are_normalized_without_guessing() {
+        assert_eq!(
+            normalize_reported_cache_ttls("1h, 5m, 5m"),
+            Some("5m, 1h".to_string())
+        );
+        assert_eq!(
+            normalize_reported_cache_ttls("15m + 30s"),
+            Some("30s, 15m".to_string())
+        );
+        assert_eq!(normalize_reported_cache_ttls("unknown"), None);
+        assert_eq!(normalize_reported_cache_ttls("0m"), None);
+    }
 
     fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         UsageEvent {
@@ -730,6 +810,32 @@ mod tests {
 
         assert_eq!(diagnostics.terminal_output, TerminalOutputKind::Text);
         assert!(diagnostics.tools_were_available_but_not_called());
+    }
+
+    #[test]
+    fn tool_policy_diagnostics_read_old_records_and_round_trip_without_false_availability() {
+        let mut old: ToolUseDiagnostics = serde_json::from_value(json!({
+            "clientToolCount":73,"forwardedToolCount":0,"toolCallCount":0,"textOutput":true,"terminalOutput":"text"
+        })).unwrap();
+        assert_eq!(old.client_schema_bytes, None);
+        assert_eq!(old.policy_mode, None);
+        assert_eq!(old.filtered_tool_count, 0);
+        assert!(!old.tools_were_available_but_not_called());
+        old.policy_mode = Some(crate::ToolPolicyMode::PassThrough);
+        old.policy_outcome = Some(crate::ToolPolicyOutcome::PassThrough);
+        old.client_schema_bytes = Some(12345);
+        old.forwarded_schema_bytes = Some(2);
+        old.filtered_tool_count = 73;
+        let json = serde_json::to_value(&old).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ToolUseDiagnostics>(json).unwrap(),
+            old
+        );
+        assert!(ToolUseDiagnostics {
+            filtered_tool_count: 2,
+            ..Default::default()
+        }
+        .has_evidence());
     }
 
     #[test]

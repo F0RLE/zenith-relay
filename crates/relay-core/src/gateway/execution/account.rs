@@ -1,39 +1,40 @@
 use super::super::continuation::{
     drop_materialized_previous_response_id, prepare_response_continuation,
+    recover_stale_tool_history as replay_and_prune_stale_tool_history,
     RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
 use super::super::errors::{
-    api_error, apply_attempt_failure_cooldown, apply_cooldown_for_model,
-    apply_failure_cooldown_with_body, apply_failure_state, is_deactivated_workspace,
+    api_error, apply_failure_state, current_failure_state, is_deactivated_workspace,
     preserved_upstream_error, previous_response_not_found, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_links_rejected, retryable_failure,
-    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    settle_attempt_failure, AttemptFailure, PreservedUpstreamError,
 };
 use super::super::now_ms;
 use super::super::request::{
     account_endpoint_url, apply_codex_routing_hint, client_context_fingerprint,
-    codex_client_version, forwarded_codex_headers, repair_legacy_responses_call_ids, request_id,
-    response_tool_call_ids, responses_lite_parallel_tool_calls_valid, tool_use_diagnostics,
-    unpaired_tool_output_ids, with_forwarded_tool_diagnostics, AccountEndpoint, ServiceTierPolicy,
-    CODEX_RESPONSES_LITE_HEADER,
+    codex_client_version, forwarded_codex_headers, is_deferred_tool_search_compatibility_error,
+    repair_legacy_responses_call_ids, request_id, response_tool_call_ids,
+    responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, AccountEndpoint,
+    RequestToolPolicy, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
-    emit_usage, populate_tokens, proxy_error_response, proxy_response, response_id_from_bytes,
-    route_error_origin, usage_event,
+    emit_usage, populate_tokens, proxy_error_response, proxy_response, proxy_sse_response,
+    response_id_from_bytes, route_error_origin, usage_event,
 };
 use super::super::turn_state::{relay_account_response_header, request_scope};
 use super::finish_request_failure;
-use super::request::should_wait_for_candidate_availability;
-use super::{wait_for_candidate_retry, AutomaticRecovery, CandidateRetryContext};
+use super::request::{adapter_error_response, should_wait_for_candidate_availability};
+use super::{wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext};
 use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids,
+    repair_custom_tool_item_ids, AdapterError,
 };
-use crate::runtime::AuthenticatedKey;
+use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError};
+use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
@@ -41,7 +42,6 @@ use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::Duration;
 use std::time::Instant;
 
 pub(in crate::gateway) struct AccountExecution {
@@ -88,7 +88,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     if let Some(origin) = request_origin {
         runtime.mark_request_origin(&request_id, origin);
     }
-    let client_tool_use = tool_use_diagnostics(&request);
+    let mut tool_policy = RequestToolPolicy::new(&runtime, &request);
     let client_context_id = client_context_fingerprint(&client_headers);
     let prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
@@ -112,7 +112,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut has_unpaired_tool_output = continuation.has_unpaired_tool_output;
     let account_only_exclusions = runtime.api_source_candidate_ids();
     let mut tried = account_only_exclusions.clone();
-    let mut attempt = 0_u16;
+    let budget = SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget());
     let mut function_item_id_repair_attempted = false;
     let mut custom_tool_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
@@ -120,19 +120,21 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut model_switch_reset_attempted = false;
     let mut stale_tool_history_recovered = false;
     let mut last_failure: Option<AttemptFailure> = None;
+    let mut last_adapter_error = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
     let mut last_failure_origin = crate::ErrorOrigin::Relay;
-    let mut retry_deadline = (!runtime.chatgpt_retry_until_available()).then(|| {
-        tokio::time::Instant::now() + Duration::from_millis(runtime.chatgpt_retry_window_ms())
-    });
-    let mut retry_wait_attempt = 0u32;
     let mut retry_window_expired = false;
-    let mut automatic_recovery = AutomaticRecovery::new();
+    let operation = if endpoint == AccountEndpoint::Compact {
+        RotationOperation::Compaction
+    } else {
+        RotationOperation::Text
+    };
     let retry_context = CandidateRetryContext {
         runtime: &runtime,
         key: &key,
         resolved_model: &resolved_model,
         protocols: &[WireApi::Responses],
+        operation,
         exclusions: &account_only_exclusions,
     };
     // Compact and search endpoints only select OAuth accounts, but their
@@ -142,50 +144,27 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         && runtime.codex_model_account_responses_routes_all_support_lite(&key, &resolved_model);
 
     loop {
+        budget.retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
+            &request,
+        ));
+        budget.configure_retry_window(
+            runtime.route_recovery_window_ms(),
+            wait_for_candidate_availability && runtime.route_recovery_enabled(),
+        );
+        if !budget.can_dispatch() {
+            break;
+        }
         // A model-switch or stale-tool recovery can remove the opaque
         // continuation id. Retry policy must then use the repaired request,
         // not the continuation state captured before the loop.
         let has_previous_response_id = request_has_previous_response_id(&request);
-        // Account-only endpoints are eligible for the managed ChatGPT policy,
-        // but its enabled state may change while this request waits.
-        let retry_until_available = runtime.chatgpt_retry_until_available();
-        // An eligible request can outlive a toggle change. Dropping a finite
-        // deadline here lets an operator turn persistent recovery on while it
-        // is waiting instead of preserving the old bounded policy.
-        if retry_until_available {
-            retry_deadline = None;
-        }
+        // Account-only client endpoints share the API's live route-recovery
+        // policy; internal wake requests remain ineligible.
+        let retry_until_available = runtime.route_recovery_enabled();
         let wait_for_candidate_availability =
             wait_for_candidate_availability && retry_until_available;
-        let attempt_limit = runtime.max_retry_candidates();
-        if usize::from(attempt) >= attempt_limit {
-            if should_wait_for_candidate_availability(
-                wait_for_candidate_availability,
-                &last_failure,
-                false,
-                has_previous_response_id,
-            ) {
-                attempt = 0;
-                let backoff = account_retry_backoff(retry_wait_attempt.saturating_add(1));
-                if !wait_for_candidate_retry(
-                    &retry_context,
-                    &mut tried,
-                    response_affinity_key.as_deref(),
-                    &mut retry_wait_attempt,
-                    backoff,
-                    retry_deadline,
-                )
-                .await
-                {
-                    retry_window_expired = true;
-                    break;
-                }
-                continue;
-            }
-            break;
-        }
         let Some((selected, lease)) = runtime
-            .select_and_reserve(
+            .select_and_reserve_operation_with_budget(
                 &key,
                 &resolved_model,
                 &[WireApi::Responses],
@@ -195,9 +174,14 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     prompt_affinity_key.as_deref(),
                 ),
                 now_ms(),
+                operation,
+                &budget,
             )
             .await
         else {
+            if let Some(error) = crate::gateway::errors::admission_error(&budget) {
+                return error;
+            }
             if !requires_affinity_owner
                 && runtime.release_unroutable_response_affinity(
                     &key,
@@ -240,9 +224,13 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 requires_affinity_owner = false;
                 continue;
             }
-            if automatic_recovery
-                .retry(&retry_context, &mut tried, response_affinity_key.as_deref())
-                .await
+            if wait_for_recovery(
+                &budget,
+                &retry_context,
+                &mut tried,
+                response_affinity_key.as_deref(),
+            )
+            .await
             {
                 continue;
             }
@@ -252,14 +240,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 false,
                 has_previous_response_id,
             ) {
-                let backoff = account_retry_backoff(retry_wait_attempt.saturating_add(1));
                 if !wait_for_candidate_retry(
+                    &budget,
                     &retry_context,
                     &mut tried,
                     response_affinity_key.as_deref(),
-                    &mut retry_wait_attempt,
-                    backoff,
-                    retry_deadline,
                 )
                 .await
                 {
@@ -296,6 +281,28 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         route.client_context_id = client_context_id.clone();
         route.service_tier =
             service_tier_policy.effective_tier(&request, selected_service_tier, WireApi::Responses);
+        let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
+        if basis_points_route {
+            if endpoint != AccountEndpoint::Wake || responses_lite.is_some() {
+                last_adapter_error = Some(AdapterError::parameter_unsupported_for(
+                    if endpoint != AccountEndpoint::Wake {
+                        "endpoint"
+                    } else {
+                        "responses_lite"
+                    },
+                ));
+                continue;
+            }
+            if let Some(error) = super::compatibility::basis_points_route_error(
+                &request,
+                request.get("stream").and_then(Value::as_bool) == Some(true),
+                &service_tier_policy,
+                selected_service_tier,
+            ) {
+                last_adapter_error = Some(error);
+                continue;
+            }
+        }
         let route_responses_lite = responses_lite.clone().or_else(|| {
             (automatic_responses_lite
                 && route.account_id.as_deref().is_some_and(|candidate_id| {
@@ -307,15 +314,15 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             .then(|| HeaderValue::from_static("true"))
         });
         let selected_error_origin = route_error_origin(&route);
-        let cooldown_scope = route.scope.clone();
-        let cooldown_protocols = route.allowed_protocols.clone();
-        let cooldown_context = CooldownContext {
-            scope: &cooldown_scope,
-            allowed_protocols: &cooldown_protocols,
-        };
-        let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint) else {
-            last_failure = Some(AttemptFailure::invalid_request());
-            continue;
+        let upstream_url = if basis_points_route {
+            route.upstream_url.clone()
+        } else {
+            let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint)
+            else {
+                last_failure = Some(AttemptFailure::invalid_request());
+                continue;
+            };
+            upstream_url
         };
         let mut upstream_body = request.clone();
         if rewrite_model {
@@ -324,7 +331,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 Value::String(route.source_model.clone()),
             );
         }
-        if route_responses_lite.is_some() {
+        if route_responses_lite.is_some() && !basis_points_route {
             if let Some(object) = upstream_body.as_object_mut() {
                 if !responses_lite_parallel_tool_calls_valid(object) {
                     return api_error(
@@ -340,6 +347,34 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
             }
         }
+        if basis_points_route {
+            if let Some(object) = upstream_body.as_object_mut() {
+                crate::gateway::request::normalize_basis_points_request(object);
+            }
+        }
+        // Only the native Responses wake path has the provider contract for
+        // `tool_search`. Compact and alpha/search are separate account
+        // endpoints and must keep their ordinary full catalog.
+        let allow_deferred_tool_search = endpoint == AccountEndpoint::Wake && !basis_points_route;
+        if let Err(message) =
+            tool_policy.apply_value(&mut upstream_body, allow_deferred_tool_search)
+        {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                message,
+                error_codes::INVALID_REQUEST,
+            );
+        }
+        if basis_points_route {
+            upstream_body = match super::basis_points::prepare_request(&upstream_body) {
+                Ok(prepared) => prepared,
+                Err(error) if error.is_route_incompatible() => {
+                    last_adapter_error = Some(error);
+                    continue;
+                }
+                Err(error) => return super::request::adapter_error_response(error),
+            };
+        }
         let reasoning_effort =
             ReasoningEffortDiagnostics::from_bodies(&request, &upstream_body, WireApi::Responses);
         let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
@@ -349,9 +384,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 error_codes::INVALID_REQUEST,
             );
         };
-        let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
+        let tool_use = tool_policy.diagnostics.clone();
 
-        attempt = attempt.saturating_add(1);
         let started = Instant::now();
         let failed_usage =
             |route: &crate::runtime::ExecutorRoute, attempt, failure: AttemptFailure| {
@@ -369,20 +403,30 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     tool_use.clone(),
                 )
             };
-        let mut request_headers = forwarded_codex_headers(&client_headers, &request_id);
-        apply_codex_routing_hint(
-            &mut request_headers,
-            &route.source_model,
-            route.service_tier,
-        );
+        let mut request_headers = if basis_points_route {
+            route.upstream_headers.clone()
+        } else {
+            forwarded_codex_headers(&client_headers, &request_id)
+        };
+        if !basis_points_route {
+            apply_codex_routing_hint(
+                &mut request_headers,
+                &route.source_model,
+                route.service_tier,
+            );
+        }
         let turn_account = route.account_id.clone();
         let turn_model = route.source_model.clone();
-        let turn_scope = request_scope(
-            &key.id,
-            &client_headers,
-            turn_account.as_deref(),
-            &turn_model,
-        );
+        let turn_scope = if basis_points_route {
+            None
+        } else {
+            request_scope(
+                &key.id,
+                &client_headers,
+                turn_account.as_deref(),
+                &turn_model,
+            )
+        };
         let compaction_headers = request_headers.clone();
         let mut upstream_request = runtime
             .request_client(&route.candidate_id)
@@ -390,7 +434,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
             .headers(request_headers);
-        if endpoint == AccountEndpoint::Compact {
+        if endpoint == AccountEndpoint::Compact && !basis_points_route {
             if let Some(value) = route_responses_lite.as_ref() {
                 upstream_request =
                     upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
@@ -400,27 +444,44 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             .send_authorized_request(
                 &route.candidate_id,
                 upstream_request.body(request_body),
-                codex_client_version(&client_headers),
+                (!basis_points_route)
+                    .then(|| codex_client_version(&client_headers))
+                    .flatten(),
                 turn_scope.as_ref(),
+                Some(&budget),
+                Some(&lease),
             )
             .await;
+        let attempt = u16::from(budget.dispatches());
         let upstream = match upstream {
             Ok(upstream) => {
                 route.account_token_generation = upstream.account_token_generation;
                 upstream.response
             }
             Err(error) => {
+                let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
+                let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);
                 let failure = AttemptFailure::authorized_request(error);
-                let state = apply_attempt_failure_cooldown(
+                let mut event = failed_usage(&route, attempt, failure);
+                if uncertain || exhausted {
+                    if uncertain {
+                        lease.settle_rotation_unknown(now_ms());
+                    }
+                    emit_usage(&runtime, event);
+                    return super::attempt_error_response(
+                        failure,
+                        None,
+                        selected_error_origin,
+                        &request_id,
+                    );
+                }
+                let state = settle_attempt_failure(
                     &runtime,
-                    &route.candidate_id,
+                    &lease,
                     &route.source_model,
                     &failure,
                     &HeaderMap::new(),
-                    &cooldown_context,
-                    route.half_open_probe,
                 );
-                let mut event = failed_usage(&route, attempt, failure);
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -433,16 +494,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         let Ok(mut bytes) =
             crate::transport::collect_limited(upstream, endpoint.response_limit()).await
         else {
+            lease.settle_rotation_unknown(now_ms());
             let failure = AttemptFailure::body();
-            let state = apply_cooldown_for_model(
-                &runtime,
-                &route.candidate_id,
-                "*",
-                &route.source_model,
-                TRANSIENT_COOLDOWN_MS,
-                &cooldown_context,
-                route.half_open_probe,
-            );
+            let state = current_failure_state(&runtime, &route.candidate_id, &route.source_model);
             let mut event = failed_usage(&route, attempt, failure);
             apply_failure_state(&mut event, state);
             emit_usage(&runtime, event);
@@ -451,16 +505,17 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             continue;
         };
         if endpoint == AccountEndpoint::Compact
-            && usize::from(attempt) < attempt_limit
+            && budget.can_dispatch()
             && super::super::compaction::missing_legacy_endpoint(status, &bytes)
         {
-            attempt = attempt.saturating_add(1);
             match super::super::compaction::execute(
                 &runtime,
                 &mut route,
                 &upstream_body,
                 &compaction_headers,
                 turn_scope.as_ref(),
+                &budget,
+                &lease,
             )
             .await
             {
@@ -471,15 +526,13 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
                 Err(error) => {
                     let (failure, headers) = *error;
-                    let mut event = failed_usage(&route, attempt, failure);
-                    let state = apply_attempt_failure_cooldown(
+                    let mut event = failed_usage(&route, u16::from(budget.dispatches()), failure);
+                    let state = settle_attempt_failure(
                         &runtime,
-                        &route.candidate_id,
+                        &lease,
                         &route.source_model,
                         &failure,
                         &headers,
-                        &cooldown_context,
-                        route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
                     emit_usage(&runtime, event);
@@ -488,6 +541,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                         &key,
                         &resolved_model,
                         &[WireApi::Responses],
+                        operation,
                         &account_only_exclusions,
                         response_affinity_key.as_deref(),
                         failure,
@@ -498,14 +552,23 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
             }
         }
+        let attempt = u16::from(budget.dispatches());
         if !status.is_success() {
+            let rejection_state = settle_attempt_failure(
+                &runtime,
+                &lease,
+                &route.source_model,
+                &AttemptFailure::status_with_body(status, Some(&bytes)),
+                &response_headers,
+            );
             if !legacy_call_id_repair_attempted
                 && responses_tool_call_links_rejected(&bytes)
                 && repair_legacy_responses_call_ids(&mut request)
             {
                 legacy_call_id_repair_attempted = true;
-                attempt = attempt.saturating_sub(1);
+
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
                 requires_affinity_owner =
                     request_has_previous_response_id(&request) || has_unpaired_tool_output;
@@ -516,8 +579,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 && repair_call_prefixed_function_item_ids(&mut request)
             {
                 function_item_id_repair_attempted = true;
-                attempt = attempt.saturating_sub(1);
+
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 continue;
             }
             if !custom_tool_item_id_repair_attempted
@@ -525,8 +589,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 && repair_custom_tool_item_ids(&mut request)
             {
                 custom_tool_item_id_repair_attempted = true;
-                attempt = attempt.saturating_sub(1);
+
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 continue;
             }
             if !message_item_id_repair_attempted
@@ -534,8 +599,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 && remove_item_prefixed_message_ids(&mut request)
             {
                 message_item_id_repair_attempted = true;
-                attempt = attempt.saturating_sub(1);
+
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
@@ -560,25 +626,47 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 tool_use.clone(),
             );
             let cache_write_rejected = prompt_cache_write_rejected(&bytes);
-            event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_body(
-                Some(status.as_u16()),
-                &bytes,
-            ));
+            let upstream_error =
+                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
+            event.upstream_error = Some(upstream_error.clone());
+            if endpoint == AccountEndpoint::Wake
+                && is_deferred_tool_search_compatibility_error(status, &upstream_error)
+                && tool_policy.prepare_deferred_fallback()
+            {
+                // Retry once with the original catalog. This is still before
+                // any client output because account responses are collected
+                // before this status branch.
+                event.tool_use.policy_fallback = true;
+                emit_usage(&runtime, event);
+                tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
+                last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
+                continue;
+            }
+            let stream = request
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if !stale_tool_history_recovered
                 && has_previous_response_id
                 && responses_tool_call_is_missing_output(&bytes)
-                && drop_materialized_previous_response_id(
+                && replay_and_prune_stale_tool_history(
                     &runtime,
                     &key.id,
                     &mut request,
                     &resolved_model,
                     now_ms(),
+                    stream,
+                    &bytes,
                 )
             {
                 stale_tool_history_recovered = true;
                 response_affinity_key = None;
                 requires_affinity_owner = false;
+                has_unpaired_tool_output = false;
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
                 last_failure_origin = selected_error_origin;
@@ -630,6 +718,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     response_affinity_key = None;
                     requires_affinity_owner = false;
                     tried.remove(&route.candidate_id);
+                    lease.allow_rotation_repair();
                     last_failure = Some(failure);
                     last_failure_origin = selected_error_origin;
                     continue;
@@ -649,17 +738,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 if response_affinity_hit && !requires_affinity_owner {
                     response_affinity_key = None;
                 }
-                let state = apply_failure_cooldown_with_body(
-                    &runtime,
-                    &route.candidate_id,
-                    &route.source_model,
-                    status,
-                    failure.category,
-                    &response_headers,
-                    Some(&bytes),
-                    &cooldown_context,
-                    route.half_open_probe,
-                );
+                let state = rejection_state.clone();
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -681,6 +760,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             return response;
         }
 
+        let client_stream = request.get("stream").and_then(Value::as_bool) == Some(true);
         let mut event = usage_event(
             &request_id,
             attempt,
@@ -695,6 +775,21 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             tool_use,
         );
         populate_tokens(&mut event, &bytes);
+        let client_bytes = if basis_points_route {
+            match super::basis_points::translate_response(&bytes, &request) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    event.success = false;
+                    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+                    event.error_category = Some(error.code().to_string());
+                    emit_usage(&runtime, event);
+                    lease.settle_rotation_terminal(now_ms());
+                    return super::request::adapter_error_response(error);
+                }
+            }
+        } else {
+            bytes
+        };
         let recovered = runtime.record_success_with_metrics(
             &route.candidate_id,
             &route.source_model,
@@ -708,7 +803,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             &route.candidate_id,
             now_ms(),
         );
-        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+        if let Ok(response) = serde_json::from_slice::<Value>(&client_bytes) {
             runtime.capture_native_responses_replay(
                 &key.id,
                 &route.candidate_id,
@@ -722,19 +817,38 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             }
         }
         runtime.bind_response_affinity(
-            response_id_from_bytes(&bytes).as_deref(),
+            response_id_from_bytes(&client_bytes).as_deref(),
             &route.candidate_id,
             now_ms(),
         );
         emit_usage(&runtime, event);
-        drop(lease);
-        let mut response = proxy_response(status, &response_headers, Body::from(bytes));
+        lease.settle_rotation_success(now_ms());
+        if basis_points_route && client_stream {
+            let stream_body = match super::basis_points::synthetic_stream(&client_bytes) {
+                Ok(stream_body) => stream_body,
+                Err(error) => {
+                    lease.settle_rotation_terminal(now_ms());
+                    return super::request::adapter_error_response(error);
+                }
+            };
+            let mut response =
+                proxy_sse_response(status, &response_headers, Body::from(stream_body));
+            relay_account_response_header(&client_headers, &response_headers, &mut response);
+            return response;
+        }
+        let mut response = proxy_response(status, &response_headers, Body::from(client_bytes));
         if route.account_id.is_some() {
             relay_account_response_header(&client_headers, &response_headers, &mut response);
         }
         return response;
     }
 
+    if let Some(error) = crate::gateway::errors::admission_error(&budget) {
+        return error;
+    }
+    if let Some(error) = last_adapter_error {
+        return adapter_error_response(error);
+    }
     let failure = if retry_window_expired {
         AttemptFailure::classified_with_hint(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -749,6 +863,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         &key,
         &resolved_model,
         &[WireApi::Responses],
+        operation,
         &account_only_exclusions,
         response_affinity_key.as_deref(),
         failure,
@@ -756,13 +871,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         last_failure_origin,
         &request_id,
     )
-}
-
-fn account_retry_backoff(attempt: u32) -> Duration {
-    let exponent = attempt.min(6);
-    let base_ms = 100u64.saturating_mul(1u64 << exponent);
-    let jitter_ms = u64::from((attempt.wrapping_mul(37)) % 100);
-    Duration::from_millis((base_ms + jitter_ms).min(5_000))
 }
 
 fn request_has_previous_response_id(request: &Value) -> bool {

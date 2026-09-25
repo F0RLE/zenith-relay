@@ -13,7 +13,7 @@ pub use adapter::{
     NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub(crate) use adapter::{
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    gemini_incomplete, remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids,
 };
 pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
@@ -32,17 +32,18 @@ pub use management::{
     pool_routing_summary, pooled_source_runtime_available, quota_refresh_status,
     source_runtime_available, update_model_reasoning_policy, valid_generated_id,
     validate_resolved_configuration_preset_members, AccountOperationalInput,
-    AccountOperationalState, AccountPresetRule, AccountRoutingBlockReason, AccountSummary,
-    ApiError, ClientWireApi, ConfigurationPreset, ConfigurationPresetApplyInput,
+    AccountOperationalState, AccountPresetRule, AccountRefreshState, AccountRoutingBlockReason,
+    AccountSummary, ApiError, ClientWireApi, ConfigurationPreset, ConfigurationPresetApplyInput,
     ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
     ConfigurationPresetPreview, ConfigurationPresetPreviewInput, ConfigurationPresetSettings,
     ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelCatalogIdentity,
     ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus, PresetQuotaPolicy,
     PresetRoutingPolicy, ProfileKeyRotation, ProxyMode, QuotaRefreshStatus, QuotaWindowUsage,
-    RemoteAccountLocation, RevealedAccountIdentity, RuntimeStateSnapshot, RuntimeTargetSummary,
-    SourcePresetRule, SourceSummary, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange,
-    UsageSummary, UsageTokenBreakdown, UsageTotals, CONFIGURATION_PRESET_FORMAT,
-    CONFIGURATION_PRESET_SCHEMA_VERSION, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
+    RefreshStatus, RemoteAccountLocation, RevealedAccountIdentity, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourcePresetRule, SourceRefreshState, SourceSummary, UsageBucket,
+    UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals,
+    CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
+    PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
 pub(crate) use sse::{data as sse_data, event_end as sse_event_end, lines as sse_lines};
 pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

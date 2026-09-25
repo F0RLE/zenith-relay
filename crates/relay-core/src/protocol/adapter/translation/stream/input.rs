@@ -15,13 +15,39 @@ impl TranslationStream {
         }
         let choice = &choices[0];
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            self.finish_reason = Some(response::finish(WireApi::ChatCompletions, reason)?);
+            let finish = response::finish(WireApi::ChatCompletions, reason)?;
+            self.finish_reason = Some(if self.saw_refusal {
+                Finish::Filter
+            } else {
+                finish
+            });
         }
         let delta = choice.get("delta").ok_or_else(invalid)?;
         checked(
             delta,
-            &["role", "content", "tool_calls", "reasoning_content"],
+            &[
+                "role",
+                "content",
+                "tool_calls",
+                "reasoning_content",
+                "refusal",
+            ],
         )?;
+        if let Some(refusal) = delta.get("refusal").filter(|value| !value.is_null()) {
+            let refusal = refusal.as_str().ok_or_else(invalid)?;
+            if !refusal.is_empty() {
+                self.saw_refusal = true;
+                self.finish_reason = Some(Finish::Filter);
+                let index = match self.indices.get("text") {
+                    Some(index) => *index,
+                    None => self.insert("text".into(), Block::Text(String::new()))?,
+                };
+                let Block::Text(text) = &mut self.response.blocks[index] else {
+                    return Err(invalid());
+                };
+                text.push_str(refusal);
+            }
+        }
         for (field, key, reasoning) in [
             ("reasoning_content", "reasoning", true),
             ("content", "text", false),
@@ -388,6 +414,13 @@ impl TranslationStream {
 
     pub(super) fn gemini(&mut self, value: &Value) -> AdapterResult<bool> {
         let invalid = AdapterError::upstream_stream_invalid;
+        if super::super::super::gemini::prompt_blocked(value).map_err(|()| invalid())? {
+            if !self.response.blocks.is_empty() || self.finish_reason.is_some() {
+                return Err(invalid());
+            }
+            self.finish_reason = Some(Finish::Filter);
+            return Ok(true);
+        }
         let Some(candidates) = value.get("candidates").and_then(Value::as_array) else {
             return if value.get("usageMetadata").is_some() {
                 Ok(false)

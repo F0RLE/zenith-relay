@@ -75,6 +75,7 @@ pub struct MessagesStreamBridge {
     response_id: Option<String>,
     upstream_id: Option<String>,
     usage: Option<Value>,
+    stop_reason: Option<String>,
     text_output: Option<TextOutput>,
     next_output_index: usize,
     next_message_index: usize,
@@ -137,6 +138,7 @@ impl MessagesStreamBridge {
             response_id: None,
             upstream_id: None,
             usage: None,
+            stop_reason: None,
             text_output: None,
             next_output_index: 0,
             next_message_index: 0,
@@ -209,6 +211,20 @@ impl MessagesStreamBridge {
             "content_block_delta" => self.handle_block_delta(&value),
             "content_block_stop" => self.handle_block_stop(&value),
             "message_delta" => {
+                if let Some(reason) = value
+                    .pointer("/delta/stop_reason")
+                    .filter(|reason| !reason.is_null())
+                {
+                    let Some(reason) = reason.as_str() else {
+                        self.fail(AdapterError::upstream_stream_invalid());
+                        return;
+                    };
+                    if super::messages::messages_response_terminal(Some(reason)).is_err() {
+                        self.fail(AdapterError::upstream_stream_invalid());
+                        return;
+                    }
+                    self.stop_reason = Some(reason.to_owned());
+                }
                 if let Some(usage) = value.get("usage") {
                     merge_usage(&mut self.usage, usage);
                 }
@@ -930,7 +946,8 @@ impl MessagesStreamBridge {
 
     fn complete(&mut self) {
         if self.response_id.is_none()
-            || self.assistant_blocks.is_empty()
+            || (self.assistant_blocks.is_empty()
+                && !matches!(self.stop_reason.as_deref(), Some("refusal" | "max_tokens")))
             || self.closed_blocks.len() != self.assistant_blocks.len()
         {
             self.fail(AdapterError::upstream_stream_invalid());
@@ -939,6 +956,14 @@ impl MessagesStreamBridge {
         if !self.finish_active_text_output() {
             return;
         }
+        let (status, incomplete_reason) =
+            match super::messages::messages_response_terminal(self.stop_reason.as_deref()) {
+                Ok(terminal) => terminal,
+                Err(_) => {
+                    self.fail(AdapterError::upstream_stream_invalid());
+                    return;
+                }
+            };
         let Some(request) = self.request.take() else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -988,8 +1013,11 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        let (mut output, _) = match responses_output_from_messages_content(&content, &request.state)
-        {
+        let (mut output, _) = match responses_output_from_messages_content(
+            &content,
+            &request.state,
+            status == "incomplete",
+        ) {
             Ok(value) => value,
             Err(error) => {
                 self.fail(error);
@@ -1009,7 +1037,8 @@ impl MessagesStreamBridge {
             "id": response_id,
             "object": "response",
             "created_at": 0,
-            "status": "completed",
+            "status": status,
+            "incomplete_details": incomplete_reason.map(|reason| json!({"reason": reason})),
             "model": self.model,
             "output": output,
             "usage": responses_usage(self.usage.as_ref()),
@@ -1021,10 +1050,15 @@ impl MessagesStreamBridge {
             response_id,
             continuation,
         });
+        let event = if status == "completed" {
+            "response.completed"
+        } else {
+            "response.incomplete"
+        };
         self.frame(
-            "response.completed",
+            event,
             json!({
-                "type": "response.completed",
+                "type": event,
                 "response": response_body,
             }),
         );
@@ -1240,6 +1274,17 @@ impl GeminiStreamBridge {
         if let Some(usage) = value.get("usageMetadata") {
             self.usage = Some(usage.clone());
         }
+        match super::gemini::prompt_blocked(&value) {
+            Ok(true) => {
+                self.complete_prompt_block(&value);
+                return;
+            }
+            Err(()) => {
+                self.fail(AdapterError::upstream_stream_invalid());
+                return;
+            }
+            Ok(false) => {}
+        }
         let Some(candidate) = value
             .get("candidates")
             .and_then(Value::as_array)
@@ -1251,11 +1296,8 @@ impl GeminiStreamBridge {
             .pointer("/content/parts")
             .and_then(Value::as_array)
         else {
-            if candidate
-                .get("finishReason")
-                .and_then(Value::as_str)
-                .is_some()
-            {
+            if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+                self.finish_reason = Some(reason.to_string());
                 self.finished_upstream = true;
                 self.complete();
             } else {
@@ -1357,6 +1399,44 @@ impl GeminiStreamBridge {
             self.finished_upstream = true;
             self.complete();
         }
+    }
+
+    fn complete_prompt_block(&mut self, upstream: &Value) {
+        // A blocked prompt has no model output. Do not turn a partial stream
+        // that already emitted data into a successful filtered response.
+        if self.started
+            || !self.text.is_empty()
+            || !self.thinking.is_empty()
+            || !self.calls.is_empty()
+        {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
+        let mut upstream = upstream.clone();
+        if upstream.get("usageMetadata").is_none() {
+            if let Some(usage) = &self.usage {
+                upstream["usageMetadata"] = usage.clone();
+            }
+        }
+        let response =
+            match super::gemini::translate_gemini_response(self.request.clone(), &upstream) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            };
+        self.ensure_started();
+        self.frame(
+            "response.incomplete",
+            json!({"type":"response.incomplete","response":response.response_body}),
+        );
+        self.completed = Some(MessagesBridgeResponse {
+            response_body: response.response_body,
+            response_id: response.response_id,
+            continuation: response.continuation,
+        });
+        self.terminal = true;
     }
 
     fn ensure_started(&mut self) {
@@ -1607,12 +1687,20 @@ impl GeminiStreamBridge {
         if self.terminal {
             return;
         }
-        if !self.started
-            || (self.text.is_empty() && self.thinking.is_empty() && self.calls.is_empty())
+        let incomplete =
+            match super::gemini::candidate_incomplete_reason(self.finish_reason.as_deref()) {
+                Ok(reason) => reason.is_some(),
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            };
+        if self.text.is_empty() && self.thinking.is_empty() && self.calls.is_empty() && !incomplete
         {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
+        self.ensure_started();
         let mut parts = Vec::new();
         for item in &self.order {
             match item {
@@ -1678,9 +1766,14 @@ impl GeminiStreamBridge {
             response_id: response.response_id.clone(),
             continuation: response.continuation,
         });
+        let kind = if incomplete {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
         self.frame(
-            "response.completed",
-            json!({"type": "response.completed", "response": response.response_body}),
+            kind,
+            json!({"type": kind, "response": response.response_body}),
         );
         self.terminal = true;
     }

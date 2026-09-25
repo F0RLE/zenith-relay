@@ -48,7 +48,7 @@ pub(in crate::gateway) async fn responses_compact(
         .resolve_visible_account_model(&key, &requested_model)
         .or_else(|| {
             runtime
-                .chatgpt_retry_until_available()
+                .route_recovery_enabled()
                 .then(|| runtime.resolve_configured_account_model(&key, &requested_model))
                 .flatten()
         });
@@ -117,7 +117,7 @@ pub(in crate::gateway) async fn alpha_search(
         .resolve_visible_account_model(&key, &requested_model)
         .or_else(|| {
             runtime
-                .chatgpt_retry_until_available()
+                .route_recovery_enabled()
                 .then(|| runtime.resolve_configured_account_model(&key, &requested_model))
                 .flatten()
         });

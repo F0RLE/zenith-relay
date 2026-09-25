@@ -22,8 +22,8 @@ use zenith_relay_core::{
 const LOCAL_KEY: &str = "p2-local-key";
 const MODEL: &str = "gpt-p2";
 
-#[path = "support/automatic_recovery.rs"]
-mod automatic_recovery;
+#[path = "support/rotation_recovery.rs"]
+mod rotation_recovery;
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -309,11 +309,7 @@ async fn explicit_speed_survives_fallback_without_participant_metadata_requests(
     for tier in ["default", "fast", "priority", "ultrafast", "flex"] {
         let (first, first_state) = spawn_upstream(
             "first-synthetic-key",
-            vec![status_reply(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "unavailable",
-                None,
-            )],
+            vec![overload_reply("unavailable", None)],
         )
         .await;
         let (second, second_state) = spawn_upstream("second-synthetic-key", Vec::new()).await;
@@ -348,7 +344,7 @@ async fn explicit_speed_survives_fallback_without_participant_metadata_requests(
 }
 
 #[tokio::test]
-async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_source() {
+async fn generic_five_xx_stops_replay_but_does_not_block_an_independent_request() {
     for status in [StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE] {
         assert_server_error_fallback(status).await;
     }
@@ -374,29 +370,28 @@ async fn assert_server_error_fallback(status: StatusCode) {
         GatewayRuntimeOptions {
             model_metadata_catalog: None,
             max_retry_candidates: 3,
-            cooldown_after_failures: 1,
             ..GatewayRuntimeOptions::default()
         },
     )
     .await;
 
     let first = request(&gateway, false).await;
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(first.headers()[CACHE_CONTROL], "winner");
-    assert_eq!(first.json::<Value>().await.unwrap()["id"], "resp-b-1");
+    assert_eq!(first.status(), status);
+    let _ = first.bytes().await.unwrap();
+    assert!(state_b.requests.lock().unwrap().is_empty());
     assert_eq!(
         request(&gateway, false)
             .await
             .json::<Value>()
             .await
             .unwrap()["id"],
-        "resp-b-2"
+        "resp-b-1"
     );
 
     let a = state_a.requests.lock().unwrap();
     let b = state_b.requests.lock().unwrap();
     assert_eq!(a.len(), 1, "5xx source should remain in cooldown");
-    assert_eq!(b.len(), 2);
+    assert_eq!(b.len(), 1);
     assert_eq!(a[0].authorization.as_deref(), Some("Bearer source-a-key"));
     assert_eq!(b[0].authorization.as_deref(), Some("Bearer source-b-key"));
     assert!(!a[0].authorization.as_deref().unwrap().contains(LOCAL_KEY));
@@ -404,7 +399,7 @@ async fn assert_server_error_fallback(status: StatusCode) {
     drop(b);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert_eq!(
         (
             events[0].attempt,
@@ -419,16 +414,9 @@ async fn assert_server_error_fallback(status: StatusCode) {
             events[1].source_id.as_str(),
             events[1].success
         ),
-        (2, "source-b", true)
-    );
-    assert_eq!(
-        (
-            events[2].attempt,
-            events[2].source_id.as_str(),
-            events[2].success
-        ),
         (1, "source-b", true)
     );
+    assert_ne!(events[0].request_id, events[1].request_id);
 }
 
 #[tokio::test]
@@ -573,7 +561,7 @@ async fn shared_endpoint_stabilizers_are_retried_before_last_reserve() {
     let (shared_endpoint, shared_state) = spawn_upstream(
         "shared-key",
         vec![
-            status_reply(StatusCode::SERVICE_UNAVAILABLE, "stabilizer-down", None),
+            overload_reply("stabilizer-down", None),
             response_reply("stabilizer-response", "stabilizer"),
         ],
     )
@@ -600,8 +588,12 @@ async fn shared_endpoint_stabilizers_are_retried_before_last_reserve() {
             ],
             vec![local_key("key", LOCAL_KEY, None)],
             GatewayRuntimeOptions {
+                pool_routing: Some(ordered_policy(&[
+                    "stabilizer-a",
+                    "stabilizer-b",
+                    "last-reserve",
+                ])),
                 max_retry_candidates: 3,
-                cooldown_after_failures: 1,
                 ..GatewayRuntimeOptions::default()
             },
             Arc::new(move |event| captured_events.lock().unwrap().push(event)),
@@ -655,7 +647,7 @@ async fn shared_endpoint_stabilizers_are_retried_before_last_reserve() {
 }
 
 #[tokio::test]
-async fn oversized_failure_retries_shared_endpoint_stabilizer_before_last_reserve() {
+async fn oversized_five_xx_body_does_not_authorize_another_generation() {
     let (shared_endpoint, shared_state) = spawn_upstream(
         "shared-key",
         vec![
@@ -690,29 +682,21 @@ async fn oversized_failure_retries_shared_endpoint_stabilizer_before_last_reserv
     .await;
 
     let response = request(&gateway, false).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[CACHE_CONTROL], "stabilizer");
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["id"],
-        "stabilizer-response"
-    );
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let _ = response.bytes().await.unwrap();
 
     let shared_requests = shared_state.requests.lock().unwrap();
     assert_eq!(
         shared_requests.len(),
-        2,
-        "a failed stabilizer must leave the next stabilizer eligible"
+        1,
+        "an unreadable 5xx cannot prove rejection before execution"
     );
     assert_eq!(
         shared_requests[0].authorization.as_deref(),
         Some("Bearer shared-key")
     );
-    assert_eq!(
-        shared_requests[1].authorization.as_deref(),
-        Some("Bearer shared-key")
-    );
     assert!(independent_state.requests.lock().unwrap().is_empty());
-    assert_eq!(events.lock().unwrap().len(), 2);
+    assert_eq!(events.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -788,12 +772,20 @@ async fn bounded_retry_does_not_report_an_untried_regular_source_as_cooled() {
 async fn all_cooled_sources_keep_model_visible_and_return_local_retry_after() {
     let (source_a, state_a) = spawn_upstream(
         "source-a-key",
-        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "a", None)],
+        vec![status_reply(
+            StatusCode::TOO_MANY_REQUESTS,
+            "a",
+            Some("120"),
+        )],
     )
     .await;
     let (source_b, state_b) = spawn_upstream(
         "source-b-key",
-        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
+        vec![status_reply(
+            StatusCode::TOO_MANY_REQUESTS,
+            "b",
+            Some("120"),
+        )],
     )
     .await;
     let (gateway, _) = spawn_gateway(
@@ -845,14 +837,15 @@ async fn all_cooled_sources_keep_model_visible_and_return_local_retry_after() {
 
 #[tokio::test]
 async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
-    let (source_a, state_a) = spawn_upstream(
-        "source-a-key",
-        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "a", None)],
-    )
-    .await;
+    let (source_a, state_a) =
+        spawn_upstream("source-a-key", vec![overload_reply("a", Some("120"))]).await;
     let (source_b, state_b) = spawn_upstream(
         "source-b-key",
-        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
+        vec![status_reply(
+            StatusCode::TOO_MANY_REQUESTS,
+            "b",
+            Some("120"),
+        )],
     )
     .await;
     let (gateway, _) = spawn_gateway_with_options(
@@ -864,7 +857,6 @@ async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
         GatewayRuntimeOptions {
             model_metadata_catalog: None,
             max_retry_candidates: 3,
-            cooldown_after_failures: 1,
             ..GatewayRuntimeOptions::default()
         },
     )
@@ -968,7 +960,6 @@ async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
             max_retry_candidates: 3,
-            cooldown_after_failures: 1,
             ..GatewayRuntimeOptions::default()
         },
     )
@@ -1037,7 +1028,6 @@ async fn assert_candidate_rejection_falls_back(error: Value) {
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
             max_retry_candidates: 3,
-            cooldown_after_failures: 1,
             ..GatewayRuntimeOptions::default()
         },
     )
@@ -1061,21 +1051,9 @@ async fn assert_candidate_rejection_falls_back(error: Value) {
 
 #[tokio::test]
 async fn retry_budget_counts_execution_attempts_and_stops_before_third_source() {
-    let (source_a, state_a) = spawn_upstream(
-        "a-key",
-        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "a", None)],
-    )
-    .await;
-    let (source_b, state_b) = spawn_upstream(
-        "b-key",
-        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "b", None)],
-    )
-    .await;
-    let (source_c, state_c) = spawn_upstream(
-        "c-key",
-        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "c", None)],
-    )
-    .await;
+    let (source_a, state_a) = spawn_upstream("a-key", vec![overload_reply("a", None)]).await;
+    let (source_b, state_b) = spawn_upstream("b-key", vec![overload_reply("b", None)]).await;
+    let (source_c, state_c) = spawn_upstream("c-key", vec![overload_reply("c", None)]).await;
     let (gateway, events) = spawn_gateway(
         vec![
             source("a", &source_a, "a-key", &[MODEL], 3),
@@ -1183,7 +1161,7 @@ async fn automatic_adapter_candidate_shares_the_execution_budget() {
 }
 
 #[tokio::test]
-async fn stream_prelude_failure_falls_back_before_any_client_bytes_are_committed() {
+async fn truncated_prelude_transport_failure_does_not_replay_unknown_work() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -1218,22 +1196,20 @@ async fn stream_prelude_failure_falls_back_before_any_client_bytes_are_committed
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = response.text().await.unwrap();
-    assert_eq!(body.matches("response.created").count(), 1);
+    assert!(!body.contains("response.created"));
     assert!(!body.contains("response.failed"));
-    assert!(body.contains("[DONE]"));
+    assert!(!body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(!events[0].success);
     assert_eq!(
         events[0].error_category.as_deref(),
         Some("upstream_transport")
     );
-    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -1253,7 +1229,7 @@ async fn streaming_usage_limit_keeps_the_provider_reset_before_fallback() {
         vec![Reply::Stream {
             chunks: vec![
                 StreamChunk::Data("data: {\"type\":\"response.created\"}\n\n"),
-                StreamChunk::Data("data: [DONE]\n\n"),
+                StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_winner\",\"status\":\"completed\"}}\n\n"),
             ],
             cache_control: "winner",
         }],
@@ -1305,7 +1281,7 @@ async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_acco
     let (source_b, _) = spawn_upstream(
         "b-key",
         vec![Reply::Stream {
-            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            chunks: vec![StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_winner\",\"status\":\"completed\"}}\n\n")],
             cache_control: "winner",
         }],
     )
@@ -1436,7 +1412,7 @@ async fn bridged_messages_prelude_returns_one_safe_terminal_error() {
 }
 
 #[tokio::test]
-async fn complete_stream_prelude_failure_falls_back_before_client_output() {
+async fn complete_prelude_transport_failure_does_not_replay_unknown_work() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -1467,25 +1443,24 @@ async fn complete_stream_prelude_failure_falls_back_before_client_output() {
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = response.text().await.unwrap();
     assert!(!body.contains("response.created"));
     assert!(!body.contains("response.failed"));
-    assert!(body.contains("[DONE]"));
+    assert!(!body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(!events[0].success);
     assert_eq!(
         events[0].error_category.as_deref(),
         Some("upstream_transport")
     );
-    assert!(events[1].success);
 }
 
 #[tokio::test]
-async fn invalid_sse_after_a_native_prelude_falls_back_before_a_source_switch() {
+async fn invalid_sse_after_a_native_prelude_does_not_replay_unknown_work() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -1518,19 +1493,18 @@ async fn invalid_sse_after_a_native_prelude_falls_back_before_a_source_switch() 
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = response.text().await.unwrap();
     assert!(!body.contains("response.created"));
     assert!(!body.contains("data: {not-"));
     assert!(!body.contains("response.failed"));
-    assert!(body.contains("[DONE]"));
+    assert!(!body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(!events[0].success);
     assert_eq!(events[0].error_category.as_deref(), Some("stream_invalid"));
-    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -2210,15 +2184,9 @@ async fn legacy_single_protocol_source_keeps_its_physical_candidate_id() {
 }
 
 #[tokio::test]
-async fn repeated_session_id_does_not_pin_requests_to_one_source() {
-    let (source_a, state_a) = spawn_upstream(
-        "a-key",
-        vec![
-            status_reply(StatusCode::TOO_MANY_REQUESTS, "a-limited", Some("0")),
-            response_reply("a-rotated", "a-ready"),
-        ],
-    )
-    .await;
+async fn round_robin_ignores_session_affinity_between_independent_requests() {
+    let (source_a, state_a) =
+        spawn_upstream("a-key", vec![response_reply("a-first", "a-ready")]).await;
     let (source_b, state_b) = spawn_upstream("b-key", vec![response_reply("b-first", "b")]).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![
@@ -2227,11 +2195,13 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
         ],
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
+            tool_policy: Default::default(),
             model_metadata_catalog: None,
             max_retry_candidates: 3,
-            pool_routing: None,
-            routing_strategy: Default::default(),
-            subscription_plan_order: Vec::new(),
+            pool_routing: Some(zenith_relay_core::PoolRoutingPolicy {
+                mode: zenith_relay_core::PoolRoutingMode::RoundRobin,
+                ..Default::default()
+            }),
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
@@ -2239,9 +2209,6 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
             response_affinity_store: None,
-            provider_storm_breaker: false,
-            cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
-            keep_last_candidate_available: zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
         },
     )
     .await;
@@ -2252,7 +2219,7 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             .json::<Value>()
             .await
             .unwrap()["id"],
-        "b-first"
+        "a-first"
     );
     assert_eq!(
         request_with_session(&gateway, "session-1")
@@ -2260,9 +2227,9 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             .json::<Value>()
             .await
             .unwrap()["id"],
-        "a-rotated"
+        "b-first"
     );
-    assert_eq!(state_a.requests.lock().unwrap().len(), 2);
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
     assert_eq!(state_b.requests.lock().unwrap().len(), 1);
 }
 
@@ -2338,9 +2305,8 @@ async fn spawn_gateway(
         GatewayRuntimeOptions {
             model_metadata_catalog: None,
             max_retry_candidates,
+            tool_policy: Default::default(),
             pool_routing: None,
-            routing_strategy: Default::default(),
-            subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
@@ -2348,9 +2314,6 @@ async fn spawn_gateway(
             image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
             response_affinity_store: None,
-            provider_storm_breaker: false,
-            cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
-            keep_last_candidate_available: zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
         },
     )
     .await
@@ -2359,8 +2322,18 @@ async fn spawn_gateway(
 async fn spawn_gateway_with_options(
     sources: Vec<RuntimeSource>,
     keys: Vec<RuntimeLocalKey>,
-    options: GatewayRuntimeOptions,
+    mut options: GatewayRuntimeOptions,
 ) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    // Transport fixtures declare their intended order instead of relying on
+    // the obsolete priority/quota score of Automatic mode.
+    if options.pool_routing.is_none() {
+        options.pool_routing = Some(ordered_policy(
+            &sources
+                .iter()
+                .map(|source| source.source.id.as_str())
+                .collect::<Vec<_>>(),
+        ));
+    }
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
     let runtime = GatewayRuntime::from_pool(
@@ -2504,6 +2477,34 @@ async fn upstream(
                 .body(Body::from_stream(chunks))
                 .unwrap()
         }
+    }
+}
+
+fn ordered_policy(ids: &[&str]) -> zenith_relay_core::PoolRoutingPolicy {
+    use zenith_relay_core::{
+        PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+    };
+    PoolRoutingPolicy {
+        mode: PoolRoutingMode::InOrder,
+        members: ids
+            .iter()
+            .map(|id| PoolRoutingMember {
+                kind: PoolMemberKind::Source,
+                id: (*id).into(),
+                weight: 1,
+                max_concurrency: 0,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn overload_reply(cache_control: &'static str, retry_after: Option<&'static str>) -> Reply {
+    Reply::Json {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        body: json!({"error":{"code":"server_is_overloaded"}}),
+        cache_control,
+        retry_after,
     }
 }
 

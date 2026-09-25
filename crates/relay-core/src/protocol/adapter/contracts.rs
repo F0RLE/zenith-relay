@@ -728,7 +728,7 @@ impl AdapterError {
         )
     }
 
-    pub(super) const fn invalid_request() -> Self {
+    pub(crate) const fn invalid_request() -> Self {
         Self {
             code: error_codes::ADAPTER_INVALID_REQUEST,
             message: "request cannot be represented by the selected source adapter",
@@ -792,7 +792,7 @@ impl AdapterError {
         }
     }
 
-    pub(super) const fn upstream_stream_invalid() -> Self {
+    pub(crate) const fn upstream_stream_invalid() -> Self {
         Self {
             code: error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,
             message: "the upstream stream cannot be represented as a Responses stream",

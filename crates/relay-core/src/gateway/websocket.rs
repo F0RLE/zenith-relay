@@ -1,9 +1,9 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
-    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, rate_limit_body_hint,
-    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    apply_failure_state, current_failure_state, rate_limit_body_hint, settle_classified_failure,
+    RateLimitBodyHint,
 };
-use super::execution::{execute_client_request, AutomaticRecovery, CandidateRetryContext};
+use super::execution::{execute_client_request, wait_for_recovery, CandidateRetryContext};
 use super::now_ms;
 use super::request::{
     apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
@@ -17,7 +17,9 @@ use super::streaming::{
 use super::turn_state::request_scope;
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
-use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
+use crate::runtime::{
+    AuthenticatedKey, AuthorizationIncarnation, CandidateLease, ExecutorPrepareError, ExecutorRoute,
+};
 use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
@@ -88,8 +90,8 @@ async fn handle_connection(
 ) {
     let request = match read_initial_request(&mut downstream, &runtime, &key, &headers).await {
         Ok(request) => request,
-        Err(failure) => {
-            send_gateway_error(&mut downstream, &failure, None).await;
+        Err((failure, stream_id)) => {
+            send_gateway_error(&mut downstream, &failure, None, stream_id.as_deref()).await;
             return;
         }
     };
@@ -104,10 +106,13 @@ async fn handle_connection(
                 WireApi::Responses,
                 kind,
             );
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "type": "response.completed",
                 "response": {"id": format!("resp_relay_blocked_{}", request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
             });
+            if let Some(stream_id) = request.stream_id.as_deref() {
+                payload["stream_id"] = json!(stream_id);
+            }
             let _ = downstream
                 .send(Message::Text(payload.to_string().into()))
                 .await;
@@ -128,7 +133,6 @@ async fn handle_connection(
         request,
         true,
         0,
-        None,
     )
     .await
     {
@@ -138,7 +142,13 @@ async fn handle_connection(
             return;
         }
         Err(failure) => {
-            send_gateway_error(&mut downstream, &failure, Some(&request_id)).await;
+            send_gateway_error(
+                &mut downstream,
+                &failure,
+                Some(&request_id),
+                fallback_request.stream_id.as_deref(),
+            )
+            .await;
             return;
         }
     };
@@ -151,30 +161,39 @@ async fn read_initial_request(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     headers: &HeaderMap,
-) -> Result<ClientRequest, GatewayFailure> {
+) -> Result<ClientRequest, (GatewayFailure, Option<String>)> {
     let deadline = TokioInstant::now() + INITIAL_MESSAGE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(TokioInstant::now());
         if remaining.is_zero() {
-            return Err(GatewayFailure::request_timeout());
+            return Err((GatewayFailure::request_timeout(), None));
         }
         let message = timeout(remaining, downstream.recv())
             .await
-            .map_err(|_| GatewayFailure::request_timeout())?
-            .ok_or_else(GatewayFailure::client_closed)?
-            .map_err(|_| GatewayFailure::invalid_request("invalid WebSocket frame"))?;
+            .map_err(|_| (GatewayFailure::request_timeout(), None))?
+            .ok_or_else(|| (GatewayFailure::client_closed(), None))?
+            .map_err(|_| {
+                (
+                    GatewayFailure::invalid_request("invalid WebSocket frame"),
+                    None,
+                )
+            })?;
         match message {
             Message::Text(text) => {
                 return ClientRequest::parse(runtime, key, headers, text.as_bytes())
+                    .map_err(|failure| (failure, ClientRequest::error_stream_id(text.as_bytes())));
             }
-            Message::Binary(bytes) => return ClientRequest::parse(runtime, key, headers, &bytes),
+            Message::Binary(bytes) => {
+                return ClientRequest::parse(runtime, key, headers, &bytes)
+                    .map_err(|failure| (failure, ClientRequest::error_stream_id(&bytes)));
+            }
             Message::Ping(payload) => {
                 if downstream.send(Message::Pong(payload)).await.is_err() {
-                    return Err(GatewayFailure::client_closed());
+                    return Err((GatewayFailure::client_closed(), None));
                 }
             }
             Message::Pong(_) => {}
-            Message::Close(_) => return Err(GatewayFailure::client_closed()),
+            Message::Close(_) => return Err((GatewayFailure::client_closed(), None)),
         }
     }
 }
@@ -204,7 +223,13 @@ async fn bridge_http_fallback(
         {
             if !client_visible_output {
                 let request_id = Some(request.request_id.as_str());
-                send_gateway_error(&mut downstream, &failure, request_id).await;
+                send_gateway_error(
+                    &mut downstream,
+                    &failure,
+                    request_id,
+                    request.stream_id.as_deref(),
+                )
+                .await;
             } else if failure.category != "client_closed" {
                 let _ = downstream
                     .send(Message::Close(Some(CloseFrame {
@@ -245,7 +270,7 @@ async fn bridge_http_fallback(
         let next_request = match ClientRequest::parse(&runtime, &key, &headers, &payload) {
             Ok(request) => request,
             Err(failure) => {
-                send_gateway_error(&mut downstream, &failure, None).await;
+                send_gateway_error(&mut downstream, &failure, None, None).await;
                 return;
             }
         };
@@ -255,8 +280,13 @@ async fn bridge_http_fallback(
                     let failure = GatewayFailure::invalid_request(
                         "only one WebSocket stream_id is supported per connection",
                     );
-                    send_gateway_error(&mut downstream, &failure, Some(&next_request.request_id))
-                        .await;
+                    send_gateway_error(
+                        &mut downstream,
+                        &failure,
+                        Some(&next_request.request_id),
+                        next_request.stream_id.as_deref(),
+                    )
+                    .await;
                     return;
                 }
             } else {
@@ -296,6 +326,16 @@ async fn serve_http_fallback_request(
             *request.headers_mut() = headers;
             request
         })?;
+    let mut http_request = http_request;
+    http_request
+        .extensions_mut()
+        .insert(request.tool_policy.clone());
+    http_request
+        .extensions_mut()
+        .insert(super::execution::RoutedRequestIdentity {
+            request_id: request.request_id.clone(),
+            budget: request.budget.clone(),
+        });
     let response = await_while_client_connected(
         downstream,
         execute_client_request(runtime, http_request, WireApi::Responses),
@@ -337,7 +377,14 @@ async fn serve_http_fallback_request(
             if terminal.has_data && !terminal.valid {
                 return Err(GatewayFailure::transport(stream_origin));
             }
-            if let Some(payload) = fallback_event_message(&terminal, stream_origin)? {
+            // An unframed [DONE] carries no Responses terminal payload for a
+            // WebSocket client, even if an HTTP adapter treated it as complete.
+            if terminal.outcome.is_some() && terminal.payload.is_none() {
+                return Err(GatewayFailure::closed(stream_origin));
+            }
+            if let Some(payload) =
+                fallback_event_message(&terminal, request.stream_id.as_deref(), stream_origin)?
+            {
                 *client_visible_output |= payload.semantic_output;
                 downstream
                     .send(payload.message)
@@ -365,8 +412,38 @@ struct FallbackEventMessage {
 
 fn fallback_event_message(
     terminal: &super::streaming::TerminalEvent,
+    stream_id: Option<&str>,
     origin: ErrorOrigin,
 ) -> Result<Option<FallbackEventMessage>, GatewayFailure> {
+    if let Some(stream_id) = stream_id {
+        let Some(mut payload) = terminal.payload.clone() else {
+            // A named lane requires JSON events so the lane can be identified.
+            // An opaque, non-JSON compaction event cannot be routed safely.
+            return if terminal.raw_data.is_some() {
+                Err(GatewayFailure::transport(origin))
+            } else {
+                Ok(None)
+            };
+        };
+        let Some(object) = payload.as_object_mut() else {
+            return Err(GatewayFailure::transport(origin));
+        };
+        object.insert(
+            "stream_id".to_string(),
+            Value::String(stream_id.to_string()),
+        );
+        let payload =
+            serde_json::to_vec(&payload).map_err(|_| GatewayFailure::transport(origin))?;
+        if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+            return Err(GatewayFailure::message_too_large(origin));
+        }
+        let semantic_output = !terminal.is_compaction && semantic_output_payload(&payload);
+        let text = String::from_utf8(payload).map_err(|_| GatewayFailure::transport(origin))?;
+        return Ok(Some(FallbackEventMessage {
+            message: Message::Text(text.into()),
+            semantic_output,
+        }));
+    }
     if let Some(raw_data) = terminal.raw_data.as_deref() {
         if raw_data.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::message_too_large(origin));
@@ -423,6 +500,7 @@ fn websocket_transport_fallback_status(status: StatusCode) -> bool {
 
 struct Connected {
     credential_fingerprint: [u8; 32],
+    authorization_incarnation: AuthorizationIncarnation,
     upstream: UpstreamWebSocket,
     initial_messages: Vec<UpstreamMessage>,
     route: ExecutorRoute,
@@ -430,7 +508,6 @@ struct Connected {
     lease: CandidateLease,
     attempt: u16,
     started: Instant,
-    retry_deadline: Option<TokioInstant>,
 }
 
 async fn connect_upstream(
@@ -440,11 +517,9 @@ async fn connect_upstream(
     mut request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
-    retry_deadline: Option<TokioInstant>,
 ) -> Result<Connected, GatewayFailure> {
     let mut tried = HashSet::new();
     let mut attempt = attempt_offset;
-    let mut attempts_this_run = 0_usize;
     let mut confirmed_response_missing = false;
     let mut native_replay_attempted = false;
     let mut function_item_id_repair_attempted = false;
@@ -455,80 +530,22 @@ async fn connect_upstream(
     let mut stale_tool_history_recovered = false;
     let mut last_failure: Option<GatewayFailure> = None;
     let mut websocket_http_fallback_origin = None;
-    let mut retry_deadline = retry_deadline.or_else(|| {
-        (!runtime.chatgpt_retry_until_available())
-            .then(|| TokioInstant::now() + Duration::from_millis(runtime.chatgpt_retry_window_ms()))
-    });
-    let mut retry_wait_attempt = 0u32;
     let mut retry_window_expired = false;
-    let mut automatic_recovery = AutomaticRecovery::new();
 
     'candidates: loop {
-        // `ClientRequest` records that this is an eligible managed ChatGPT
-        // request. Read the setting on every retry cycle so disabling it
-        // releases an active persistent wait after the bounded poll.
-        let retry_until_available = runtime.chatgpt_retry_until_available();
-        // The request keeps its client eligibility, while the setting is live.
-        // If it was enabled after this request began, discard the old bounded
-        // deadline before the next retry cycle.
-        if retry_until_available {
-            retry_deadline = None;
-        }
-        let wait_for_candidate_availability =
-            request.wait_for_candidate_availability && retry_until_available;
-        let attempt_limit = runtime
-            .max_retry_candidates()
-            .saturating_sub(usize::from(attempt_offset));
-        if attempts_this_run >= attempt_limit {
-            if websocket_http_fallback_origin.is_none()
-                && wait_for_candidate_availability
-                && last_failure.as_ref().is_none_or(|failure| {
-                    super::errors::retryable_failure(
-                        failure.status,
-                        failure.category,
-                        request.has_previous_response_id(),
-                    ) && !matches!(
-                        failure.category,
-                        error_codes::UPSTREAM_UNAUTHORIZED
-                            | error_codes::UPSTREAM_ACCOUNT_DISABLED
-                            | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
-                            | error_codes::UPSTREAM_REGION_UNSUPPORTED
-                            | error_codes::UPSTREAM_MODEL_NOT_FOUND
-                            | error_codes::UPSTREAM_MODEL_UNSUPPORTED
-                            | error_codes::UPSTREAM_FORBIDDEN
-                            | error_codes::UPSTREAM_CONTENT_POLICY
-                            | error_codes::UPSTREAM_INVALID_REQUEST
-                            | error_codes::UPSTREAM_CANDIDATE_REJECTED
-                    )
-                })
-            {
-                tried.clear();
-                attempts_this_run = 0;
-                retry_wait_attempt = retry_wait_attempt.saturating_add(1);
-                if !runtime
-                    .wait_for_candidate_availability(
-                        runtime.earliest_retry_at(
-                            key,
-                            &request.resolved_model,
-                            WEBSOCKET_PROTOCOLS,
-                            &tried,
-                            request.response_affinity_key.as_deref(),
-                            now_ms(),
-                        ),
-                        websocket_retry_backoff(retry_wait_attempt),
-                        retry_deadline,
-                    )
-                    .await
-                {
-                    retry_window_expired = true;
-                    break;
-                }
-                continue;
-            }
+        request.account_retained_input();
+        request.budget.configure_retry_window(
+            runtime.route_recovery_window_ms(),
+            runtime.route_recovery_enabled(),
+        );
+        if !request.budget.can_dispatch() {
             break;
         }
+        // Read the live setting on every retry cycle so disabling it wakes
+        // an active persistent wait through the configuration event.
+        let wait_for_candidate_availability = runtime.route_recovery_enabled();
         let selected = runtime
-            .select_and_reserve(
+            .select_and_reserve_with_budget(
                 key,
                 &request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
@@ -538,9 +555,13 @@ async fn connect_upstream(
                     request.prompt_affinity_key.as_deref(),
                 ),
                 now_ms(),
+                &request.budget,
             )
             .await;
         let Some((selected, lease)) = selected else {
+            if let Some(reason) = request.budget.admission_stop_reason() {
+                return Err(GatewayFailure::admission(reason));
+            }
             if !request.requires_affinity_owner
                 && runtime.release_unroutable_response_affinity(
                     key,
@@ -645,44 +666,55 @@ async fn connect_upstream(
             {
                 return Err(GatewayFailure::continuation_unavailable());
             }
+            let may_wait_for_route = last_failure.as_ref().is_none_or(|failure| {
+                super::errors::retryable_recovery_wait(
+                    failure.status,
+                    failure.category,
+                    request.has_previous_response_id(),
+                )
+            });
             if websocket_http_fallback_origin.is_none()
-                && automatic_recovery
-                    .retry(
-                        &CandidateRetryContext {
-                            runtime,
-                            key,
-                            resolved_model: &request.resolved_model,
-                            protocols: WEBSOCKET_PROTOCOLS,
-                            exclusions: &HashSet::new(),
-                        },
-                        &mut tried,
-                        request.response_affinity_key.as_deref(),
-                    )
-                    .await
+                && may_wait_for_route
+                && wait_for_recovery(
+                    &request.budget,
+                    &CandidateRetryContext {
+                        runtime,
+                        key,
+                        resolved_model: &request.resolved_model,
+                        protocols: WEBSOCKET_PROTOCOLS,
+                        operation: crate::scheduler::rotation::RotationOperation::Text,
+                        exclusions: &HashSet::new(),
+                    },
+                    &mut tried,
+                    request.response_affinity_key.as_deref(),
+                )
+                .await
             {
                 continue;
             }
-            if websocket_http_fallback_origin.is_none() && wait_for_candidate_availability {
+            if websocket_http_fallback_origin.is_none()
+                && may_wait_for_route
+                && wait_for_candidate_availability
+            {
                 tried.clear();
-                retry_wait_attempt = retry_wait_attempt.saturating_add(1);
                 if !runtime
-                    .wait_for_candidate_availability(
-                        runtime.earliest_retry_at(
-                            key,
-                            &request.resolved_model,
-                            WEBSOCKET_PROTOCOLS,
-                            &tried,
-                            request.response_affinity_key.as_deref(),
-                            now_ms(),
-                        ),
-                        websocket_retry_backoff(retry_wait_attempt),
-                        retry_deadline,
+                    .wait_for_recovery_event(
+                        key,
+                        &request.resolved_model,
+                        WEBSOCKET_PROTOCOLS,
+                        &tried,
+                        request.response_affinity_key.as_deref(),
+                        crate::scheduler::rotation::RotationOperation::Text,
+                        &request.budget,
+                        None,
+                        true,
                     )
                     .await
                 {
                     retry_window_expired = true;
                     break;
                 }
+                request.budget.begin_recovery_pass();
                 continue;
             }
             break;
@@ -724,8 +756,10 @@ async fn connect_upstream(
             last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
             continue;
         }
-        attempt = attempt.saturating_add(1);
-        attempts_this_run = attempts_this_run.saturating_add(1);
+        let Some(_wire_attempt) = request.budget.start_wire_attempt() else {
+            drop(lease);
+            break;
+        };
         let started = Instant::now();
         let prepared = match runtime
             .prepare_authorization(&route.candidate_id, now_ms())
@@ -735,7 +769,7 @@ async fn connect_upstream(
             Err(error) => {
                 let failure = GatewayFailure::prepare(error, source_error_origin);
                 record_connect_failure(
-                    runtime, key, &route, &request, attempt, started, &failure, None,
+                    runtime, &lease, key, &route, &request, attempt, started, &failure, None,
                 );
                 last_failure = Some(failure);
                 continue;
@@ -771,7 +805,7 @@ async fn connect_upstream(
             let Ok(Ok(upgrade)) = timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await else {
                 let failure = GatewayFailure::transport(source_error_origin);
                 record_connect_failure(
-                    runtime, key, &route, &request, attempt, started, &failure, None,
+                    runtime, &lease, key, &route, &request, attempt, started, &failure, None,
                 );
                 last_failure = Some(failure);
                 continue 'candidates;
@@ -799,7 +833,7 @@ async fn connect_upstream(
                 Err(error) => {
                     let failure = GatewayFailure::prepare(error, source_error_origin);
                     record_connect_failure(
-                        runtime, key, &route, &request, attempt, started, &failure, None,
+                        runtime, &lease, key, &route, &request, attempt, started, &failure, None,
                     );
                     last_failure = Some(failure);
                     continue 'candidates;
@@ -847,9 +881,8 @@ async fn connect_upstream(
                 && request.repair_legacy_call_ids()
             {
                 legacy_call_id_repair_attempted = true;
-                attempt = attempt.saturating_sub(1);
-                attempts_this_run = attempts_this_run.saturating_sub(1);
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 continue 'candidates;
             }
             if websocket_transport_fallback_status(status) {
@@ -892,15 +925,16 @@ async fn connect_upstream(
                     runtime, key, &route, &request, attempt, started, status,
                 );
                 tried.remove(&route.candidate_id);
+                lease.allow_rotation_repair();
                 last_failure = Some(failure);
                 continue 'candidates;
             }
             let stale_tool_history = !stale_tool_history_recovered
                 && request.has_previous_response_id()
-                && body
-                    .as_deref()
-                    .is_some_and(super::errors::responses_tool_call_is_missing_output)
-                && request.drop_previous_response_id(runtime, &key.id);
+                && body.as_deref().is_some_and(|body| {
+                    super::errors::responses_tool_call_is_missing_output(body)
+                        && request.recover_stale_tool_history(runtime, &key.id, body)
+                });
             if stale_tool_history {
                 stale_tool_history_recovered = true;
                 record_connect_rejection(
@@ -921,6 +955,7 @@ async fn connect_upstream(
                 runtime.invalidate_prompt_affinity(request.prompt_affinity_key.as_deref());
                 record_connect_failure_with_hint(
                     runtime,
+                    &lease,
                     key,
                     &route,
                     &request,
@@ -957,6 +992,7 @@ async fn connect_upstream(
                 }
                 record_connect_failure_with_hint(
                     runtime,
+                    &lease,
                     key,
                     &route,
                     &request,
@@ -979,30 +1015,38 @@ async fn connect_upstream(
         else {
             let failure = GatewayFailure::transport(source_error_origin);
             record_connect_failure(
-                runtime, key, &route, &request, attempt, started, &failure, None,
+                runtime, &lease, key, &route, &request, attempt, started, &failure, None,
             );
             last_failure = Some(failure);
             continue;
         };
         runtime.mark_websocket_supported(&route.candidate_id, &request.resolved_model);
+        // WebSocket upgrade/auth probes are not generation dispatches. The
+        // actual payload send is; all reconnect and HTTP fallback paths share
+        // this same counter through ClientRequest.
+        let dispatch = lease
+            .begin_rotation_dispatch_for(&prepared, runtime)
+            .map_err(|_| GatewayFailure::unavailable())?;
+        attempt = u16::try_from(dispatch.0).unwrap_or(u16::MAX);
         if send_request(&mut upstream, payload, source_error_origin)
             .await
             .is_err()
         {
+            lease.settle_rotation_unknown(now_ms());
             let failure = GatewayFailure::transport(source_error_origin);
-            record_connect_failure(
-                runtime, key, &route, &request, attempt, started, &failure, None,
-            );
-            last_failure = Some(failure);
-            continue;
+            // The frame may have reached the provider even when flush fails.
+            // Do not cool the route or replay an unknown outcome.
+            return Err(failure);
         }
         let initial_messages =
             match initial_application_messages(&mut upstream, source_error_origin).await {
                 Ok(messages) => messages,
                 Err(failure) => {
+                    lease.settle_rotation_unknown(now_ms());
                     let response_headers = HeaderMap::new();
                     record_connect_failure(
                         runtime,
+                        &lease,
                         key,
                         &route,
                         &request,
@@ -1011,24 +1055,37 @@ async fn connect_upstream(
                         &failure,
                         Some(&response_headers),
                     );
-                    last_failure = Some(failure);
-                    continue;
+                    return Err(failure);
                 }
             };
         if initial_messages_are_empty_incomplete(&initial_messages) {
+            lease.settle_rotation_terminal(now_ms());
             let failure = GatewayFailure::classified(
                 StatusCode::BAD_GATEWAY,
                 error_codes::STREAM_INCOMPLETE,
                 source_error_origin,
             );
             record_connect_failure(
-                runtime, key, &route, &request, attempt, started, &failure, None,
+                runtime, &lease, key, &route, &request, attempt, started, &failure, None,
             );
-            last_failure = Some(failure);
-            continue;
+            return Err(failure);
         }
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(EventTerminalOutcome::Failure) {
+                let failure = super::errors::AttemptFailure::classified_with_hint(
+                    terminal_failure_status(terminal.status),
+                    terminal
+                        .error_category
+                        .unwrap_or(error_codes::UPSTREAM_TERMINAL),
+                    terminal.body_hint,
+                );
+                super::errors::settle_attempt_failure(
+                    runtime,
+                    &lease,
+                    &route.source_model,
+                    &failure,
+                    &terminal.headers,
+                );
                 let terminal_body = initial_messages.last().and_then(|message| match message {
                     UpstreamMessage::Text(text) => Some(text.as_bytes()),
                     UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
@@ -1041,6 +1098,7 @@ async fn connect_upstream(
                 {
                     function_item_id_repair_attempted = true;
                     tried.remove(&route.candidate_id);
+                    lease.allow_rotation_repair();
                     last_failure = None;
                     continue;
                 }
@@ -1052,6 +1110,7 @@ async fn connect_upstream(
                 {
                     custom_tool_item_id_repair_attempted = true;
                     tried.remove(&route.candidate_id);
+                    lease.allow_rotation_repair();
                     last_failure = None;
                     continue;
                 }
@@ -1062,6 +1121,7 @@ async fn connect_upstream(
                 {
                     message_item_id_repair_attempted = true;
                     tried.remove(&route.candidate_id);
+                    lease.allow_rotation_repair();
                     last_failure = None;
                     continue;
                 }
@@ -1081,9 +1141,8 @@ async fn connect_upstream(
                     && request.repair_legacy_call_ids()
                 {
                     legacy_call_id_repair_attempted = true;
-                    attempt = attempt.saturating_sub(1);
-                    attempts_this_run = attempts_this_run.saturating_sub(1);
                     tried.remove(&route.candidate_id);
+                    lease.allow_rotation_repair();
                     continue 'candidates;
                 }
                 let affinity_miss = super::errors::recoverable_response_affinity_miss(
@@ -1107,14 +1166,16 @@ async fn connect_upstream(
                         runtime, key, &route, &request, attempt, started, status,
                     );
                     tried.remove(&route.candidate_id);
+                    lease.allow_rotation_repair();
                     last_failure = Some(failure);
                     continue 'candidates;
                 }
                 if !stale_tool_history_recovered
                     && request.has_previous_response_id()
-                    && terminal_body
-                        .is_some_and(super::errors::responses_tool_call_is_missing_output)
-                    && request.drop_previous_response_id(runtime, &key.id)
+                    && terminal_body.is_some_and(|body| {
+                        super::errors::responses_tool_call_is_missing_output(body)
+                            && request.recover_stale_tool_history(runtime, &key.id, body)
+                    })
                 {
                     stale_tool_history_recovered = true;
                     let failure = GatewayFailure::classified(status, category, source_error_origin)
@@ -1150,6 +1211,7 @@ async fn connect_upstream(
                         .with_upstream_error(terminal.upstream_error.clone());
                     record_connect_failure_with_hint(
                         runtime,
+                        &lease,
                         key,
                         &route,
                         &request,
@@ -1181,6 +1243,7 @@ async fn connect_upstream(
                     } else {
                         record_connect_failure_with_hint(
                             runtime,
+                            &lease,
                             key,
                             &route,
                             &request,
@@ -1207,6 +1270,7 @@ async fn connect_upstream(
         }
         return Ok(Connected {
             credential_fingerprint: prepared.credential_fingerprint(),
+            authorization_incarnation: prepared.incarnation(),
             upstream,
             initial_messages,
             route,
@@ -1214,7 +1278,6 @@ async fn connect_upstream(
             lease,
             attempt,
             started,
-            retry_deadline,
         });
     }
 
@@ -1231,13 +1294,15 @@ async fn connect_upstream(
                 reset_request,
                 false,
                 attempt,
-                retry_deadline,
             ))
             .await;
         }
         return Err(GatewayFailure::continuation_unavailable());
     }
 
+    if let Some(reason) = request.budget.admission_stop_reason() {
+        return Err(GatewayFailure::admission(reason));
+    }
     if retry_window_expired {
         return Err(GatewayFailure::classified(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1255,6 +1320,7 @@ async fn connect_upstream(
         &HashSet::new(),
         request.response_affinity_key.as_deref(),
         now_ms(),
+        crate::scheduler::rotation::RotationOperation::Text,
     ) {
         return Err(GatewayFailure::cooldown(retry_at_ms));
     }
@@ -1273,7 +1339,6 @@ async fn connect_upstream_while_client_connected(
     request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
-    retry_deadline: Option<TokioInstant>,
 ) -> Result<Connected, GatewayFailure> {
     await_while_client_connected(
         downstream,
@@ -1284,7 +1349,6 @@ async fn connect_upstream_while_client_connected(
             request,
             allow_previous_response_reset,
             attempt_offset,
-            retry_deadline,
         ),
     )
     .await?
@@ -1342,9 +1406,9 @@ async fn retry_upstream_connection(
     state: &mut BridgeState,
     request: ClientRequest,
     attempt_offset: u16,
-    retry_deadline: Option<TokioInstant>,
     request_id: Option<&str>,
 ) -> bool {
+    let stream_id = request.stream_id.clone();
     match connect_upstream_while_client_connected(
         downstream,
         runtime,
@@ -1353,7 +1417,6 @@ async fn retry_upstream_connection(
         request,
         true,
         attempt_offset,
-        retry_deadline,
     )
     .await
     {
@@ -1361,17 +1424,10 @@ async fn retry_upstream_connection(
             install_connected(downstream, upstream, runtime, key, state, connected).await
         }
         Err(retry_failure) => {
-            send_gateway_error(downstream, &retry_failure, request_id).await;
+            send_gateway_error(downstream, &retry_failure, request_id, stream_id.as_deref()).await;
             false
         }
     }
-}
-
-fn websocket_retry_backoff(attempt: u32) -> Duration {
-    let exponent = attempt.min(6);
-    let base_ms = 100u64.saturating_mul(1u64 << exponent);
-    let jitter_ms = u64::from((attempt.wrapping_mul(37)) % 100);
-    Duration::from_millis((base_ms + jitter_ms).min(5_000))
 }
 
 async fn initial_application_messages(
@@ -1499,6 +1555,7 @@ fn initial_payloads_are_empty_incomplete(payloads: &[Value]) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn record_connect_failure(
     runtime: &GatewayRuntime,
+    lease: &CandidateLease,
     key: &AuthenticatedKey,
     route: &ExecutorRoute,
     request: &ClientRequest,
@@ -1509,6 +1566,7 @@ fn record_connect_failure(
 ) {
     record_connect_failure_with_hint(
         runtime,
+        lease,
         key,
         route,
         request,
@@ -1523,6 +1581,7 @@ fn record_connect_failure(
 #[allow(clippy::too_many_arguments)]
 fn record_connect_failure_with_hint(
     runtime: &GatewayRuntime,
+    lease: &CandidateLease,
     key: &AuthenticatedKey,
     route: &ExecutorRoute,
     request: &ClientRequest,
@@ -1532,32 +1591,24 @@ fn record_connect_failure_with_hint(
     headers: Option<&HeaderMap>,
     hint: RateLimitBodyHint,
 ) {
-    let cooldown_context = CooldownContext {
-        scope: &route.scope,
-        allowed_protocols: &route.allowed_protocols,
-    };
     let state = match headers {
-        Some(headers) => apply_failure_cooldown_with_hint(
+        Some(headers) => settle_classified_failure(
             runtime,
-            &route.candidate_id,
+            lease,
             &route.source_model,
             failure.status,
             failure.category,
             headers,
             hint,
-            &cooldown_context,
-            route.half_open_probe,
         ),
-        None => apply_failure_cooldown_with_hint(
+        None => settle_classified_failure(
             runtime,
-            &route.candidate_id,
+            lease,
             &route.source_model,
             failure.status,
             failure.category,
             &HeaderMap::new(),
             hint,
-            &cooldown_context,
-            route.half_open_probe,
         ),
     };
     let mut event = usage_event(
@@ -1689,7 +1740,6 @@ struct InFlight {
     started: Instant,
     response_id: Option<String>,
     prompt_affinity_key: Option<String>,
-    retry_deadline: Option<TokioInstant>,
     client_visible_output: bool,
     legacy_call_id_repair_attempted: bool,
     native_replay_capture: NativeReplayCapture,
@@ -1697,6 +1747,7 @@ struct InFlight {
 
 struct BridgeState {
     credential_fingerprint: [u8; 32],
+    authorization_incarnation: AuthorizationIncarnation,
     local_key_id: String,
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
@@ -1718,6 +1769,12 @@ impl BridgeState {
         self.in_flight
             .as_ref()
             .map(|in_flight| in_flight.event.request_id.as_str())
+    }
+
+    fn request_stream_id(&self) -> Option<&str> {
+        self.in_flight
+            .as_ref()
+            .and_then(|in_flight| in_flight.request.stream_id.as_deref())
     }
 }
 
@@ -1747,6 +1804,7 @@ async fn bridge(
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
     let mut state = BridgeState {
         credential_fingerprint: connected.credential_fingerprint,
+        authorization_incarnation: connected.authorization_incarnation,
         local_key_id: key.id.clone(),
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
@@ -1756,7 +1814,6 @@ async fn bridge(
             started: connected.started,
             response_id: None,
             prompt_affinity_key,
-            retry_deadline: connected.retry_deadline,
             client_visible_output: false,
             legacy_call_id_repair_attempted: false,
             native_replay_capture: NativeReplayCapture::default(),
@@ -1798,13 +1855,16 @@ async fn bridge(
                 if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
                     let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
                     let request_id = state.request_id().map(str::to_owned);
+                    let stream_id = state.request_stream_id().map(str::to_owned);
                     finish_incomplete(&runtime, &mut state, error_codes::UPSTREAM_WEBSOCKET);
                     if active_request {
                         send_gateway_error(
                             &mut downstream,
                             &GatewayFailure::transport(state.upstream_origin),
                             request_id.as_deref(),
-                        ).await;
+                            stream_id.as_deref(),
+                        )
+                        .await;
                     }
                     break;
                 }
@@ -1832,10 +1892,17 @@ async fn bridge(
                     Ok(false) => break,
                     Err(failure) => {
                         let request_id = state.request_id().map(str::to_owned);
+                        let stream_id = state.request_stream_id().map(str::to_owned);
                         let can_send_error = state.can_send_gateway_error();
                         finish_incomplete(&runtime, &mut state, failure.category);
                         if can_send_error {
-                        send_gateway_error(&mut downstream, &failure, request_id.as_deref()).await;
+                            send_gateway_error(
+                                &mut downstream,
+                                &failure,
+                                request_id.as_deref(),
+                                stream_id.as_deref(),
+                            )
+                            .await;
                         }
                         break;
                     }
@@ -1861,16 +1928,13 @@ async fn bridge(
                         .map(|failure| failure.category)
                         .unwrap_or(error_codes::UPSTREAM_WEBSOCKET_CLOSED);
                     let request_id = state.request_id().map(str::to_owned);
+                    let stream_id = state.request_stream_id().map(str::to_owned);
                     if let Some(request) = retryable_disconnect_request(&runtime, &state) {
                         let attempt_offset = state
                             .in_flight
                             .as_ref()
                             .map(|in_flight| in_flight.event.attempt)
                             .unwrap_or_default();
-                        let retry_deadline = state
-                            .in_flight
-                            .as_ref()
-                            .and_then(|in_flight| in_flight.retry_deadline);
                         finish_incomplete(&runtime, &mut state, category);
                         if retry_upstream_connection(
                             &mut downstream,
@@ -1881,7 +1945,6 @@ async fn bridge(
                             &mut state,
                             request,
                             attempt_offset,
-                            retry_deadline,
                             request_id.as_deref(),
                         )
                         .await
@@ -1899,6 +1962,7 @@ async fn bridge(
                                 &mut downstream,
                                 &failure,
                                 request_id.as_deref(),
+                                stream_id.as_deref(),
                             )
                             .await;
                         }
@@ -1913,16 +1977,15 @@ async fn bridge(
                     break;
                 };
                 if let Some(request) = repairable_terminal_request(&runtime, &mut state, &message) {
+                    if let Some(lease) = state.lease.as_ref() {
+                        lease.allow_rotation_repair();
+                    }
                     let request_id = state.request_id().map(str::to_owned);
                     let attempt_offset = state
                         .in_flight
                         .as_ref()
                         .map(|in_flight| in_flight.event.attempt)
                         .unwrap_or_default();
-                    let retry_deadline = state
-                        .in_flight
-                        .as_ref()
-                        .and_then(|in_flight| in_flight.retry_deadline);
                     let mut terminal = match &message {
                         UpstreamMessage::Text(text) => {
                             inspect_upstream_event(text.as_bytes(), &mut state)
@@ -1943,7 +2006,6 @@ async fn bridge(
                         &mut state,
                         request,
                         attempt_offset,
-                        retry_deadline,
                         request_id.as_deref(),
                     )
                     .await
@@ -1959,10 +2021,6 @@ async fn bridge(
                         .as_ref()
                         .map(|in_flight| in_flight.event.attempt)
                         .unwrap_or_default();
-                    let retry_deadline = state
-                        .in_flight
-                        .as_ref()
-                        .and_then(|in_flight| in_flight.retry_deadline);
                     let terminal = match &message {
                         UpstreamMessage::Text(text) => inspect_upstream_event(text.as_bytes(), &mut state),
                         UpstreamMessage::Binary(bytes) => inspect_upstream_event(bytes, &mut state),
@@ -1981,7 +2039,6 @@ async fn bridge(
                         &mut state,
                         request,
                         attempt_offset,
-                        retry_deadline,
                         request_id.as_deref(),
                     )
                     .await
@@ -2003,6 +2060,10 @@ fn retryable_disconnect_request(
     state: &BridgeState,
 ) -> Option<ClientRequest> {
     let in_flight = state.in_flight.as_ref()?;
+    if in_flight.request.budget.dispatches() > 0 {
+        // A disconnect after response.create has no pre-execution proof.
+        return None;
+    }
     if in_flight.client_visible_output
         || in_flight.event.ttft_ms.is_some()
         || in_flight.event.output_tokens.is_some()
@@ -2069,28 +2130,8 @@ fn retryable_terminal_request(
             .then(|| replay_in_flight_continuation(runtime, state))
             .flatten();
     }
-    let persistent = runtime.chatgpt_retry_until_available()
-        && in_flight.request.wait_for_candidate_availability;
-    if (!runtime.automatic_recovery_enabled() && !persistent)
-        || in_flight.request.has_unpaired_tool_output()
-    {
-        return None;
-    }
-    if !super::errors::retryable_failure(status, category, false)
-        || (!runtime.automatic_recovery_enabled()
-            && matches!(
-                category,
-                error_codes::UPSTREAM_UNAUTHORIZED
-                    | error_codes::UPSTREAM_ACCOUNT_DISABLED
-                    | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
-                    | error_codes::UPSTREAM_REGION_UNSUPPORTED
-                    | error_codes::UPSTREAM_MODEL_NOT_FOUND
-                    | error_codes::UPSTREAM_MODEL_UNSUPPORTED
-                    | error_codes::UPSTREAM_FORBIDDEN
-                    | error_codes::UPSTREAM_CONTENT_POLICY
-                    | error_codes::UPSTREAM_INVALID_REQUEST
-                    | error_codes::UPSTREAM_CANDIDATE_REJECTED
-            ))
+    if in_flight.request.has_unpaired_tool_output()
+        || !super::errors::retryable_failure(status, category, false)
     {
         return None;
     }
@@ -2144,6 +2185,7 @@ async fn install_connected(
 ) -> bool {
     let Connected {
         credential_fingerprint,
+        authorization_incarnation,
         upstream: next_upstream,
         initial_messages,
         route,
@@ -2151,7 +2193,6 @@ async fn install_connected(
         lease,
         attempt,
         started,
-        retry_deadline,
     } = connected;
     let _ = upstream
         .send(UpstreamMessage::Close {
@@ -2166,12 +2207,12 @@ async fn install_connected(
         key,
         InFlightInstall {
             credential_fingerprint,
+            authorization_incarnation,
             request,
             route,
             lease,
             attempt,
             started,
-            retry_deadline,
         },
     );
     handle_initial_messages(downstream, runtime, state, initial_messages).await
@@ -2292,7 +2333,7 @@ async fn start_next_request(
     if same_response_id && !model_switch_reset {
         let tried = HashSet::new();
         let selected = runtime
-            .select_and_reserve(
+            .select_and_reserve_with_budget(
                 key,
                 &request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
@@ -2302,6 +2343,7 @@ async fn start_next_request(
                     request.prompt_affinity_key.as_deref(),
                 ),
                 now_ms(),
+                &request.budget,
             )
             .await;
         let Some((selected, lease)) = selected else {
@@ -2313,7 +2355,7 @@ async fn start_next_request(
             // choosing a compatible account or API source.
             if request.has_previous_response_id() && request.requires_affinity_owner {
                 let connected = connect_upstream_while_client_connected(
-                    downstream, runtime, key, headers, request, false, 0, None,
+                    downstream, runtime, key, headers, request, false, 0,
                 )
                 .await?;
                 return Ok(
@@ -2327,6 +2369,7 @@ async fn start_next_request(
                 &tried,
                 request.response_affinity_key.as_deref(),
                 now_ms(),
+                crate::scheduler::rotation::RotationOperation::Text,
             ) {
                 return Err(GatewayFailure::cooldown(retry_at_ms));
             }
@@ -2339,13 +2382,15 @@ async fn start_next_request(
             .prepare_authorization(&selected.candidate_id, now_ms())
             .await
             .map_err(|error| GatewayFailure::prepare(error, state.upstream_origin))?;
-        if prepared.credential_fingerprint() != state.credential_fingerprint {
+        if prepared.credential_fingerprint() != state.credential_fingerprint
+            || prepared.incarnation() != state.authorization_incarnation
+        {
             drop(lease);
             if !request.drop_previous_response_id(runtime, &key.id) {
                 return Err(GatewayFailure::continuation_unavailable());
             }
             let connected = connect_upstream_while_client_connected(
-                downstream, runtime, key, headers, request, true, 0, None,
+                downstream, runtime, key, headers, request, true, 0,
             )
             .await?;
             return Ok(
@@ -2369,15 +2414,21 @@ async fn start_next_request(
         route.service_tier = request.service_tier(runtime, &route);
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
-        if let Err(failure) =
-            send_request(upstream, request.payload_for(&route)?, upstream_origin).await
-        {
-            record_connect_failure(runtime, key, &route, &request, 1, started, &failure, None);
-            return Err(failure);
-        }
+        let payload = request.payload_for(&route)?;
+        request.budget.configure_retry_window(
+            runtime.route_recovery_window_ms(),
+            runtime.route_recovery_enabled(),
+        );
+        let dispatch = lease
+            .begin_rotation_dispatch_for(&prepared, runtime)
+            .map_err(|_| GatewayFailure::unavailable())?;
+        let attempt = u16::try_from(dispatch.0).unwrap_or(u16::MAX);
+        // A failed WebSocket flush does not prove that remote execution never
+        // started. Do not convert it into a health vote or retry.
+        send_request(upstream, payload, upstream_origin).await?;
         let event = usage_event(
             &request.request_id,
-            1,
+            attempt,
             &key.id,
             &route,
             Some(&request.reasoning_effort_for(&route)),
@@ -2397,9 +2448,6 @@ async fn start_next_request(
             started,
             response_id: None,
             prompt_affinity_key: request.prompt_affinity_key,
-            retry_deadline: (!runtime.chatgpt_retry_until_available()).then(|| {
-                TokioInstant::now() + Duration::from_millis(runtime.chatgpt_retry_window_ms())
-            }),
             client_visible_output: false,
             legacy_call_id_repair_attempted: false,
             native_replay_capture: NativeReplayCapture::default(),
@@ -2407,11 +2455,12 @@ async fn start_next_request(
         return Ok(true);
     }
     let connected = connect_upstream_while_client_connected(
-        downstream, runtime, key, headers, request, true, 0, None,
+        downstream, runtime, key, headers, request, true, 0,
     )
     .await?;
     let Connected {
         credential_fingerprint,
+        authorization_incarnation,
         upstream: next_upstream,
         initial_messages,
         route,
@@ -2419,7 +2468,6 @@ async fn start_next_request(
         lease,
         attempt,
         started,
-        retry_deadline,
     } = connected;
     let _ = upstream
         .send(UpstreamMessage::Close {
@@ -2434,12 +2482,12 @@ async fn start_next_request(
         key,
         InFlightInstall {
             credential_fingerprint,
+            authorization_incarnation,
             request,
             route,
             lease,
             attempt,
             started,
-            retry_deadline,
         },
     );
     Ok(handle_initial_messages(downstream, runtime, state, initial_messages).await)
@@ -2461,12 +2509,12 @@ async fn handle_initial_messages(
 
 struct InFlightInstall {
     credential_fingerprint: [u8; 32],
+    authorization_incarnation: AuthorizationIncarnation,
     request: ClientRequest,
     route: ExecutorRoute,
     lease: CandidateLease,
     attempt: u16,
     started: Instant,
-    retry_deadline: Option<TokioInstant>,
 }
 
 fn install_in_flight(
@@ -2477,12 +2525,12 @@ fn install_in_flight(
 ) {
     let InFlightInstall {
         credential_fingerprint,
+        authorization_incarnation,
         request,
         route,
         lease,
         attempt,
         started,
-        retry_deadline,
     } = install;
     let event = usage_event(
         &request.request_id,
@@ -2501,6 +2549,7 @@ fn install_in_flight(
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
     state.credential_fingerprint = credential_fingerprint;
+    state.authorization_incarnation = authorization_incarnation;
     state.upstream_origin = route_error_origin(&route);
     state.last_response_id = None;
     state.in_flight = Some(InFlight {
@@ -2510,7 +2559,6 @@ fn install_in_flight(
         started,
         response_id: None,
         prompt_affinity_key: request.prompt_affinity_key,
-        retry_deadline,
         client_visible_output: false,
         legacy_call_id_repair_attempted: false,
         native_replay_capture: NativeReplayCapture::default(),
@@ -2526,18 +2574,13 @@ async fn handle_upstream_message(
     match message {
         UpstreamMessage::Text(text) => {
             if text.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                let request_id = state.request_id().map(str::to_owned);
-                let can_send_error = state.can_send_gateway_error();
-                finish_incomplete(runtime, state, error_codes::STREAM_EVENT_TOO_LARGE);
-                if can_send_error {
-                    send_gateway_error(
-                        downstream,
-                        &GatewayFailure::message_too_large(state.upstream_origin),
-                        request_id.as_deref(),
-                    )
-                    .await;
-                }
+                reject_oversized_upstream_message(downstream, runtime, state).await;
                 return false;
+            }
+            if state.in_flight.is_none() && is_response_frame(text.as_bytes()) {
+                // A completed turn no longer owns upstream response frames.
+                // Do not leak late deltas/terminals into the next client turn.
+                return true;
             }
             let terminal = inspect_upstream_event(text.as_bytes(), state);
             mark_client_visible_output(state, text.as_bytes());
@@ -2549,18 +2592,11 @@ async fn handle_upstream_message(
         }
         UpstreamMessage::Binary(bytes) => {
             if bytes.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-                let request_id = state.request_id().map(str::to_owned);
-                let can_send_error = state.can_send_gateway_error();
-                finish_incomplete(runtime, state, error_codes::STREAM_EVENT_TOO_LARGE);
-                if can_send_error {
-                    send_gateway_error(
-                        downstream,
-                        &GatewayFailure::message_too_large(state.upstream_origin),
-                        request_id.as_deref(),
-                    )
-                    .await;
-                }
+                reject_oversized_upstream_message(downstream, runtime, state).await;
                 return false;
+            }
+            if state.in_flight.is_none() && is_response_frame(&bytes) {
+                return true;
             }
             let terminal = inspect_upstream_event(&bytes, state);
             mark_client_visible_output(state, bytes.as_ref());
@@ -2575,12 +2611,14 @@ async fn handle_upstream_message(
         UpstreamMessage::Close { code, reason } => {
             let active_request = state.in_flight.is_some() && state.can_send_gateway_error();
             let request_id = state.request_id().map(str::to_owned);
+            let stream_id = state.request_stream_id().map(str::to_owned);
             finish_incomplete(runtime, state, error_codes::UPSTREAM_WEBSOCKET_CLOSED);
             if active_request {
                 send_gateway_error(
                     downstream,
                     &GatewayFailure::closed(state.upstream_origin),
                     request_id.as_deref(),
+                    stream_id.as_deref(),
                 )
                 .await;
             } else {
@@ -2594,6 +2632,37 @@ async fn handle_upstream_message(
             false
         }
     }
+}
+
+async fn reject_oversized_upstream_message(
+    downstream: &mut WebSocket,
+    runtime: &GatewayRuntime,
+    state: &mut BridgeState,
+) {
+    let request_id = state.request_id().map(str::to_owned);
+    let stream_id = state.request_stream_id().map(str::to_owned);
+    let can_send_error = state.can_send_gateway_error();
+    finish_incomplete(runtime, state, error_codes::STREAM_EVENT_TOO_LARGE);
+    if can_send_error {
+        send_gateway_error(
+            downstream,
+            &GatewayFailure::message_too_large(state.upstream_origin),
+            request_id.as_deref(),
+            stream_id.as_deref(),
+        )
+        .await;
+    }
+}
+
+fn is_response_frame(payload: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(payload)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|event_type| event_type.starts_with("response."))
+        })
 }
 
 /// Mark a request as owned by the selected route only after the upstream has
@@ -2708,6 +2777,31 @@ fn finish_terminal(
             now_ms(),
         );
     }
+    if let Some(lease) = state.lease.take() {
+        if terminal_success {
+            lease.settle_rotation_success(now_ms());
+        } else if outcome != EventTerminalOutcome::Failure {
+            lease.settle_rotation_terminal(now_ms());
+        } else {
+            let mut failure = super::errors::AttemptFailure::classified_with_hint(
+                terminal_failure_status(terminal.status),
+                terminal
+                    .error_category
+                    .unwrap_or(error_codes::UPSTREAM_TERMINAL),
+                terminal.body_hint,
+            );
+            if in_flight.client_visible_output {
+                failure.execution = crate::scheduler::rotation::ExecutionObservation::committed();
+            }
+            super::errors::settle_attempt_failure(
+                runtime,
+                &lease,
+                &in_flight.route.source_model,
+                &failure,
+                &terminal.headers,
+            );
+        }
+    }
     if terminal_success {
         if let Some(response) = in_flight
             .native_replay_capture
@@ -2757,30 +2851,22 @@ fn finish_terminal(
         in_flight.event.error_category = Some(category.to_string());
         in_flight.event.upstream_error = terminal.upstream_error;
         if super::errors::retryable_failure(status, category, false) {
-            let cooldown_context = CooldownContext {
-                scope: &in_flight.route.scope,
-                allowed_protocols: &in_flight.route.allowed_protocols,
-            };
-            let failure_state = apply_failure_cooldown_with_hint(
+            let failure_state = current_failure_state(
                 runtime,
                 &in_flight.route.candidate_id,
                 &in_flight.route.source_model,
-                status,
-                category,
-                &terminal.headers,
-                terminal.body_hint,
-                &cooldown_context,
-                in_flight.route.half_open_probe,
             );
             apply_failure_state(&mut in_flight.event, failure_state);
         }
     }
     emit_usage(runtime, in_flight.event);
-    state.lease.take();
     keep_client_socket
 }
 
 fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category: &str) {
+    if let Some(lease) = state.lease.take() {
+        lease.settle_rotation_unknown(now_ms());
+    }
     clear_transient_response_affinity(runtime, state);
     let Some(mut in_flight) = state.in_flight.take() else {
         state.lease.take();
@@ -2800,18 +2886,16 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
     // Cool only this physical slot and model. A stream failure on one
     // credential must not make unrelated routes unavailable, regardless of
     // whether the selected route is an OAuth account or a direct API source.
-    if incomplete_requires_cooldown(category) {
-        let cooldown_context = CooldownContext {
-            scope: &in_flight.route.scope,
-            allowed_protocols: &in_flight.route.allowed_protocols,
-        };
-        let failure_state = apply_cooldown(
+    if incomplete_requires_cooldown(category)
+        && !matches!(
+            category,
+            error_codes::UPSTREAM_WEBSOCKET_CLOSED | error_codes::UPSTREAM_WEBSOCKET
+        )
+    {
+        let failure_state = current_failure_state(
             runtime,
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
-            TRANSIENT_COOLDOWN_MS,
-            &cooldown_context,
-            in_flight.route.half_open_probe,
         );
         apply_failure_state(&mut in_flight.event, failure_state);
     }
@@ -2841,7 +2925,7 @@ mod tests {
     };
     use axum::body::Body;
     use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Arc;
 
     fn runtime() -> GatewayRuntime {
@@ -2893,6 +2977,19 @@ mod tests {
         assert_eq!(terminal.outcome, Some(EventTerminalOutcome::Incomplete));
         assert_eq!(terminal.error_category, Some("response_incomplete"));
         assert!(!incomplete_requires_cooldown("response_incomplete"));
+    }
+
+    #[test]
+    fn completed_websocket_event_does_not_override_an_explicit_failed_status() {
+        let terminal = event_terminal(&json!({
+            "type": "response.completed",
+            "response": {"id": "resp_failed", "status": "failed"}
+        }));
+        assert_eq!(terminal.outcome, Some(EventTerminalOutcome::Failure));
+        assert_eq!(
+            terminal.error_category,
+            Some(crate::error_codes::UPSTREAM_TERMINAL)
+        );
     }
 
     #[test]
@@ -2963,7 +3060,7 @@ mod tests {
         let terminal = super::parse_sse_event(
             b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
         );
-        let message = fallback_event_message(&terminal, ErrorOrigin::Account)
+        let message = fallback_event_message(&terminal, None, ErrorOrigin::Account)
             .ok()
             .flatten()
             .expect("opaque compaction must produce a WebSocket message");
@@ -2981,13 +3078,41 @@ mod tests {
     }
 
     #[test]
+    fn named_http_fallback_scopes_json_compaction_but_rejects_unroutable_raw_data() {
+        let json_terminal = super::parse_sse_event(
+            br#"event: response.compaction.delta
+data: {"type":"response.compaction.delta","delta":"opaque","stream_id":"other"}
+
+"#,
+        );
+        let message = fallback_event_message(&json_terminal, Some("main"), ErrorOrigin::Account)
+            .ok()
+            .flatten()
+            .expect("named compaction JSON must be forwarded");
+        assert!(!message.semantic_output);
+        let text = match message.message {
+            axum::extract::ws::Message::Text(text) => Some(text),
+            _ => None,
+        }
+        .expect("JSON compaction must be a text frame");
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["delta"], "opaque");
+        assert_eq!(value["stream_id"], "main");
+
+        let raw_terminal = super::parse_sse_event(
+            b"event: response.compaction.delta\ndata: encrypted-compaction-fragment\n\n",
+        );
+        assert!(fallback_event_message(&raw_terminal, Some("main"), ErrorOrigin::Account).is_err());
+    }
+
+    #[test]
     fn http_fallback_does_not_commit_response_setup_events() {
         let terminal = super::parse_sse_event(
             br#"data: {"type":"response.created","response":{"id":"resp_setup"}}
 
 "#,
         );
-        let message = fallback_event_message(&terminal, ErrorOrigin::Account)
+        let message = fallback_event_message(&terminal, None, ErrorOrigin::Account)
             .ok()
             .flatten()
             .expect("setup event must still be forwarded");
@@ -3041,7 +3166,7 @@ mod tests {
             ErrorOrigin::Account,
         )
         .with_upstream_error(Some(details));
-        let event = super::failure::gateway_error_event(&failure, None);
+        let event = super::failure::gateway_error_event(&failure, None, None);
         assert_eq!(event["error"]["message"], "Invalid field: temperature");
         let handshake = GatewayFailure::upstream_status(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -3104,7 +3229,10 @@ mod tests {
             "upstream_invalid_request",
             ErrorOrigin::Account,
         );
-        let event = super::failure::gateway_error_event(&failure, Some("relay-request-3"));
+        let event =
+            super::failure::gateway_error_event(&failure, Some("relay-request-3"), Some("main"));
+
+        assert_eq!(event["stream_id"], "main");
 
         assert_eq!(event["error"]["code"], "invalid_request");
         assert_eq!(
@@ -3415,6 +3543,37 @@ mod tests {
             .payload_for(&route)
             .unwrap_or_else(|error| panic!("payload should serialize: {}", error.message));
         assert!(payload.contains("\"stream_id\":\"main\""));
+    }
+
+    #[test]
+    fn client_request_rejects_invalid_named_stream_ids() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        for invalid in [
+            "",
+            " main",
+            "main ",
+            "other/lane",
+            "a b",
+            "café",
+            "a\nb",
+            "a".repeat(257).as_str(),
+        ] {
+            let payload = serde_json::to_vec(&json!({
+                "type": "response.create",
+                "stream_id": invalid,
+                "model": "relay/upstream-model",
+                "input": "hello",
+            }))
+            .unwrap();
+            let failure = ClientRequest::parse(&runtime, &key, &HeaderMap::new(), &payload)
+                .err()
+                .expect("invalid named stream_id must be rejected");
+            assert_eq!(failure.status, StatusCode::BAD_REQUEST);
+            assert_eq!(failure.category, "invalid_stream_id");
+        }
     }
 
     #[test]

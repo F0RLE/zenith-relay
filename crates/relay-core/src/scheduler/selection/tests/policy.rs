@@ -13,15 +13,11 @@ pub(super) fn mixed(mode: PoolRoutingMode) -> PoolScheduler {
 }
 
 pub(super) fn dispatch(scheduler: &mut PoolScheduler) -> String {
-    let selection = select(scheduler, &HashSet::new()).unwrap();
-    assert!(scheduler.reserve_for(&selection.candidate_id, "gpt-5", 100));
-    scheduler.commit_rotation(&selection, false);
-    assert!(scheduler.release_for(&selection.candidate_id, Some("gpt-5")));
-    selection.candidate_id
+    rotation::dispatch(scheduler, 100, None)
 }
 
 #[test]
-fn unified_order_skips_unavailable_accounts_and_falls_back_between_apis() {
+fn saved_order_skips_unavailable_accounts_and_falls_back_between_apis() {
     let mut scheduler = mixed(PoolRoutingMode::InOrder);
     assert_eq!(dispatch(&mut scheduler), "account");
     scheduler.candidates.get_mut("account").unwrap().health = CandidateHealth::ReauthRequired;
@@ -40,7 +36,7 @@ fn unified_order_skips_unavailable_accounts_and_falls_back_between_apis() {
 }
 
 #[test]
-fn unified_order_can_place_apis_before_accounts_without_type_gates() {
+fn saved_order_can_place_apis_before_accounts_without_type_gates() {
     let mut scheduler = mixed(PoolRoutingMode::InOrder);
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy.members.rotate_left(1);
@@ -81,7 +77,7 @@ fn round_robin_weights_count_physical_members_once() {
     let mut counts = BTreeMap::new();
     for _ in 0..100 {
         let id = dispatch(&mut scheduler);
-        let member = super::super::unified::member_key(&scheduler.candidates[&id]);
+        let member = super::super::members::member_key(&scheduler.candidates[&id]);
         *counts.entry(member).or_insert(0) += 1;
     }
     assert_eq!(counts["account:account"], 20);
@@ -119,6 +115,7 @@ fn member_capacity_covers_protocols_and_lanes_and_survives_removal() {
     let mut scheduler = mixed(PoolRoutingMode::InOrder);
     let mut alias = candidate("api-a::chat");
     alias.source_id = "api-a".into();
+    alias.models.insert("gpt-image-2".into());
     scheduler.upsert(alias);
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy
@@ -177,7 +174,7 @@ fn ownership_overrides_rotation_but_soft_affinity_does_not_override_order() {
 
 #[test]
 fn smart_spreads_neutral_members_and_avoids_busy_and_exhausted_members() {
-    let mut scheduler = mixed(PoolRoutingMode::Smart);
+    let mut scheduler = mixed(PoolRoutingMode::Automatic);
     let selected: BTreeSet<_> = (0..12).map(|_| dispatch(&mut scheduler)).collect();
     assert_eq!(selected.len(), 3);
     scheduler.candidates.get_mut("account").unwrap().quota = CandidateQuota::Exhausted;
@@ -188,7 +185,7 @@ fn smart_spreads_neutral_members_and_avoids_busy_and_exhausted_members() {
 #[test]
 fn smart_selection_is_independent_of_saved_manual_order() {
     let sequence = |reverse: bool| {
-        let mut scheduler = mixed(PoolRoutingMode::Smart);
+        let mut scheduler = mixed(PoolRoutingMode::Automatic);
         scheduler.upsert(candidate("api-c"));
         let mut policy = scheduler.migrated_pool_routing();
         if reverse {
@@ -211,7 +208,7 @@ fn smart_selection_is_independent_of_saved_manual_order() {
 
 #[test]
 fn smart_does_not_keep_preferring_quota_that_aged_without_a_refresh() {
-    let mut scheduler = mixed(PoolRoutingMode::Smart);
+    let mut scheduler = mixed(PoolRoutingMode::Automatic);
     scheduler.set_quota_stale_after_ms(10);
     let account = scheduler.candidates.get_mut("account").unwrap();
     account.quota = CandidateQuota::Available(10_000);
@@ -228,70 +225,37 @@ fn smart_does_not_keep_preferring_quota_that_aged_without_a_refresh() {
 }
 
 #[test]
-fn smart_cache_affinity_stays_within_the_best_scoring_group() {
-    let mut scheduler = mixed(PoolRoutingMode::Smart);
+fn smart_cache_affinity_does_not_compare_unrelated_quota_percentages() {
+    let mut scheduler = mixed(PoolRoutingMode::Automatic);
     for (id, remaining) in [("account", 10_000), ("api-a", 8_000), ("api-b", 6_000)] {
         scheduler.candidates.get_mut(id).unwrap().quota = CandidateQuota::Available(remaining);
     }
     scheduler.bind_prompt_affinity("cache:prompt", "api-b", 100);
-    let mut selected = BTreeSet::new();
     for _ in 0..12 {
-        let selection = scheduler
-            .select(SelectionRequest {
-                model: "gpt-5",
-                allowed_protocols: &[WireApi::Responses],
-                scope: &CandidateScope::default(),
-                tried: &HashSet::new(),
-                response_affinity_key: None,
-                prompt_affinity_key: Some("cache:prompt"),
-                now_ms: 100,
-            })
-            .unwrap();
-        assert_ne!(selection.candidate_id, "api-b");
-        let slot = scheduler
-            .reserve_request(&selection.candidate_id, "gpt-5", 100, false)
-            .unwrap();
-        scheduler.commit_rotation(&selection, false);
-        scheduler.release_reservation(slot);
-        selected.insert(selection.candidate_id);
+        assert_eq!(
+            rotation::dispatch(&mut scheduler, 100, Some("cache:prompt")),
+            "api-b"
+        );
     }
-    assert_eq!(selected, BTreeSet::from(["account".into(), "api-a".into()]));
 }
 
 #[test]
 fn smart_cache_affinity_within_the_best_group_still_counts_toward_rotation() {
-    let mut scheduler = mixed(PoolRoutingMode::Smart);
+    let mut scheduler = mixed(PoolRoutingMode::Automatic);
     scheduler.bind_prompt_affinity("cache:prompt", "api-b", 100);
-    let selection = scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: Some("cache:prompt"),
-            now_ms: 100,
-        })
-        .unwrap();
-    assert_eq!(selection.candidate_id, "api-b");
     assert_eq!(
-        selection.diagnostics.reason,
-        SelectionReason::PromptCacheAffinity
+        rotation::dispatch(&mut scheduler, 100, Some("cache:prompt")),
+        "api-b"
     );
-    let slot = scheduler
-        .reserve_request(&selection.candidate_id, "gpt-5", 100, false)
-        .unwrap();
-    scheduler.commit_rotation(&selection, false);
-    scheduler.release_reservation(slot);
     assert_eq!(dispatch(&mut scheduler), "account");
     assert_eq!(dispatch(&mut scheduler), "api-a");
 }
 
 #[test]
 fn migration_matches_shared_inventory_order() {
-    let scheduler = mixed(PoolRoutingMode::Smart);
+    let scheduler = mixed(PoolRoutingMode::Automatic);
     let expected = crate::resolve_pool_routing(
-        None,
+        Some(&PoolRoutingPolicy::default()),
         vec![
             (PoolMemberKind::Source, "api-a".into(), 0, 1),
             (PoolMemberKind::Account, "account".into(), 0, 1),
@@ -299,5 +263,8 @@ fn migration_matches_shared_inventory_order() {
         ],
     );
     assert_eq!(scheduler.pool_routing, Some(expected));
-    assert_eq!(PoolRoutingPolicy::default().mode, PoolRoutingMode::Smart);
+    assert_eq!(
+        PoolRoutingPolicy::default().mode,
+        PoolRoutingMode::Automatic
+    );
 }

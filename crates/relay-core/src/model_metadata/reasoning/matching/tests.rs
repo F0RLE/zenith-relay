@@ -71,12 +71,12 @@ fn qualified_leaf_fallback_stays_inside_its_provider() {
 #[test]
 fn punctuation_and_provider_names_do_not_become_version_aliases() {
     assert_matches(
-        &["vendor-2-1/model-3.1", "vendor/模型-3.1"],
+        &["vendor-2-1/model-3.1", "vendor/жЁЎећ‹-3.1"],
         &[
             ("vendor-2.1/model-3-1", None),
             ("vendor-2-1/model-3-1", Some(0)),
-            ("vendor/模型-3-1", Some(1)),
-            ("vendor/模型-3_1", None),
+            ("vendor/жЁЎећ‹-3-1", Some(1)),
+            ("vendor/жЁЎећ‹-3_1", None),
         ],
     );
     assert_matches(

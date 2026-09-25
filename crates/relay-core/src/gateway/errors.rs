@@ -1,8 +1,8 @@
 use super::now_ms;
 use crate::error_codes;
 use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError};
-use crate::scheduler::{CandidateScope, CooldownReason, CooldownRequest};
-use crate::{GatewayRuntime, UsageEvent, WireApi};
+use crate::scheduler::{CooldownReason, CooldownRequest};
+use crate::{GatewayRuntime, UsageEvent};
 use axum::body::Body;
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, Response, StatusCode};
@@ -16,9 +16,9 @@ mod failure;
 mod response;
 
 pub(super) use cooldown::{
-    apply_attempt_failure_cooldown, apply_cooldown, apply_cooldown_for_model,
-    apply_failure_cooldown_with_body, apply_failure_cooldown_with_hint, apply_failure_state,
-    apply_mandatory_cooldown, rate_limit_body_hint, rate_limit_body_hint_value, RateLimitBodyHint,
+    apply_failure_state, current_failure_state, failure_cooldown, rate_limit_body_hint,
+    rate_limit_body_hint_value, settle_attempt_failure, settle_classified_failure,
+    settle_image_capability_failure, settle_status_failure, RateLimitBodyHint,
 };
 
 pub(super) use failure::{
@@ -45,14 +45,56 @@ pub(super) use response::{
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 
+/// Waiting is only useful for an unavailable route, never for a request or
+/// credential that must be changed before another generation is possible.
+pub(super) fn retryable_recovery_wait(
+    status: StatusCode,
+    category: &'static str,
+    has_previous_response_id: bool,
+) -> bool {
+    retryable_failure(status, category, has_previous_response_id)
+        && !matches!(
+            category,
+            error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_FORBIDDEN
+                | error_codes::UPSTREAM_CONTENT_POLICY
+                | error_codes::UPSTREAM_INVALID_REQUEST
+                | error_codes::UPSTREAM_CANDIDATE_REJECTED
+        )
+}
+
+pub(super) fn admission_failure(
+    reason: crate::scheduler::rotation::AdmissionStopReason,
+) -> (&'static str, &'static str) {
+    use crate::scheduler::rotation::AdmissionStopReason;
+    match reason {
+        AdmissionStopReason::QueueFull => (
+            error_codes::ADMISSION_QUEUE_FULL,
+            "Relay admission queue is full",
+        ),
+        AdmissionStopReason::WaitExpired => (
+            error_codes::ADMISSION_WAIT_EXPIRED,
+            "Relay request admission wait expired",
+        ),
+    }
+}
+
+pub(super) fn admission_error(
+    budget: &crate::scheduler::rotation::SharedRequestBudget,
+) -> Option<Response<Body>> {
+    let (code, message) = admission_failure(budget.admission_stop_reason()?);
+    Some(api_error(StatusCode::SERVICE_UNAVAILABLE, message, code))
+}
+
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
-
-pub(super) struct CooldownContext<'a> {
-    pub(super) scope: &'a CandidateScope,
-    pub(super) allowed_protocols: &'a [WireApi],
-}
 
 /// Marks an error body constructed by Relay itself. Native protocol handlers
 /// use this marker to normalize only local errors without rewriting an
@@ -62,6 +104,7 @@ pub(super) struct LocalGatewayError;
 
 #[derive(Clone, Copy)]
 pub(super) struct AttemptFailure {
+    pub(super) execution: crate::scheduler::rotation::ExecutionObservation,
     pub(super) status: StatusCode,
     pub(super) category: &'static str,
     pub(super) message: &'static str,
@@ -113,6 +156,7 @@ fn preserved_error_details(
     })
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct FailureState {
     pub(super) cooldown_scope: Option<String>,
     pub(super) retry_at_ms: Option<u64>,
@@ -223,7 +267,8 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
             "no tool output found for custom tool call",
             "no tool output found for apply patch call",
         ],
-    ) {
+    ) || failure::responses_call_id_is_missing_text(text)
+    {
         error_codes::UPSTREAM_TOOL_CALL_MISMATCH
     } else if text_has_any(
         text,
@@ -349,6 +394,17 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         ],
     ) {
         error_codes::UPSTREAM_CONTENT_POLICY
+    } else if text_has_any(
+        text,
+        &[
+            "model_disabled",
+            "requested model is disabled",
+            "this route cannot serve the request",
+        ],
+    ) {
+        // An explicit route rejection is scoped to that model, not a generic
+        // invalid input and not a vote against the provider's inference health.
+        error_codes::UPSTREAM_CANDIDATE_REJECTED
     } else if text_has_any(
         text,
         &[
@@ -496,7 +552,7 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
     } else if status == StatusCode::GATEWAY_TIMEOUT {
         error_codes::UPSTREAM_GATEWAY_TIMEOUT
     } else if status.is_client_error() {
-        error_codes::UPSTREAM_CANDIDATE_REJECTED
+        error_codes::UPSTREAM_INVALID_REQUEST
     } else if status.is_server_error() {
         error_codes::UPSTREAM_SERVER_ERROR
     } else {
@@ -630,6 +686,14 @@ pub(super) fn upstream_event_failure_category(
         event_type
     };
     match event_type {
+        Some("response.completed" | "response.done") => {
+            match value.pointer("/response/status").and_then(Value::as_str) {
+                Some("failed" | "cancelled" | "canceled") => Some(error_codes::UPSTREAM_TERMINAL),
+                Some("incomplete") => Some(error_codes::RESPONSE_INCOMPLETE),
+                Some("completed") | None => None,
+                Some(_) => Some(error_codes::STREAM_INVALID),
+            }
+        }
         Some("response.incomplete") => Some(error_codes::RESPONSE_INCOMPLETE),
         Some("response.cancelled" | "response.canceled") => Some(error_codes::UPSTREAM_CANCELLED),
         Some("response.failed" | "error") => {

@@ -81,18 +81,14 @@ impl SourceProtocolConfig {
         let profile = service_protocol(base_url);
         let mut indexed = BTreeMap::<_, Vec<_>>::new();
         for entry in &self.capabilities {
+            // Legacy generation probes are diagnostic records, not routing or
+            // model-capability evidence. Never let them override discovery.
+            if entry.origin == CapabilityOrigin::GenerationProbe {
+                continue;
+            }
             if entry.status == CapabilityStatus::Unknown
                 && (entry.origin != CapabilityOrigin::Catalog
                     || (entry.features.is_empty() && entry.reasoning_efforts.is_empty()))
-            {
-                continue;
-            }
-            // Failed legacy probes are diagnostic only; they cannot override
-            // catalog support or remove an otherwise configured model.
-            if entry.origin == CapabilityOrigin::GenerationProbe
-                && (!entry.status.available()
-                    || entry.features.get(&ProtocolFeature::Text)
-                        == Some(&CapabilityStatus::Unsupported))
             {
                 continue;
             }
@@ -102,12 +98,7 @@ impl SourceProtocolConfig {
                 .push(entry);
         }
         for observations in indexed.values_mut() {
-            observations.sort_by_key(|entry| {
-                (
-                    entry.origin == CapabilityOrigin::GenerationProbe,
-                    entry.checked_at_ms,
-                )
-            });
+            observations.sort_by_key(|entry| entry.checked_at_ms);
         }
         let mut result = Vec::new();
         for model in models {
@@ -228,9 +219,10 @@ impl SourceProtocolConfig {
         self.capabilities.extend(observations);
     }
 
-    /// Resolve every catalog model. Protocol evidence selects the upstream
-    /// wire format, while missing or failed probes never remove a model from
-    /// the pool. Names, families and prices never participate.
+    /// Resolve every catalog model. Catalog declarations and configured
+    /// endpoint identity select the upstream wire format. Legacy generation
+    /// probes are diagnostic only. Names, families and prices never
+    /// participate.
     pub fn resolve(
         &self,
         base_url: &str,
@@ -293,9 +285,10 @@ impl SourceProtocolConfig {
             for client in WireApi::ALL {
                 // Resolve each client protocol independently. If the model
                 // accepts that protocol upstream, keep it native. Otherwise
-                // use the strongest available upstream evidence and bridge
-                // to it. Missing or failed probes fall back to the source
-                // protocol, so catalog membership remains routable.
+                // use the strongest available catalog evidence and bridge to
+                // it. If protocol evidence is absent, the configured source
+                // protocol is the fallback; catalog membership remains
+                // routable regardless of legacy diagnostic probes.
                 let upstream = available
                     .iter()
                     .find(|capability| capability.upstream_wire_api == client)
@@ -650,6 +643,38 @@ mod tests {
             responses.features.get(&ProtocolFeature::Text),
             Some(&CapabilityStatus::Unsupported)
         );
+    }
+
+    #[test]
+    fn successful_generation_probe_does_not_override_catalog_routes() {
+        let models = vec!["test".into()];
+        let mut config = SourceProtocolConfig {
+            capabilities: catalog_capabilities(
+                &json!({"data":[{"id":"test","supported_endpoint_types":["responses"]}]}),
+                1,
+            ),
+            ..Default::default()
+        };
+        config.capabilities.push(ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: WireApi::ChatCompletions,
+            status: CapabilityStatus::Confirmed,
+            origin: CapabilityOrigin::GenerationProbe,
+            checked_at_ms: 2,
+            features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Confirmed)]),
+            reasoning_efforts: vec![],
+        });
+
+        let routes = config
+            .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
+            .unwrap();
+        assert!(routes.iter().all(|route| {
+            route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Responses
+        }));
+        assert!(config
+            .effective_capabilities("https://example.test/v1", &models)
+            .iter()
+            .all(|capability| capability.origin != CapabilityOrigin::GenerationProbe));
     }
 
     #[test]

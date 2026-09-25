@@ -269,6 +269,8 @@ pub fn translate_messages_response(
     request: MessagesBridgeRequest,
     upstream: &Value,
 ) -> AdapterResult<MessagesBridgeResponse> {
+    let (status, incomplete_reason) =
+        messages_response_terminal(upstream.get("stop_reason").and_then(Value::as_str))?;
     let upstream_id = upstream
         .get("id")
         .and_then(Value::as_str)
@@ -281,7 +283,8 @@ pub fn translate_messages_response(
         .ok_or_else(AdapterError::upstream_response_invalid)?
         .clone();
     validate_messages_tool_calls(&request.state, &content)?;
-    let (mut output, _) = responses_output_from_messages_content(&content, &request.state)?;
+    let (mut output, _) =
+        responses_output_from_messages_content(&content, &request.state, status == "incomplete")?;
     let response_id = bridged_response_id_scoped(request.response_scope(), upstream_id);
     set_message_output_id(&mut output, &response_id);
     let usage = responses_usage(upstream.get("usage"));
@@ -292,7 +295,8 @@ pub fn translate_messages_response(
             .get("created_at")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
-        "status": "completed",
+        "status": status,
+        "incomplete_details": incomplete_reason.map(|reason| json!({"reason": reason})),
         "model": request.state.model,
         "output": output,
         "usage": usage,
@@ -304,6 +308,19 @@ pub fn translate_messages_response(
         response_id,
         continuation,
     })
+}
+
+/// Map only terminal Messages reasons that a Responses client can represent.
+/// A missing or unknown reason must not be presented as a completed turn.
+pub(super) fn messages_response_terminal(
+    stop_reason: Option<&str>,
+) -> AdapterResult<(&'static str, Option<&'static str>)> {
+    match stop_reason {
+        Some("end_turn" | "stop_sequence" | "tool_use") => Ok(("completed", None)),
+        Some("max_tokens") => Ok(("incomplete", Some("max_output_tokens"))),
+        Some("refusal") => Ok(("incomplete", Some("content_filter"))),
+        _ => Err(AdapterError::upstream_response_invalid()),
+    }
 }
 
 pub fn bridged_response_id(upstream_id: &str) -> String {
@@ -1248,6 +1265,7 @@ fn apply_reasoning(
 pub(super) fn responses_output_from_messages_content(
     content: &[Value],
     state: &MessagesBridgeState,
+    allow_empty: bool,
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
     let mut output = Vec::new();
     let mut preserved = Vec::new();
@@ -1347,7 +1365,7 @@ pub(super) fn responses_output_from_messages_content(
         }
     }
     flush_text(&mut output, &mut text, &mut text_message_index);
-    if output.is_empty() {
+    if output.is_empty() && !allow_empty {
         return Err(AdapterError::upstream_response_invalid());
     }
     Ok((output, preserved))

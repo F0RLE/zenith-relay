@@ -1,10 +1,10 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::errors::{
-    api_error, api_error_type, apply_attempt_failure_cooldown, apply_cooldown_for_model,
-    apply_failure_cooldown_with_body, apply_failure_cooldown_with_hint, apply_failure_state,
-    apply_mandatory_cooldown, canonical_upstream_status, classify_upstream_error_value,
-    cooldown_error, rate_limit_body_hint_value, retryable_failure, upstream_failure_status,
-    upstream_status_from_value, AttemptFailure, CooldownContext, RateLimitBodyHint,
+    api_error, api_error_type, apply_failure_state, canonical_upstream_status,
+    classify_upstream_error_value, cooldown_error, current_failure_state,
+    rate_limit_body_hint_value, retryable_failure, settle_attempt_failure,
+    settle_classified_failure, settle_image_capability_failure, settle_status_failure,
+    upstream_failure_status, upstream_status_from_value, AttemptFailure, RateLimitBodyHint,
     TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
@@ -438,18 +438,40 @@ async fn execute_prepared(
     endpoint: ImageEndpoint,
 ) -> Response<Body> {
     let request_id = request_id();
+    let budget = crate::scheduler::rotation::SharedRequestBudget::for_incoming_request(
+        runtime.request_dispatch_budget(),
+    );
+    budget.retain_input_bytes(
+        prepared
+            .input_images
+            .iter()
+            .map(String::capacity)
+            .fold(
+                prepared.raw_body.len().saturating_add(
+                    crate::gateway::request_body::retained_object_bytes(&prepared.fields),
+                ),
+                usize::saturating_add,
+            )
+            .saturating_add(prepared.mask_image.as_ref().map_or(0, String::capacity))
+            .saturating_mul(3)
+            .saturating_add(16 * 1024),
+    );
     let mut tried = HashSet::new();
-    let mut attempt = 0_u16;
     let mut last_failure = None;
 
-    while usize::from(attempt) < runtime.max_retry_candidates() {
+    loop {
+        budget.configure_retry_window(runtime.route_recovery_window_ms(), false);
+        if !budget.can_dispatch() {
+            break;
+        }
         let Some((selected, lease)) = runtime
-            .select_and_reserve_image(
+            .select_and_reserve_image_with_budget(
                 &key,
                 &prepared.resolved_model,
                 IMAGE_PROTOCOLS,
                 &tried,
                 now_ms(),
+                &budget,
             )
             .await
         else {
@@ -467,10 +489,6 @@ async fn execute_prepared(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = prepared.client_context_id.clone();
-        let cooldown_context = CooldownContext {
-            scope: &route.scope,
-            allowed_protocols: &route.allowed_protocols,
-        };
         let account_route = route.account_id.is_some();
         let upstream_url = if account_route {
             Some(route.upstream_url.clone())
@@ -500,7 +518,6 @@ async fn execute_prepared(
             direct_request_body(&prepared)
         };
 
-        attempt = attempt.saturating_add(1);
         let started = Instant::now();
         let upstream = runtime
             .request_client(&route.candidate_id)
@@ -522,24 +539,56 @@ async fn execute_prepared(
                 },
             )
             .body(request_body);
-        let upstream = match runtime
-            .send_authorized_request(&route.candidate_id, upstream, None, None)
-            .await
-        {
+        let upstream_result = runtime
+            .send_authorized_request(
+                &route.candidate_id,
+                upstream,
+                None,
+                None,
+                Some(&budget),
+                Some(&lease),
+            )
+            .await;
+        let attempt = u16::from(budget.dispatches());
+        let upstream = match upstream_result {
             Ok(upstream) => {
                 route.account_token_generation = upstream.account_token_generation;
                 upstream.response
             }
             Err(error) => {
+                let uncertain = error.execution_certainty()
+                    == crate::scheduler::rotation::ExecutionCertainty::Unknown;
+                let exhausted = matches!(
+                    error,
+                    crate::runtime::AuthorizedRequestError::DispatchBudgetExhausted
+                );
                 let failure = AttemptFailure::authorized_request(error);
-                let state = apply_attempt_failure_cooldown(
+                if uncertain || exhausted {
+                    if uncertain {
+                        lease.settle_rotation_unknown(now_ms());
+                    }
+                    emit_usage(
+                        &runtime,
+                        image_usage_event(
+                            &request_id,
+                            attempt,
+                            &key,
+                            &route,
+                            &prepared,
+                            false,
+                            failure.status,
+                            Some(failure.category.to_string()),
+                            started,
+                        ),
+                    );
+                    return api_error(failure.status, failure.message, failure.category);
+                }
+                let state = settle_attempt_failure(
                     &runtime,
-                    &route.candidate_id,
+                    &lease,
                     &prepared.resolved_model,
                     &failure,
                     &HeaderMap::new(),
-                    &cooldown_context,
-                    route.half_open_probe,
                 );
                 let mut event = image_usage_event(
                     &request_id,
@@ -564,16 +613,10 @@ async fn execute_prepared(
         let Ok(bytes) =
             crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES).await
         else {
+            lease.settle_rotation_unknown(now_ms());
             let failure = AttemptFailure::body();
-            let state = apply_cooldown_for_model(
-                &runtime,
-                &route.candidate_id,
-                "*",
-                &prepared.resolved_model,
-                TRANSIENT_COOLDOWN_MS,
-                &cooldown_context,
-                route.half_open_probe,
-            );
+            let state =
+                current_failure_state(&runtime, &route.candidate_id, &prepared.resolved_model);
             let mut event = image_usage_event(
                 &request_id,
                 attempt,
@@ -597,25 +640,21 @@ async fn execute_prepared(
             let capability_failure = image_capability_unavailable(&bytes);
             if retryable_failure(status, failure.category, false) || capability_failure {
                 let state = if capability_failure {
-                    apply_mandatory_cooldown(
+                    settle_image_capability_failure(
                         &runtime,
-                        &route.candidate_id,
+                        &lease,
                         &prepared.resolved_model,
                         TRANSIENT_COOLDOWN_MS,
-                        &cooldown_context,
-                        route.half_open_probe,
                     )
                 } else {
-                    apply_failure_cooldown_with_body(
+                    settle_status_failure(
                         &runtime,
-                        &route.candidate_id,
+                        &lease,
                         &prepared.resolved_model,
                         status,
                         failure.category,
                         &response_headers,
                         Some(&bytes),
-                        &cooldown_context,
-                        route.half_open_probe,
                     )
                 };
                 let mut event = image_usage_event(
@@ -678,7 +717,7 @@ async fn execute_prepared(
             );
             event.consecutive_failures = recovered.then_some(0);
             emit_usage(&runtime, event);
-            drop(lease);
+            lease.settle_rotation_success(now_ms());
             return if prepared.stream {
                 proxy_sse_response(status, &response_headers, Body::from(bytes))
             } else {
@@ -693,26 +732,30 @@ async fn execute_prepared(
         ) {
             Ok(translated) => translated,
             Err(failure) if failure.retryable => {
+                if matches!(
+                    failure.category,
+                    error_codes::STREAM_INCOMPLETE
+                        | error_codes::IMAGE_OUTPUT_MISSING
+                        | error_codes::STREAM_INVALID
+                ) {
+                    lease.settle_rotation_unknown(now_ms());
+                }
                 let state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
-                    apply_mandatory_cooldown(
+                    settle_image_capability_failure(
                         &runtime,
-                        &route.candidate_id,
+                        &lease,
                         &prepared.resolved_model,
                         TRANSIENT_COOLDOWN_MS,
-                        &cooldown_context,
-                        route.half_open_probe,
                     )
                 } else {
-                    apply_failure_cooldown_with_hint(
+                    settle_classified_failure(
                         &runtime,
-                        &route.candidate_id,
+                        &lease,
                         &prepared.resolved_model,
                         failure.status,
                         failure.category,
                         &response_headers,
                         failure.cooldown_hint,
-                        &cooldown_context,
-                        route.half_open_probe,
                     )
                 };
                 let mut event = image_usage_event(
@@ -740,6 +783,7 @@ async fn execute_prepared(
                 continue;
             }
             Err(failure) => {
+                lease.settle_rotation_terminal(now_ms());
                 let mut event = image_usage_event(
                     &request_id,
                     attempt,
@@ -782,7 +826,7 @@ async fn execute_prepared(
         );
         event.consecutive_failures = recovered.then_some(0);
         emit_usage(&runtime, event);
-        drop(lease);
+        lease.settle_rotation_success(now_ms());
         return if prepared.stream {
             proxy_sse_response(status, &response_headers, Body::from(translated.stream))
         } else {
@@ -790,6 +834,9 @@ async fn execute_prepared(
         };
     }
 
+    if let Some(error) = super::errors::admission_error(&budget) {
+        return error;
+    }
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
         if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
@@ -799,6 +846,7 @@ async fn execute_prepared(
             &HashSet::new(),
             None,
             now_ms(),
+            crate::scheduler::rotation::RotationOperation::Image,
         ) {
             return cooldown_error(
                 retry_at,

@@ -552,14 +552,14 @@ fn responses(value: &Value) -> AdapterResult<Request> {
                         item,
                         &["type", "id", "status", "call_id", "name", "arguments"],
                     )?;
-                    request.messages.push(Message {
-                        role: Role::Assistant,
-                        blocks: vec![Block::ToolCall {
+                    append_assistant_blocks(
+                        &mut request.messages,
+                        vec![Block::ToolCall {
                             id: required_text(item, "call_id")?.into(),
                             name: required_text(item, "name")?.into(),
                             arguments: required_text(item, "arguments")?.into(),
                         }],
-                    });
+                    );
                 }
                 "function_call_output" => {
                     checked(item, &["type", "id", "status", "call_id", "output"])?;
@@ -600,10 +600,7 @@ fn responses(value: &Value) -> AdapterResult<Request> {
                             ))
                         })
                         .collect::<AdapterResult<Vec<_>>>()?;
-                    request.messages.push(Message {
-                        role: Role::Assistant,
-                        blocks,
-                    });
+                    append_assistant_blocks(&mut request.messages, blocks);
                 }
                 _ => return Err(AdapterError::parameter_unsupported()),
             }
@@ -628,6 +625,22 @@ fn responses(value: &Value) -> AdapterResult<Request> {
         }
     }
     Ok(request)
+}
+
+/// Responses emits each tool call as an output item; Chat Completions needs
+/// adjacent calls in one assistant message before the corresponding results.
+fn append_assistant_blocks(messages: &mut Vec<Message>, blocks: Vec<Block>) {
+    if let Some(message) = messages
+        .last_mut()
+        .filter(|message| message.role == Role::Assistant)
+    {
+        message.blocks.extend(blocks);
+    } else {
+        messages.push(Message {
+            role: Role::Assistant,
+            blocks,
+        });
+    }
 }
 
 fn chat(value: &Value) -> AdapterResult<Request> {

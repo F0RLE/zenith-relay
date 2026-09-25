@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey, RuntimeSource,
+    GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey, RuntimeSource, WireApi,
 };
 use std::sync::Arc;
 
@@ -26,8 +26,26 @@ fn runtime(recovery_delay_seconds: u64) -> GatewayRuntime {
     .unwrap()
 }
 
-#[test]
-fn model_failure_preserves_provider_retry_after_over_shorter_source_delay() {
+async fn reserve(runtime: &GatewayRuntime) -> crate::runtime::CandidateLease {
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer test-local-key")))
+        .unwrap();
+    runtime
+        .select_and_reserve(
+            &key,
+            "model-a",
+            &[WireApi::Responses],
+            &Default::default(),
+            (None, None),
+            now_ms(),
+        )
+        .await
+        .unwrap()
+        .1
+}
+
+#[tokio::test]
+async fn model_failure_preserves_provider_retry_after_over_shorter_source_delay() {
     for category in [
         "upstream_overloaded",
         "upstream_model_capacity",
@@ -46,9 +64,10 @@ fn model_failure_preserves_provider_retry_after_over_shorter_source_delay() {
                 headers.insert(RETRY_AFTER, seconds.to_string().parse().unwrap());
             }
             let started = now_ms();
-            let failure = apply_failure_cooldown_with_hint(
+            let lease = reserve(&runtime).await;
+            let failure = settle_classified_failure(
                 &runtime,
-                "source",
+                &lease,
                 "model-a",
                 StatusCode::SERVICE_UNAVAILABLE,
                 category,
@@ -57,11 +76,6 @@ fn model_failure_preserves_provider_retry_after_over_shorter_source_delay() {
                     retry_after_ms: body,
                     global: false,
                 },
-                &CooldownContext {
-                    scope: &CandidateScope::default(),
-                    allowed_protocols: &[WireApi::Responses],
-                },
-                false,
             );
             let retry_at = failure.retry_at_ms.unwrap();
             assert!(
@@ -80,35 +94,55 @@ fn model_failure_preserves_provider_retry_after_over_shorter_source_delay() {
     }
 }
 
-#[test]
-fn generic_failure_preserves_provider_retry_after() {
+#[tokio::test]
+async fn generic_failure_preserves_provider_retry_after() {
     let runtime = runtime(5);
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
     let started = now_ms();
-    let failure = apply_failure_cooldown_with_hint(
+    let lease = reserve(&runtime).await;
+    let failure = settle_classified_failure(
         &runtime,
-        "source",
+        &lease,
         "model-a",
         StatusCode::SERVICE_UNAVAILABLE,
         "upstream_status",
         &headers,
         RateLimitBodyHint::default(),
-        &CooldownContext {
-            scope: &CandidateScope::default(),
-            allowed_protocols: &[WireApi::Responses],
-        },
-        false,
     );
     assert!(failure.retry_at_ms.unwrap() >= started + 120_000);
     assert_eq!(failure.cooldown_scope.as_deref(), Some("*"));
 }
 
-#[test]
-fn model_failures_without_retry_hints_keep_their_recovery_policy() {
+#[tokio::test]
+async fn global_retry_scope_survives_an_equal_circuit_deadline_after_dispatch() {
+    let runtime = runtime(5);
+    let lease = reserve(&runtime).await;
+    lease.begin_rotation_dispatch().unwrap();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+    let state = settle_classified_failure(
+        &runtime,
+        &lease,
+        "model-a",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        error_codes::UPSTREAM_SERVER_ERROR,
+        &headers,
+        RateLimitBodyHint::default(),
+    );
+    assert_eq!(state.consecutive_failures, 1);
+    assert_eq!(state.cooldown_scope.as_deref(), Some("*"));
+    assert_eq!(
+        current_failure_state(&runtime, "source", "model-b").retry_at_ms,
+        state.retry_at_ms
+    );
+}
+
+#[tokio::test]
+async fn model_failures_without_retry_hints_keep_their_recovery_policy() {
     for (category, mandatory) in [
         ("upstream_overloaded", false),
-        ("upstream_candidate_rejected", false),
+        ("upstream_candidate_rejected", true),
         ("upstream_stream", false),
         ("stream_incomplete", false),
         ("stream_idle_timeout", false),
@@ -118,19 +152,15 @@ fn model_failures_without_retry_hints_keep_their_recovery_policy() {
     ] {
         let runtime = runtime(5);
         let started = now_ms();
-        let failure = apply_failure_cooldown_with_hint(
+        let lease = reserve(&runtime).await;
+        let failure = settle_classified_failure(
             &runtime,
-            "source",
+            &lease,
             "model-a",
             StatusCode::SERVICE_UNAVAILABLE,
             category,
             &reqwest::header::HeaderMap::new(),
             RateLimitBodyHint::default(),
-            &CooldownContext {
-                scope: &CandidateScope::default(),
-                allowed_protocols: &[WireApi::Responses],
-            },
-            false,
         );
         assert_eq!(failure.retry_at_ms.is_some(), mandatory, "{category}");
         if let Some(retry_at) = failure.retry_at_ms {

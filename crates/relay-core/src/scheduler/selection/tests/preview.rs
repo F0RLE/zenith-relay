@@ -1,4 +1,4 @@
-use super::unified::{dispatch, mixed};
+use super::policy::{dispatch, mixed};
 use super::*;
 use crate::PoolRoutingMode;
 
@@ -12,7 +12,7 @@ fn next(order: &[CandidateRuntimeSnapshot]) -> Option<&str> {
 #[test]
 fn preview_matches_dispatch_in_every_mode_without_advancing_rotation() {
     for mode in [
-        PoolRoutingMode::Smart,
+        PoolRoutingMode::Automatic,
         PoolRoutingMode::InOrder,
         PoolRoutingMode::RoundRobin,
     ] {

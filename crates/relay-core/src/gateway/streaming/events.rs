@@ -162,6 +162,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     let event_type = value.get("type").and_then(Value::as_str);
     let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
         || is_compaction_payload(&value, event_type);
+    let upstream_error_category = upstream_event_failure_category(event_type, &value);
     let mut outcome = match event_type {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
@@ -170,11 +171,25 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             Some(TerminalOutcome::Failure)
         }
         Some("response.incomplete") => Some(TerminalOutcome::Incomplete),
+        None if upstream_error_category.is_none() && crate::protocol::gemini_incomplete(&value) => {
+            Some(TerminalOutcome::Incomplete)
+        }
         _ => None,
     };
-    let error_category = upstream_event_failure_category(event_type, &value);
-    if error_category.is_some() && !matches!(outcome, Some(TerminalOutcome::Incomplete)) {
-        outcome = Some(TerminalOutcome::Failure);
+    let error_category = upstream_error_category.or_else(|| {
+        (outcome == Some(TerminalOutcome::Incomplete)).then_some(error_codes::RESPONSE_INCOMPLETE)
+    });
+    if let Some(category) = error_category {
+        let explicitly_incomplete = outcome == Some(TerminalOutcome::Incomplete)
+            || matches!(event_type, Some("response.completed" | "response.done"))
+                && value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete");
+        outcome = Some(
+            if category == error_codes::RESPONSE_INCOMPLETE && explicitly_incomplete {
+                TerminalOutcome::Incomplete
+            } else {
+                TerminalOutcome::Failure
+            },
+        );
     }
     let error_status = error_category.map(|category| {
         let status = upstream_status_from_value(&value)
@@ -402,6 +417,22 @@ fn gemini_candidate_has_output_delta(candidate: &Value) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|text| !text.is_empty())
                     || part.get("functionCall").is_some()
+                    || part
+                        .pointer("/inlineData/data")
+                        .and_then(Value::as_str)
+                        .is_some_and(|data| !data.is_empty())
+                    || part
+                        .pointer("/fileData/fileUri")
+                        .and_then(Value::as_str)
+                        .is_some_and(|uri| !uri.is_empty())
+                    || part
+                        .pointer("/executableCode/code")
+                        .and_then(Value::as_str)
+                        .is_some_and(|code| !code.is_empty())
+                    || part
+                        .pointer("/codeExecutionResult/output")
+                        .and_then(Value::as_str)
+                        .is_some_and(|output| !output.is_empty())
             })
         })
 }
@@ -503,6 +534,72 @@ mod tests {
 
         assert!(event.has_data);
         assert!(!event.valid);
+    }
+
+    #[test]
+    fn completed_event_cannot_override_an_explicit_noncompleted_response_status() {
+        for (status, expected) in [
+            ("failed", TerminalOutcome::Failure),
+            ("incomplete", TerminalOutcome::Incomplete),
+            ("in_progress", TerminalOutcome::Failure),
+        ] {
+            let data = serde_json::json!({
+                "type": "response.completed",
+                "response": {"status": status}
+            });
+            let event = parse_sse_event(format!("data: {data}\n\n").as_bytes());
+            assert_eq!(event.outcome, Some(expected), "{status}");
+            assert!(event.error_category.is_some(), "{status}");
+        }
+    }
+
+    #[test]
+    fn gemini_filter_and_token_limit_are_incomplete_but_unknown_terminal_is_not() {
+        for data in [
+            r#"{"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]}"#,
+            r#"{"candidates":[{"finishReason":"SAFETY"}]}"#,
+            r#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#,
+        ] {
+            let event = parse_sse_event(format!("data: {data}\n\n").as_bytes());
+            assert_eq!(event.outcome, Some(TerminalOutcome::Incomplete), "{data}");
+            assert_eq!(event.error_category, Some(error_codes::RESPONSE_INCOMPLETE));
+        }
+        for data in [
+            r#"{"candidates":[]}"#,
+            r#"{"candidates":[{"finishReason":"NEW_REASON"}]}"#,
+            r#"{"promptFeedback":{"blockReason":"NEW_REASON"}}"#,
+            r#"{"promptFeedback":{"blockReason":"NEW_REASON"},"candidates":[{"finishReason":"SAFETY"}]}"#,
+        ] {
+            let event = parse_sse_event(format!("data: {data}\n\n").as_bytes());
+            assert_eq!(event.outcome, None, "{data}");
+        }
+        let with_error = parse_sse_event(
+            br#"data: {"error":{"code":500},"candidates":[{"finishReason":"SAFETY"}]}
+
+"#,
+        );
+        assert_eq!(with_error.outcome, Some(TerminalOutcome::Failure));
+    }
+
+    #[test]
+    fn native_gemini_media_and_code_parts_are_semantic_output() {
+        for part in [
+            serde_json::json!({"inlineData":{"mimeType":"image/png","data":"YQ=="}}),
+            serde_json::json!({"fileData":{"mimeType":"image/png","fileUri":"gs://example/image"}}),
+            serde_json::json!({"executableCode":{"language":"PYTHON","code":"print(1)"}}),
+            serde_json::json!({"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"}}),
+        ] {
+            let frame = format!(
+                "data: {}\n\n",
+                serde_json::json!({"candidates":[{"content":{"parts":[part]}}]})
+            );
+            assert!(parse_sse_event(frame.as_bytes()).semantic_output);
+        }
+        let metadata = serde_json::json!({
+            "candidates":[{"content":{"parts":[{"thoughtSignature":"opaque"}]},"finishReason":"STOP"}]
+        });
+        let metadata_only = parse_sse_event(format!("data: {metadata}\n\n").as_bytes());
+        assert!(!metadata_only.semantic_output);
     }
 
     #[test]

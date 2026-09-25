@@ -38,6 +38,7 @@ pub use record::{
 };
 pub use token_authority::{
     access_token_is_usable, PrepareStatus, PreparedToken, TokenAuthority, TokenAuthorityError,
-    TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh, TokenRefreshAdapter,
-    TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
+    TokenDispatchRevision, TokenDispatchRevisionGuard, TokenPersistenceAdapter,
+    TokenPersistenceFailure, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
+    TokenRefreshFailureKind, TokenSet,
 };

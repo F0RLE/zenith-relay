@@ -1,6 +1,7 @@
 use super::{
-    apply_candidate_policy, model_rules, runtime_now_ms, ExecutionFence, GatewayRuntime,
-    RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
+    apply_candidate_policy, images::select_image_main_model_with_catalog, model_rules,
+    normalized_set, runtime_now_ms, AccountModelInventory, ExecutionFence, GatewayRuntime,
+    RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate, IMAGE_API_MODEL,
 };
 use crate::error_codes;
 use crate::quota::QuotaSnapshot;
@@ -14,6 +15,82 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 
 impl GatewayRuntime {
+    /// Reconcile only the discovered OAuth model inventory. Keep this runtime's
+    /// scheduler and executor identity: an inventory read is not fresh auth,
+    /// quota or health evidence and must not discard live physical leases.
+    /// The scheduler lock also serializes this edit with final dispatch and
+    /// model-list projection; old unstarted leases are rechecked there.
+    pub fn update_account_models(&self, account_id: &str, models: &[String]) -> bool {
+        let Some(account) = self.chatgpt_accounts.get(account_id) else {
+            return false;
+        };
+        let configured_models = normalized_set(models.iter());
+        let image_main_model = select_image_main_model_with_catalog(
+            &configured_models,
+            self.image_base_model.as_deref(),
+            self.image_pricing_catalog.as_deref(),
+        );
+        let mut candidate_models = configured_models.clone();
+        let mut published_models = models.to_vec();
+        if image_main_model.is_some() {
+            candidate_models.insert(IMAGE_API_MODEL.to_string());
+            published_models.push(IMAGE_API_MODEL.to_string());
+        }
+        let mut scheduler = self.lock_scheduler();
+        if scheduler.is_retired() {
+            return false;
+        }
+        let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
+            return false;
+        };
+        if candidate.kind != CandidateKind::OAuthAccount
+            || candidate.account_id.as_deref() != Some(account_id)
+        {
+            return false;
+        }
+        candidate.models = candidate_models;
+        // Never publish a model that the executor cannot resolve. Hold the
+        // scheduler lock until all three views name the same inventory.
+        let mut inventory = account
+            .model_inventory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = inventory.configured_models != configured_models;
+        let image_bridge_changed = inventory.image_main_model != image_main_model;
+        *inventory = AccountModelInventory {
+            configured_models,
+            image_main_model,
+        };
+        drop(inventory);
+        if image_bridge_changed {
+            // A virtual image route retains its public model id even when its
+            // underlying Responses model changes. Revoke pending old leases.
+            account.image_bridge_revision.fetch_add(1, Ordering::AcqRel);
+        }
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(account_id, published_models.iter());
+        scheduler.upsert(candidate);
+        if changed {
+            // Transport cards and Lite support describe the old inventory.
+            // A removed and later reintroduced slug needs fresh evidence.
+            self.model_metadata
+                .codex_manifests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(account_id);
+            self.codex_responses_lite_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(id, _)| id != account_id);
+        }
+        drop(scheduler);
+        self.candidate_availability.notify_waiters();
+        self.admission_changed.notify_waiters();
+        true
+    }
+
     /// Immediately blocks sibling OAuth candidates that share the same
     /// ChatGPT Team/workspace identity. This is intentionally an in-memory
     /// circuit breaker; the owning local/server store persists the triggering
@@ -58,32 +135,49 @@ impl GatewayRuntime {
         changed
     }
 
+    /// Hold while a host commits a credential or permission edit and applies
+    /// it to this runtime. Acquire before the durable edit; release only after
+    /// the new runtime state is published or the old state is restored.
+    pub fn fence_candidate_dispatch(&self, candidate_id: &str) -> Option<ExecutionFence> {
+        let epoch = self.lock_scheduler().begin_execution_fence(candidate_id)?;
+        self.candidate_availability.notify_waiters();
+        Some(ExecutionFence {
+            scheduler: self.scheduler.clone(),
+            availability: self.candidate_availability.clone(),
+            candidate_id: candidate_id.to_string(),
+            epoch,
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Fence every physical protocol route of one API source while its host
+    /// changes the source's credential, endpoint or permission policy.
+    pub fn fence_source_dispatch(&self, source_id: &str) -> Vec<ExecutionFence> {
+        self.source_candidate_bindings
+            .iter()
+            .filter(|(_, binding)| binding.source_id == source_id)
+            .filter_map(|(candidate_id, _)| self.fence_candidate_dispatch(candidate_id))
+            .collect()
+    }
+
     pub(crate) fn fence_execution(&self, candidate_id: &str) -> Option<ExecutionFence> {
-        self.lock_scheduler()
-            .set_execution_fence(candidate_id, true)
-            .then(|| ExecutionFence {
-                scheduler: self.scheduler.clone(),
-                candidate_id: candidate_id.to_string(),
-                released: AtomicBool::new(false),
-            })
+        self.fence_candidate_dispatch(candidate_id)
     }
 
     pub(crate) fn block_candidate_capability(&self, candidate_id: &str, model: &str) -> bool {
-        self.lock_scheduler().block_capability(candidate_id, model)
+        let changed = self.lock_scheduler().block_capability(candidate_id, model);
+        if changed {
+            self.candidate_availability.notify_waiters();
+        }
+        changed
     }
 
     pub(crate) fn clear_candidate_capability_blocks(&self, candidate_id: &str) -> bool {
-        self.lock_scheduler().clear_capability_blocks(candidate_id)
-    }
-
-    pub(crate) fn record_provider_rate_limit(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-    ) -> bool {
-        self.lock_scheduler()
-            .record_provider_rate_limit(candidate_id, model, now_ms)
+        let changed = self.lock_scheduler().clear_capability_blocks(candidate_id);
+        if changed {
+            self.candidate_availability.notify_waiters();
+        }
+        changed
     }
 
     pub(crate) fn observe_codex_quota_headers(
@@ -193,6 +287,46 @@ impl GatewayRuntime {
         snapshot: &QuotaSnapshot,
         observed_at_ms: u64,
     ) -> bool {
+        self.sync_account_availability_with_quota_inner(
+            candidate_id,
+            enabled,
+            health,
+            snapshot,
+            observed_at_ms,
+            false,
+        )
+    }
+
+    /// A refresh without a durable health transition is not evidence that a
+    /// newer live auth or entitlement block recovered. Explicit transitions
+    /// use the ordinary sync method instead.
+    pub fn sync_account_refresh_availability_with_quota(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+    ) -> bool {
+        self.sync_account_availability_with_quota_inner(
+            candidate_id,
+            enabled,
+            health,
+            snapshot,
+            observed_at_ms,
+            true,
+        )
+    }
+
+    fn sync_account_availability_with_quota_inner(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+        preserve_live_block: bool,
+    ) -> bool {
         if !self.chatgpt_accounts.contains_key(candidate_id) {
             return false;
         }
@@ -215,14 +349,22 @@ impl GatewayRuntime {
             provider_credits_micro_units: effective.available_credits_micro_units,
             provider_credits_unlimited: effective.provider_credits_unlimited,
         };
-        let updated = self
-            .lock_scheduler()
-            .update_candidate_availability_with_quota_at(
-                candidate_id,
-                enabled,
-                health,
-                quota_state,
-            );
+        let mut scheduler = self.lock_scheduler();
+        let effective_health = if preserve_live_block && health.is_eligible() {
+            scheduler
+                .candidate(candidate_id)
+                .filter(|candidate| !candidate.health.is_eligible())
+                .map_or(health, |candidate| candidate.health)
+        } else {
+            health
+        };
+        let updated = scheduler.update_candidate_availability_with_quota_at(
+            candidate_id,
+            enabled,
+            effective_health,
+            quota_state,
+        );
+        drop(scheduler);
         drop(quotas);
         if updated {
             self.candidate_availability.notify_waiters();
@@ -286,9 +428,6 @@ impl GatewayRuntime {
             return;
         }
         if event.account_id.is_none() {
-            if event.http_status == StatusCode::TOO_MANY_REQUESTS.as_u16() {
-                self.record_provider_rate_limit(candidate_id, model, observed_at_ms);
-            }
             return;
         }
 
@@ -498,6 +637,9 @@ impl GatewayRuntime {
             return true;
         }
         *current = scope;
+        // The scope write lock makes this revision atomic with the permission
+        // edit from the perspective of both reservation and final dispatch.
+        key.scope_revision.fetch_add(1, Ordering::AcqRel);
         drop(current);
         self.candidate_availability.notify_waiters();
         true
@@ -616,7 +758,16 @@ impl GatewayRuntime {
                 let _ = store.delete_candidate(route_id);
             }
         }
+        if removed {
+            self.candidate_availability.notify_waiters();
+        }
         removed
+    }
+
+    /// Refresh cadence follows physical members, not protocol-route aliases.
+    /// This read does not build the more expensive routing-preview projection.
+    pub fn active_member_keys(&self, now_ms: u64, recent_ms: u64) -> BTreeSet<String> {
+        self.lock_scheduler().active_member_keys(now_ms, recent_ms)
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
@@ -678,8 +829,13 @@ impl GatewayRuntime {
         candidate_id: Option<&str>,
         reserve_basis_points: u64,
     ) -> bool {
-        self.lock_scheduler()
-            .set_protected_candidate(candidate_id, reserve_basis_points)
+        let changed = self
+            .lock_scheduler()
+            .set_protected_candidate(candidate_id, reserve_basis_points);
+        if changed {
+            self.candidate_availability.notify_waiters();
+        }
+        changed
     }
 
     pub fn clear_candidate_cooldown(&self, candidate_id: &str, model: &str) -> bool {
@@ -699,14 +855,6 @@ impl GatewayRuntime {
         let updated = self
             .lock_scheduler()
             .set_cooldown(candidate_id, model, retry_at_ms);
-        if updated {
-            self.candidate_availability.notify_waiters();
-        }
-        updated
-    }
-
-    pub fn reset_candidate_failures(&self, candidate_id: &str) -> bool {
-        let updated = self.lock_scheduler().reset_failures(candidate_id);
         if updated {
             self.candidate_availability.notify_waiters();
         }

@@ -3,6 +3,7 @@ mod formats;
 mod tests;
 mod transport;
 
+use crate::scheduler::refresh::http::ManagementHttpScope;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use transport::{StatsClient, StatsResult};
@@ -80,10 +81,39 @@ pub struct SourceProviderStats {
     pub balance_unlimited: bool,
     #[serde(default)]
     pub amounts: Vec<SourceStatsAmount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<SourceStatsStatus>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl SourceProviderStats {
-    fn empty(provider: SourceStatsProvider, status: SourceStatsStatus) -> Self {
+    /// Preserve a successful value only inside the same fenced source scope.
+    pub fn observed(mut self, previous: Option<&Self>, now_ms: u64) -> Self {
+        if self.status == SourceStatsStatus::Available {
+            self.as_of_ms = Some(now_ms);
+            self.stale = false;
+            self.refresh_error = None;
+        } else if self.status != SourceStatsStatus::Unsupported {
+            if let Some(previous) =
+                previous.filter(|value| value.status == SourceStatsStatus::Available)
+            {
+                let mut retained = previous.clone();
+                retained.stale = true;
+                retained.refresh_error = Some(self.status);
+                return retained;
+            }
+        }
+        self
+    }
+
+    pub fn empty(provider: SourceStatsProvider, status: SourceStatsStatus) -> Self {
         Self {
             provider,
             status,
@@ -94,6 +124,9 @@ impl SourceProviderStats {
             balance_kind: SourceBalanceKind::Wallet,
             balance_unlimited: false,
             amounts: Vec::new(),
+            as_of_ms: None,
+            stale: false,
+            refresh_error: None,
         }
     }
 
@@ -116,15 +149,42 @@ pub async fn fetch_source_provider_stats(
     base_url: &str,
     api_key: &str,
 ) -> Result<SourceProviderStats, String> {
-    let client = StatsClient::new(base_url, api_key)?;
+    read_source_provider_stats(base_url, api_key).await.value
+}
+
+pub async fn read_source_provider_stats(
+    base_url: &str,
+    api_key: &str,
+) -> super::SourceRead<Result<SourceProviderStats, String>> {
+    read_source_provider_stats_with_scope(base_url, api_key, ManagementHttpScope::default()).await
+}
+
+pub async fn read_source_provider_stats_with_scope(
+    base_url: &str,
+    api_key: &str,
+    scope: ManagementHttpScope,
+) -> super::SourceRead<Result<SourceProviderStats, String>> {
+    let client = match StatsClient::new_with_scope(base_url, api_key, scope) {
+        Ok(client) => client,
+        Err(error) => {
+            return super::SourceRead {
+                value: Err(error),
+                retry_after_ms: None,
+            }
+        }
+    };
     let provider = source_stats_provider(base_url);
     let result =
         tokio::time::timeout(Duration::from_secs(20), fetch_stats(&client, provider)).await;
-    Ok(match result {
+    let value = Ok(match result {
         Ok(Ok(stats)) => stats,
         Ok(Err(status)) => SourceProviderStats::empty(provider, status),
         Err(_) => SourceProviderStats::empty(provider, SourceStatsStatus::Unavailable),
-    })
+    });
+    super::SourceRead {
+        value,
+        retry_after_ms: client.hints.delay(),
+    }
 }
 
 async fn fetch_stats(
@@ -152,9 +212,9 @@ async fn fetch_stats(
             Ok(key)
         }
         P::Deepseek => formats::deepseek_stats(&client.get("user/balance", true, true).await?),
-        P::SiliconFlow => {
-            formats::siliconflow_stats(&client.get("user/info", false, true).await?, client.host())
-        }
+        // SiliconFlow retired /user/info on 2026-08-14 and has not announced
+        // a replacement account endpoint. Do not send a key to a dead API.
+        P::SiliconFlow => Err(SourceStatsStatus::Unsupported),
         _ => autodetect(client).await,
     }
 }

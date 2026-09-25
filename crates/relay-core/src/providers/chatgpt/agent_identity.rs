@@ -169,21 +169,36 @@ impl AgentIdentityCredential {
                 &self.private_key,
                 format!("{}:{timestamp}", self.runtime_id).as_bytes(),
             )?;
-            let response = client
-                .post(url.clone())
-                .timeout(TASK_REGISTRATION_TIMEOUT)
-                .json(&TaskRegistrationRequest {
-                    timestamp,
-                    signature,
-                })
-                .send()
+            let (response, permit) = crate::scheduler::refresh::http::management_http_gate()
+                .send(
+                    client,
+                    client
+                        .post(url.clone())
+                        .timeout(TASK_REGISTRATION_TIMEOUT)
+                        .json(&TaskRegistrationRequest {
+                            timestamp,
+                            signature,
+                        }),
+                    crate::scheduler::refresh::http::HttpClass::Auth,
+                )
                 .await
                 .map_err(|_| AgentIdentityError::RegistrationTransport)?;
             if response.status().is_success() {
-                return decode_task_registration_response(self, response).await;
+                let result = decode_task_registration_response(self, response).await;
+                drop(permit);
+                return result;
             }
             if retryable_status(response.status()) && attempt + 1 < REGISTRATION_ATTEMPTS {
-                tokio::time::sleep(retry_delay(attempt)).await;
+                let delay = crate::transport::retry_after_ms(
+                    response.headers(),
+                    std::time::SystemTime::now(),
+                )
+                .map(Duration::from_millis)
+                .unwrap_or_default()
+                .max(retry_delay(attempt));
+                drop(response);
+                drop(permit);
+                tokio::time::sleep(delay).await;
                 continue;
             }
             return Err(AgentIdentityError::RegistrationRejected);
@@ -239,12 +254,17 @@ impl AgentIdentityCredential {
             if is_fedramp_account {
                 builder = builder.header("X-OpenAI-Fedramp", "true");
             }
-            let response = builder
-                .send()
+            let (response, permit) = crate::scheduler::refresh::http::management_http_gate()
+                .send(
+                    client,
+                    builder,
+                    crate::scheduler::refresh::http::HttpClass::Auth,
+                )
                 .await
                 .map_err(|_| AgentIdentityError::RegistrationTransport)?;
             if response.status().is_success() {
                 let body = collect_registration_response(response).await?;
+                drop(permit);
                 let response: AgentRegistrationResponse = serde_json::from_slice(&body)
                     .map_err(|_| AgentIdentityError::InvalidRegistrationResponse)?;
                 let registered_runtime_id = response
@@ -261,7 +281,14 @@ impl AgentIdentityCredential {
             if !retryable_status(response.status()) || attempt + 1 >= REGISTRATION_ATTEMPTS {
                 return Err(AgentIdentityError::RegistrationRejected);
             }
-            tokio::time::sleep(retry_delay(attempt)).await;
+            let delay =
+                crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now())
+                    .map(Duration::from_millis)
+                    .unwrap_or_default()
+                    .max(retry_delay(attempt));
+            drop(response);
+            drop(permit);
+            tokio::time::sleep(delay).await;
         }
         let identity = Self::unregistered(
             private_key,

@@ -2,6 +2,7 @@ use super::{collect_response_body, valid_access_token, ResponseBodyError};
 use crate::accounts::decode_unverified_jwt_payload;
 use crate::error_codes;
 use crate::quota::QuotaRefreshFailure;
+use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, REFERER, USER_AGENT},
@@ -31,6 +32,7 @@ pub struct CodexSubscriptionClient {
     http: Client,
     accounts_check_endpoint: Url,
     subscriptions_endpoint: Url,
+    scope: ManagementHttpScope,
 }
 
 impl CodexSubscriptionClient {
@@ -62,7 +64,13 @@ impl CodexSubscriptionClient {
             http,
             accounts_check_endpoint,
             subscriptions_endpoint,
+            scope: ManagementHttpScope::default(),
         })
+    }
+
+    pub fn with_http_scope(mut self, scope: ManagementHttpScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub async fn fetch(
@@ -86,7 +94,9 @@ impl CodexSubscriptionClient {
             .fetch_authorized_once(authorization.clone(), preferred_account_id, now_ms)
             .await;
         match first {
-            Err(error) if error.retryable => {
+            // A provider floor belongs to the first attempt. Never make the
+            // built-in retry before a Retry-After has elapsed.
+            Err(error) if error.retryable && error.retry_after_ms().is_none() => {
                 self.fetch_authorized_once(authorization, preferred_account_id, now_ms)
                     .await
             }
@@ -101,21 +111,26 @@ impl CodexSubscriptionClient {
         now_ms: u64,
     ) -> Result<CodexSubscriptionMetadata, QuotaRefreshFailure> {
         let preferred_account_id = validate_account_id(preferred_account_id)?;
-        let response = self
-            .http
-            .get(self.accounts_check_endpoint.clone())
-            .query(&[(
-                "timezone_offset_min",
-                -(Local::now().offset().local_minus_utc() / 60),
-            )])
-            .headers(subscription_headers(
-                authorization.clone(),
-                "/backend-api/accounts/check/v4-2023-04-27",
-            )?)
-            .send()
+        let (response, permit) = self
+            .scope
+            .send(
+                &self.http,
+                self.http
+                    .get(self.accounts_check_endpoint.clone())
+                    .query(&[(
+                        "timezone_offset_min",
+                        -(Local::now().offset().local_minus_utc() / 60),
+                    )])
+                    .headers(subscription_headers(
+                        authorization.clone(),
+                        "/backend-api/accounts/check/v4-2023-04-27",
+                    )?),
+                HttpClass::Ordinary,
+            )
             .await
             .map_err(|_| failure(error_codes::SUBSCRIPTION_TRANSPORT, true))?;
         let payload = response_json(response).await?;
+        drop(permit);
         let mut metadata = parse_accounts_check(&payload, preferred_account_id)?;
         if metadata
             .active_until_ms
@@ -128,18 +143,23 @@ impl CodexSubscriptionClient {
             .account_id
             .as_deref()
             .unwrap_or(preferred_account_id);
-        let response = self
-            .http
-            .get(self.subscriptions_endpoint.clone())
-            .query(&[("account_id", account_id)])
-            .headers(subscription_headers(
-                authorization,
-                "/backend-api/subscriptions",
-            )?)
-            .send()
+        let (response, permit) = self
+            .scope
+            .send(
+                &self.http,
+                self.http
+                    .get(self.subscriptions_endpoint.clone())
+                    .query(&[("account_id", account_id)])
+                    .headers(subscription_headers(
+                        authorization,
+                        "/backend-api/subscriptions",
+                    )?),
+                HttpClass::Ordinary,
+            )
             .await
             .map_err(|_| failure(error_codes::SUBSCRIPTION_TRANSPORT, true))?;
         let payload = response_json(response).await?;
+        drop(permit);
         let fallback = parse_subscriptions(&payload, account_id);
         metadata.account_id = fallback.account_id.or(metadata.account_id);
         metadata.plan_type = fallback.plan_type.or(metadata.plan_type);
@@ -242,6 +262,8 @@ fn subscription_headers(
 
 async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefreshFailure> {
     let status = response.status();
+    let retry_after_ms =
+        crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
     let body = collect_response_body(response, MAX_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
@@ -249,9 +271,10 @@ async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefres
             ResponseBodyError::TooLarge => {
                 failure(error_codes::SUBSCRIPTION_RESPONSE_TOO_LARGE, false)
             }
-        })?;
+        })
+        .map_err(|failure| failure.with_retry_after(retry_after_ms))?;
     if !status.is_success() {
-        return Err(http_failure(status));
+        return Err(http_failure(status).with_retry_after(retry_after_ms));
     }
     serde_json::from_slice(&body)
         .map_err(|_| failure(error_codes::SUBSCRIPTION_INVALID_RESPONSE, false))
@@ -597,6 +620,22 @@ mod tests {
         Arc,
     };
 
+    async fn check_client(
+        router: Router,
+    ) -> (CodexSubscriptionClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let endpoint = Url::parse(&format!(
+            "http://{address}/backend-api/accounts/check/v4-2023-04-27"
+        ))
+        .unwrap();
+        let client =
+            CodexSubscriptionClient::with_endpoints(Client::new(), endpoint.clone(), endpoint)
+                .unwrap();
+        (client, server)
+    }
+
     #[test]
     fn account_check_prefers_the_requested_record_and_reads_entitlement() {
         let payload = json!({
@@ -794,16 +833,7 @@ mod tests {
                 }),
             )
             .with_state(attempts.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let endpoint = Url::parse(&format!(
-            "http://{address}/backend-api/accounts/check/v4-2023-04-27"
-        ))
-        .unwrap();
-        let client =
-            CodexSubscriptionClient::with_endpoints(Client::new(), endpoint.clone(), endpoint)
-                .unwrap();
+        let (client, server) = check_client(router).await;
 
         let metadata = client
             .fetch("access-secret", "account-target", 1_700_000_000_000)
@@ -812,6 +842,29 @@ mod tests {
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(metadata.active_until_ms, Some(1_788_998_400_000));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn subscription_retry_after_prevents_an_early_nested_retry() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route(
+                "/backend-api/accounts/check/v4-2023-04-27",
+                get(|State(attempts): State<Arc<AtomicUsize>>| async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "3600")],
+                        "later",
+                    )
+                }),
+            )
+            .with_state(attempts.clone());
+        let (client, server) = check_client(router).await;
+        let failure = client.fetch("synthetic", "account", 0).await.unwrap_err();
+        assert_eq!(failure.retry_after_ms(), Some(3_600_000));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         server.abort();
     }
 

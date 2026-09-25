@@ -4,6 +4,7 @@ use std::time::Duration;
 use url::Url;
 
 use super::SourceStatsStatus;
+use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 
 pub(super) type StatsResult<T> = Result<T, SourceStatsStatus>;
 const MAX_STATS_BYTES: usize = 1024 * 1024;
@@ -13,10 +14,21 @@ pub(super) struct StatsClient {
     base: Url,
     site: Url,
     api_key: String,
+    pub(super) hints: crate::sources::observations::SourceReadHints,
+    scope: ManagementHttpScope,
 }
 
 impl StatsClient {
+    #[cfg(test)]
     pub(super) fn new(base_url: &str, api_key: &str) -> Result<Self, String> {
+        Self::new_with_scope(base_url, api_key, ManagementHttpScope::default())
+    }
+
+    pub(super) fn new_with_scope(
+        base_url: &str,
+        api_key: &str,
+        scope: ManagementHttpScope,
+    ) -> Result<Self, String> {
         let invalid = || "source stats base URL is invalid".to_owned();
         let mut base = super::super::normalized_base_url(base_url).map_err(|_| invalid())?;
         if !matches!(base.scheme(), "http" | "https")
@@ -44,6 +56,8 @@ impl StatsClient {
             base,
             site,
             api_key: api_key.to_owned(),
+            hints: Default::default(),
+            scope,
         })
     }
 
@@ -75,7 +89,12 @@ impl StatsClient {
         if authenticated {
             request = request.bearer_auth(&self.api_key);
         }
-        let response = request.send().await.map_err(|_| S::Unavailable)?;
+        let (response, permit) = self
+            .scope
+            .send(&self.client, request, HttpClass::Ordinary)
+            .await
+            .map_err(|_| S::Unavailable)?;
+        self.hints.observe(response.headers());
         match response.status().as_u16() {
             200..=299 => {}
             401 | 403 => return Err(S::Unauthorized),
@@ -106,6 +125,7 @@ impl StatsClient {
             }
             bytes.extend_from_slice(&chunk);
         }
+        drop(permit);
         serde_json::from_slice(&bytes).map_err(|_| S::InvalidResponse)
     }
 }

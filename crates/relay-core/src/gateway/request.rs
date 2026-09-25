@@ -18,8 +18,8 @@ pub(super) use headers::{
 #[cfg(test)]
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};
 pub(super) use normalization::{
-    normalize_account_request, normalize_compact_account_request, normalize_responses_lite_request,
-    responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
+    normalize_account_request, normalize_basis_points_request, normalize_compact_account_request,
+    normalize_responses_lite_request, responses_lite_parallel_tool_calls_valid, ServiceTierPolicy,
 };
 
 use super::execution::execute_client_request;
@@ -28,7 +28,7 @@ use crate::codex_catalog_entry_is_compatible;
 use crate::{GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi};
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Request, Response};
+use axum::http::{HeaderMap, Request, Response, StatusCode};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
@@ -342,6 +342,109 @@ fn legacy_responses_call_family(item_type: &str) -> Option<LegacyResponsesCallFa
     }
 }
 
+/// Removes one incomplete function or custom-tool call only after the upstream
+/// explicitly reports that its output is missing. The error identity must
+/// match the call's item ID or call ID when the provider supplies one.
+pub(super) fn remove_unpaired_responses_tool_call(
+    request: &mut Value,
+    historical_item_count: usize,
+    upstream_error: &[u8],
+) -> bool {
+    let Some((expected_type, error_id)) = missing_responses_tool_call_identity(upstream_error)
+    else {
+        return false;
+    };
+    let Some(input) = request.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+
+    let mut incomplete = Vec::new();
+    for (index, item) in input.iter().enumerate() {
+        let Some(call_type) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let output_type = match call_type {
+            "function_call" => "function_call_output",
+            "custom_tool_call" => "custom_tool_call_output",
+            _ => continue,
+        };
+        let call_id = item.get("call_id").and_then(Value::as_str);
+        let item_id = item.get("id").and_then(Value::as_str);
+        let has_output = input.iter().enumerate().skip(index + 1).any(|(_, output)| {
+            output.get("type").and_then(Value::as_str) == Some(output_type)
+                && output
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|output_id| {
+                        Some(output_id) == call_id || Some(output_id) == item_id
+                    })
+        });
+        if !has_output {
+            incomplete.push((index, call_type, call_id, item_id));
+        }
+    }
+
+    // Multiple pending calls make it unsafe to guess which one the provider
+    // rejected. Repair only a single incomplete call across the replayed turn.
+    if incomplete.len() != 1 {
+        return false;
+    }
+    let (index, call_type, call_id, item_id) = incomplete[0];
+    if index >= historical_item_count
+        || call_type != expected_type
+        || error_id
+            .as_deref()
+            .is_some_and(|error_id| Some(error_id) != call_id && Some(error_id) != item_id)
+    {
+        return false;
+    }
+
+    request["input"]
+        .as_array_mut()
+        .expect("validated Responses input")
+        .remove(index);
+    true
+}
+
+fn missing_responses_tool_call_identity(payload: &[u8]) -> Option<(&'static str, Option<String>)> {
+    let text = String::from_utf8_lossy(payload);
+    let normalized = text.to_ascii_lowercase();
+    for (prefix, call_type) in [
+        ("no tool output found for function call ", "function_call"),
+        (
+            "no tool output found for custom tool call ",
+            "custom_tool_call",
+        ),
+        (
+            "no tool output found for apply patch call ",
+            "custom_tool_call",
+        ),
+    ] {
+        let Some(start) = normalized.find(prefix) else {
+            continue;
+        };
+        let suffix = text[start + prefix.len()..].trim_start_matches(['"', '\'', '`']);
+        let id = suffix
+            .split(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        '"' | '\'' | '`' | ',' | ';' | ':' | ')' | ']' | '}' | '>'
+                    )
+            })
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('.')
+            .trim();
+        let id = (!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+            .then(|| id.to_string());
+        return Some((call_type, id));
+    }
+    normalized
+        .contains("unanswered_function_call")
+        .then_some(("function_call", None))
+}
+
 fn legacy_responses_call_id(item: &Value) -> Option<&str> {
     item.get("call_id")
         .and_then(Value::as_str)
@@ -567,57 +670,140 @@ fn bounded_tool_call_id(value: Option<&Value>) -> Option<String> {
 }
 
 pub(super) fn tool_use_diagnostics(value: &Value) -> ToolUseDiagnostics {
+    let stats = crate::tool_policy::catalog_stats(value);
     ToolUseDiagnostics {
-        client_tool_count: tool_definition_count(value),
+        client_tool_count: stats.count,
+        client_schema_bytes: Some(stats.bytes),
         tool_choice: tool_choice_mode(value),
         ..ToolUseDiagnostics::default()
     }
 }
 
-pub(super) fn with_forwarded_tool_diagnostics(
-    client: &ToolUseDiagnostics,
-    request_body: &[u8],
-) -> ToolUseDiagnostics {
-    let mut diagnostics = client.clone();
-    diagnostics.forwarded_tool_count = serde_json::from_slice::<Value>(request_body)
-        .ok()
-        .map_or(0, |value| tool_definition_count(&value));
-    diagnostics
+pub(super) fn is_deferred_tool_search_compatibility_error(
+    status: StatusCode,
+    details: &crate::usage::UpstreamErrorDetails,
+) -> bool {
+    if !status.is_client_error() {
+        return false;
+    }
+    let text = format!(
+        "{} {} {}",
+        details.code.as_deref().unwrap_or_default(),
+        details.error_type.as_deref().unwrap_or_default(),
+        details.message.as_deref().unwrap_or_default(),
+    )
+    .to_ascii_lowercase();
+    text.contains("tool_search")
+        || text.contains("tool search")
+        || text.contains("defer_loading")
+        || text.contains("deferred tool")
+        || (text.contains("unsupported") && text.contains("tool"))
 }
 
-fn tool_definition_count(value: &Value) -> u16 {
-    let mut count = 0_u16;
-    count = count.saturating_add(tool_array_count(value.get("tools")));
-    count = count.saturating_add(tool_array_count(value.get("functions")));
-    count = count.saturating_add(tool_array_count(
-        value
-            .get("response")
-            .and_then(|response| response.get("tools")),
-    ));
-    if let Some(items) = value.get("input").and_then(Value::as_array) {
-        for item in items {
-            if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
-                count = count.saturating_add(tool_array_count(item.get("tools")));
-            }
+/// Internal request extension, never a wire header or persisted request body.
+#[derive(Clone)]
+pub(in crate::gateway) struct RequestToolPolicy {
+    policy: crate::ToolPolicy,
+    configured_mode: crate::ToolPolicyMode,
+    policy_fallback: bool,
+    deferred_disabled: bool,
+    deferred_applied: bool,
+    pub(in crate::gateway) diagnostics: ToolUseDiagnostics,
+}
+
+impl RequestToolPolicy {
+    pub(in crate::gateway) fn new(runtime: &GatewayRuntime, request: &Value) -> Self {
+        let policy = runtime.tool_policy();
+        Self {
+            configured_mode: policy.mode,
+            policy,
+            policy_fallback: false,
+            deferred_disabled: false,
+            deferred_applied: false,
+            diagnostics: tool_use_diagnostics(request),
         }
     }
-    count
-}
 
-fn tool_array_count(value: Option<&Value>) -> u16 {
-    value.and_then(Value::as_array).map_or(0, |tools| {
-        tools.iter().fold(0_u16, |count, tool| {
-            count.saturating_add(tool_definition_leaf_count(tool))
-        })
-    })
-}
-
-fn tool_definition_leaf_count(tool: &Value) -> u16 {
-    if tool.get("type").and_then(Value::as_str) == Some("namespace") {
-        let nested = tool_array_count(tool.get("tools"));
-        return if nested == 0 { 1 } else { nested };
+    pub(in crate::gateway) fn apply(&mut self, request: &mut Value) -> Result<(), &'static str> {
+        self.apply_value(request, false)
     }
-    u16::from(tool.is_object())
+
+    pub(in crate::gateway) fn apply_value(
+        &mut self,
+        request: &mut Value,
+        allow_deferred_tool_search: bool,
+    ) -> Result<(), &'static str> {
+        let result = crate::tool_policy::apply_tool_policy(request, &self.policy)?;
+        let deferred = allow_deferred_tool_search
+            && !self.deferred_disabled
+            && matches!(
+                self.diagnostics.tool_choice,
+                crate::ToolChoiceMode::Auto | crate::ToolChoiceMode::Unspecified
+            )
+            && crate::tool_policy::enable_deferred_tool_search(request, &self.policy);
+        self.deferred_applied |= deferred;
+        self.record(result, deferred, request);
+        Ok(())
+    }
+
+    pub(in crate::gateway) fn apply_adapter(
+        &mut self,
+        request: &mut crate::PreparedAdapterRequest,
+        allow_deferred_tool_search: bool,
+    ) -> Result<(), &'static str> {
+        let result = request.apply_tool_policy(&self.policy)?;
+        let deferred = allow_deferred_tool_search
+            && !self.deferred_disabled
+            && matches!(
+                self.diagnostics.tool_choice,
+                crate::ToolChoiceMode::Auto | crate::ToolChoiceMode::Unspecified
+            )
+            && crate::tool_policy::enable_deferred_tool_search(
+                request.upstream_body_mut(),
+                &self.policy,
+            );
+        self.deferred_applied |= deferred;
+        self.record(result, deferred, request.upstream_body());
+        Ok(())
+    }
+
+    fn record(
+        &mut self,
+        mut result: crate::tool_policy::ToolPolicyResult,
+        deferred: bool,
+        request: &Value,
+    ) {
+        if deferred {
+            // Include the provider control tool and defer flags in the
+            // serialized-catalog diagnostic for this attempt. These are wire
+            // bytes, not a claim about model-context tokens.
+            result.after = crate::tool_policy::catalog_stats(request);
+            result.outcome = crate::ToolPolicyOutcome::Deferred;
+        }
+        // Keep the configured mode visible on every attempt.
+        self.diagnostics.policy_mode = Some(self.configured_mode);
+        self.diagnostics.policy_fallback = self.policy_fallback;
+        self.diagnostics.deferred_tool_search = deferred;
+        // Capture the exact post-policy Value that will be serialized. Do not
+        // deserialize the entire conversation again just to count its catalog.
+        // Usage rows describe one attempt, not the maximum across other routes.
+        self.diagnostics.forwarded_tool_count = result.after.count;
+        self.diagnostics.forwarded_schema_bytes = Some(result.after.bytes);
+        self.diagnostics.filtered_tool_count =
+            result.before.count.saturating_sub(result.after.count);
+        self.diagnostics.policy_outcome = Some(result.outcome);
+    }
+
+    /// Allow one compatibility retry for a deferred request.
+    pub(in crate::gateway) fn prepare_deferred_fallback(&mut self) -> bool {
+        if self.deferred_applied && !self.deferred_disabled {
+            self.deferred_disabled = true;
+            self.policy_fallback = true;
+            self.diagnostics.policy_fallback = true;
+            return true;
+        }
+        false
+    }
 }
 
 fn tool_choice_mode(value: &Value) -> ToolChoiceMode {
@@ -714,6 +900,96 @@ mod tests {
     };
     use axum::http::{HeaderMap, HeaderValue};
 
+    fn automatic_tool_policy_test_runtime() -> GatewayRuntime {
+        let runtime = capability_test_runtime(&["synthetic"], GatewayRuntimeOptions::default());
+        runtime
+            .set_tool_policy(crate::ToolPolicy {
+                mode: crate::ToolPolicyMode::Automatic,
+            })
+            .unwrap();
+        runtime
+    }
+
+    fn two_function_tools() -> Value {
+        json!({
+            "tools": [
+                {"type":"function","name":"lookup"},
+                {"type":"function","name":"update"}
+            ]
+        })
+    }
+
+    #[test]
+    fn tool_policy_snapshot_survives_hot_updates_and_retry_clones() {
+        let runtime = capability_test_runtime(&["synthetic"], GatewayRuntimeOptions::default());
+        runtime
+            .set_tool_policy(crate::ToolPolicy {
+                mode: crate::ToolPolicyMode::Automatic,
+            })
+            .unwrap();
+        let original =
+            json!({"tools":[{"type":"function","name":"keep"},{"type":"function","name":"drop"}]});
+        let snapshot = RequestToolPolicy::new(&runtime, &original);
+        runtime
+            .set_tool_policy(crate::ToolPolicy::default())
+            .unwrap();
+        for mut attempt in [snapshot.clone(), snapshot] {
+            let mut body = original.clone();
+            attempt.apply(&mut body).unwrap();
+            assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+            assert_eq!(attempt.diagnostics.client_tool_count, 2);
+            assert_eq!(attempt.diagnostics.filtered_tool_count, 0);
+            attempt.apply(&mut body).unwrap();
+            assert_eq!(attempt.diagnostics.filtered_tool_count, 0);
+            assert_eq!(
+                attempt.diagnostics.policy_outcome,
+                Some(crate::ToolPolicyOutcome::Unchanged)
+            );
+        }
+        let mut next = original.clone();
+        RequestToolPolicy::new(&runtime, &original)
+            .apply(&mut next)
+            .unwrap();
+        assert_eq!(next, original);
+    }
+
+    #[test]
+    fn direct_native_responses_policy_defers_then_restores_the_full_catalog() {
+        let runtime = automatic_tool_policy_test_runtime();
+        let original = two_function_tools();
+        let mut policy = RequestToolPolicy::new(&runtime, &original);
+
+        let mut deferred = original.clone();
+        policy.apply_value(&mut deferred, true).unwrap();
+        assert_eq!(deferred["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(deferred["tools"][0]["defer_loading"], true);
+        assert_eq!(deferred["tools"][2], json!({"type":"tool_search"}));
+        assert!(policy.diagnostics.deferred_tool_search);
+        assert_eq!(
+            policy.diagnostics.policy_outcome,
+            Some(crate::ToolPolicyOutcome::Deferred)
+        );
+
+        assert!(policy.prepare_deferred_fallback());
+        let mut fallback = original.clone();
+        policy.apply_value(&mut fallback, true).unwrap();
+        assert_eq!(fallback, original);
+        assert!(!policy.diagnostics.deferred_tool_search);
+        assert!(policy.diagnostics.policy_fallback);
+        assert!(!policy.prepare_deferred_fallback());
+    }
+
+    #[test]
+    fn direct_non_responses_account_endpoint_keeps_the_catalog_unchanged() {
+        let runtime = automatic_tool_policy_test_runtime();
+        let original = two_function_tools();
+        let mut policy = RequestToolPolicy::new(&runtime, &original);
+        let mut body = original.clone();
+        policy.apply_value(&mut body, false).unwrap();
+        assert_eq!(body, original);
+        assert!(!policy.diagnostics.deferred_tool_search);
+    }
+
     #[test]
     fn background_classifier_requires_explicit_codex_marker() {
         let mut headers = HeaderMap::new();
@@ -790,8 +1066,10 @@ mod tests {
         });
 
         let diagnostics = tool_use_diagnostics(&request);
-        let forwarded =
-            with_forwarded_tool_diagnostics(&diagnostics, &serde_json::to_vec(&request).unwrap());
+        let runtime = capability_test_runtime(&["synthetic"], GatewayRuntimeOptions::default());
+        let mut policy = RequestToolPolicy::new(&runtime, &request);
+        policy.apply(&mut request.clone()).unwrap();
+        let forwarded = policy.diagnostics;
 
         assert_eq!(diagnostics.client_tool_count, 5);
         assert_eq!(diagnostics.tool_choice, ToolChoiceMode::AllowedTools);
@@ -947,6 +1225,68 @@ mod tests {
             }}],
             "input": "Inspect the provided example"
         })));
+    }
+
+    #[test]
+    fn stale_custom_tool_recovery_removes_only_the_reported_historical_call() {
+        let error =
+            br#"{"error":{"message":"No tool output found for custom tool call ctc_stale."}}"#;
+        for call in [
+            json!({"type":"custom_tool_call","id":"item_stale","call_id":"ctc_stale","name":"patch","input":"{}"}),
+            json!({"type":"custom_tool_call","id":"ctc_stale","name":"patch","input":"{}"}),
+        ] {
+            let mut request = json!({"input":[
+                {"type":"message","role":"user","content":"start"},
+                {"type":"function_call","call_id":"fc_done","name":"lookup","arguments":"{}"},
+                {"type":"function_call_output","call_id":"fc_done","output":"keep this result"},
+                call,
+                {"type":"message","role":"user","content":"continue"}
+            ]});
+
+            assert!(remove_unpaired_responses_tool_call(&mut request, 4, error));
+            assert_eq!(request["input"].as_array().unwrap().len(), 4);
+            assert_eq!(request["input"][0]["content"], "start");
+            assert_eq!(request["input"][1]["call_id"], "fc_done");
+            assert_eq!(request["input"][2]["output"], "keep this result");
+            assert_eq!(request["input"][3]["content"], "continue");
+        }
+    }
+
+    #[test]
+    fn stale_tool_recovery_leaves_ambiguous_mismatched_and_current_calls_untouched() {
+        let error =
+            br#"{"error":{"message":"No tool output found for custom tool call ctc_stale."}}"#;
+        for (input, historical_item_count) in [
+            (
+                json!([
+                    {"type":"custom_tool_call","call_id":"ctc_stale","name":"patch","input":"{}"},
+                    {"type":"custom_tool_call","call_id":"ctc_other","name":"patch","input":"{}"}
+                ]),
+                2,
+            ),
+            (
+                json!([
+                    {"type":"custom_tool_call","call_id":"ctc_other","name":"patch","input":"{}"}
+                ]),
+                1,
+            ),
+            (
+                json!([
+                    {"type":"message","role":"user","content":"current"},
+                    {"type":"custom_tool_call","call_id":"ctc_stale","name":"patch","input":"{}"}
+                ]),
+                1,
+            ),
+        ] {
+            let mut request = json!({"input":input});
+            let original = request.clone();
+            assert!(!remove_unpaired_responses_tool_call(
+                &mut request,
+                historical_item_count,
+                error,
+            ));
+            assert_eq!(request, original);
+        }
     }
 
     #[test]
@@ -1346,7 +1686,7 @@ mod tests {
     }
 
     #[test]
-    fn messages_bridge_adds_codex_ultra_only_as_a_translated_max_alias() {
+    fn messages_bridge_does_not_invent_codex_ultra_from_max() {
         use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
         let model = "anthropic/claude-fable-5-1";
         let catalog = ModelMetadataCatalog::from_models_dev_json(
@@ -1397,10 +1737,10 @@ mod tests {
                 .iter()
                 .filter_map(|level| level["effort"].as_str())
                 .collect::<Vec<_>>(),
-            ["low", "medium", "high", "max", "ultra"]
+            ["low", "medium", "high", "max"]
         );
-        // The model metadata remains the official five-level enum; `ultra`
-        // maps to `max` in Codex, while this adapter cannot forward `xhigh`.
+        // The adapter can forward Max but cannot forward xhigh. Codex Ultra
+        // is a client orchestration mode, not a synonym for this route's Max.
         assert_eq!(
             runtime.model_capabilities(model).reasoning_effort_levels,
             ["low", "medium", "high", "xhigh", "max"]

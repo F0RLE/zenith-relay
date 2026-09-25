@@ -6,6 +6,39 @@ use axum::http::{header::CONTENT_ENCODING, HeaderMap, Response, StatusCode};
 use serde_json::{Map, Value};
 use std::io::Read;
 
+/// Upper-biased envelope accounting without serializing another copy. Include
+/// parsed container allocations, repair/bridge copies and fixed request state;
+/// compressed length alone would severely undercharge arrays and uploads.
+pub(super) fn retained_request_bytes(value: &Value) -> usize {
+    retained_value_bytes(value)
+        .saturating_mul(3)
+        .saturating_add(16 * 1024)
+}
+
+pub(super) fn retained_object_bytes(object: &Map<String, Value>) -> usize {
+    object.iter().fold(0usize, |bytes, (key, value)| {
+        bytes
+            .saturating_add(128)
+            .saturating_add(key.capacity())
+            .saturating_add(retained_value_bytes(value))
+    })
+}
+
+fn retained_value_bytes(value: &Value) -> usize {
+    let allocation = match value {
+        Value::String(value) => value.capacity(),
+        Value::Array(values) => values.iter().fold(
+            values
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Value>()),
+            |bytes, value| bytes.saturating_add(retained_value_bytes(value)),
+        ),
+        Value::Object(object) => retained_object_bytes(object),
+        _ => 0,
+    };
+    allocation.saturating_add(std::mem::size_of::<Value>())
+}
+
 #[derive(Debug, PartialEq)]
 enum ReadError {
     TooLarge,

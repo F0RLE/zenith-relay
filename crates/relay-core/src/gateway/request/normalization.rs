@@ -51,6 +51,10 @@ impl ServiceTierPolicy {
         )
     }
 
+    pub(in crate::gateway) fn has_explicit_client_tier(&self) -> bool {
+        self.client_tier.is_some()
+    }
+
     pub(in crate::gateway) fn prepare_for_candidate(
         &self,
         request: &mut Value,
@@ -157,6 +161,7 @@ pub(in crate::gateway) fn normalize_compact_account_request(
 
 fn normalize_account_request_common(object: &mut Map<String, Value>, responses_lite: bool) {
     object.remove("max_output_tokens");
+    normalize_empty_context_management(object);
     normalize_codex_tool_schemas(object);
     sanitize_unstored_reasoning_items(object);
     if responses_lite {
@@ -203,6 +208,27 @@ fn normalize_account_request_common(object: &mut Map<String, Value>, responses_l
             );
         }
         _ => {}
+    }
+}
+
+/// Basis Points accepts the normal Responses body, but rejects an explicitly
+/// empty context policy. Keep a non-empty policy client-owned and omit only
+/// null/empty values so an absent policy remains the provider default.
+pub(in crate::gateway) fn normalize_basis_points_request(object: &mut Map<String, Value>) {
+    normalize_empty_context_management(object);
+}
+
+fn normalize_empty_context_management(object: &mut Map<String, Value>) {
+    let empty = object
+        .get("context_management")
+        .is_some_and(|value| match value {
+            Value::Null => true,
+            Value::Array(items) => items.is_empty(),
+            Value::Object(fields) => fields.is_empty(),
+            _ => false,
+        });
+    if empty {
+        object.remove("context_management");
     }
 }
 
@@ -540,6 +566,24 @@ mod tests {
             WireApi::Responses,
         );
         assert!(request.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn empty_context_management_is_omitted_but_non_empty_policy_is_preserved() {
+        for value in [Value::Null, json!([]), json!({})] {
+            let mut request = json!({"context_management": value});
+            normalize_account_request(request.as_object_mut().unwrap(), false);
+            assert!(request.get("context_management").is_none());
+        }
+
+        let mut request = json!({
+            "context_management": [{"type": "compaction", "compact_threshold": 1_000}]
+        });
+        normalize_basis_points_request(request.as_object_mut().unwrap());
+        assert_eq!(
+            request["context_management"],
+            json!([{"type": "compaction", "compact_threshold": 1_000}])
+        );
     }
 
     fn const_branches(values: &[Value]) -> Value {

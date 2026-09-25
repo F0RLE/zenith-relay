@@ -12,6 +12,7 @@ mod store;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod tool_policy;
 mod translation;
 
 pub(crate) use contracts::{
@@ -23,6 +24,7 @@ pub use contracts::{
     MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode, NativeResponsesReplayState,
     PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
+pub(crate) use gemini::gemini_incomplete;
 pub use gemini::{GeminiBridgeRequest, GeminiBridgeResponse};
 pub use messages::{
     bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,

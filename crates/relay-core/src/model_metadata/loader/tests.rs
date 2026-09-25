@@ -227,7 +227,7 @@ fn compact_source_preserves_json_contract_and_validates_canonical_content() {
         "vendor/model": {
             "reasoning": true,
             "limit": {"context": 1_234_567},
-            "future_metadata": {"ratio": 0.125, "values": [null, false, "текст"]}
+            "future_metadata": {"ratio": 0.125, "values": [null, false, "С‚РµРєСЃС‚"]}
         }
     });
     let mut envelope = SourceEnvelope::new(0, payload.clone(), 1).unwrap();

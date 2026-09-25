@@ -1,4 +1,6 @@
-use crate::accounts::{TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter};
+use crate::accounts::{
+    TokenAuthority, TokenDispatchRevision, TokenPersistenceAdapter, TokenRefreshAdapter,
+};
 use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
@@ -13,9 +15,8 @@ use crate::ProxyConfig;
 use crate::{
     decode_codex_model_alias, is_valid_model_id, CacheWriteTtl, CandidateScope, Error,
     LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore,
-    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    SourceAdapter, SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback,
-    WireApi,
+    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RuntimeCandidate, SourceAdapter,
+    SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback, WireApi,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 #[cfg(test)]
@@ -31,6 +32,8 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use url::Url;
 
+mod admission;
+mod attempt;
 mod authorization;
 mod build;
 mod candidates;
@@ -43,6 +46,9 @@ mod selection;
 mod session_state;
 mod source_metadata;
 
+pub(crate) use attempt::CandidateLease;
+use attempt::CandidateLeaseLane;
+pub use attempt::ExecutionFence;
 use control::RuntimeControl;
 pub(crate) use session_state::CodexTurnStateScope;
 use session_state::CodexTurnStateStore;
@@ -78,6 +84,9 @@ pub struct RuntimeActivitySnapshot {
     pub runtime_id: u64,
     pub revision: u64,
     pub candidate_id: String,
+    /// Physical refresh member; a source may have several protocol candidates.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member_key: String,
     pub in_flight: u32,
     pub active_request_count: u32,
     pub active_models: Vec<crate::ActiveModelRuntime>,
@@ -137,7 +146,8 @@ impl RuntimeSource {
 /// Mutable routing policy for an already configured candidate.
 ///
 /// It deliberately excludes connection details and the configured model
-/// routes. Those require a new runtime because executors are immutable.
+/// routes. Source routes and connection changes require a new runtime;
+/// discovered OAuth model inventory has its own in-place reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCandidatePolicy {
     pub enabled: bool,
@@ -323,11 +333,8 @@ pub trait ResponseAffinityStore: Send + Sync {
 
 #[derive(Clone)]
 pub struct GatewayRuntimeOptions {
+    pub tool_policy: crate::ToolPolicy,
     pub max_retry_candidates: usize,
-    pub cooldown_after_failures: u8,
-    pub keep_last_candidate_available: bool,
-    pub routing_strategy: RoutingStrategy,
-    pub subscription_plan_order: Vec<String>,
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
@@ -345,21 +352,14 @@ pub struct GatewayRuntimeOptions {
     /// exposes no reasoning selector for API sources.
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
-    pub provider_storm_breaker: bool,
 }
 
 impl fmt::Debug for GatewayRuntimeOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GatewayRuntimeOptions")
+            .field("tool_policy_mode", &self.tool_policy.mode)
             .field("max_retry_candidates", &self.max_retry_candidates)
-            .field("cooldown_after_failures", &self.cooldown_after_failures)
-            .field(
-                "keep_last_candidate_available",
-                &self.keep_last_candidate_available,
-            )
-            .field("routing_strategy", &self.routing_strategy)
-            .field("subscription_plan_order", &self.subscription_plan_order)
             .field("hidden_models", &self.hidden_models)
             .field("default_service_tier", &self.default_service_tier)
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
@@ -380,7 +380,6 @@ impl fmt::Debug for GatewayRuntimeOptions {
                 "response_affinity_store",
                 &self.response_affinity_store.as_ref().map(|_| "configured"),
             )
-            .field("provider_storm_breaker", &self.provider_storm_breaker)
             .finish()
     }
 }
@@ -388,11 +387,8 @@ impl fmt::Debug for GatewayRuntimeOptions {
 impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
+            tool_policy: crate::ToolPolicy::default(),
             max_retry_candidates: 3,
-            cooldown_after_failures: crate::DEFAULT_COOLDOWN_AFTER_FAILURES,
-            keep_last_candidate_available: crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-            routing_strategy: RoutingStrategy::Adaptive,
-            subscription_plan_order: Vec::new(),
             pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
@@ -402,12 +398,12 @@ impl Default for GatewayRuntimeOptions {
             model_metadata_catalog: None,
             model_reasoning_allowed_levels: BTreeMap::new(),
             response_affinity_store: None,
-            provider_storm_breaker: false,
         }
     }
 }
 
 pub struct GatewayRuntime {
+    tool_policy: RwLock<crate::ToolPolicy>,
     clients: RuntimeHttpClients,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
@@ -419,7 +415,11 @@ pub struct GatewayRuntime {
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_availability: Arc<tokio::sync::Notify>,
-    registry: ModelRegistry,
+    admission: Mutex<admission::AdmissionQueue>,
+    admission_changed: tokio::sync::Notify,
+    registry: Mutex<ModelRegistry>,
+    image_base_model: Option<String>,
+    image_pricing_catalog: Option<Arc<PricingCatalog>>,
     codex_responses_lite_models: Mutex<BTreeSet<(String, String)>>,
     websocket_http_only: Mutex<BTreeMap<(String, String), u64>>,
     model_metadata: SourceModelMetadataState,
@@ -465,91 +465,11 @@ struct SourceModelMetadataState {
     codex_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
 }
 
-pub(crate) struct CandidateLease {
-    scheduler: Arc<Mutex<PoolScheduler>>,
-    availability: Arc<tokio::sync::Notify>,
-    candidate_id: String,
-    reservation_id: crate::scheduler::ReservationId,
-    activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
-    activity_runtime_id: u64,
-    activity_revision: Arc<AtomicU64>,
-    released: AtomicBool,
-}
-
-pub(crate) struct ExecutionFence {
-    scheduler: Arc<Mutex<PoolScheduler>>,
-    candidate_id: String,
-    released: AtomicBool,
-}
-
-#[derive(Clone, Copy)]
-enum CandidateLeaseLane {
-    Text,
-    Image,
-}
-
-impl CandidateLease {
-    pub(crate) fn release(&self) {
-        if self.released.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let activity = {
-            let mut scheduler = self
-                .scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let released = scheduler.release_reservation(self.reservation_id);
-            if !released {
-                None
-            } else {
-                let (in_flight, active_request_count, active_models) =
-                    scheduler.runtime_activity_for(&self.candidate_id);
-                Some(RuntimeActivitySnapshot {
-                    runtime_id: self.activity_runtime_id,
-                    revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
-                    candidate_id: self.candidate_id.clone(),
-                    in_flight,
-                    active_request_count,
-                    active_models,
-                })
-            }
-        };
-        if let Some(activity) = activity {
-            self.availability.notify_one();
-            let callback = self
-                .activity_callback
-                .lock()
-                .ok()
-                .map(|callback| callback.clone());
-            if let Some(callback) = callback {
-                callback(activity);
-            }
-        }
-    }
-}
-
-impl Drop for CandidateLease {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-impl Drop for ExecutionFence {
-    fn drop(&mut self) {
-        if self.released.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .set_execution_fence(&self.candidate_id, false);
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct AuthenticatedKey {
     pub(crate) id: String,
     scope: Arc<RwLock<CandidateScope>>,
+    scope_revision: Arc<AtomicU64>,
     pub(crate) model_rules: ModelRules,
     pub(crate) model_prefix: Option<String>,
     client_wire_apis: Option<Vec<ClientWireApi>>,
@@ -573,10 +493,13 @@ impl AuthenticatedKey {
 struct ChatGptAccountExecutor {
     id: String,
     source_id: String,
+    chatgpt_account_id: String,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
-    configured_models: BTreeSet<String>,
-    image_main_model: Option<String>,
+    basis_points_url: Url,
+    basis_points_enabled: AtomicBool,
+    model_inventory: RwLock<AccountModelInventory>,
+    image_bridge_revision: Arc<AtomicU64>,
     token_authority: Arc<TokenAuthority>,
     refresh_adapter: Arc<dyn TokenRefreshAdapter>,
     persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
@@ -584,8 +507,14 @@ struct ChatGptAccountExecutor {
     clients: RuntimeHttpClients,
     active: AtomicBool,
     agent_identity: RwLock<Option<AgentIdentityCredential>>,
+    agent_identity_revision: AtomicU64,
     agent_task_lock: tokio::sync::Mutex<()>,
     routing_cookies: routing_cookies::RoutingCookies,
+}
+
+struct AccountModelInventory {
+    configured_models: BTreeSet<String>,
+    image_main_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -597,8 +526,6 @@ pub(crate) struct ExecutorRoute {
     /// request. This is request-local provenance, not route configuration.
     pub(crate) account_token_generation: Option<u64>,
     pub(crate) client_context_id: Option<String>,
-    pub(crate) scope: CandidateScope,
-    pub(crate) allowed_protocols: Vec<WireApi>,
     pub(crate) wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
@@ -606,6 +533,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
     pub(crate) upstream_headers: HeaderMap,
+    pub(crate) account_transport: AccountTransport,
     pub(crate) source_model: String,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
@@ -626,8 +554,17 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) authorization: HeaderValue,
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
+    pub(crate) token_revision: Option<TokenDispatchRevision>,
     pub(crate) agent_task_id: Option<String>,
     pub(crate) agent_credential_fingerprint: Option<[u8; 32]>,
+    pub(crate) agent_identity_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorizationIncarnation {
+    Source,
+    OAuth(TokenDispatchRevision),
+    Agent(u64),
 }
 
 /// The upstream response together with the exact OAuth credential generation
@@ -643,6 +580,7 @@ pub(crate) enum AuthorizedRequestError {
     Prepare(ExecutorPrepareError),
     Transport(reqwest::Error),
     NotReplayable,
+    DispatchBudgetExhausted,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -658,6 +596,7 @@ struct RuntimeKey {
     enabled: bool,
     secret_hash: [u8; 32],
     scope: Arc<RwLock<CandidateScope>>,
+    scope_revision: Arc<AtomicU64>,
     model_rules: ModelRules,
     model_prefix: Option<String>,
     client_wire_apis: Option<Vec<ClientWireApi>>,
@@ -765,6 +704,11 @@ impl GatewayRuntime {
         usage: UsageCallback,
     ) -> Result<Self> {
         validate_runtime_options(&options)?;
+        let tool_policy = options
+            .tool_policy
+            .clone()
+            .normalized()
+            .map_err(|message| Error::Validation(message.to_string()))?;
         let model_reasoning_allowed_levels = normalize_model_reasoning_allowed_levels(
             options.model_reasoning_allowed_levels.clone(),
         )
@@ -792,12 +736,13 @@ impl GatewayRuntime {
             &mut scheduler,
         )?;
         let hidden_models = normalized_set(options.hidden_models.iter());
-        // Desktop and server resolve the versioned policy from the complete
-        // configured inventory. `None` keeps the legacy core compatibility
-        // path for direct callers and older saved runtimes.
-        if let Some(policy) = options.pool_routing.clone() {
-            scheduler.set_pool_routing(policy)?;
-        }
+        // All callers use pool rotation. Older settings migrate once to the
+        // same explicit policy used by desktop and server.
+        let policy = options
+            .pool_routing
+            .clone()
+            .unwrap_or_else(|| scheduler.migrated_pool_routing());
+        scheduler.set_pool_routing(policy)?;
         let key_parts = build_keys(keys, &hidden_models)?;
         validate_reachability(
             reachability_requirement,
@@ -837,6 +782,7 @@ impl GatewayRuntime {
         }
 
         Ok(Self {
+            tool_policy: RwLock::new(tool_policy),
             clients,
             discovery_client,
             sources: source_parts.executors,
@@ -848,7 +794,11 @@ impl GatewayRuntime {
             keys: key_parts.runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
-            registry,
+            admission: Mutex::default(),
+            admission_changed: tokio::sync::Notify::new(),
+            registry: Mutex::new(registry),
+            image_base_model,
+            image_pricing_catalog: options.image_pricing_catalog.clone(),
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             websocket_http_only: Mutex::new(BTreeMap::new()),
             model_metadata: SourceModelMetadataState::default(),
@@ -912,6 +862,26 @@ impl GatewayRuntime {
         self.control.codex_background_tasks_enabled()
     }
 
+    /// Requests snapshot this value once. Hot updates never rebuild the
+    /// listener or change an already admitted request's policy during retry.
+    pub fn tool_policy(&self) -> crate::ToolPolicy {
+        self.tool_policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set_tool_policy(&self, policy: crate::ToolPolicy) -> Result<()> {
+        let policy = policy
+            .normalized()
+            .map_err(|message| Error::Validation(message.to_string()))?;
+        *self
+            .tool_policy
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+        Ok(())
+    }
+
     pub fn set_codex_background_tasks_enabled(&self, enabled: bool) {
         self.control.set_codex_background_tasks_enabled(enabled);
     }
@@ -924,22 +894,24 @@ impl GatewayRuntime {
         self.control.set_codex_websockets_enabled(enabled);
     }
 
-    pub fn chatgpt_retry_until_available(&self) -> bool {
-        self.control.chatgpt_retry_until_available()
+    pub fn route_recovery_enabled(&self) -> bool {
+        self.control.route_recovery_enabled()
     }
 
-    pub fn set_chatgpt_retry_until_available(&self, enabled: bool) {
-        self.control.set_chatgpt_retry_until_available(enabled);
+    pub fn set_route_recovery_enabled(&self, enabled: bool) {
+        self.control.set_route_recovery_enabled(enabled);
+        self.candidate_availability.notify_waiters();
     }
 
-    /// Maximum time a managed ChatGPT request may wait for a transiently
-    /// unavailable candidate before returning a machine-readable 503.
-    pub fn chatgpt_retry_window_ms(&self) -> u64 {
-        self.control.chatgpt_retry_window_ms()
+    /// The bounded retry window for gateway requests without persistent route
+    /// recovery. It starts at the first replay-safe rejection, not dispatch.
+    pub fn route_recovery_window_ms(&self) -> u64 {
+        self.control.route_recovery_window_ms()
     }
 
-    pub fn set_chatgpt_retry_window_ms(&self, value: u64) {
-        self.control.set_chatgpt_retry_window_ms(value);
+    pub fn set_route_recovery_window_ms(&self, value: u64) {
+        self.control.set_route_recovery_window_ms(value);
+        self.candidate_availability.notify_waiters();
     }
 
     pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
@@ -1023,6 +995,7 @@ impl GatewayRuntime {
                 account_ids: Some(BTreeSet::from([account_id.to_string()])),
                 model_rules: ModelRules::default(),
             })),
+            scope_revision: Arc::new(AtomicU64::new(0)),
             model_rules: ModelRules::default(),
             model_prefix: None,
             client_wire_apis: Some(vec![ClientWireApi::Responses]),
@@ -1033,6 +1006,7 @@ impl GatewayRuntime {
         AuthenticatedKey {
             id: key.id.clone(),
             scope: key.scope.clone(),
+            scope_revision: key.scope_revision.clone(),
             model_rules: key.model_rules.clone(),
             model_prefix: key.model_prefix.clone(),
             client_wire_apis: key.client_wire_apis.clone(),
@@ -1145,6 +1119,8 @@ impl GatewayRuntime {
         let scheduler = self.lock_scheduler();
         let mut models = self
             .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| key.model_rules.allows(model))
@@ -1182,7 +1158,11 @@ impl GatewayRuntime {
                 .values()
                 .filter_map(|account| {
                     let candidate = scheduler.candidate(&account.id)?;
-                    let visible_models = account
+                    let inventory = account
+                        .model_inventory
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let visible_models = inventory
                         .configured_models
                         .iter()
                         .filter(|model| {
@@ -1258,22 +1238,21 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
+        if !self
+            .lock_scheduler()
+            .candidate(candidate_id)
+            .is_some_and(|candidate| candidate.is_configured(model, allowed_protocols, scope))
+        {
+            return None;
+        }
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            return self.source_executor_route(
-                candidate_id,
-                binding,
-                model,
-                scope,
-                allowed_protocols,
-                upstream_stream,
-            );
+            return self.source_executor_route(candidate_id, binding, model, upstream_stream);
         }
         let account = self.chatgpt_accounts.get(candidate_id)?;
         let source_model = account.canonical_model(model)?;
         Some(Self::account_executor_route(
             account,
             source_model,
-            scope,
             allowed_protocols,
         ))
     }
@@ -1285,24 +1264,28 @@ impl GatewayRuntime {
         scope: &CandidateScope,
         allowed_protocols: &[WireApi],
     ) -> Option<ExecutorRoute> {
+        if !self
+            .lock_scheduler()
+            .candidate(candidate_id)
+            .is_some_and(|candidate| candidate.is_configured(model, allowed_protocols, scope))
+        {
+            return None;
+        }
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             if !binding.adapter.is_passthrough() {
                 return None;
             }
-            return self.source_executor_route(
-                candidate_id,
-                binding,
-                model,
-                scope,
-                allowed_protocols,
-                false,
-            );
+            return self.source_executor_route(candidate_id, binding, model, false);
         }
         let account = self.chatgpt_accounts.get(candidate_id)?;
         Some(Self::account_executor_route(
             account,
-            account.image_main_model.clone()?,
-            scope,
+            account
+                .model_inventory
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .image_main_model
+                .clone()?,
             allowed_protocols,
         ))
     }
@@ -1312,8 +1295,6 @@ impl GatewayRuntime {
         candidate_id: &str,
         binding: &SourceCandidateBinding,
         model: &str,
-        scope: &CandidateScope,
-        allowed_protocols: &[WireApi],
         upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
         let source = self.sources.get(&binding.source_id)?;
@@ -1325,8 +1306,6 @@ impl GatewayRuntime {
             account_id: None,
             account_token_generation: None,
             client_context_id: None,
-            scope: scope.clone(),
-            allowed_protocols: allowed_protocols.to_vec(),
             wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
@@ -1334,6 +1313,7 @@ impl GatewayRuntime {
             service_tier: DefaultServiceTier::Standard,
             upstream_url: source.endpoint(binding.binding_key, &source_model, upstream_stream)?,
             upstream_headers: source.protocol_headers_for_binding(source_binding),
+            account_transport: AccountTransport::NativeResponses,
             source_model,
             half_open_probe: false,
             routing: None,
@@ -1343,7 +1323,6 @@ impl GatewayRuntime {
     fn account_executor_route(
         account: &ChatGptAccountExecutor,
         source_model: String,
-        scope: &CandidateScope,
         allowed_protocols: &[WireApi],
     ) -> ExecutorRoute {
         let wire_api = allowed_protocols
@@ -1352,14 +1331,23 @@ impl GatewayRuntime {
             .unwrap_or(WireApi::Responses);
         let adapter =
             SourceAdapter::between(wire_api, WireApi::Responses).expect("registered account route");
+        let account_transport = if account.basis_points_enabled.load(Ordering::Relaxed)
+            && account
+                .agent_identity
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            AccountTransport::ExcelBasisPoints
+        } else {
+            AccountTransport::NativeResponses
+        };
         ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             account_token_generation: None,
             client_context_id: None,
-            scope: scope.clone(),
-            allowed_protocols: allowed_protocols.to_vec(),
             wire_api,
             adapter,
             reasoning_mode: if adapter.is_passthrough() {
@@ -1369,8 +1357,17 @@ impl GatewayRuntime {
             },
             cache_write_ttl: CacheWriteTtl::Provider,
             service_tier: DefaultServiceTier::Standard,
-            upstream_url: account.responses_url.clone(),
-            upstream_headers: HeaderMap::new(),
+            upstream_url: match account_transport {
+                AccountTransport::NativeResponses => account.responses_url.clone(),
+                AccountTransport::ExcelBasisPoints => account.basis_points_url.clone(),
+            },
+            upstream_headers: match account_transport {
+                AccountTransport::NativeResponses => HeaderMap::new(),
+                AccountTransport::ExcelBasisPoints => {
+                    basis_points_headers(&account.chatgpt_account_id)
+                }
+            },
+            account_transport,
             source_model,
             half_open_probe: false,
             routing: None,
@@ -1420,44 +1417,77 @@ impl GatewayRuntime {
             .insert((candidate_id.to_string(), model.to_string()), now_ms);
     }
 
-    pub(crate) fn max_retry_candidates(&self) -> usize {
-        let scheduler = self.lock_scheduler();
-        if scheduler.automatic_recovery_enabled() {
-            // Cover the whole configured pool and one recovery attempt per
-            // route. Selection still enforces the key, model and owner scope.
-            scheduler.candidates().count().saturating_mul(2).max(1)
-        } else {
-            self.max_retry_candidates.load(Ordering::Relaxed)
-        }
-    }
-
-    pub(crate) fn automatic_recovery_enabled(&self) -> bool {
-        self.lock_scheduler().automatic_recovery_enabled()
+    /// The saved dispatch limit applies to the entire incoming request.
+    pub(crate) fn request_dispatch_budget(&self) -> usize {
+        self.max_retry_candidates.load(Ordering::Relaxed)
     }
 
     pub fn set_pool_routing_policy(
         &self,
         policy: crate::PoolRoutingPolicy,
         max_retry_candidates: u8,
-        cooldown_after_failures: u8,
-        keep_last_candidate_available: bool,
     ) -> Result<()> {
+        self.set_pool_routing_policy_with_key_scopes(policy, max_retry_candidates, &[])?;
+        Ok(())
+    }
+
+    /// Apply host membership and the corresponding internal key scopes as one
+    /// routing transaction. A final dispatch holds scope -> scheduler locks;
+    /// taking them in the same order here prevents a send in the gap between
+    /// replacing the policy and revoking a removed member's key permission.
+    /// Missing keys abort without changing either the policy or any scope.
+    pub fn set_pool_routing_policy_with_key_scopes(
+        &self,
+        policy: crate::PoolRoutingPolicy,
+        max_retry_candidates: u8,
+        key_scopes: &[(String, CandidateScope)],
+    ) -> Result<bool> {
         policy
-            .validate()
+            .validate_activation()
             .map_err(|message| Error::Validation(message.into()))?;
-        if !(1..=8).contains(&max_retry_candidates) || !(1..=8).contains(&cooldown_after_failures) {
+        if !(1..=8).contains(&max_retry_candidates) {
             return Err(Error::Validation(
-                "routing retry limits must be between 1 and 8".into(),
+                "max retry candidates must be between 1 and 8".into(),
+            ));
+        }
+        let mut updates = key_scopes.iter().collect::<Vec<_>>();
+        updates.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut seen = BTreeSet::new();
+        let mut keys = Vec::with_capacity(updates.len());
+        for (id, scope) in updates {
+            if !seen.insert(id) {
+                return Err(Error::Validation(
+                    "duplicate gateway key scope update".into(),
+                ));
+            }
+            let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == *id) else {
+                return Ok(false);
+            };
+            keys.push((key, scope));
+        }
+        let mut locked = Vec::with_capacity(keys.len());
+        for (key, scope) in keys {
+            locked.push((
+                key,
+                scope,
+                key.scope
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             ));
         }
         let mut scheduler = self.lock_scheduler();
         scheduler.set_pool_routing(policy)?;
-        scheduler.set_cooldown_policy(cooldown_after_failures, keep_last_candidate_available);
         self.max_retry_candidates
             .store(usize::from(max_retry_candidates), Ordering::Relaxed);
+        for (key, scope, mut current) in locked {
+            if *current != *scope {
+                *current = scope.clone();
+                key.scope_revision.fetch_add(1, Ordering::AcqRel);
+            }
+        }
         drop(scheduler);
         self.candidate_availability.notify_waiters();
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
@@ -1530,50 +1560,43 @@ impl GatewayRuntime {
         )
     }
 
-    pub(crate) fn record_failure(&self, candidate_id: &str) -> u32 {
-        self.lock_scheduler()
-            .record_failure(candidate_id)
-            .unwrap_or(1)
-    }
-
-    pub(crate) fn set_cooldown_with_reason_for_model_at(
-        &self,
-        candidate_id: &str,
-        request: CooldownRequest<'_>,
-    ) -> bool {
-        let mut scheduler = self.lock_scheduler();
-        let applied = scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request);
-        if applied {
-            if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-                let resource_failure = request.reason
-                    == crate::scheduler::CooldownReason::RateLimit
-                    || (request.scope == "*"
-                        && request.reason == crate::scheduler::CooldownReason::Mandatory);
-                let upstream = binding.adapter.upstream_protocol(binding.wire_api);
-                for (id, sibling) in &self.source_candidate_bindings {
-                    if id != candidate_id
-                        && sibling.source_id == binding.source_id
-                        && (resource_failure
-                            || sibling.adapter.upstream_protocol(sibling.wire_api) == upstream)
-                    {
-                        scheduler.set_cooldown_with_reason(
-                            id,
-                            request.scope,
-                            request.retry_at_ms,
-                            request.reason,
-                        );
-                    }
-                }
-            }
-        }
-        applied
-    }
-
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
         self.scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// Switches the explicitly labelled Excel/Basis Points transport for OAuth
+    /// accounts without rebuilding the scheduler. Agent Identity accounts
+    /// cannot use this transport. The account candidate, quota state and
+    /// concurrency reservation remain unchanged.
+    pub fn set_basis_points_enabled(&self, enabled: bool) {
+        for account in self.chatgpt_accounts.values() {
+            let oauth = account
+                .agent_identity
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none();
+            account
+                .basis_points_enabled
+                .store(enabled && oauth, Ordering::Relaxed);
+        }
+    }
+
+    /// A host replaces this runtime's routing graph without waiting for
+    /// already-served streams to finish. Serialize retirement with final rotation
+    /// dispatch, then wake admissions so they do not wait on dead capacity.
+    pub fn retire_for_replacement(&self) {
+        self.lock_scheduler().retire_for_replacement();
+        self.candidate_availability.notify_waiters();
+        self.admission_changed.notify_waiters();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AccountTransport {
+    NativeResponses,
+    ExcelBasisPoints,
 }
 
 fn normalize_client_wire_api(wire_api: ClientWireApi) -> ClientWireApi {
@@ -1614,9 +1637,62 @@ fn runtime_now_ms() -> u64 {
     crate::unix_time_ms()
 }
 
+fn basis_points_headers(account_id: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(account_id) {
+        let mut value = value;
+        value.set_sensitive(true);
+        headers.insert(
+            HeaderName::from_static("x-openai-account-id"),
+            value.clone(),
+        );
+        headers.insert(HeaderName::from_static("chatgpt-account-id"), value);
+    }
+    for (name, value) in [
+        ("x-basispoints-auth-mode", "chatgpt"),
+        ("origin", "https://bps.openai.com"),
+        (
+            "x-openai-internal-basispoints-client-agent-profile",
+            "excel",
+        ),
+        ("x-openai-internal-basispoints-client-editor", "excel"),
+        ("x-openai-internal-basispoints-client-host", "oiiice"),
+        ("x-openai-internal-basispoints-client-platform", "excel"),
+        ("x-openai-internal-basispoints-client-platform-class", "PC"),
+        (
+            "x-openai-internal-basispoints-client-product",
+            "basispoints-excel-plugin",
+        ),
+        ("x-openai-internal-basispoints-client-runtime", "desktop"),
+        ("x-openai-internal-basispoints-oiiice-host", "Excel"),
+        ("x-openai-internal-basispoints-oiiice-platform", "PC"),
+        ("x-stainless-arch", "unknown"),
+        ("x-stainless-lang", "rust"),
+        ("x-stainless-os", "unknown"),
+        ("x-stainless-runtime", "relay"),
+    ] {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+    headers.insert(
+        HeaderName::from_static("user-agent"),
+        HeaderValue::from_static("zenith-relay-basispoints"),
+    );
+    headers.insert(
+        HeaderName::from_static("accept-encoding"),
+        HeaderValue::from_static("identity"),
+    );
+    headers
+}
+
 impl ChatGptAccountExecutor {
     fn canonical_model(&self, model: &str) -> Option<String> {
-        self.configured_models
+        self.model_inventory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .configured_models
             .iter()
             .find(|candidate| candidate.eq_ignore_ascii_case(model))
             .cloned()

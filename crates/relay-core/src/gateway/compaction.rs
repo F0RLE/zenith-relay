@@ -4,6 +4,7 @@ use super::streaming::{parse_sse_event, NativeReplayCapture, TerminalOutcome};
 use crate::error_codes;
 use crate::protocol::sse_event_end;
 use crate::runtime::{CodexTurnStateScope, ExecutorRoute};
+use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
 use axum::http::{
     header::{ACCEPT, CONTENT_TYPE},
@@ -159,6 +160,8 @@ pub(super) async fn execute(
     request: &Value,
     headers: &HeaderMap,
     scope: Option<&CodexTurnStateScope<'_>>,
+    budget: &SharedRequestBudget,
+    lease: &crate::runtime::CandidateLease,
 ) -> Result<(HeaderMap, Vec<u8>), Box<(AttemptFailure, HeaderMap)>> {
     let body = request_body(request).map_err(|failure| Box::new((failure, HeaderMap::new())))?;
     let upstream = runtime
@@ -173,6 +176,8 @@ pub(super) async fn execute(
                 .body(body),
             codex_client_version(headers),
             scope,
+            Some(budget),
+            Some(lease),
         )
         .await
         .map_err(|error| Box::new((AttemptFailure::authorized_request(error), HeaderMap::new())))?;
@@ -185,10 +190,8 @@ pub(super) async fn execute(
             .await
             .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
     if !status.is_success() {
-        return Err(Box::new((
-            AttemptFailure::status_with_body(status, Some(&bytes)),
-            headers,
-        )));
+        let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        return Err(Box::new((failure, headers)));
     }
     let body = compact_output(&bytes).map_err(|failure| Box::new((failure, headers.clone())))?;
     for name in [

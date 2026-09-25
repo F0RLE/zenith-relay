@@ -136,7 +136,18 @@ pub(super) fn is_new_api(payload: &Value) -> bool {
 }
 
 pub(super) fn new_api_stats(payload: &Value, metadata: Option<&Value>) -> StatsResult<Stats> {
-    if !is_new_api(payload) || payload.get("success").and_then(Value::as_bool) != Some(true) {
+    // New API uses `code: true`; older compatible deployments use `success: true`.
+    // A present failure flag must not be overridden by the other field.
+    let success_flags = ["code", "success"]
+        .into_iter()
+        .filter_map(|field| payload.get(field))
+        .collect::<Vec<_>>();
+    if !is_new_api(payload)
+        || success_flags.is_empty()
+        || success_flags
+            .iter()
+            .any(|value| value.as_bool() != Some(true))
+    {
         return Err(Status::InvalidResponse);
     }
     let data = data(payload);
@@ -182,20 +193,17 @@ pub(super) fn billing_stats(
     if !is_billing(subscription) || usage.get("object").and_then(Value::as_str) != Some("list") {
         return Err(Status::InvalidResponse);
     }
-    let metadata = metadata.and_then(valid_metadata);
-    let currency = match metadata
-        .and_then(|meta| meta.get("quota_display_type"))
-        .and_then(Value::as_str)
-    {
+    // Billing fields retain legacy `_usd` names even when the site returns
+    // CNY or raw quota. Without its status we cannot label the numbers.
+    let metadata = metadata
+        .and_then(valid_metadata)
+        .ok_or(Status::InvalidResponse)?;
+    let currency = match metadata.get("quota_display_type").and_then(Value::as_str) {
         Some("CNY") => Currency::Cny,
         Some("TOKENS") => Currency::Credits,
         Some("USD") => Currency::Usd,
         Some(_) => return Err(Status::InvalidResponse),
-        None if metadata
-            .and_then(|meta| meta.get("display_in_currency"))
-            .and_then(Value::as_bool)
-            == Some(false) =>
-        {
+        None if metadata.get("display_in_currency").and_then(Value::as_bool) == Some(false) => {
             Currency::Credits
         }
         None => Currency::Usd,
@@ -205,7 +213,7 @@ pub(super) fn billing_stats(
     let spent = amount(usage.get("total_usage"), 10_000).ok_or(Status::InvalidResponse)?;
     let mut stats = Stats::empty(Provider::Billing, Status::Available);
     if metadata
-        .and_then(|meta| meta.get("display_token_stat_enabled"))
+        .get("display_token_stat_enabled")
         .and_then(Value::as_bool)
         == Some(true)
     {
@@ -244,24 +252,6 @@ pub(super) fn deepseek_stats(payload: &Value) -> StatsResult<Stats> {
             None,
         );
     }
-    complete(stats)
-}
-
-pub(super) fn siliconflow_stats(payload: &Value, host: Option<&str>) -> StatsResult<Stats> {
-    let data = data(payload);
-    if payload.get("status").and_then(Value::as_bool) != Some(true)
-        || payload.get("code").and_then(Value::as_i64) != Some(20_000)
-    {
-        return Err(Status::InvalidResponse);
-    }
-    let currency = match host.map(str::to_ascii_lowercase).as_deref() {
-        Some("api.siliconflow.cn") => Currency::Cny,
-        Some("api.siliconflow.com") => Currency::Usd,
-        _ => return Err(Status::Unsupported),
-    };
-    let total = amount(data.get("totalBalance"), 1_000_000).ok_or(Status::InvalidResponse)?;
-    let mut stats = Stats::empty(Provider::SiliconFlow, Status::Available);
-    stats.amount(currency, Some(total), None);
     complete(stats)
 }
 

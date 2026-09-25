@@ -95,38 +95,59 @@ impl PoolScheduler {
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
-        let next = self.preview_new_request_candidate(scope, models, protocols, now_ms);
-        let mut candidates = self
+        // Preview is a read-only projection: neither weighted credits nor
+        // capacity, circuit epochs or recovery permits can advance here.
+        let mut projection = self.clone();
+        projection.sync_all_rotation_candidates();
+        let next = projection.preview_new_request_candidate(scope, models, protocols, now_ms);
+        let mut snapshots = projection
             .candidates
             .values()
             .map(|candidate| {
-                (
-                    candidate,
-                    self.is_runtime_available(candidate, now_ms),
-                    self.in_flight_count(&candidate.id, InFlightLane::Text),
-                )
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(
-            |(left, left_available, left_in_flight), (right, right_available, right_in_flight)| {
-                (right_in_flight > &0)
-                    .cmp(&(left_in_flight > &0))
-                    .then_with(|| right_available.cmp(left_available))
-                    .then_with(|| self.compare_preference(right, left, InFlightLane::Text, now_ms))
-            },
-        );
-        candidates
-            .into_iter()
-            .map(|(candidate, available, in_flight)| {
-                let active_models = self.active_models_for(&candidate.id);
-                let mut model_retries = candidate
-                    .cooldowns
-                    .iter()
-                    .filter(|(model, retry_at_ms)| model.as_str() != "*" && **retry_at_ms > now_ms)
-                    .map(|(model, retry_at_ms)| ModelRetryRuntime {
-                        model: model.clone(),
-                        retry_at_ms: *retry_at_ms,
-                    })
+                let mut available = false;
+                let mut half_open = false;
+                let mut retries = BTreeMap::<String, u64>::new();
+                for model in &candidate.models {
+                    if !models.allows(model)
+                        || !projection.rotation_visible(candidate, model, protocols, scope, now_ms)
+                    {
+                        continue;
+                    }
+                    let operation = Self::model_operation(model);
+                    let request = projection.rotation_request(
+                        None,
+                        Some(&candidate.id),
+                        model,
+                        operation,
+                        BTreeSet::from([candidate.id.clone()]),
+                    );
+                    let circuit = projection
+                        .rotation
+                        .circuit(&candidate.id, &request.route_key);
+                    half_open |= circuit.state == super::super::rotation::CircuitState::HalfOpen;
+                    match projection.rotation.candidate_availability(
+                        &request,
+                        &candidate.id,
+                        now_ms,
+                    ) {
+                        super::super::rotation::CandidateAvailability::Ready { .. } => {
+                            available |= operation != RotationOperation::Image
+                                || projection.lane_allows(candidate, InFlightLane::Image);
+                        }
+                        super::super::rotation::CandidateAvailability::WaitUntil {
+                            at_ms, ..
+                        } => {
+                            retries
+                                .entry(model.clone())
+                                .and_modify(|at| *at = (*at).max(at_ms))
+                                .or_insert(at_ms);
+                        }
+                        _ => {}
+                    }
+                }
+                let mut model_retries = retries
+                    .into_iter()
+                    .map(|(model, retry_at_ms)| ModelRetryRuntime { model, retry_at_ms })
                     .collect::<Vec<_>>();
                 model_retries.sort_by_key(|retry| retry.retry_at_ms);
                 CandidateRuntimeSnapshot {
@@ -136,70 +157,95 @@ impl PoolScheduler {
                     next_for_new_request: next.as_deref() == Some(candidate.id.as_str()),
                     activity_revision: 0,
                     runtime_id: 0,
-                    in_flight,
-                    active_request_count: self.active_request_count(&candidate.id),
-                    active_models,
+                    in_flight: projection.in_flight_count(&candidate.id, InFlightLane::Text),
+                    active_request_count: projection.active_request_count(&candidate.id),
+                    active_models: projection.active_models_for(&candidate.id),
+                    next_retry_at_ms: model_retries.first().map(|retry| retry.retry_at_ms),
                     model_retries,
                     last_used_at_ms: candidate.last_used_at,
-                    next_retry_at_ms: candidate
-                        .cooldowns
-                        .values()
-                        .copied()
-                        .filter(|retry_at_ms| *retry_at_ms > now_ms)
-                        .min(),
-                    half_open: self.reservations.is_probing(&candidate.id),
-                    dispatches: self.dispatch_count(&candidate.id, InFlightLane::Text),
+                    half_open,
+                    dispatches: projection.dispatch_count(&candidate.id, InFlightLane::Text),
                 }
             })
-            .collect()
-    }
-
-    fn is_runtime_available(&self, candidate: &RuntimeCandidate, now_ms: u64) -> bool {
-        let scope = CandidateScope::default();
-        candidate
-            .models
-            .iter()
-            .any(|model| self.is_eligible(candidate, model, &[candidate.protocol], &scope, now_ms))
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|entry| {
+            (
+                !entry.active_request_count.gt(&0),
+                !entry.available,
+                !entry.next_for_new_request,
+                projection
+                    .member_policy(&projection.candidates[&entry.candidate_id])
+                    .map_or(usize::MAX, |(rank, _)| rank),
+                entry.candidate_id.clone(),
+            )
+        });
+        snapshots
     }
 
     fn preview_new_request_candidate(
-        &self,
+        &mut self,
         scope: &CandidateScope,
         models: &crate::ModelRules,
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Option<String> {
-        let mut routes = BTreeMap::<(String, WireApi), Vec<&RuntimeCandidate>>::new();
-        for candidate in self.candidates.values() {
-            for model in &candidate.models {
-                if models.allows(model) && candidate.is_configured(model, protocols, scope) {
-                    routes
-                        .entry((model.to_ascii_lowercase(), candidate.protocol))
-                        .or_default()
-                        .push(candidate);
-                }
-            }
-        }
-        let mut next: Option<&RuntimeCandidate> = None;
-        for ((model, protocol), candidates) in routes {
-            // Without a request's model or protocol a pool-wide text preview
-            // is meaningful only when every applicable selection agrees.
-            let eligible = candidates
-                .iter()
-                .copied()
-                .filter(|candidate| {
-                    self.lane_allows(candidate, InFlightLane::Text)
-                        && self.is_eligible(candidate, &model, &[protocol], scope, now_ms)
-                })
-                .collect::<Vec<_>>();
-            let (selected, _) = self.select_baseline(&eligible, InFlightLane::Text, now_ms)?;
-            if next.is_some_and(|previous| {
-                unified::member_key(previous) != unified::member_key(selected)
+        let routes = self
+            .candidates
+            .values()
+            .flat_map(|candidate| {
+                candidate
+                    .models
+                    .iter()
+                    .filter(|model| {
+                        !crate::runtime::is_image_model_id(model)
+                            && models.allows(model)
+                            && candidate.is_configured(model, protocols, scope)
+                    })
+                    .map(|model| (model.to_ascii_lowercase(), candidate.protocol))
+            })
+            .collect::<BTreeSet<_>>();
+        let mut next: Option<String> = None;
+        for (model, protocol) in routes {
+            let selected = self.select(SelectionRequest {
+                model: &model,
+                allowed_protocols: &[protocol],
+                scope,
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms,
+            })?;
+            if next.as_ref().is_some_and(|previous| {
+                members::member_key(&self.candidates[previous])
+                    != members::member_key(&self.candidates[&selected.candidate_id])
             }) {
                 return None;
             }
-            next.get_or_insert(selected);
+            next.get_or_insert(selected.candidate_id);
         }
-        next.map(|candidate| candidate.id.clone())
+        next
+    }
+}
+
+impl PoolScheduler {
+    pub(super) fn diagnostics(
+        &self,
+        candidate_id: &str,
+        reason: SelectionReason,
+        eligible_candidates: usize,
+        lane: InFlightLane,
+    ) -> Option<RoutingDiagnostics> {
+        let candidate = self.candidates.get(candidate_id)?;
+        Some(RoutingDiagnostics {
+            reason,
+            eligible_candidates: u32::try_from(eligible_candidates).unwrap_or(u32::MAX),
+            quota_remaining_basis_points: match candidate.quota {
+                CandidateQuota::Available(remaining) => Some(remaining),
+                CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => None,
+            },
+            in_flight_before: self.in_flight_count(candidate_id, lane),
+            dispatches_before: self.dispatch_count(candidate_id, lane),
+            endpoint_kind: None,
+        })
     }
 }

@@ -6,8 +6,9 @@ pub(super) async fn send_gateway_error(
     downstream: &mut WebSocket,
     failure: &GatewayFailure,
     request_id: Option<&str>,
+    stream_id: Option<&str>,
 ) {
-    let event = gateway_error_event(failure, request_id);
+    let event = gateway_error_event(failure, request_id, stream_id);
     let _ = downstream
         .send(Message::Text(event.to_string().into()))
         .await;
@@ -23,9 +24,13 @@ pub(super) async fn send_gateway_error(
         .await;
 }
 
-pub(super) fn gateway_error_event(failure: &GatewayFailure, request_id: Option<&str>) -> Value {
+pub(super) fn gateway_error_event(
+    failure: &GatewayFailure,
+    request_id: Option<&str>,
+    stream_id: Option<&str>,
+) -> Value {
     let code = super::super::errors::api_error_code(failure.category);
-    json!({
+    let mut event = json!({
         "type": "error",
         "status": failure.status.as_u16(),
         "error": {
@@ -43,7 +48,11 @@ pub(super) fn gateway_error_event(failure: &GatewayFailure, request_id: Option<&
             },
         },
         "retry_at_ms": failure.retry_at_ms,
-    })
+    });
+    if let Some(stream_id) = stream_id {
+        event["stream_id"] = json!(stream_id);
+    }
+    event
 }
 
 pub(super) struct GatewayFailure {
@@ -56,6 +65,18 @@ pub(super) struct GatewayFailure {
 }
 
 impl GatewayFailure {
+    pub(super) fn admission(reason: crate::scheduler::rotation::AdmissionStopReason) -> Self {
+        let (category, message) = super::super::errors::admission_failure(reason);
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            category,
+            message,
+            retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
     pub(super) fn with_upstream_error(
         mut self,
         details: Option<crate::usage::UpstreamErrorDetails>,
@@ -69,6 +90,18 @@ impl GatewayFailure {
             status: StatusCode::BAD_REQUEST,
             category: error_codes::INVALID_REQUEST,
             message,
+            retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
+    pub(super) fn invalid_stream_id() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            category: error_codes::INVALID_STREAM_ID,
+            message:
+                "stream_id must be 1-256 ASCII letters, digits, underscores, hyphens or periods",
             retry_at_ms: None,
             upstream_error: None,
             origin: ErrorOrigin::Relay,

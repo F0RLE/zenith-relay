@@ -134,7 +134,7 @@ pub struct RuntimeCandidate {
     pub quota_reset_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub last_used_at: Option<u64>,
-    pub consecutive_failures: u32,
+
     pub secret_available: bool,
 }
 

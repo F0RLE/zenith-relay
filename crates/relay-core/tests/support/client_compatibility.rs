@@ -3,7 +3,13 @@ use std::io::Write;
 
 #[tokio::test]
 async fn websocket_credential_change_reconnects_only_with_portable_history() {
-    for portable in [true, false] {
+    for (portable, replacement) in [
+        (true, "synthetic-new"),
+        (false, "synthetic-new"),
+        // Identical bearer/generation still represents a new login slot.
+        (true, "synthetic-old"),
+        (false, "synthetic-old"),
+    ] {
         let output = if portable {
             json!([{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"synthetic answer"}]}])
         } else {
@@ -49,7 +55,7 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             .register(
                 "compat-account",
                 TokenSet::access_only(
-                    "synthetic-new",
+                    replacement,
                     Some(current_time_ms() + 600_000),
                     current_time_ms(),
                 )
@@ -65,7 +71,7 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             assert_eq!(headers.len(), 2);
             assert_eq!(
                 header(&headers[1], "authorization").as_deref(),
-                Some("Bearer synthetic-new")
+                Some(format!("Bearer {replacement}").as_str())
             );
             let requests = observed.requests.lock().unwrap();
             assert_eq!(requests.len(), 2);

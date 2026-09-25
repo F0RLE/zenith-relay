@@ -234,6 +234,66 @@ pub fn normalize_codex_catalog_priorities(models: &mut [Value]) {
     }
 }
 
+/// Ultra is a Codex orchestration mode, not a provider reasoning effort. Only
+/// an exact Codex-owned model card may enable it, and both the parent (Max)
+/// and the configured subagent effort must already work through this route.
+/// Never copy transport capabilities or instructions from the reference card.
+pub fn apply_codex_ultra_from_official_model(
+    entry: &mut Value,
+    official: &Value,
+    upstream_model: &str,
+) -> bool {
+    if official
+        .get("slug")
+        .and_then(Value::as_str)
+        .is_none_or(|slug| !slug.eq_ignore_ascii_case(upstream_model))
+        || !official
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .is_some_and(|levels| {
+                levels
+                    .iter()
+                    .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+            })
+    {
+        return false;
+    }
+    let Some(levels) = entry
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    let supports = |effort: &str| {
+        levels.iter().any(|level| {
+            level
+                .get("effort")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
+        })
+    };
+    let subagent_effort = official
+        .get("multi_agent_reasoning_effort")
+        .and_then(Value::as_str);
+    if !supports("max") || subagent_effort.is_some_and(|effort| !supports(effort)) {
+        return false;
+    }
+    if !supports("ultra") {
+        levels.push(json!({"effort": "ultra", "description": "Ultra (agents)"}));
+    }
+    if let Some(version) = official
+        .get("multi_agent_version")
+        .and_then(Value::as_str)
+        .filter(|version| matches!(*version, "v1" | "v2"))
+    {
+        entry["multi_agent_version"] = json!(version);
+    }
+    if let Some(effort) = subagent_effort {
+        entry["multi_agent_reasoning_effort"] = json!(effort);
+    }
+    true
+}
+
 pub fn normalize_upstream_codex_catalog_entry(
     template: &Map<String, Value>,
     model: &str,
@@ -1169,5 +1229,56 @@ mod tests {
         let mut poisoned = valid;
         poisoned["input_modalities"] = json!(["text", "video"]);
         assert!(!codex_catalog_entry_is_compatible(&poisoned));
+    }
+
+    #[test]
+    fn official_codex_ultra_requires_exact_identity_and_routable_child_effort() {
+        let official = json!({
+            "slug": "gpt-future",
+            "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}],
+            "multi_agent_version": "v2",
+            "multi_agent_reasoning_effort": "xhigh",
+            "base_instructions": "never inherit this"
+        });
+        let mut entry = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+        entry["supported_reasoning_levels"] = json!([
+            {"effort": "xhigh", "description": "xhigh"},
+            {"effort": "max", "description": "max"}
+        ]);
+        assert!(!apply_codex_ultra_from_official_model(
+            &mut entry,
+            &official,
+            "gpt-other"
+        ));
+        assert!(!apply_codex_ultra_from_official_model(
+            &mut entry,
+            &official,
+            "gpt-future-other"
+        ));
+        assert!(apply_codex_ultra_from_official_model(
+            &mut entry,
+            &official,
+            "gpt-future"
+        ));
+        assert_eq!(entry["supported_reasoning_levels"][2]["effort"], "ultra");
+        assert_eq!(entry["multi_agent_version"], "v2");
+        assert_eq!(entry["multi_agent_reasoning_effort"], "xhigh");
+        assert_ne!(entry["base_instructions"], "never inherit this");
+        assert!(codex_catalog_entry_is_compatible(&entry));
+
+        let mut missing_child = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+        missing_child["supported_reasoning_levels"] = json!([{"effort": "max"}]);
+        assert!(!apply_codex_ultra_from_official_model(
+            &mut missing_child,
+            &official,
+            "gpt-future"
+        ));
+        assert_eq!(
+            missing_child["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

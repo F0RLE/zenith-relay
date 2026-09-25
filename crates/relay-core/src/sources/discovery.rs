@@ -1,8 +1,10 @@
+use super::observations::{SourceRead, SourceReadHints};
 use super::{
     capabilities::catalog_capabilities, normalize_source_protocol_bindings, service_protocol,
     ModelEndpointCapability, ProviderSource, SourceAdapter, SourceConnector, SourceProtocolBinding,
     SourceProtocolBindingKey, SourceProtocolConfig,
 };
+use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
 use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
 use serde_json::Value;
@@ -59,6 +61,41 @@ pub async fn discover_source_with_protocol_config(
     bindings: &[SourceProtocolBinding],
     config: &SourceProtocolConfig,
 ) -> Result<SourceDiscovery> {
+    discover_source_with_protocol_config_with_scope(
+        source,
+        bindings,
+        config,
+        ManagementHttpScope::default(),
+    )
+    .await
+}
+
+pub async fn discover_source_with_protocol_config_with_scope(
+    source: &ProviderSource,
+    bindings: &[SourceProtocolBinding],
+    config: &SourceProtocolConfig,
+    scope: ManagementHttpScope,
+) -> Result<SourceDiscovery> {
+    read_source_models_with_scope(source, bindings, config, scope)
+        .await
+        .value
+}
+
+pub async fn read_source_models(
+    source: &ProviderSource,
+    bindings: &[SourceProtocolBinding],
+    config: &SourceProtocolConfig,
+) -> SourceRead<Result<SourceDiscovery>> {
+    read_source_models_with_scope(source, bindings, config, ManagementHttpScope::default()).await
+}
+
+pub async fn read_source_models_with_scope(
+    source: &ProviderSource,
+    bindings: &[SourceProtocolBinding],
+    config: &SourceProtocolConfig,
+    scope: ManagementHttpScope,
+) -> SourceRead<Result<SourceDiscovery>> {
+    let hints = SourceReadHints::default();
     let mut catalog_source = source.clone();
     catalog_source.wire_api = config
         .endpoint_hint
@@ -68,7 +105,11 @@ pub async fn discover_source_with_protocol_config(
     // Stored bindings are discovery hints for providers that expose distinct
     // catalogs per physical protocol. Runtime routes are still recomputed from
     // the resulting catalog and capability evidence.
-    discover_source_models_and_protocol_bindings(&catalog_source, bindings).await
+    let value = read_bindings(&catalog_source, bindings, &hints, &scope).await;
+    SourceRead {
+        value,
+        retry_after_ms: hints.delay(),
+    }
 }
 
 /// Discovers models independently for every configured binding.
@@ -87,6 +128,21 @@ pub async fn discover_source_with_protocol_config(
 pub async fn discover_source_models_and_protocol_bindings(
     source: &ProviderSource,
     protocol_bindings: &[SourceProtocolBinding],
+) -> Result<SourceDiscovery> {
+    read_bindings(
+        source,
+        protocol_bindings,
+        &SourceReadHints::default(),
+        &ManagementHttpScope::default(),
+    )
+    .await
+}
+
+async fn read_bindings(
+    source: &ProviderSource,
+    protocol_bindings: &[SourceProtocolBinding],
+    hints: &SourceReadHints,
+    scope: &ManagementHttpScope,
 ) -> Result<SourceDiscovery> {
     source.validate()?;
     let bindings = normalize_source_protocol_bindings(
@@ -110,6 +166,8 @@ pub async fn discover_source_models_and_protocol_bindings(
         &bindings,
         protocol_bindings,
         &automatic_catalog_routes,
+        hints,
+        scope,
     )
     .await?;
     if bindings.len() == 1 && automatic_catalog_routes.contains(&bindings[0].key()) {
@@ -179,9 +237,17 @@ pub(crate) async fn discover_models_with_client(
     // legacy expanded model list from an explicit per-protocol allow-list.
     // Keep this compatibility helper broad; management paths use the public
     // discovery API above and retain that distinction.
-    discover_protocol_bindings_with_client(client, source, bindings, &[], &BTreeSet::new())
-        .await
-        .map(|discovery| discovery.models)
+    discover_protocol_bindings_with_client(
+        client,
+        source,
+        bindings,
+        &[],
+        &BTreeSet::new(),
+        &SourceReadHints::default(),
+        &ManagementHttpScope::default(),
+    )
+    .await
+    .map(|discovery| discovery.models)
 }
 
 async fn discover_protocol_bindings_with_client(
@@ -190,6 +256,8 @@ async fn discover_protocol_bindings_with_client(
     bindings: &[SourceProtocolBinding],
     configured_bindings: &[SourceProtocolBinding],
     automatic_catalog_routes: &BTreeSet<SourceProtocolBindingKey>,
+    hints: &SourceReadHints,
+    scope: &ManagementHttpScope,
 ) -> Result<SourceDiscovery> {
     let mut last_error = None;
     let mut connector = source.clone();
@@ -208,23 +276,32 @@ async fn discover_protocol_bindings_with_client(
             .get(connector.models_url.clone())
             .headers(connector.protocol_headers_for_binding(binding))
             .header(authorization_name.clone(), authorization.clone());
-        let mut response = match request.send().await {
-            Ok(response) => response,
-            Err(error) => {
-                last_error = Some(Error::Upstream(error));
-                continue;
-            }
-        };
+        let (mut response, first_permit) =
+            match scope.send(client, request, HttpClass::Ordinary).await {
+                Ok(value) => value,
+                Err(_) => {
+                    last_error = Some(Error::ManagementHttpUnavailable);
+                    continue;
+                }
+            };
+        let mut permit = Some(first_permit);
+        hints.observe(response.headers());
         if response.status() == reqwest::StatusCode::NOT_FOUND
             && resolved_base_url.is_none()
             && root_v1_fallback_allowed(&connector, binding)
         {
+            // The first response has no body to consume. Do not hold its slot
+            // while waiting for a separate /v1 retry at the same origin.
+            drop(permit.take());
             if let Some(v1_connector) = connector.with_appended_v1(bindings) {
                 let retry = client
                     .get(v1_connector.models_url.clone())
                     .headers(v1_connector.protocol_headers_for_binding(binding))
                     .header(authorization_name, authorization);
-                if let Ok(candidate) = retry.send().await {
+                if let Ok((candidate, candidate_permit)) =
+                    scope.send(client, retry, HttpClass::Ordinary).await
+                {
+                    hints.observe(candidate.headers());
                     if candidate.status().is_success() {
                         resolved_base_url = Some(
                             v1_connector
@@ -235,6 +312,7 @@ async fn discover_protocol_bindings_with_client(
                         );
                         connector = v1_connector;
                         response = candidate;
+                        permit = Some(candidate_permit);
                     }
                 }
             }
@@ -250,6 +328,7 @@ async fn discover_protocol_bindings_with_client(
                 continue;
             }
         };
+        drop(permit);
         let body: Value = match serde_json::from_slice(&body) {
             Ok(body) => body,
             Err(_) => {
@@ -368,9 +447,8 @@ async fn discover_protocol_bindings_with_client(
 }
 
 /// A model may be exposed by both a generic OpenAI-compatible route and an
-/// Anthropic Messages route in one source. Generic routes deliberately carry
-/// no cache-creation fields, so those route snapshots can be merged when all
-/// token prices agree and only the Messages route contributes `5m`/`1h`.
+/// Anthropic Messages route in one source. Merge compatible prices while
+/// preserving explicit TTL fields from either catalog endpoint.
 fn merge_route_model_price(
     left: ApiModelPriceOverride,
     right: ApiModelPriceOverride,
@@ -496,6 +574,23 @@ mod tests {
             }
         )
         .is_none());
+    }
+
+    #[test]
+    fn generic_model_catalog_retains_explicit_cache_write_windows() {
+        let models = parse_upstream_models(
+            UpstreamProtocol::Responses,
+            &serde_json::json!({"data": [{
+                "id": "claude-test",
+                "inputCostMicrousdPerMillion": 1_000_000,
+                "outputCostMicrousdPerMillion": 2_000_000,
+                "promptCacheWriteCostsByTtl": { "5m": 1_250_000, "1h": 2_500_000 }
+            }]}),
+        )
+        .unwrap();
+        let price = models[0].1.unwrap();
+        assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(1_250_000));
+        assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(2_500_000));
     }
 
     #[test]

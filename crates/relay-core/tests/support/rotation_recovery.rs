@@ -3,7 +3,7 @@ use zenith_relay_core::{resolve_pool_routing, PoolMemberKind, PoolRoutingMode};
 
 fn options(ids: &[&str]) -> GatewayRuntimeOptions {
     let mut policy = resolve_pool_routing(
-        None,
+        Some(&zenith_relay_core::PoolRoutingPolicy::default()),
         ids.iter()
             .map(|id| (PoolMemberKind::Source, (*id).into(), 0, 1))
             .collect(),
@@ -11,16 +11,14 @@ fn options(ids: &[&str]) -> GatewayRuntimeOptions {
     policy.mode = PoolRoutingMode::InOrder;
     GatewayRuntimeOptions {
         pool_routing: Some(policy),
-        // Existing saved settings must not truncate or disable recovery.
-        max_retry_candidates: 1,
-        cooldown_after_failures: 8,
-        keep_last_candidate_available: true,
+        // Every recovery and compatibility dispatch shares this exact limit.
+        max_retry_candidates: 3,
         ..Default::default()
     }
 }
 
 #[tokio::test]
-async fn access_errors_and_opaque_rejections_do_not_hide_the_ninth_candidate() {
+async fn bounded_requests_reach_the_ninth_candidate_without_hiding_it_from_the_pool() {
     let failures = [
         (StatusCode::UNAUTHORIZED, json!({"code":"invalid_api_key"})),
         (StatusCode::FORBIDDEN, json!({"code":"account_disabled"})),
@@ -77,6 +75,18 @@ async fn access_errors_and_opaque_rejections_do_not_hide_the_ninth_candidate() {
     let policy = options(&ids);
     let (gateway, events) =
         spawn_gateway_with_options(sources, vec![local_key("key", LOCAL_KEY, None)], policy).await;
+    // A single request may dispatch only three times, even if the pool has
+    // more routes. Independent requests can continue past the cooled slots.
+    assert_ne!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(
+        states
+            .iter()
+            .map(|state| state.requests.lock().unwrap().len())
+            .sum::<usize>(),
+        3
+    );
+    assert!(success.requests.lock().unwrap().is_empty());
+    assert_ne!(request(&gateway, false).await.status(), StatusCode::OK);
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.json::<Value>().await.unwrap()["id"], "resp_ninth");
@@ -93,11 +103,11 @@ async fn access_errors_and_opaque_rejections_do_not_hide_the_ninth_candidate() {
 }
 
 #[tokio::test]
-async fn transient_failure_waits_five_seconds_and_recovers_without_manual_settings() {
+async fn transient_failure_uses_rotation_pacing_and_recovers_without_manual_refresh() {
     let (upstream, state) = spawn_upstream(
         "test-key",
         vec![
-            status_reply(StatusCode::SERVICE_UNAVAILABLE, "failure", None),
+            overload_reply("failure", None),
             response_reply("resp_recovered", "success"),
         ],
     )
@@ -111,7 +121,7 @@ async fn transient_failure_waits_five_seconds_and_recovers_without_manual_settin
     let started = std::time::Instant::now();
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(started.elapsed() >= Duration::from_millis(4_950));
+    assert!(started.elapsed() >= Duration::from_millis(240));
     assert_eq!(
         response.json::<Value>().await.unwrap()["id"],
         "resp_recovered"
@@ -125,12 +135,13 @@ async fn transient_failure_waits_five_seconds_and_recovers_without_manual_settin
 }
 
 #[tokio::test]
-async fn repeated_failure_cools_the_last_candidate_and_stops_after_one_recovery() {
+async fn repeated_rejection_stops_at_the_shared_request_budget_without_multiple_health_votes() {
     let (upstream, state) = spawn_upstream(
         "test-key",
         vec![
-            status_reply(StatusCode::SERVICE_UNAVAILABLE, "failure", None),
-            status_reply(StatusCode::SERVICE_UNAVAILABLE, "failure", None),
+            overload_reply("failure", None),
+            overload_reply("failure", None),
+            overload_reply("failure", None),
             response_reply("must_not_run", "unexpected"),
         ],
     )
@@ -145,15 +156,21 @@ async fn repeated_failure_cools_the_last_candidate_and_stops_after_one_recovery(
         request(&gateway, false).await.status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    assert_eq!(state.requests.lock().unwrap().len(), 3);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[1].consecutive_failures, Some(2));
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|event| event.consecutive_failures == Some(1)));
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(usize::from(event.attempt), index + 1);
+        assert_eq!(event.request_id, events[0].request_id);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    assert!(events[1].retry_at_ms.unwrap() >= now + 59_000);
+    assert!(events[2].retry_at_ms.unwrap() >= now + 150);
 }
 
 #[tokio::test]

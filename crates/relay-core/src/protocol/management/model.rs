@@ -2,7 +2,7 @@ use super::{AccountSummary, OperationalStatus, SourceSummary};
 use crate::model_metadata::{ModelMetadataCatalog, ReasoningMethod};
 use crate::{
     ApiModelPriceOverride, CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier,
-    GatewayRuntime, ImageRequestPrice, RoutingStrategy,
+    GatewayRuntime, ImageRequestPrice,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySummary {
+    #[serde(default)]
+    pub tool_policy: crate::ToolPolicy,
+    #[serde(default)]
+    pub basis_points_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub running: bool,
@@ -17,13 +21,6 @@ pub struct GatewaySummary {
     pub candidate_count: usize,
     pub visible_model_ids: Vec<String>,
     pub max_retry_candidates: u8,
-    #[serde(default = "default_cooldown_after_failures")]
-    pub cooldown_after_failures: u8,
-    #[serde(default = "default_keep_last_candidate_available")]
-    pub keep_last_candidate_available: bool,
-    pub routing_strategy: RoutingStrategy,
-    #[serde(default)]
-    pub subscription_plan_order: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
     pub image_base_model: Option<String>,
@@ -50,6 +47,7 @@ pub struct GatewaySummary {
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
     #[serde(default)]
+    /// Legacy snapshot key retained for older desktop/server clients.
     pub chatgpt_retry_until_available: bool,
     #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
@@ -468,12 +466,4 @@ pub fn pooled_source_runtime_available(
     source_id: &str,
 ) -> bool {
     source_runtime_available(routing_order, source_id)
-}
-
-fn default_cooldown_after_failures() -> u8 {
-    2
-}
-
-fn default_keep_last_candidate_available() -> bool {
-    true
 }

@@ -3,6 +3,7 @@ use super::{
     CodexIdentityEnvelope,
 };
 use crate::error_codes;
+use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 use crate::{transport::collect_limited, Error, ProxyConfig};
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
@@ -23,6 +24,7 @@ const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
 pub struct CodexModelsClient {
     http: reqwest::Client,
     endpoint: Url,
+    scope: ManagementHttpScope,
 }
 
 impl CodexModelsClient {
@@ -76,7 +78,16 @@ impl CodexModelsClient {
         }
         .build()
         .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidEndpoint))?;
-        Ok(Self { http, endpoint })
+        Ok(Self {
+            http,
+            endpoint,
+            scope: ManagementHttpScope::default(),
+        })
+    }
+
+    pub fn with_http_scope(mut self, scope: ManagementHttpScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub async fn discover(
@@ -109,16 +120,22 @@ impl CodexModelsClient {
         request_url
             .query_pairs_mut()
             .append_pair("client_version", client_version);
-        let response = identity
-            .apply(
-                self.http
-                    .get(request_url)
-                    .header(AUTHORIZATION, authorization),
+        let (response, permit) = self
+            .scope
+            .send(
+                &self.http,
+                identity.apply(
+                    self.http
+                        .get(request_url)
+                        .header(AUTHORIZATION, authorization),
+                ),
+                HttpClass::Ordinary,
             )
-            .send()
             .await
             .map_err(|_| ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport))?;
         let status = response.status();
+        let retry_after_ms =
+            crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
         let body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
@@ -126,7 +143,12 @@ impl CodexModelsClient {
                     ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
                 }
                 _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
+            })
+            .map_err(|mut failure| {
+                failure.retry_after_ms = retry_after_ms;
+                failure
             })?;
+        drop(permit);
         if !status.is_success() {
             let (code, retryable) =
                 if is_agent_identity_task_invalid_response(status.as_u16(), &body) {
@@ -146,6 +168,7 @@ impl CodexModelsClient {
                 code,
                 retryable,
                 http_status: Some(status.as_u16()),
+                retry_after_ms,
             });
         }
 
@@ -207,6 +230,7 @@ pub struct ModelDiscoveryFailure {
     pub code: ModelDiscoveryFailureCode,
     pub retryable: bool,
     pub http_status: Option<u16>,
+    pub retry_after_ms: Option<u64>,
 }
 
 impl ModelDiscoveryFailure {
@@ -215,6 +239,7 @@ impl ModelDiscoveryFailure {
             code,
             retryable: false,
             http_status: None,
+            retry_after_ms: None,
         }
     }
 
@@ -223,6 +248,7 @@ impl ModelDiscoveryFailure {
             code,
             retryable: true,
             http_status: None,
+            retry_after_ms: None,
         }
     }
 }
@@ -437,6 +463,29 @@ mod tests {
             assert_eq!(code.is_authentication_failure(), authentication_failure);
             assert_eq!(code.blocks_account(), blocks_account);
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_retains_provider_retry_after_for_the_shared_scheduler() {
+        let (endpoint, server) = spawn(Router::new().route(
+            "/backend-api/codex/models",
+            get(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "120")],
+                    "{}",
+                )
+            }),
+        ))
+        .await;
+        let failure = CodexModelsClient::with_endpoint(endpoint)
+            .unwrap()
+            .discover("synthetic-access", "synthetic-account", "1.0.0")
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, ModelDiscoveryFailureCode::RateLimited);
+        assert_eq!(failure.retry_after_ms, Some(120_000));
+        server.abort();
     }
 
     #[tokio::test]

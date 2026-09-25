@@ -30,7 +30,8 @@ pub(super) enum EventTerminalOutcome {
 }
 
 pub(super) fn event_terminal(value: &Value) -> EventTerminal {
-    let outcome = match value.get("type").and_then(Value::as_str) {
+    let event_type = value.get("type").and_then(Value::as_str);
+    let mut outcome = match event_type {
         Some("response.completed" | "response.done") => Some(EventTerminalOutcome::Success),
         Some("response.incomplete") => Some(EventTerminalOutcome::Incomplete),
         Some("response.failed" | "response.cancelled" | "response.canceled" | "error") => {
@@ -38,6 +39,19 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
         }
         _ => None,
     };
+    let error_category = upstream_event_failure_category(event_type, value);
+    if let Some(category) = error_category {
+        let explicitly_incomplete = outcome == Some(EventTerminalOutcome::Incomplete)
+            || matches!(event_type, Some("response.completed" | "response.done"))
+                && value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete");
+        outcome = Some(
+            if category == error_codes::RESPONSE_INCOMPLETE && explicitly_incomplete {
+                EventTerminalOutcome::Incomplete
+            } else {
+                EventTerminalOutcome::Failure
+            },
+        );
+    }
     let status = upstream_status_from_value(value);
     EventTerminal {
         upstream_error: (outcome == Some(EventTerminalOutcome::Failure))
@@ -45,10 +59,7 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
         outcome,
         response: value.get("response").cloned(),
         status,
-        error_category: upstream_event_failure_category(
-            value.get("type").and_then(Value::as_str),
-            value,
-        ),
+        error_category,
         headers: websocket_retry_headers(value),
         body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
         previous_response_not_found: previous_response_not_found_value(value),

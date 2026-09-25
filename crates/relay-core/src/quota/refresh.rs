@@ -199,6 +199,7 @@ pub struct QuotaRefreshFailure {
     pub code: String,
     pub retryable: bool,
     http_status: Option<u16>,
+    retry_after_ms: Option<u64>,
 }
 
 impl QuotaRefreshFailure {
@@ -207,11 +208,21 @@ impl QuotaRefreshFailure {
             code: safe_error_code(code),
             retryable,
             http_status: None,
+            retry_after_ms: None,
         }
     }
 
     pub fn http_status(&self) -> Option<u16> {
         self.http_status
+    }
+
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        self.retry_after_ms
+    }
+
+    pub(crate) fn with_retry_after(mut self, delay: Option<u64>) -> Self {
+        self.retry_after_ms = delay;
+        self
     }
 
     pub(crate) fn with_http_status(mut self, status: u16) -> Self {

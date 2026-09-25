@@ -151,12 +151,9 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             "multi",
             CooldownRequest {
                 scope,
-                policy_model: "test",
-                allowed_protocols: &WireApi::ALL,
-                request_scope: &CandidateScope::default(),
+
                 retry_at_ms: 1000,
                 reason,
-                now_ms: 100,
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
@@ -301,6 +298,7 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
         source_id: "openai-codex".to_string(),
         chatgpt_account_id: "account-1".to_string(),
         responses_url: "https://example.test/v1/responses".to_string(),
+        basis_points_enabled: false,
         models: vec!["gpt-test".to_string()],
         enabled: true,
         draining: false,
@@ -322,6 +320,13 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
 }
 
 fn quota_runtime(snapshot: QuotaSnapshot) -> GatewayRuntime {
+    quota_runtime_with_agent(snapshot, None)
+}
+
+fn quota_runtime_with_agent(
+    snapshot: QuotaSnapshot,
+    agent: Option<AgentIdentityCredential>,
+) -> GatewayRuntime {
     GatewayRuntime::from_mixed_pool(
         Vec::new(),
         vec![quota_account(snapshot)],
@@ -340,12 +345,527 @@ fn quota_runtime(snapshot: QuotaSnapshot) -> GatewayRuntime {
             refresh_adapter: Arc::new(NeverRefresh),
             persistence_adapter: Arc::new(NoopPersistence),
             refresh_skew_ms: 60_000,
-            agent_identities: HashMap::new(),
+            agent_identities: agent
+                .into_iter()
+                .map(|agent| ("account-1".to_string(), agent))
+                .collect(),
         },
         GatewayRuntimeOptions::default(),
         Arc::new(|_| {}),
     )
     .unwrap()
+}
+
+#[test]
+fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
+    let oauth = quota_runtime(QuotaSnapshot::default());
+    let key = oauth.authenticate_secret("local-secret").unwrap();
+    let transport = || {
+        oauth
+            .executor_route(
+                "account-1",
+                "gpt-test",
+                &key.scope_snapshot(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap()
+            .account_transport
+    };
+    assert_eq!(transport(), AccountTransport::NativeResponses);
+    oauth.set_basis_points_enabled(true);
+    assert_eq!(transport(), AccountTransport::ExcelBasisPoints);
+    oauth.set_basis_points_enabled(false);
+    assert_eq!(transport(), AccountTransport::NativeResponses);
+
+    let agent = AgentIdentityCredential::new(
+        "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
+        "synthetic-runtime".into(),
+        "synthetic-task".into(),
+    )
+    .unwrap();
+    let identity_runtime = quota_runtime_with_agent(QuotaSnapshot::default(), Some(agent));
+    let key = identity_runtime
+        .authenticate_secret("local-secret")
+        .unwrap();
+    identity_runtime.set_basis_points_enabled(true);
+    assert_eq!(
+        identity_runtime
+            .executor_route(
+                "account-1",
+                "gpt-test",
+                &key.scope_snapshot(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap()
+            .account_transport,
+        AccountTransport::NativeResponses,
+    );
+}
+
+#[tokio::test]
+async fn prepared_oauth_replacement_cannot_dispatch_an_old_lease() {
+    use crate::accounts::{AccountAuthState, TokenSet};
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let first = TokenSet::access_only("synthetic-first", None, 1).unwrap();
+    authority
+        .register("account-1", first.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+
+    // Reuse the visible token fields and generation: a credential snapshot is
+    // not a slot incarnation. Neither HTTP nor WebSocket may debit a stale send.
+    authority
+        .register("account-1", first, AccountAuthState::Active)
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    assert!(budget.attempted_members().is_empty());
+    assert_eq!(
+        lease.begin_rotation_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+}
+
+#[tokio::test]
+async fn removed_and_readded_oauth_slot_rejects_pending_http_and_websocket_dispatch() {
+    use crate::accounts::{AccountAuthState, TokenSet};
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let token = TokenSet::access_only("synthetic-access", None, 1).unwrap();
+    authority
+        .register("account-1", token.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    assert!(authority.remove("account-1"));
+    authority
+        .register("account-1", token, AccountAuthState::Active)
+        .await
+        .unwrap();
+    let replacement = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.credential_fingerprint(),
+        replacement.credential_fingerprint()
+    );
+    assert_ne!(prepared.incarnation(), replacement.incarnation());
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(
+        lease.begin_rotation_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    assert!(budget.attempted_members().is_empty());
+    lease
+        .begin_rotation_http_dispatch_for(&replacement, &runtime)
+        .unwrap();
+    assert_eq!(budget.dispatches(), 1);
+    lease.settle_rotation_success(crate::unix_time_ms());
+}
+
+#[tokio::test]
+async fn agent_task_replacement_and_aba_revoke_prepared_dispatch() {
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let agent = AgentIdentityCredential::new(
+        "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
+        "synthetic-runtime".into(),
+        "synthetic-task".into(),
+    )
+    .unwrap();
+    let runtime = quota_runtime_with_agent(QuotaSnapshot::default(), Some(agent.clone()));
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    let account = &runtime.chatgpt_accounts["account-1"];
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    // Mimic the in-runtime task update without calling a real provider.
+    for task in ["other-task", "synthetic-task"] {
+        let mut identity = account.agent_identity.write().unwrap();
+        *identity = Some(agent.with_task_id(task.into()).unwrap());
+        account
+            .agent_identity_revision
+            .fetch_add(1, Ordering::Release);
+    }
+    let replacement = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.credential_fingerprint(),
+        replacement.credential_fingerprint()
+    );
+    assert_ne!(prepared.incarnation(), replacement.incarnation());
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(
+        lease.begin_rotation_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    lease
+        .begin_rotation_dispatch_for(&replacement, &runtime)
+        .unwrap();
+    assert_eq!(budget.dispatches(), 1);
+    lease.settle_rotation_success(crate::unix_time_ms());
+}
+
+#[tokio::test]
+async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_ownership() {
+    use crate::scheduler::rotation::SharedRequestBudget;
+    use crate::{PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy};
+
+    async fn reserve_account(
+        runtime: &GatewayRuntime,
+        key: &AuthenticatedKey,
+        model: &str,
+        budget: &SharedRequestBudget,
+        now: u64,
+    ) -> Option<(crate::Selection, CandidateLease)> {
+        runtime
+            .select_and_reserve_with_budget(
+                key,
+                model,
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                now,
+                budget,
+            )
+            .await
+    }
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let now = crate::unix_time_ms();
+    let started_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, started) = reserve_account(&runtime, &key, "gpt-test", &started_budget, now)
+        .await
+        .unwrap();
+    started.begin_rotation_http_dispatch().unwrap();
+
+    // An unstarted lease for the removed route must not become a stale send.
+    let pending_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, pending) = reserve_account(&runtime, &key, "gpt-test", &pending_budget, now)
+        .await
+        .unwrap();
+    runtime
+        .lock_scheduler()
+        .set_pool_routing(PoolRoutingPolicy {
+            mode: PoolRoutingMode::InOrder,
+            members: vec![PoolRoutingMember {
+                kind: PoolMemberKind::Account,
+                id: "account-1".into(),
+                weight: 1,
+                max_concurrency: 1,
+            }],
+            ..PoolRoutingPolicy::default()
+        })
+        .unwrap();
+    assert!(runtime.update_account_models("account-1", &["gpt-added".into()]));
+    assert!(runtime
+        .visible_models(&key, &[WireApi::Responses], now)
+        .contains(&"gpt-added".to_string()));
+    assert_eq!(
+        pending.begin_rotation_http_dispatch(),
+        Err(crate::scheduler::rotation::DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(pending_budget.dispatches(), 0);
+    drop(pending);
+
+    let added_budget = SharedRequestBudget::for_incoming_request(3);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            reserve_account(&runtime, &key, "gpt-added", &added_budget, now)
+        )
+        .await
+        .is_err(),
+        "new inventory must not bypass the old physical lease"
+    );
+    assert!(started
+        .settle_rotation(
+            crate::scheduler::rotation::AttemptObservation {
+                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                health: crate::scheduler::rotation::HealthObservation::Success,
+            },
+            crate::unix_time_ms(),
+        )
+        .unwrap()
+        .is_some());
+    assert!(started
+        .settle_rotation(
+            crate::scheduler::rotation::AttemptObservation {
+                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                health: crate::scheduler::rotation::HealthObservation::Success,
+            },
+            crate::unix_time_ms(),
+        )
+        .unwrap()
+        .is_none());
+    let (_, added) = reserve_account(&runtime, &key, "gpt-added", &added_budget, now)
+        .await
+        .unwrap();
+    added.begin_rotation_http_dispatch().unwrap();
+    added.settle_rotation_success(crate::unix_time_ms());
+
+    assert!(runtime.set_candidate_health("account-1", CandidateHealth::Blocked));
+    assert!(runtime.update_account_models("account-1", &["gpt-added".into(), "gpt-new".into()]));
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .health,
+        CandidateHealth::Blocked,
+        "inventory edits are not positive health evidence"
+    );
+    assert!(reserve_account(
+        &runtime,
+        &key,
+        "gpt-new",
+        &SharedRequestBudget::for_incoming_request(3),
+        now
+    )
+    .await
+    .is_none());
+}
+
+#[test]
+fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_evidence() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let scope = key.scope_snapshot();
+    runtime.remember_codex_model_manifest(
+        "account-1",
+        serde_json::json!({"models": [{"slug": "gpt-test"}]}),
+        1,
+    );
+    runtime.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
+    assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
+    assert!(runtime
+        .stale_codex_model_manifests(["account-1"])
+        .is_empty());
+    assert!(runtime
+        .codex_model_responses_lite_candidates("gpt-test")
+        .is_empty());
+    assert_eq!(
+        runtime
+            .image_executor_route(
+                "account-1",
+                IMAGE_API_MODEL,
+                &scope,
+                &[WireApi::ChatCompletions],
+            )
+            .unwrap()
+            .source_model,
+        "gpt-5.6-sol"
+    );
+    assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
+    assert!(runtime
+        .image_executor_route(
+            "account-1",
+            IMAGE_API_MODEL,
+            &scope,
+            &[WireApi::ChatCompletions],
+        )
+        .is_none());
+}
+
+#[tokio::test]
+async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let now = crate::unix_time_ms();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let reserve = |budget: SharedRequestBudget| {
+        let runtime = &runtime;
+        let key = &key;
+        async move {
+            runtime
+                .select_and_reserve_with_budget(
+                    key,
+                    "gpt-test",
+                    &[WireApi::Responses],
+                    &HashSet::new(),
+                    (None, None),
+                    crate::unix_time_ms(),
+                    &budget,
+                )
+                .await
+                .unwrap()
+                .1
+        }
+    };
+    let pending = reserve(budget.clone()).await;
+    assert!(runtime.update_account_models("account-1", &["gpt-other".into()]));
+    assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
+    assert_eq!(
+        pending.begin_rotation_http_dispatch(),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    drop(pending);
+
+    let current = reserve(budget.clone()).await;
+    current.begin_rotation_http_dispatch().unwrap();
+    current.settle_rotation_success(now);
+    assert_eq!(budget.dispatches(), 1);
+}
+
+#[tokio::test]
+async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_generation() {
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    assert!(runtime.update_account_models("account-1", &["gpt-5.4".into(), "gpt-5.6-sol".into()]));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let scope = key.scope_snapshot();
+    let protocols = [WireApi::ChatCompletions];
+    let now = crate::unix_time_ms();
+    let pending_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, pending) = runtime
+        .select_and_reserve_image_with_budget(
+            &key,
+            IMAGE_API_MODEL,
+            &protocols,
+            &HashSet::new(),
+            now,
+            &pending_budget,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
+            .unwrap()
+            .source_model,
+        "gpt-5.4"
+    );
+    assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
+    assert_eq!(
+        pending.begin_rotation_http_dispatch(),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(pending_budget.dispatches(), 0);
+    assert_eq!(
+        pending_budget.with_budget(|budget| budget.wire_attempts()),
+        0
+    );
+    drop(pending);
+
+    let fresh_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, fresh) = runtime
+        .select_and_reserve_image_with_budget(
+            &key,
+            IMAGE_API_MODEL,
+            &protocols,
+            &HashSet::new(),
+            now,
+            &fresh_budget,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
+            .unwrap()
+            .source_model,
+        "gpt-5.6-sol"
+    );
+    fresh.begin_rotation_http_dispatch().unwrap();
+    fresh.settle_rotation_success(crate::unix_time_ms());
+    assert_eq!(fresh_budget.dispatches(), 1);
 }
 
 #[test]
@@ -441,26 +961,9 @@ fn automatic_responses_lite_requires_every_configured_route_to_confirm_support()
 }
 
 #[tokio::test]
-async fn persistent_candidate_wait_does_not_expire_on_elapsed_retry_at() {
-    let runtime = quota_runtime(QuotaSnapshot::default());
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        runtime.wait_for_candidate_availability(
-            Some(0),
-            std::time::Duration::from_millis(10),
-            None,
-        ),
-    )
-    .await
-    .expect("persistent wait should use bounded backoff");
-
-    assert!(result);
-}
-
-#[tokio::test]
 async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
     let mut policy = crate::resolve_pool_routing(
-        None,
+        Some(&crate::PoolRoutingPolicy::default()),
         vec![
             (crate::PoolMemberKind::Source, "source-a".into(), 0, 1),
             (crate::PoolMemberKind::Source, "source-b".into(), 0, 1),
@@ -478,11 +981,13 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
         vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
         GatewayRuntimeOptions {
             pool_routing: Some(policy.clone()),
+            max_retry_candidates: 2,
             ..Default::default()
         },
         Arc::new(|_| {}),
     )
     .unwrap();
+    assert_eq!(runtime.request_dispatch_budget(), 2);
     let authenticated = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
         .unwrap();
@@ -514,11 +1019,11 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
     let mut waiting = Box::pin(select());
     assert!(futures_util::poll!(&mut waiting).is_pending());
     policy.members[1].max_concurrency = 2;
-    assert!(runtime
-        .set_pool_routing_policy(policy.clone(), 0, 3, true)
-        .is_err());
+    assert!(runtime.set_pool_routing_policy(policy.clone(), 0).is_err());
+    assert_eq!(runtime.request_dispatch_budget(), 2);
     assert!(futures_util::poll!(&mut waiting).is_pending());
-    runtime.set_pool_routing_policy(policy, 3, 3, true).unwrap();
+    runtime.set_pool_routing_policy(policy, 6).unwrap();
+    assert_eq!(runtime.request_dispatch_budget(), 6);
     let (expanded, expanded_lease) = tokio::time::timeout(Duration::from_millis(500), waiting)
         .await
         .unwrap()
@@ -555,29 +1060,27 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
 }
 
 #[tokio::test]
-async fn bounded_candidate_wait_retries_when_the_cooldown_elapsed_before_waiting() {
-    let runtime = quota_runtime(QuotaSnapshot::default());
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        runtime.wait_for_candidate_availability(
-            Some(0),
-            std::time::Duration::from_millis(10),
-            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1)),
-        ),
-    )
-    .await
-    .expect("an elapsed cooldown should be retried immediately");
-
-    assert!(result);
-}
-
-#[tokio::test]
 async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_versions() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     let key = runtime.authenticated_key(&runtime.keys[0]);
     let tried = HashSet::new();
     let now = current_time_ms();
-    runtime.set_candidate_cooldown("account-1", "*", now - 1);
+    let budget = crate::scheduler::rotation::SharedRequestBudget::for_incoming_request(3);
+    let (_, failed) = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &tried,
+            (None, None),
+            now - 1_000,
+            &budget,
+        )
+        .await
+        .unwrap();
+    failed.begin_rotation_dispatch().unwrap();
+    failed.settle_rotation_transient(None, now - 1_000);
+    drop(failed);
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
     runtime.set_activity_callback(move |event| captured.lock().unwrap().push(event));
@@ -598,6 +1101,7 @@ async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_version
     let event = events.lock().unwrap()[0].clone();
     assert_eq!(snapshot[0].activity_revision, event.revision);
     assert_eq!(snapshot[0].runtime_id, event.runtime_id);
+    assert_eq!(event.member_key, "account:account-1");
     assert!(event.runtime_id > 0);
     drop(probe);
     let (_, next_probe) = tokio::time::timeout(Duration::from_millis(500), waiting)
@@ -608,6 +1112,68 @@ async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_version
     let rebuilt = quota_runtime(QuotaSnapshot::default());
     assert!(rebuilt.candidate_runtime_order()[0].runtime_id > event.runtime_id);
     assert_eq!(rebuilt.candidate_runtime_order()[0].activity_revision, 0);
+}
+
+#[tokio::test]
+async fn source_activity_reports_its_physical_member_on_admission_and_release() {
+    let mut configured =
+        RuntimeSource::unrestricted(source("source-1", "synthetic-upstream", &["gpt-test"]));
+    configured.protocol_config.capabilities = vec![ModelEndpointCapability {
+        model_id: "gpt-test".into(),
+        upstream_wire_api: WireApi::Messages,
+        status: CapabilityStatus::Declared,
+        origin: CapabilityOrigin::Catalog,
+        checked_at_ms: 1,
+        features: BTreeMap::new(),
+        reasoning_efforts: Vec::new(),
+    }];
+    let runtime = GatewayRuntime::from_pool(
+        vec![configured],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let events = captured.clone();
+    runtime.set_activity_callback(move |event| events.lock().unwrap().push(event));
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let (selection, lease) = runtime
+        .select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Messages],
+            &HashSet::new(),
+            (None, None),
+            current_time_ms(),
+        )
+        .await
+        .unwrap();
+    assert!(selection.candidate_id.starts_with("source-1::"));
+    assert_eq!(
+        runtime.active_member_keys(current_time_ms(), 0),
+        BTreeSet::from(["source:source-1".into()])
+    );
+    lease.begin_rotation_dispatch().unwrap();
+    drop(lease);
+    assert!(runtime.active_member_keys(current_time_ms(), 0).is_empty());
+    assert_eq!(
+        runtime.active_member_keys(current_time_ms(), 600_000),
+        BTreeSet::from(["source:source-1".into()])
+    );
+    assert!(runtime
+        .active_member_keys(current_time_ms() + 600_000, 600_000)
+        .is_empty());
+    let events = captured.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.candidate_id == selection.candidate_id
+            && event.member_key == "source:source-1"));
+    assert!(events[0].in_flight > 0);
+    assert_eq!(events[1].in_flight, 0);
 }
 
 #[test]
@@ -975,6 +1541,7 @@ async fn saving_bridge_continuation_binds_its_response_to_the_creating_candidate
         bridge_request,
         &serde_json::json!({
             "id": "msg-1",
+            "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "hello"}]
         }),
     )
@@ -1619,42 +2186,6 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
         )
         .await;
     assert!(selection.is_some());
-}
-
-#[tokio::test]
-async fn direct_source_rate_limit_uses_the_shared_model_storm_breaker() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-test"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions {
-            provider_storm_breaker: true,
-            ..GatewayRuntimeOptions::default()
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-
-    assert!(!runtime.record_provider_rate_limit("source-1", "gpt-test", 123));
-    assert!(!runtime.record_provider_rate_limit("source-1", "gpt-test", 124));
-    assert!(runtime.record_provider_rate_limit("source-1", "gpt-test", 125));
-    assert!(runtime
-        .select_and_reserve(
-            &authenticated,
-            "gpt-test",
-            &[WireApi::Responses],
-            &HashSet::new(),
-            (None, None),
-            125,
-        )
-        .await
-        .is_none());
 }
 
 #[test]

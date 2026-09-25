@@ -475,6 +475,7 @@ fn messages_bridge_preserves_custom_tool_call_and_output_shapes() {
         first,
         &json!({
             "id": "msg_custom",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_custom",
@@ -541,6 +542,7 @@ fn messages_bridge_converts_multimodal_function_output_to_anthropic_blocks() {
         first,
         &json!({
             "id": "msg_image",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_image",
@@ -601,6 +603,7 @@ fn messages_bridge_keeps_regular_function_output_arrays_as_json_text() {
         first,
         &json!({
             "id": "msg_json_output",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_json_output",
@@ -647,6 +650,7 @@ fn messages_bridge_rejects_invalid_tool_output_image_data() {
         first,
         &json!({
             "id": "msg_invalid_image",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_invalid_image",
@@ -697,6 +701,7 @@ fn messages_bridge_rejects_non_text_custom_tool_output() {
         first,
         &json!({
             "id": "msg_custom_output",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_custom_output",
@@ -778,6 +783,7 @@ fn messages_bridge_rejects_an_upstream_tool_that_was_not_declared() {
         prepared,
         &json!({
             "id": "msg_unknown_tool",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_unknown",
@@ -804,6 +810,7 @@ fn messages_bridge_preserves_text_and_tool_output_order() {
         prepared,
         &json!({
             "id": "msg_ordered",
+            "stop_reason": "tool_use",
             "content": [
                 {"type": "text", "text": "before"},
                 {"type": "tool_use", "id": "tool_ordered", "name": "run_command", "input": {"command": "pwd"}},
@@ -833,6 +840,7 @@ fn messages_bridge_rejects_tool_result_for_an_unknown_call() {
         first,
         &json!({
             "id": "msg_01",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_01",
@@ -1073,6 +1081,7 @@ fn scoped_bridge_ids_keep_same_upstream_id_isolated_between_routes() {
     .unwrap();
     let upstream = json!({
         "id": "msg_same",
+        "stop_reason": "end_turn",
         "content": [{"type": "text", "text": "ok"}]
     });
     let first = translate_messages_response(first, &upstream).unwrap();
@@ -1087,6 +1096,88 @@ fn scoped_bridge_ids_keep_same_upstream_id_isolated_between_routes() {
         second.response_body["output"][0]["id"],
         format!("msg_{}", second.response_id)
     );
+}
+
+#[test]
+fn messages_bridge_preserves_output_limit_and_rejects_unknown_terminal_reason() {
+    let request = || {
+        prepare_responses_to_messages(
+            &request(Value::String("continue".to_string())),
+            "claude-test",
+            false,
+            MessagesReasoningMode::Disabled,
+            None,
+        )
+        .unwrap()
+    };
+    let limited = translate_messages_response(
+        request(),
+        &json!({"id":"msg_limited","stop_reason":"max_tokens","content":[{"type":"text","text":"partial"}]}),
+    )
+    .unwrap();
+    assert_eq!(limited.response_body["status"], "incomplete");
+    assert_eq!(
+        limited.response_body["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    for reason in [None, Some("pause_turn")] {
+        let mut upstream = json!({"id":"msg_unknown","content":[{"type":"text","text":"partial"}]});
+        if let Some(reason) = reason {
+            upstream["stop_reason"] = reason.into();
+        }
+        assert_eq!(
+            translate_messages_response(request(), &upstream)
+                .unwrap_err()
+                .code(),
+            "adapter_upstream_response_invalid"
+        );
+    }
+}
+
+#[test]
+fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
+    let make_request = |stream| {
+        prepare_responses_to_messages(
+            &request(Value::String("hello".to_string())),
+            "claude-test",
+            stream,
+            MessagesReasoningMode::Disabled,
+            None,
+        )
+        .unwrap()
+    };
+    let json = translate_messages_response(
+        make_request(false),
+        &json!({"id":"msg_empty_refusal","stop_reason":"refusal","content":[]}),
+    )
+    .unwrap();
+    assert_eq!(json.response_body["status"], "incomplete");
+    assert_eq!(json.response_body["output"], json!([]));
+    assert_eq!(
+        json.response_body["incomplete_details"]["reason"],
+        "content_filter"
+    );
+
+    let mut stream = MessagesStreamBridge::new(make_request(true));
+    for event in [
+        json!({"type":"message_start","message":{"id":"msg_empty_refusal","usage":{"input_tokens":2}}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}),
+        json!({"type":"message_stop"}),
+    ] {
+        stream.push(format!("data: {event}\n\n").as_bytes());
+    }
+    let completed = stream.completed().expect("empty refusal should complete");
+    assert_eq!(completed.response_body["status"], "incomplete");
+    assert_eq!(completed.response_body["output"], json!([]));
+    assert_eq!(
+        completed.response_body["incomplete_details"]["reason"],
+        "content_filter"
+    );
+    let events = std::iter::from_fn(|| stream.pop_output())
+        .map(|chunk| String::from_utf8(chunk).unwrap())
+        .collect::<String>();
+    assert!(events.contains("response.incomplete"));
+    assert!(!events.contains("response.failed"));
 }
 
 #[test]
@@ -1118,6 +1209,9 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta",
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
 
 event: message_stop
 data: {"type":"message_stop"}
@@ -1164,6 +1258,8 @@ data: {"type":"content_block_start","index":2,"content_block":{"type":"text"}}
 data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"after"}}
 
 data: {"type":"content_block_stop","index":2}
+
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
 
 data: {"type":"message_stop"}
 
@@ -1285,6 +1381,8 @@ data: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}
 data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"done"}}
 
 data: {"type":"content_block_stop","index":1}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
 
 data: {"type":"message_stop"}
 
