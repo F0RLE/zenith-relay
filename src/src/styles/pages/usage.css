@@ -373,7 +373,10 @@
 .usage-request-table col[data-column="request"] { width: 12%; }
 
 .usage-request-table th[data-column="status"] { min-width: 58px; padding-inline: 3px; }
-.usage-request-table th[data-column="status"] .usage-column-heading > span { white-space: nowrap; }
+.usage-request-table th[data-column="status"] .usage-column-heading > span {
+  min-width: max-content;
+  white-space: nowrap;
+}
 
 .usage-model-value {
   display: inline-flex;

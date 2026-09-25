@@ -286,10 +286,13 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
       close();
       menuRef.current?.querySelector("summary")?.focus({ preventScroll: true });
     };
-    document.addEventListener("pointerdown", onPointerDown);
+    // Capture the dismissal before a native <details> toggle or another
+    // control handles the same pointer event. This keeps outside clicks
+    // deterministic across Chromium platform/font layouts.
+    document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown, true);
     return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown, true);
     };
   }, [open]);
