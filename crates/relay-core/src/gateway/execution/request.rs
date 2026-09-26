@@ -180,6 +180,8 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
     let mut legacy_call_id_repair_attempted = false;
     let mut model_switch_reset_attempted = false;
     let mut stale_tool_history_recovered = false;
+    let mut basis_points_relay_retry_attempted = false;
+    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error: Option<AdapterError> = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -595,6 +597,10 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     }
                     Err(error) => return adapter_error_response(error),
                 };
+            let mut prepared = prepared;
+            if let Some(parameter) = basis_points_relay_retry_parameter {
+                super::basis_points::add_tool_relay_retry_hint(&mut prepared, Some(parameter));
+            }
             *adapter_request.upstream_body_mut() = prepared;
         }
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
@@ -1190,6 +1196,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             );
             // Accounting reads the actual upstream counters before translation.
             populate_tokens(&mut event, &bytes);
+            let basis_points_retry_body = basis_points_route.then(|| bytes.clone());
             let translated = if let Some(responses_request) = basis_points_request.as_ref() {
                 translate_basis_points_completed(adapter_request, &bytes, responses_request, stream)
             } else {
@@ -1208,6 +1215,25 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             } = match translated {
                 Ok(response) => response,
                 Err(error) => {
+                    if basis_points_route
+                        && !basis_points_relay_retry_attempted
+                        && super::basis_points::should_retry_tool_relay(
+                            error,
+                            basis_points_retry_body.as_deref().unwrap_or_default(),
+                        )
+                    {
+                        basis_points_relay_retry_attempted = true;
+                        basis_points_relay_retry_parameter = error.parameter();
+                        event.success = false;
+                        event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+                        event.error_category = Some(error.code().to_string());
+                        emit_usage(&runtime, event);
+                        last_adapter_error = Some(error);
+                        tried.remove(&route.candidate_id);
+                        lease.allow_rotation_repair();
+                        lease.settle_rotation_repair(now_ms());
+                        continue;
+                    }
                     event.success = false;
                     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
                     event.error_category = Some(error.code().to_string());

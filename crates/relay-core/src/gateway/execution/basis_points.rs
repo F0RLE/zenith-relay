@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 const TRANSPORT_TOOL: &str = "run_officejs";
 const TRANSPORT_TOOL_ALIAS: &str = "functions.run_officejs";
+const TRANSPORT_RETRY_HINT: &str = "The previous run_officejs relay was malformed. Retry once using exactly one client tool name in outer references and only its payload in code: a JSON arguments object for function tools, or unchanged raw input for custom tools. Do not wrap the payload in a tool/args object. Serialize the outer arguments once, including quotes and backslashes.";
 
 #[derive(Clone, Debug)]
 struct ClientTool {
@@ -562,6 +563,44 @@ fn tool_instructions(tools: &[ClientTool], request: &Value) -> String {
     )
 }
 
+/// The upstream Basis Points adapter regenerates one malformed client-tool
+/// relay before returning an error. Keep the same bounded recovery in Relay,
+/// but only for errors that prove the model emitted the transport envelope;
+/// malformed response bodies and missing terminal status are not retried.
+pub(super) fn should_retry_tool_relay(error: AdapterError, body: &[u8]) -> bool {
+    if error.code() != crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID {
+        return false;
+    }
+    let Some(parameter) = error.parameter() else {
+        return false;
+    };
+    if !(parameter.starts_with("output.run_officejs.") || parameter == "output.tool_call") {
+        return false;
+    }
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|response| {
+            response
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_none_or(|status| status != "incomplete")
+}
+
+/// Add the one-shot regeneration hint ahead of the conversation history. The
+/// diagnostic contains only the adapter's safe parameter name; provider data
+/// and tool arguments never enter the prompt or logs.
+pub(super) fn add_tool_relay_retry_hint(body: &mut Value, parameter: Option<&str>) -> bool {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let diagnostic = parameter.unwrap_or("output.run_officejs");
+    let hint = format!("{TRANSPORT_RETRY_HINT} Diagnostic: {diagnostic}");
+    input.insert(0, text_message("developer", "input_text", hint));
+    true
+}
+
 /// Prepare a client Responses request for the Basis Points executor.
 pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
     let object = request
@@ -1067,6 +1106,40 @@ mod tests {
             "input": "Inspect the repo",
             "tools": [{"type":"function","name":"exec_command","description":"Run a command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}]
         })
+    }
+
+    #[test]
+    fn malformed_tool_relay_is_retryable_once_but_incomplete_is_not() {
+        let error = AdapterError::upstream_response_invalid()
+            .with_parameter("output.run_officejs.references");
+        let completed = json!({"status": "completed", "output": []});
+        assert!(should_retry_tool_relay(
+            error,
+            &serde_json::to_vec(&completed).unwrap()
+        ));
+
+        let incomplete = json!({"status": "incomplete", "output": []});
+        assert!(!should_retry_tool_relay(
+            error,
+            &serde_json::to_vec(&incomplete).unwrap()
+        ));
+        assert!(!should_retry_tool_relay(
+            AdapterError::upstream_response_invalid().with_parameter("response.output"),
+            &serde_json::to_vec(&completed).unwrap()
+        ));
+    }
+
+    #[test]
+    fn tool_relay_retry_hint_is_added_before_history_without_provider_data() {
+        let mut body = prepare_request(&request_with_tool()).unwrap();
+        assert!(add_tool_relay_retry_hint(
+            &mut body,
+            Some("output.run_officejs.code")
+        ));
+        let first = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(first.contains("previous run_officejs relay was malformed"));
+        assert!(first.contains("output.run_officejs.code"));
+        assert!(!first.contains("private"));
     }
 
     #[test]

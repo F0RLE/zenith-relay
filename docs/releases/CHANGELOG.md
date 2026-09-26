@@ -93,6 +93,8 @@ release entries are kept concise and link to the corresponding tag.
   The strict Basis Points body now matches the upstream adapter: client tool
   definitions stay in developer instructions, `tools`/`tool_choice` are not
   forwarded, and the original stream flag is preserved.
+  A malformed client-tool relay now gets the same single bounded regeneration
+  used by the official adapter before Relay records a terminal 502.
 
 - Disconnecting a managed ChatGPT profile now restores only Relay-owned
   settings and login fields. External `config.toml` edits and newer manual
